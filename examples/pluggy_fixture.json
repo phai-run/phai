@@ -1,0 +1,50 @@
+{
+  "accounts": [
+    {
+      "id": "fixture-checking",
+      "item_id": "item-1",
+      "name": "Primary Checking",
+      "type": "checking",
+      "status": "ACTIVE",
+      "balance": 1342.44,
+      "currency_code": "BRL",
+      "updated_at": "2026-03-27T09:00:31Z"
+    },
+    {
+      "id": "fixture-credit",
+      "item_id": "item-2",
+      "name": "Shared Credit Card",
+      "type": "credit",
+      "status": "ACTIVE",
+      "balance": -12490.12,
+      "currency_code": "BRL",
+      "updated_at": "2026-03-27T09:00:31Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "pluggy-fixture-001",
+      "accountId": "fixture-checking",
+      "date": "2026-03-27",
+      "description": "Supermercado Angeloni",
+      "amount": -152.30,
+      "type": "debit",
+      "status": "posted",
+      "category": "alimentacao:mercado",
+      "created_at": "2026-03-27T08:30:00Z",
+      "updated_at": "2026-03-27T08:30:00Z"
+    },
+    {
+      "id": "pluggy-fixture-002",
+      "accountId": "fixture-checking",
+      "date": "2026-03-26",
+      "description": "Pagamento recebido",
+      "amount": 7459.03,
+      "type": "credit",
+      "status": "posted",
+      "category": "financeiro:pagamento-recebido",
+      "created_at": "2026-03-26T17:00:00Z",
+      "updated_at": "2026-03-26T17:00:00Z"
+    }
+  ]
+}
