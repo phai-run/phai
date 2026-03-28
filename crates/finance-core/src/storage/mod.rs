@@ -4,13 +4,31 @@ use crate::models::{
     ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionRecord,
     UncategorizedRow,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use std::collections::BTreeSet;
 
 pub mod bigquery;
 pub mod local;
+
+const ALLOWED_TABLES: &[&str] = &[
+    "schema_versions",
+    "accounts",
+    "categories",
+    "rules",
+    "transactions",
+    "audit_log",
+    "forecast",
+];
+
+pub fn validate_table_name(table: &str) -> Result<()> {
+    if ALLOWED_TABLES.contains(&table) {
+        Ok(())
+    } else {
+        Err(anyhow!("Nome de tabela inválido: {table}"))
+    }
+}
 
 #[async_trait(?Send)]
 pub trait FinanceStore {

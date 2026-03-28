@@ -12,10 +12,11 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use yup_oauth2::{read_service_account_key, ServiceAccountAuthenticator};
 
 const BIGQUERY_SCOPE: &str = "https://www.googleapis.com/auth/bigquery";
@@ -24,6 +25,7 @@ pub struct BigQueryStore {
     config: AppConfig,
     client: Client,
     service_account_path: PathBuf,
+    cached_token: RefCell<Option<(String, Instant)>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,10 +74,16 @@ impl BigQueryStore {
                 .build()
                 .context("Falha ao construir cliente HTTP")?,
             service_account_path,
+            cached_token: RefCell::new(None),
         })
     }
 
     async fn bearer_token(&self) -> Result<String> {
+        if let Some((token, created_at)) = self.cached_token.borrow().as_ref() {
+            if created_at.elapsed() < Duration::from_secs(3000) {
+                return Ok(token.clone());
+            }
+        }
         let key = read_service_account_key(&self.service_account_path)
             .await
             .context("Falha ao ler service account do BigQuery")?;
@@ -84,10 +92,12 @@ impl BigQueryStore {
             .await
             .context("Falha ao construir autenticador BigQuery")?;
         let token = auth.token(&[BIGQUERY_SCOPE]).await?;
-        token
+        let token_str = token
             .token()
             .map(|value| value.to_string())
-            .context("Token BigQuery ausente")
+            .context("Token BigQuery ausente")?;
+        *self.cached_token.borrow_mut() = Some((token_str.clone(), Instant::now()));
+        Ok(token_str)
     }
 
     fn query_endpoint(&self) -> Result<String> {
@@ -103,8 +113,18 @@ impl BigQueryStore {
             self.config.project_id()?,
             job_id
         );
-        if let Some(location) = location {
-            url.push_str(&format!("?location={location}"));
+        if let Some(loc) = location {
+            let encoded: String = loc
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c.to_string()
+                    } else {
+                        format!("%{:02X}", c as u8)
+                    }
+                })
+                .collect();
+            url.push_str(&format!("?location={encoded}"));
         }
         Ok(url)
     }
@@ -162,7 +182,7 @@ impl BigQueryStore {
 
     fn qualified_table(&self, table: &str) -> Result<String> {
         Ok(format!(
-            "`{}.{}`.{}",
+            "`{}.{}.{}`",
             self.config.project_id()?,
             self.config.dataset_id()?,
             table
@@ -171,7 +191,12 @@ impl BigQueryStore {
 }
 
 fn escape_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('\'', "\\'")
+    value
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\0', "")
 }
 
 fn sql_string(value: &str) -> String {
@@ -873,6 +898,7 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn count_rows(&self, table: &str) -> Result<i64> {
+        super::validate_table_name(table)?;
         let sql = format!(
             "SELECT CAST(COUNT(*) AS STRING) FROM {}",
             self.qualified_table(table)?

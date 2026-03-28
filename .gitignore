@@ -6,3 +6,14 @@
 **/*.db-wal
 **/.DS_Store
 
+# Credentials and secrets
+*.env
+pluggy.env
+service-account*.json
+*-service-account.json
+
+# Personal finance data
+finance/pluggy-config.json
+finance/data/
+config.toml
+

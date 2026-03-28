@@ -499,7 +499,6 @@ dependencies = [
  "deunicode",
  "dirs",
  "hex",
- "regex",
  "reqwest",
  "rusqlite",
  "rust_decimal",

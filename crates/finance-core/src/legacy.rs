@@ -3,7 +3,8 @@ use crate::idempotency::{
     rule_idempotency,
 };
 use crate::models::{
-    decimal_from_str, AccountRecord, CategoryRecord, ForecastRecord, RuleRecord, TransactionRecord,
+    decimal_from_str, parse_datetime_or_now, AccountRecord, CategoryRecord, ForecastRecord,
+    RuleRecord, TransactionRecord,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
@@ -33,19 +34,6 @@ pub struct AccountRegistryEntry {
     pub metadata_json: Value,
 }
 
-fn parse_datetime(value: Option<&str>) -> DateTime<Utc> {
-    value
-        .and_then(|raw| {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                DateTime::parse_from_rfc3339(trimmed).ok()
-            }
-        })
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now)
-}
 
 fn read_csv_rows(path: &Path) -> Result<Vec<BTreeMap<String, String>>> {
     let mut reader = csv::ReaderBuilder::new()
@@ -219,12 +207,12 @@ pub fn load_legacy_bundle(finance_root: &Path, actor_id: &str) -> Result<LegacyI
                     .context("Transação legacy sem data válida")?;
                 let amount =
                     decimal_from_str(row.get("valor").map(String::as_str).unwrap_or_default())?;
-                let created_at = parse_datetime(
+                let created_at = parse_datetime_or_now(
                     row.get("pluggy_created_at")
                         .map(String::as_str)
                         .or_else(|| row.get("data_hora_iso").map(String::as_str)),
                 );
-                let updated_at = parse_datetime(
+                let updated_at = parse_datetime_or_now(
                     row.get("pluggy_updated_at")
                         .map(String::as_str)
                         .or_else(|| row.get("data_hora_iso").map(String::as_str)),

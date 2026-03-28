@@ -1,0 +1,13 @@
+{
+  "syncStartDate": "2025-01-01",
+  "accounts": [
+    {
+      "id": "my-checking",
+      "pluggyAccountId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    },
+    {
+      "id": "my-credit-card",
+      "pluggyAccountId": "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+    }
+  ]
+}

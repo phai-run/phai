@@ -1,10 +1,24 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::str::FromStr;
 use uuid::Uuid;
+
+pub fn parse_datetime_or_now(value: Option<&str>) -> DateTime<Utc> {
+    value
+        .and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                DateTime::parse_from_rfc3339(trimmed).ok()
+            }
+        })
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
@@ -198,12 +212,18 @@ impl DailyPulseItem {
 }
 
 pub fn decimal_from_str(value: &str) -> Result<Decimal> {
-    let cleaned = value.trim().replace('.', "").replace(',', ".");
-    if value.contains('.') && !value.contains(',') {
-        return Decimal::from_str(value.trim())
-            .with_context(|| format!("Falha ao parsear decimal {value}"));
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("String vazia não pode ser parseada como decimal"));
     }
-    Decimal::from_str(&cleaned).with_context(|| format!("Falha ao parsear decimal {value}"))
+    // US/international format: digits with optional dot decimal separator, no commas
+    if trimmed.contains('.') && !trimmed.contains(',') {
+        return Decimal::from_str(trimmed)
+            .with_context(|| format!("Falha ao parsear decimal '{value}'"));
+    }
+    // Brazilian format: dots as thousand separators, comma as decimal separator
+    let cleaned = trimmed.replace('.', "").replace(',', ".");
+    Decimal::from_str(&cleaned).with_context(|| format!("Falha ao parsear decimal '{value}'"))
 }
 
 pub fn json_object_or_empty(value: Option<Value>) -> Value {

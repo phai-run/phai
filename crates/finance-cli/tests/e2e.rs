@@ -152,7 +152,7 @@ fn import_legacy_is_idempotent() {
             .arg("--backend")
             .arg("local")
             .arg("--actor-id")
-            .arg("ford"),
+            .arg("test-actor"),
         &config_dir,
         &data_dir,
     )
@@ -212,7 +212,7 @@ fn mutating_commands_feed_reporting_views() {
             .arg("--backend")
             .arg("local")
             .arg("--actor-id")
-            .arg("ford"),
+            .arg("test-actor"),
         &config_dir,
         &data_dir,
     )
@@ -499,7 +499,7 @@ fn sync_json_summary_counts_only_new_transactions() {
             .arg("--backend")
             .arg("local")
             .arg("--actor-id")
-            .arg("ford"),
+            .arg("test-actor"),
         &config_dir,
         &data_dir,
     )

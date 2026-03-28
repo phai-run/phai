@@ -5,7 +5,7 @@ use crate::models::{
     ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionRecord,
     UncategorizedRow,
 };
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -34,8 +34,11 @@ impl LocalStore {
     }
 
     fn connection(&self) -> Result<Connection> {
-        Connection::open(&self.db_path)
-            .with_context(|| format!("Falha ao abrir {}", self.db_path.display()))
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("Falha ao abrir {}", self.db_path.display()))?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .context("Falha ao configurar PRAGMAs do SQLite")?;
+        Ok(conn)
     }
 
     fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -339,7 +342,7 @@ impl FinanceStore for LocalStore {
         let tx = conn.transaction()?;
         let mut stmt = tx.prepare(
             "
-            INSERT OR REPLACE INTO audit_log (
+            INSERT OR IGNORE INTO audit_log (
               event_id, entity_type, entity_id, action, actor_id, event_timestamp, idempotency_key, diff_json
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ",
@@ -371,7 +374,7 @@ impl FinanceStore for LocalStore {
         idempotency_key: &str,
     ) -> Result<()> {
         let conn = self.connection()?;
-        conn.execute(
+        let affected = conn.execute(
             "
             UPDATE transactions
             SET category_id = COALESCE(?1, category_id),
@@ -392,6 +395,9 @@ impl FinanceStore for LocalStore {
                 transaction_id,
             ],
         )?;
+        if affected == 0 {
+            bail!("Transação {transaction_id} não encontrada");
+        }
         Ok(())
     }
 
@@ -693,8 +699,9 @@ impl FinanceStore for LocalStore {
     }
 
     async fn count_rows(&self, table: &str) -> Result<i64> {
+        super::validate_table_name(table)?;
         let conn = self.connection()?;
-        let sql = format!("SELECT COUNT(*) FROM {table}");
+        let sql = format!("SELECT COUNT(*) FROM [{table}]");
         let count = conn.query_row(&sql, [], |row| row.get(0))?;
         Ok(count)
     }

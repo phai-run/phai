@@ -1,14 +1,17 @@
 use crate::idempotency::{account_idempotency, category_id, pluggy_transaction_idempotency};
 use crate::legacy::{load_account_registry, AccountRegistryEntry};
-use crate::models::{json_object_or_empty, AccountRecord, TransactionRecord};
+use crate::models::{json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord};
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::NaiveDate;
 use reqwest::Client;
-use serde::Deserialize;
+use rust_decimal::Decimal;
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -27,6 +30,35 @@ pub struct PluggyConfigFile {
     pub sync_start_date: Option<String>,
     #[serde(default)]
     pub accounts: Vec<PluggyBindingConfig>,
+}
+
+fn deserialize_decimal<'de, D>(deserializer: D) -> std::result::Result<Decimal, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match &value {
+        Value::Number(n) => Decimal::from_str(&n.to_string()).map_err(DeError::custom),
+        Value::String(s) => Decimal::from_str(s).map_err(DeError::custom),
+        _ => Err(DeError::custom("expected number or string for decimal")),
+    }
+}
+
+fn deserialize_optional_decimal<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Decimal>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => Decimal::from_str(&n.to_string())
+            .map(Some)
+            .map_err(DeError::custom),
+        Some(Value::String(s)) => Decimal::from_str(&s).map(Some).map_err(DeError::custom),
+        _ => Err(DeError::custom("expected number or string for decimal")),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,8 +80,8 @@ pub struct PluggyAccountPayload {
     pub subtype: Option<String>,
     #[serde(default, rename = "type")]
     pub account_type: Option<String>,
-    #[serde(default)]
-    pub balance: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_decimal")]
+    pub balance: Option<Decimal>,
     #[serde(default, rename = "currencyCode")]
     pub currency_code: Option<String>,
     #[serde(default)]
@@ -71,7 +103,8 @@ pub struct PluggyTransactionPayload {
     pub account_id: String,
     pub date: String,
     pub description: String,
-    pub amount: f64,
+    #[serde(deserialize_with = "deserialize_decimal")]
+    pub amount: Decimal,
     #[serde(default, rename = "type")]
     pub tx_type: Option<String>,
     #[serde(default)]
@@ -100,19 +133,6 @@ struct PaginatedResponse<T> {
     total_pages: Option<u32>,
 }
 
-fn parse_datetime(value: Option<&str>) -> DateTime<Utc> {
-    value
-        .and_then(|raw| {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                DateTime::parse_from_rfc3339(trimmed).ok()
-            }
-        })
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now)
-}
 
 fn parse_date(value: &str) -> Result<NaiveDate> {
     let raw = value.get(0..10).unwrap_or(value);
@@ -135,7 +155,7 @@ fn build_account_record(
     registry: Option<&AccountRegistryEntry>,
     actor_id: &str,
 ) -> AccountRecord {
-    let updated_at = parse_datetime(payload.updated_at.as_deref());
+    let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
     let registry_id = registry.map(|entry| entry.account_id.clone());
     let account_id = registry_id.unwrap_or_else(|| binding.id.clone());
     AccountRecord {
@@ -191,10 +211,9 @@ fn build_transaction_record(
         .filter(|value| !value.trim().is_empty());
     let category_key = category_name.map(|value| category_id(value, None));
     let transaction_date = parse_date(&payload.date)?;
-    let amount = rust_decimal::Decimal::from_f64_retain(payload.amount)
-        .context("Falha ao converter amount Pluggy para decimal")?;
-    let created_at = parse_datetime(payload.created_at.as_deref());
-    let updated_at = parse_datetime(payload.updated_at.as_deref());
+    let amount = payload.amount;
+    let created_at = parse_datetime_or_now(payload.created_at.as_deref());
+    let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
     Ok(TransactionRecord {
         transaction_id: payload.id.clone(),
         account_id: registry
@@ -207,7 +226,7 @@ fn build_transaction_record(
             .tx_type
             .clone()
             .unwrap_or_else(|| {
-                if payload.amount.is_sign_negative() {
+                if amount.is_sign_negative() {
                     "debit".to_string()
                 } else {
                     "credit".to_string()
@@ -253,8 +272,11 @@ async fn authenticate(client: &Client) -> Result<String> {
         .await
         .context("Falha ao autenticar no Pluggy")?;
     if !response.status().is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Auth Pluggy falhou: {body}"));
+        let status = response.status();
+        let _body = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "Auth Pluggy falhou com status {status} — verifique PLUGGY_CLIENT_ID e PLUGGY_CLIENT_SECRET"
+        ));
     }
     let body: PluggyAuthResponse = response
         .json()
@@ -299,9 +321,14 @@ async fn fetch_transactions(
 
     while page <= total_pages {
         let response = client
-            .get(format!(
-                "{PLUGGY_API}/transactions?accountId={account_id}&from={from}&to={to}&pageSize=500&page={page}"
-            ))
+            .get(format!("{PLUGGY_API}/transactions"))
+            .query(&[
+                ("accountId", account_id),
+                ("from", from),
+                ("to", to),
+                ("pageSize", "500"),
+                ("page", &page.to_string()),
+            ])
             .header("X-API-KEY", api_key)
             .send()
             .await

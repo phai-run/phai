@@ -26,8 +26,8 @@ fn slugify(value: &str) -> String {
 pub fn hash_key(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part.as_bytes());
-        hasher.update(b"|");
     }
     hex::encode(hasher.finalize())
 }
@@ -114,8 +114,8 @@ mod tests {
     #[test]
     fn forecast_key_is_deterministic() {
         let date = NaiveDate::from_ymd_opt(2026, 3, 27).unwrap();
-        let key_a = forecast_idempotency("ford", "Consulta recorrente", date);
-        let key_b = forecast_idempotency("ford", "Consulta recorrente", date);
+        let key_a = forecast_idempotency("test-actor", "Consulta recorrente", date);
+        let key_b = forecast_idempotency("test-actor", "Consulta recorrente", date);
         assert_eq!(key_a, key_b);
     }
 

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,7 +40,7 @@ impl Default for AppConfig {
             dataset_id: None,
             service_account_path: None,
             local_db_path: None,
-            pluggy_start_date: Some("2025-12-01".to_string()),
+            pluggy_start_date: None,
         }
     }
 }
@@ -95,8 +97,14 @@ impl AppConfig {
     pub fn save(&self, paths: &ConfigPaths) -> Result<()> {
         paths.ensure()?;
         let serialized = toml::to_string_pretty(self).context("Falha ao serializar config")?;
-        fs::write(&paths.config_file, serialized)
+        fs::write(&paths.config_file, &serialized)
             .with_context(|| format!("Falha ao gravar {}", paths.config_file.display()))?;
+        #[cfg(unix)]
+        {
+            let perms = std::fs::Permissions::from_mode(0o600);
+            fs::set_permissions(&paths.config_file, perms)
+                .with_context(|| format!("Falha ao definir permissões em {}", paths.config_file.display()))?;
+        }
         Ok(())
     }
 
@@ -120,6 +128,9 @@ impl AppConfig {
                 {
                     BackendKind::Bigquery
                 } else {
+                    eprintln!(
+                        "aviso: backend configurado como bigquery mas credenciais ausentes — usando local como fallback"
+                    );
                     BackendKind::Local
                 }
             }

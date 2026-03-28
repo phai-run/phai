@@ -521,7 +521,9 @@ async fn auth_setup(args: AuthSetupArgs) -> Result<()> {
     println!("Configuração salva em {}", paths.config_file.display());
     println!("backend: {:?}", config.backend);
     println!("actor_id: {}", config.actor_id);
-    println!("local_db: {}", config.local_db_path.unwrap().display());
+    if let Some(db_path) = &config.local_db_path {
+        println!("local_db: {}", db_path.display());
+    }
     Ok(())
 }
 
