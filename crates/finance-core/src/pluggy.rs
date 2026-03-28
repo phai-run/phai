@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
+use tokio::task::JoinSet;
 
 const PLUGGY_API: &str = "https://api.pluggy.ai";
 
@@ -400,38 +402,49 @@ pub async fn sync_pluggy(
         return Ok((accounts, transactions));
     }
 
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .context("Falha ao construir cliente HTTP do Pluggy")?;
     let api_key = authenticate(&client).await?;
     let mut accounts = Vec::new();
     let mut transactions = Vec::new();
+    let mut tasks = JoinSet::new();
 
-    for binding in &config.accounts {
+    for binding in config.accounts.clone() {
         let registry_entry = registry
             .get(&binding.id)
-            .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)));
-        let account = fetch_account_details(&client, &api_key, &binding.pluggy_account_id).await?;
-        accounts.push(build_account_record(
-            account,
-            binding,
-            registry_entry,
-            actor_id,
-        ));
-        let account_transactions = fetch_transactions(
-            &client,
-            &api_key,
-            &binding.pluggy_account_id,
-            &from,
-            to_date,
-        )
-        .await?;
-        for payload in account_transactions {
-            transactions.push(build_transaction_record(
-                payload,
-                binding,
-                registry_entry,
-                actor_id,
-            )?);
-        }
+            .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)))
+            .cloned();
+        let client = client.clone();
+        let api_key = api_key.clone();
+        let from = from.clone();
+        let to = to_date.to_string();
+        let actor_id = actor_id.to_string();
+        tasks.spawn(async move {
+            let account =
+                fetch_account_details(&client, &api_key, &binding.pluggy_account_id).await?;
+            let account_record =
+                build_account_record(account, &binding, registry_entry.as_ref(), &actor_id);
+            let account_transactions =
+                fetch_transactions(&client, &api_key, &binding.pluggy_account_id, &from, &to)
+                    .await?;
+            let transaction_records = account_transactions
+                .into_iter()
+                .map(|payload| {
+                    build_transaction_record(payload, &binding, registry_entry.as_ref(), &actor_id)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok::<_, anyhow::Error>((account_record, transaction_records))
+        });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        let (account, mut account_transactions) = result
+            .context("Task Pluggy falhou ao sincronizar conta")??;
+        accounts.push(account);
+        transactions.append(&mut account_transactions);
     }
 
     Ok((accounts, transactions))

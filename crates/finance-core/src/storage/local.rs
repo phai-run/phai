@@ -413,6 +413,19 @@ impl FinanceStore for LocalStore {
         Ok(rows.into_iter().collect())
     }
 
+    async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> {
+        let conn = self.connection()?;
+        let value = conn.query_row(
+            "SELECT MAX(transaction_date) FROM transactions WHERE source = 'pluggy'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        value
+            .map(|raw| parse_sql_date(raw, 0))
+            .transpose()
+            .context("Falha ao ler última data Pluggy no SQLite")
+    }
+
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(

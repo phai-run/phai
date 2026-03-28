@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 const UPSERT_BATCH_SIZE: usize = 50;
 const AUDIT_BATCH_SIZE: usize = 25;
+const DEFAULT_SYNC_LOOKBACK_DAYS: i64 = 14;
 
 #[derive(Parser)]
 #[command(name = "finance", version, about = "Finance OS v1 CLI")]
@@ -623,6 +624,11 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
 
+    let effective_from = resolve_sync_from(
+        args.from.as_deref(),
+        config.pluggy_start_date.as_deref(),
+        store.latest_pluggy_transaction_date().await?,
+    )?;
     let to = args
         .to
         .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
@@ -631,7 +637,7 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         &args.pluggy_config,
         Some(&args.accounts_csv),
         args.fixture.as_deref(),
-        args.from.as_deref().or(config.pluggy_start_date.as_deref()),
+        Some(&effective_from),
         &to,
     )
     .await?;
@@ -723,6 +729,34 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     println!("- actor: {}", config.actor_id);
     println!("- backend: {:?}", config.effective_backend());
     Ok(())
+}
+
+fn resolve_sync_from(
+    explicit_from: Option<&str>,
+    configured_start: Option<&str>,
+    latest_seen: Option<NaiveDate>,
+) -> Result<String> {
+    if let Some(value) = explicit_from {
+        return Ok(value.to_string());
+    }
+
+    let configured_start_date = configured_start
+        .map(|value| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .with_context(|| format!("Falha ao parsear pluggy_start_date {value}"))
+        })
+        .transpose()?;
+
+    let computed = latest_seen
+        .and_then(|latest| latest.checked_sub_signed(Duration::days(DEFAULT_SYNC_LOOKBACK_DAYS)))
+        .or(configured_start_date)
+        .unwrap_or_else(|| Utc::now().date_naive() - Duration::days(DEFAULT_SYNC_LOOKBACK_DAYS));
+
+    Ok(configured_start_date
+        .map(|start| start.max(computed))
+        .unwrap_or(computed)
+        .format("%Y-%m-%d")
+        .to_string())
 }
 
 async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
@@ -1163,4 +1197,37 @@ async fn account_upsert(args: AccountUpsertArgs) -> Result<()> {
         .await?;
     println!("Conta salva: {}", row.account_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_sync_from;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn resolve_sync_from_prefers_explicit_date() {
+        let latest = NaiveDate::from_ymd_opt(2026, 3, 20);
+        assert_eq!(
+            resolve_sync_from(Some("2026-03-01"), Some("2025-12-01"), latest).unwrap(),
+            "2026-03-01"
+        );
+    }
+
+    #[test]
+    fn resolve_sync_from_uses_latest_seen_with_lookback() {
+        let latest = NaiveDate::from_ymd_opt(2026, 3, 27);
+        assert_eq!(
+            resolve_sync_from(None, Some("2025-12-01"), latest).unwrap(),
+            "2026-03-13"
+        );
+    }
+
+    #[test]
+    fn resolve_sync_from_never_goes_before_configured_start() {
+        let latest = NaiveDate::from_ymd_opt(2025, 12, 10);
+        assert_eq!(
+            resolve_sync_from(None, Some("2025-12-01"), latest).unwrap(),
+            "2025-12-01"
+        );
+    }
 }

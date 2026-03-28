@@ -36,6 +36,7 @@ pub trait FinanceStore {
     ) -> Result<()>;
 
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>>;
+    async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>>;
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>>;
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>>;
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>>;

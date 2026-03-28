@@ -129,7 +129,14 @@ impl BigQueryStore {
         }
         let mut parsed: QueryResponse =
             response.json().await.context("JSON inválido do BigQuery")?;
+        let mut poll_attempts = 0u32;
+        const MAX_POLL_ATTEMPTS: u32 = 60;
         while !parsed.job_complete {
+            poll_attempts += 1;
+            if poll_attempts > MAX_POLL_ATTEMPTS {
+                return Err(anyhow!("BigQuery job não completou após {MAX_POLL_ATTEMPTS} tentativas"));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
             let job = parsed
                 .job_reference
                 .as_ref()
@@ -650,6 +657,19 @@ impl FinanceStore for BigQueryStore {
             existing.insert(required_string(&values, 0, "transaction_id")?);
         }
         Ok(existing)
+    }
+
+    async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> {
+        let sql = format!(
+            "SELECT MAX(transaction_date) FROM {} WHERE source = 'pluggy'",
+            self.qualified_table("transactions")?
+        );
+        let response = self.run_query(&sql).await?;
+        let Some(row) = response.rows.first() else {
+            return Ok(None);
+        };
+        let values = row_values(row);
+        optional_date(&values, 0, "max_transaction_date")
     }
 
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>> {
