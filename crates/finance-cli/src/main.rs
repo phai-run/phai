@@ -12,11 +12,12 @@ use finance_core::models::{
     TransactionRecord,
 };
 use finance_core::pluggy::sync_pluggy;
+use finance_core::rules::compile_rules;
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -187,12 +188,17 @@ struct UncategorizedArgs {
 struct SyncSummaryTransaction {
     transaction_id: String,
     transaction_date: String,
+    day_of_week: String,
     description: String,
     amount: String,
+    tx_type: String,
     category_id: Option<String>,
+    category_source: String,
     account_id: Option<String>,
+    account_label: Option<String>,
     payment_status: String,
     source: String,
+    metadata_json: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,12 +206,16 @@ struct SyncSummaryTransaction {
 struct SyncSummaryPending {
     transaction_id: String,
     transaction_date: String,
+    day_of_week: String,
     description: String,
     amount: String,
+    tx_type: String,
     account_id: Option<String>,
+    account_label: Option<String>,
     category_source: String,
     payment_status: String,
     source: String,
+    metadata_json: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,6 +235,7 @@ enum TxCommand {
     UpsertManual(ManualTransactionArgs),
     Categorize(CategorizeTransactionArgs),
     SetContext(SetContextArgs),
+    ListContext(ListContextArgs),
 }
 
 #[derive(Args)]
@@ -269,6 +280,14 @@ struct SetContextArgs {
     context: String,
 }
 
+#[derive(Args)]
+struct ListContextArgs {
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Subcommand)]
 enum ForecastCommand {
     Upsert(ForecastUpsertArgs),
@@ -299,6 +318,8 @@ struct ForecastUpsertArgs {
 #[derive(Subcommand)]
 enum RuleCommand {
     Upsert(RuleUpsertArgs),
+    List(RuleListArgs),
+    Inspect(RuleInspectArgs),
 }
 
 #[derive(Args)]
@@ -309,6 +330,22 @@ struct RuleUpsertArgs {
     body: String,
     #[arg(long, default_value = "active")]
     status: String,
+}
+
+#[derive(Args)]
+struct RuleListArgs {
+    #[arg(long, default_value = "active")]
+    status: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct RuleInspectArgs {
+    #[arg(long)]
+    rule_id: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -359,6 +396,10 @@ fn brl(value: Decimal) -> String {
 
 fn decimal_text(value: Decimal) -> String {
     format!("{:.2}", value.round_dp(2))
+}
+
+fn day_of_week_text(date: NaiveDate) -> String {
+    date.format("%A").to_string().to_ascii_lowercase()
 }
 
 fn build_category_records_from_transactions(
@@ -492,12 +533,15 @@ async fn main() -> Result<()> {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
             TxCommand::Categorize(args) => tx_categorize(args).await,
             TxCommand::SetContext(args) => tx_set_context(args).await,
+            TxCommand::ListContext(args) => tx_list_context(args).await,
         },
         Commands::Forecast { command } => match command {
             ForecastCommand::Upsert(args) => forecast_upsert(args).await,
         },
         Commands::Rule { command } => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,
+            RuleCommand::List(args) => rule_list(args).await,
+            RuleCommand::Inspect(args) => rule_inspect(args).await,
         },
         Commands::Account { command } => match command {
             AccountCommand::Upsert(args) => account_upsert(args).await,
@@ -625,6 +669,8 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
+    let compiled_rules = compile_rules(&store.active_rules().await?)?;
+    let internal_categories = store.internal_categories().await?;
 
     let effective_from = resolve_sync_from(
         args.from.as_deref(),
@@ -641,6 +687,8 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         args.fixture.as_deref(),
         Some(&effective_from),
         &to,
+        &compiled_rules,
+        &internal_categories,
     )
     .await?;
     let existing_ids = store
@@ -680,18 +728,30 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     }
     insert_audit_chunked(store.as_ref(), &audit).await?;
 
+    let account_labels = accounts
+        .iter()
+        .map(|row| (row.account_id.clone(), row.label.clone()))
+        .collect::<BTreeMap<_, _>>();
     let new_transactions = transactions
         .iter()
         .filter(|row| !existing_ids.contains(&row.transaction_id))
         .map(|row| SyncSummaryTransaction {
             transaction_id: row.transaction_id.clone(),
             transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
+            day_of_week: day_of_week_text(row.transaction_date),
             description: row.description.clone(),
             amount: decimal_text(row.amount),
+            tx_type: row.tx_type.clone(),
             category_id: row.category_id.clone(),
+            category_source: row.category_source.clone(),
             account_id: row.account_id.clone(),
+            account_label: row
+                .account_id
+                .as_ref()
+                .and_then(|account_id| account_labels.get(account_id).cloned()),
             payment_status: row.payment_status.clone(),
             source: row.source.clone(),
+            metadata_json: row.metadata_json.clone(),
         })
         .collect::<Vec<_>>();
     let needs_context = store
@@ -701,12 +761,16 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         .map(|row| SyncSummaryPending {
             transaction_id: row.transaction_id,
             transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
+            day_of_week: day_of_week_text(row.transaction_date),
             description: row.description,
             amount: decimal_text(row.amount),
+            tx_type: row.tx_type,
             account_id: row.account_id,
+            account_label: row.account_label,
             category_source: row.category_source,
             payment_status: row.payment_status,
             source: row.source,
+            metadata_json: row.metadata_json,
         })
         .collect::<Vec<_>>();
 
@@ -775,13 +839,18 @@ async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
         return Ok(());
     }
 
+    let internal_categories = store.internal_categories().await?;
+    let is_internal = |cat: &Option<String>| {
+        cat.as_deref()
+            .is_some_and(|c| internal_categories.contains(c))
+    };
     let income = items
         .iter()
-        .filter(|item| !item.amount.is_sign_negative())
+        .filter(|item| !item.amount.is_sign_negative() && !is_internal(&item.category_id))
         .fold(Decimal::ZERO, |acc, item| acc + item.amount);
     let expenses = items
         .iter()
-        .filter(|item| item.amount.is_sign_negative())
+        .filter(|item| item.amount.is_sign_negative() && !is_internal(&item.category_id))
         .fold(Decimal::ZERO, |acc, item| acc + item.amount);
 
     println!("Daily pulse desde {}", since.format("%Y-%m-%d"));
@@ -1088,6 +1157,41 @@ async fn tx_set_context(args: SetContextArgs) -> Result<()> {
     Ok(())
 }
 
+async fn tx_list_context(args: ListContextArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store.transactions_with_context(args.limit).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Transactions with context");
+    println!("- linhas: {}", rows.len());
+    println!();
+
+    for row in rows {
+        let account = row
+            .account_label
+            .or(row.account_id)
+            .unwrap_or_else(|| "sem-conta".to_string());
+        let category = row
+            .category_id
+            .unwrap_or_else(|| "sem-categoria".to_string());
+        println!(
+            "{} | {} | {} | {} | {} | {}",
+            row.transaction_date.format("%Y-%m-%d"),
+            brl(row.amount),
+            row.description,
+            account,
+            category,
+            row.context
+        );
+    }
+    Ok(())
+}
+
 async fn forecast_upsert(args: ForecastUpsertArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
@@ -1162,6 +1266,68 @@ async fn rule_upsert(args: RuleUpsertArgs) -> Result<()> {
         )])
         .await?;
     println!("Rule salva: {}", row.rule_id);
+    Ok(())
+}
+
+fn rule_matches_status(rule: &RuleRecord, status: &str) -> bool {
+    let normalized = status.trim().to_ascii_lowercase();
+    normalized == "all" || rule.status.eq_ignore_ascii_case(&normalized)
+}
+
+async fn rule_list(args: RuleListArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store
+        .all_rules()
+        .await?
+        .into_iter()
+        .filter(|row| rule_matches_status(row, &args.status))
+        .collect::<Vec<_>>();
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Rules status={}", args.status);
+    println!("- linhas: {}", rows.len());
+    println!();
+
+    for row in rows {
+        println!(
+            "{} | {} | {} | {}",
+            row.rule_id,
+            row.status,
+            row.updated_at.format("%Y-%m-%d"),
+            row.body
+        );
+    }
+    Ok(())
+}
+
+async fn rule_inspect(args: RuleInspectArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let row = store
+        .all_rules()
+        .await?
+        .into_iter()
+        .find(|row| row.rule_id == args.rule_id)
+        .with_context(|| format!("Rule {} não encontrada", args.rule_id))?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&row)?);
+        return Ok(());
+    }
+
+    println!("Rule {}", row.rule_id);
+    println!("- status: {}", row.status);
+    println!("- actor_id: {}", row.actor_id);
+    println!("- created_at: {}", row.created_at.to_rfc3339());
+    println!("- updated_at: {}", row.updated_at.to_rfc3339());
+    println!("- idempotency_key: {}", row.idempotency_key);
+    println!();
+    println!("{}", row.body);
     Ok(())
 }
 

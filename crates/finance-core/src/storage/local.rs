@@ -1,15 +1,16 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
-    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionRecord,
-    UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord,
+    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use rust_decimal::Decimal;
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -82,6 +83,19 @@ fn parse_optional_sql_date(
     value
         .map(|raw| parse_sql_date(raw, column_index))
         .transpose()
+}
+
+fn parse_sql_json(
+    value: String,
+    column_index: usize,
+) -> std::result::Result<Value, rusqlite::Error> {
+    serde_json::from_str(&value).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column_index,
+            rusqlite::types::Type::Text,
+            Box::new(err),
+        )
+    })
 }
 
 #[async_trait(?Send)]
@@ -419,6 +433,84 @@ impl FinanceStore for LocalStore {
         Ok(rows.into_iter().collect())
     }
 
+    async fn find_account_by_pluggy_item_id(
+        &self,
+        pluggy_item_id: &str,
+    ) -> Result<Vec<AccountRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              account_id,
+              owner,
+              account_type,
+              bank,
+              label,
+              pluggy_account_id,
+              pluggy_item_id,
+              status,
+              actor_id,
+              idempotency_key,
+              metadata_json,
+              created_at,
+              updated_at
+            FROM accounts
+            WHERE pluggy_item_id = ?1
+            ORDER BY updated_at DESC, account_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([pluggy_item_id], |row| {
+                let metadata_json = row.get::<_, String>(10)?;
+                let created_at: String = row.get(11)?;
+                let updated_at: String = row.get(12)?;
+                Ok(AccountRecord {
+                    account_id: row.get(0)?,
+                    owner: row.get(1)?,
+                    account_type: row.get(2)?,
+                    bank: row.get(3)?,
+                    label: row.get(4)?,
+                    pluggy_account_id: row.get(5)?,
+                    pluggy_item_id: row.get(6)?,
+                    status: row.get(7)?,
+                    actor_id: row.get(8)?,
+                    idempotency_key: row.get(9)?,
+                    metadata_json: parse_sql_json(metadata_json, 10)?,
+                    created_at: parse_datetime_or_now(Some(&created_at)),
+                    updated_at: parse_datetime_or_now(Some(&updated_at)),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT rule_id, body, status, actor_id, idempotency_key, created_at, updated_at
+            FROM rules
+            ORDER BY rule_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let created_at: String = row.get(5)?;
+                let updated_at: String = row.get(6)?;
+                Ok(RuleRecord {
+                    rule_id: row.get(0)?,
+                    body: row.get(1)?,
+                    status: row.get(2)?,
+                    actor_id: row.get(3)?,
+                    idempotency_key: row.get(4)?,
+                    created_at: parse_datetime_or_now(Some(&created_at)),
+                    updated_at: parse_datetime_or_now(Some(&updated_at)),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> {
         let conn = self.connection()?;
         let value = conn.query_row(
@@ -430,6 +522,103 @@ impl FinanceStore for LocalStore {
             .map(|raw| parse_sql_date(raw, 0))
             .transpose()
             .context("Falha ao ler última data Pluggy no SQLite")
+    }
+
+    async fn active_rules(&self) -> Result<Vec<RuleRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT rule_id, body, status, actor_id, idempotency_key, created_at, updated_at
+            FROM rules
+            WHERE LOWER(status) = 'active'
+            ORDER BY rule_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let created_at: String = row.get(5)?;
+                let updated_at: String = row.get(6)?;
+                Ok(RuleRecord {
+                    rule_id: row.get(0)?,
+                    body: row.get(1)?,
+                    status: row.get(2)?,
+                    actor_id: row.get(3)?,
+                    idempotency_key: row.get(4)?,
+                    created_at: parse_datetime_or_now(Some(&created_at)),
+                    updated_at: parse_datetime_or_now(Some(&updated_at)),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn internal_categories(&self) -> Result<BTreeSet<String>> {
+        let conn = self.connection()?;
+        let exists = Self::table_exists(&conn, "internal_categories")?;
+        if !exists {
+            return Ok(BTreeSet::new());
+        }
+        let mut stmt = conn.prepare(
+            "
+            SELECT category_id
+            FROM internal_categories
+            ORDER BY category_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              t.transaction_id,
+              t.transaction_date,
+              t.description,
+              CAST(t.amount AS TEXT),
+              t.account_id,
+              a.label,
+              t.category_id,
+              t.context,
+              t.payment_status,
+              t.source
+            FROM transactions t
+            LEFT JOIN accounts a ON a.account_id = t.account_id
+            WHERE t.context IS NOT NULL
+              AND TRIM(t.context) <> ''
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                let transaction_date = row.get::<_, String>(1)?;
+                let amount = row.get::<_, String>(3)?;
+                Ok(TransactionContextRow {
+                    transaction_id: row.get(0)?,
+                    transaction_date: parse_sql_date(transaction_date, 1)?,
+                    description: row.get(2)?,
+                    amount: parse_decimal(amount).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    account_id: row.get(4)?,
+                    account_label: row.get(5)?,
+                    category_id: row.get(6)?,
+                    context: row.get(7)?,
+                    payment_status: row.get(8)?,
+                    source: row.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>> {
@@ -660,16 +849,22 @@ impl FinanceStore for LocalStore {
         let mut stmt = conn.prepare(
             "
             SELECT
-              transaction_id,
-              transaction_date,
-              description,
-              CAST(amount AS TEXT),
-              account_id,
-              category_source,
-              payment_status,
-              source
-            FROM v_uncategorized
-            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+              t.transaction_id,
+              t.transaction_date,
+              t.description,
+              CAST(t.amount AS TEXT),
+              t.account_id,
+              a.label,
+              t.tx_type,
+              t.category_source,
+              t.payment_status,
+              t.source,
+              t.metadata_json
+            FROM transactions t
+            LEFT JOIN accounts a ON a.account_id = t.account_id
+            WHERE t.category_id IS NULL
+               OR t.category_source IN ('unclassified', 'fallback')
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT ?1
             ",
         )?;
@@ -677,6 +872,7 @@ impl FinanceStore for LocalStore {
             .query_map([limit as i64], |row| {
                 let transaction_date = row.get::<_, String>(1)?;
                 let amount = row.get::<_, String>(3)?;
+                let metadata_json = row.get::<_, String>(10)?;
                 Ok(UncategorizedRow {
                     transaction_id: row.get(0)?,
                     transaction_date: parse_sql_date(transaction_date, 1)?,
@@ -689,9 +885,12 @@ impl FinanceStore for LocalStore {
                         )
                     })?,
                     account_id: row.get(4)?,
-                    category_source: row.get(5)?,
-                    payment_status: row.get(6)?,
-                    source: row.get(7)?,
+                    account_label: row.get(5)?,
+                    tx_type: row.get(6)?,
+                    category_source: row.get(7)?,
+                    payment_status: row.get(8)?,
+                    source: row.get(9)?,
+                    metadata_json: parse_sql_json(metadata_json, 10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

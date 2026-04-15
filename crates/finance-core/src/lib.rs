@@ -4,6 +4,7 @@ pub mod legacy;
 pub mod migrations;
 pub mod models;
 pub mod pluggy;
+pub mod rules;
 pub mod storage;
 
 pub use config::{AppConfig, BackendKind, ConfigPaths};

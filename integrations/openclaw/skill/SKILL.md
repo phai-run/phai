@@ -1,7 +1,7 @@
 ---
 name: finance-os
 description: >
-  Runtime financeiro da Ford baseado em Finance OS + BigQuery. Sincroniza Pluggy,
+  Runtime financeiro da OpenClaw baseado em Finance OS + BigQuery. Sincroniza Pluggy,
   grava contexto/categoria direto no banco canônico e gera relatórios determinísticos
   via CLI única.
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 # Finance OS
 
-Use esta skill para qualquer operação financeira da Ford.
+Use esta skill para qualquer operação financeira da OpenClaw.
 
 ## Princípios
 

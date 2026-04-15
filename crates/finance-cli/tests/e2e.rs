@@ -68,7 +68,7 @@ fn seed_fixture_sync(temp: &TempDir, config_dir: &Path, data_dir: &Path) {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("- transactions: 2"));
+    .stdout(predicate::str::contains("- transactions: 4"));
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn milestone_zero_local_sync_and_report() {
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
-            .arg("30"),
+            .arg("31"),
         &config_dir,
         &data_dir,
     )
@@ -383,6 +383,7 @@ fn mutating_commands_feed_reporting_views() {
     .success()
     .stdout(predicate::str::contains("alimentacao-mercado"))
     .stdout(predicate::str::contains("saude:exames"))
+    .stdout(predicate::str::contains("gas-stations"))
     .stdout(predicate::str::contains("financeiro-pagamento-recebido").not());
 
     envs(
@@ -484,6 +485,38 @@ fn mutating_commands_feed_reporting_views() {
     assert_eq!(account_count, 1);
     assert_eq!(rule_count, 1);
     assert_eq!(forecast_count, 1);
+
+    // Credit-card debit from Pluggy (positive +150) must be stored as negative
+    let cc_debit_amount: String = conn
+        .query_row(
+            "SELECT amount FROM transactions WHERE transaction_id = 'pluggy-fixture-003'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("credit card debit amount");
+    let cc_debit_val: f64 = cc_debit_amount.parse().expect("parse cc debit");
+    assert!(
+        cc_debit_val < 0.0,
+        "credit-card debit must be negated, got {cc_debit_amount}"
+    );
+    assert!(
+        (cc_debit_val - (-150.0)).abs() < 0.01,
+        "credit-card debit must be -150, got {cc_debit_amount}"
+    );
+
+    // Credit-card credit (refund +42.50) must stay positive
+    let cc_credit_amount: String = conn
+        .query_row(
+            "SELECT amount FROM transactions WHERE transaction_id = 'pluggy-fixture-004'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("credit card credit amount");
+    let cc_credit_val: f64 = cc_credit_amount.parse().expect("parse cc credit");
+    assert!(
+        cc_credit_val > 0.0,
+        "credit-card credit must stay positive, got {cc_credit_amount}"
+    );
 }
 
 #[test]
@@ -554,9 +587,24 @@ fn sync_json_summary_counts_only_new_transactions() {
     .expect("first sync output");
     assert!(first.status.success());
     let first_json: Value = serde_json::from_slice(&first.stdout).expect("first sync json");
-    assert_eq!(first_json["newTransactionsCount"], 2);
+    assert_eq!(first_json["newTransactionsCount"], 4);
     assert_eq!(first_json["needsContextCount"], 0);
-    assert_eq!(first_json["newTransactions"].as_array().unwrap().len(), 2);
+    assert_eq!(first_json["newTransactions"].as_array().unwrap().len(), 4);
+    let first_items = first_json["newTransactions"]
+        .as_array()
+        .expect("new transactions array");
+    let first_tx = first_items
+        .iter()
+        .find(|item| item["transactionId"] == "pluggy-fixture-001")
+        .expect("fixture tx in summary");
+    assert_eq!(first_tx["txType"], "debit");
+    assert_eq!(first_tx["categorySource"], "pluggy");
+    assert_eq!(first_tx["dayOfWeek"], "friday");
+    assert_eq!(first_tx["accountLabel"], "Primary Checking");
+    assert_eq!(
+        first_tx["metadataJson"]["pluggy_account_id"],
+        "fixture-checking"
+    );
 
     let second = envs(
         cargo_bin()
@@ -581,4 +629,483 @@ fn sync_json_summary_counts_only_new_transactions() {
     assert_eq!(second_json["newTransactionsCount"], 0);
     assert_eq!(second_json["needsContextCount"], 0);
     assert_eq!(second_json["newTransactions"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn sync_json_summary_includes_pending_metadata_fields() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" }
+  ]
+}"#,
+    );
+
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\n",
+    );
+
+    let fixture_path = temp.path().join("pluggy_fixture_uncategorized.json");
+    write_file(
+        &fixture_path,
+        r#"{
+  "accounts": [
+    {
+      "id": "fixture-checking",
+      "itemId": "item-1",
+      "name": "Primary Checking",
+      "type": "checking",
+      "status": "ACTIVE",
+      "updatedAt": "2026-03-15T12:00:00.000Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "uncat-fixture-001",
+      "accountId": "fixture-checking",
+      "date": "2026-03-16",
+      "description": "Compra sem categoria",
+      "amount": -19.90,
+      "type": "debit",
+      "status": "POSTED",
+      "createdAt": "2026-03-16T12:00:00.000Z",
+      "updatedAt": "2026-03-16T12:00:00.000Z"
+    }
+  ]
+}"#,
+    );
+
+    let output = envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture_path)
+            .arg("--to")
+            .arg("2026-03-31")
+            .arg("--json-summary"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("pending sync output");
+    assert!(output.status.success());
+
+    let summary: Value = serde_json::from_slice(&output.stdout).expect("pending summary json");
+    assert_eq!(summary["needsContextCount"], 1);
+    let pending = summary["needsContext"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("pending row");
+    assert_eq!(pending["transactionId"], "uncat-fixture-001");
+    assert_eq!(pending["txType"], "debit");
+    assert_eq!(pending["dayOfWeek"], "monday");
+    assert_eq!(pending["accountLabel"], "Primary Checking");
+    assert_eq!(
+        pending["metadataJson"]["pluggy_account_id"],
+        "fixture-checking"
+    );
+}
+
+#[test]
+fn sync_rebinds_fixture_account_by_item_id() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "stale-checking", "pluggyItemId": "item-1" },
+    { "id": "shared_credit", "pluggyAccountId": "stale-credit", "pluggyItemId": "item-2" }
+  ]
+}"#,
+    );
+
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,stale-checking,item-1,,\nshared_credit,secondary,credit,fintech,Shared Credit Card,stale-credit,item-2,3,10\n",
+    );
+
+    let fixture_path = repo_root().join("examples/pluggy_fixture.json");
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture_path)
+            .arg("--to")
+            .arg("2026-03-31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("- transactions: 4"));
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    let rebound_checking: String = conn
+        .query_row(
+            "SELECT pluggy_account_id FROM accounts WHERE account_id = 'primary_checking'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("checking rebind");
+    let rebound_credit: String = conn
+        .query_row(
+            "SELECT pluggy_account_id FROM accounts WHERE account_id = 'shared_credit'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("credit rebind");
+
+    assert_eq!(rebound_checking, "fixture-checking");
+    assert_eq!(rebound_credit, "fixture-credit");
+}
+
+#[test]
+fn rule_and_context_inspection_commands_work() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("rule")
+            .arg("upsert")
+            .arg("--rule-id")
+            .arg("mercado_rule")
+            .arg("--body")
+            .arg("if description contains mercado then category alimentacao:mercado"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("rule")
+            .arg("upsert")
+            .arg("--rule-id")
+            .arg("disabled_rule")
+            .arg("--body")
+            .arg("if description contains farmacia then category saude:farmacia")
+            .arg("--status")
+            .arg("disabled"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let rule_list = envs(
+        cargo_bin().arg("rule").arg("list").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("rule list output");
+    assert!(rule_list.status.success());
+    let listed_rules: Value = serde_json::from_slice(&rule_list.stdout).expect("rule list json");
+    let listed_rules = listed_rules.as_array().expect("listed rules array");
+    assert_eq!(listed_rules.len(), 1);
+    assert_eq!(listed_rules[0]["rule_id"], "mercado_rule");
+
+    let inspected = envs(
+        cargo_bin()
+            .arg("rule")
+            .arg("inspect")
+            .arg("--rule-id")
+            .arg("disabled_rule")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("rule inspect output");
+    assert!(inspected.status.success());
+    let inspected_rule: Value =
+        serde_json::from_slice(&inspected.stdout).expect("rule inspect json");
+    assert_eq!(inspected_rule["status"], "disabled");
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("set-context")
+            .arg("--transaction-id")
+            .arg("pluggy-fixture-001")
+            .arg("--context")
+            .arg("compras-do-mes"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let contexts = envs(
+        cargo_bin().arg("tx").arg("list-context").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("list context output");
+    assert!(contexts.status.success());
+    let contexts_json: Value = serde_json::from_slice(&contexts.stdout).expect("list context json");
+    let contexts_rows = contexts_json.as_array().expect("contexts array");
+    let context_row = contexts_rows
+        .iter()
+        .find(|row| row["transaction_id"] == "pluggy-fixture-001")
+        .expect("context row");
+    assert_eq!(context_row["context"], "compras-do-mes");
+    assert_eq!(context_row["account_label"], "Primary Checking");
+}
+
+#[test]
+fn sync_applies_db_rules_without_hardcoded_personal_logic() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("rule")
+            .arg("upsert")
+            .arg("--rule-id")
+            .arg("bill_payment_rule")
+            .arg("--body")
+            .arg(
+                "if description contains \"pagamento de fatura\" then category credit-card-payment",
+            ),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" }
+  ]
+}"#,
+    );
+
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\n",
+    );
+
+    let fixture_path = temp.path().join("pluggy_fixture_rule.json");
+    write_file(
+        &fixture_path,
+        r#"{
+  "accounts": [
+    {
+      "id": "fixture-checking",
+      "itemId": "item-1",
+      "name": "Primary Checking",
+      "type": "checking",
+      "status": "ACTIVE",
+      "updatedAt": "2026-03-15T12:00:00.000Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "rule-fixture-001",
+      "accountId": "fixture-checking",
+      "date": "2026-03-15",
+      "description": "Pagamento de fatura Visa",
+      "amount": -500.00,
+      "status": "POSTED",
+      "createdAt": "2026-03-15T12:00:00.000Z",
+      "updatedAt": "2026-03-15T12:00:00.000Z"
+    }
+  ]
+}"#,
+    );
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture_path)
+            .arg("--to")
+            .arg("2026-03-31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("- transactions: 1"));
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("daily-pulse")
+            .arg("--days")
+            .arg("31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Pagamento de fatura Visa"))
+    .stdout(predicate::str::contains("- entradas: +R$ 0,00"))
+    .stdout(predicate::str::contains("- saídas: +R$ 0,00"));
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("monthly-spend")
+            .arg("--month")
+            .arg("2026-03"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("- linhas: 0"));
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    let category_id: String = conn
+        .query_row(
+            "SELECT category_id FROM transactions WHERE transaction_id = 'rule-fixture-001'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("category from db rule");
+    let category_source: String = conn
+        .query_row(
+            "SELECT category_source FROM transactions WHERE transaction_id = 'rule-fixture-001'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("category source from db rule");
+
+    assert_eq!(category_id, "credit-card-payment");
+    assert_eq!(category_source, "rule");
 }

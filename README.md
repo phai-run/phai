@@ -2,6 +2,8 @@
 
 A personal finance CLI and data pipeline built in Rust. Syncs bank transactions from [Pluggy](https://pluggy.ai), stores them in BigQuery (production) or SQLite (local development), and provides reporting views for budgeting, cashflow analysis, and forecast tracking.
 
+> **Brazilian banking focus:** Pluggy is a Brazilian open-finance aggregator. The data model and reporting are designed for Brazilian accounts (checking, credit cards, investments), but the architecture is backend-agnostic and can be adapted for other providers.
+
 ## Features
 
 - **Dual-backend storage** -- BigQuery for production, SQLite for local development
@@ -111,6 +113,53 @@ finance account upsert      Create or update an account
 
 All report commands support `--json` for machine-readable output.
 
+Rules are stored in the database and applied during Pluggy sync. Supported rule formats:
+
+```bash
+finance rule upsert \
+  --rule-id bill_payment \
+  --body 'if description contains "pagamento de fatura" then category credit-card-payment'
+
+finance rule upsert \
+  --rule-id own_transfer \
+  --body 'if description contains "pix no credito" then category transfer-internal'
+```
+
+Use database-backed rules or private config for user-specific patterns. Do not commit personal classification rules to shared code or migrations.
+
+## Private Local Setup
+
+For day-to-day use, keep private files outside the open-source repo and mount them into a local gitignored overlay.
+
+Recommended layout:
+
+```text
+finance-os/                  # open-source repo
+  .private/                  # gitignored local overlay
+    runtime -> ~/finance-os-configs/runtime/<runtime-name>
+    pluggy.env -> ~/finance-os-configs/pluggy/pluggy.env
+    pluggy-config.json -> /private/path/to/pluggy-config.json
+    contas.csv -> /private/path/to/contas.csv
+```
+
+Create the local links with:
+
+```bash
+scripts/setup-private-links.sh \
+  --configs-root "$HOME/finance-os-configs" \
+  --runtime your-runtime \
+  --pluggy-config "/private/path/to/pluggy-config.json" \
+  --accounts-csv "/private/path/to/contas.csv"
+```
+
+Then run sync through the overlay:
+
+```bash
+scripts/local-sync.sh --from 2026-03-01 --to 2026-04-01
+```
+
+This keeps secrets, service-account paths, Pluggy credentials, and user-specific rules out of the shared repository.
+
 ## Architecture
 
 ```
@@ -121,10 +170,16 @@ schema/
   sqlite/           SQLite migration files
   bigquery/         BigQuery migration files (with template substitution)
 integrations/
-  ford/             Example workspace integration (skill + shell wrapper)
+  openclaw/         Example AI assistant integration (skill + shell wrapper)
 ```
 
 The `FinanceStore` trait abstracts over both backends. Migrations are embedded in the binary at compile time via `include_str!`.
+
+## AI Assistant Integration
+
+The `integrations/openclaw/` directory contains an example integration for [OpenClaw](https://openclaw.io), an AI assistant framework. It shows how to expose `finance-cli` commands as a skill that an AI agent can invoke — syncing transactions, categorizing spending, and generating reports through natural language.
+
+The pattern (a shell wrapper + a skill definition file) can be adapted for other AI assistant frameworks.
 
 ## Testing
 
@@ -133,6 +188,14 @@ cargo test --workspace
 ```
 
 E2E tests run against SQLite using temporary directories. No external services required.
+
+## Contributing
+
+Contributions are welcome. Please open an issue before submitting large changes so we can discuss the approach. For bug fixes and small improvements, a pull request is sufficient.
+
+- Keep new commands idempotent where possible
+- Add a migration file for any schema changes (both `schema/sqlite/` and `schema/bigquery/`)
+- E2E tests against the SQLite backend are preferred over unit tests that mock the store
 
 ## License
 

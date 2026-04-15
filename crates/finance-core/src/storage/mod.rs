@@ -1,8 +1,8 @@
 use crate::config::{AppConfig, BackendKind};
 use crate::models::{
     AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
-    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionRecord,
-    UncategorizedRow,
+    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
+    TransactionRecord, UncategorizedRow,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -16,6 +16,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "schema_versions",
     "accounts",
     "categories",
+    "internal_categories",
     "rules",
     "transactions",
     "audit_log",
@@ -54,6 +55,14 @@ pub trait FinanceStore {
     ) -> Result<()>;
 
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>>;
+    async fn find_account_by_pluggy_item_id(
+        &self,
+        pluggy_item_id: &str,
+    ) -> Result<Vec<AccountRecord>>;
+    async fn all_rules(&self) -> Result<Vec<RuleRecord>>;
+    async fn active_rules(&self) -> Result<Vec<RuleRecord>>;
+    async fn internal_categories(&self) -> Result<BTreeSet<String>>;
+    async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>>;
     async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>>;
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>>;
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>>;

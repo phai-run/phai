@@ -4,8 +4,11 @@ use anyhow::Result;
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 6] = [
-    ("001_initial", include_str!("../../../schema/sqlite/001_initial.sql")),
+const SQLITE_MIGRATIONS: [Migration; 11] = [
+    (
+        "001_initial",
+        include_str!("../../../schema/sqlite/001_initial.sql"),
+    ),
     (
         "002_add_forecast",
         include_str!("../../../schema/sqlite/002_add_forecast.sql"),
@@ -26,9 +29,29 @@ const SQLITE_MIGRATIONS: [Migration; 6] = [
         "006_harden",
         include_str!("../../../schema/sqlite/006_harden.sql"),
     ),
+    (
+        "007_fix_credit_card_sign",
+        include_str!("../../../schema/sqlite/007_fix_credit_card_sign.sql"),
+    ),
+    (
+        "008_exclude_internal_from_reports",
+        include_str!("../../../schema/sqlite/008_exclude_internal_from_reports.sql"),
+    ),
+    (
+        "009_fix_remaining_credit_card_sign",
+        include_str!("../../../schema/sqlite/009_fix_remaining_credit_card_sign.sql"),
+    ),
+    (
+        "010_internal_categories_table",
+        include_str!("../../../schema/sqlite/010_internal_categories_table.sql"),
+    ),
+    (
+        "011_reclassify_internal_transfers",
+        include_str!("../../../schema/sqlite/011_reclassify_internal_transfers.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 6] = [
+const BIGQUERY_MIGRATIONS: [Migration; 11] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -52,6 +75,26 @@ const BIGQUERY_MIGRATIONS: [Migration; 6] = [
     (
         "006_harden",
         include_str!("../../../schema/bigquery/006_harden.sql"),
+    ),
+    (
+        "007_fix_credit_card_sign",
+        include_str!("../../../schema/bigquery/007_fix_credit_card_sign.sql"),
+    ),
+    (
+        "008_exclude_internal_from_reports",
+        include_str!("../../../schema/bigquery/008_exclude_internal_from_reports.sql"),
+    ),
+    (
+        "009_fix_remaining_credit_card_sign",
+        include_str!("../../../schema/bigquery/009_fix_remaining_credit_card_sign.sql"),
+    ),
+    (
+        "010_internal_categories_table",
+        include_str!("../../../schema/bigquery/010_internal_categories_table.sql"),
+    ),
+    (
+        "011_reclassify_internal_transfers",
+        include_str!("../../../schema/bigquery/011_reclassify_internal_transfers.sql"),
     ),
 ];
 

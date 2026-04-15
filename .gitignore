@@ -17,3 +17,6 @@ finance/pluggy-config.json
 finance/data/
 config.toml
 
+# Local private workspace overlays
+/.private/
+/.local/

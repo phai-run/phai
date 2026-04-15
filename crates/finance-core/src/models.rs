@@ -160,7 +160,24 @@ pub struct UncategorizedRow {
     pub description: String,
     pub amount: Decimal,
     pub account_id: Option<String>,
+    pub account_label: Option<String>,
+    pub tx_type: String,
     pub category_source: String,
+    pub payment_status: String,
+    pub source: String,
+    pub metadata_json: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionContextRow {
+    pub transaction_id: String,
+    pub transaction_date: NaiveDate,
+    pub description: String,
+    pub amount: Decimal,
+    pub account_id: Option<String>,
+    pub account_label: Option<String>,
+    pub category_id: Option<String>,
+    pub context: String,
     pub payment_status: String,
     pub source: String,
 }

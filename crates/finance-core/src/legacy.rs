@@ -34,7 +34,6 @@ pub struct AccountRegistryEntry {
     pub metadata_json: Value,
 }
 
-
 fn read_csv_rows(path: &Path) -> Result<Vec<BTreeMap<String, String>>> {
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)

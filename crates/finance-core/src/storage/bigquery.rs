@@ -1,9 +1,9 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
-    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionRecord,
-    UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord,
+    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use chrono::{NaiveDate, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -154,7 +154,9 @@ impl BigQueryStore {
         while !parsed.job_complete {
             poll_attempts += 1;
             if poll_attempts > MAX_POLL_ATTEMPTS {
-                return Err(anyhow!("BigQuery job não completou após {MAX_POLL_ATTEMPTS} tentativas"));
+                return Err(anyhow!(
+                    "BigQuery job não completou após {MAX_POLL_ATTEMPTS} tentativas"
+                ));
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
             let job = parsed
@@ -284,6 +286,15 @@ fn optional_date(
     optional_string(values, index)
         .map(|value| {
             NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                .with_context(|| format!("Falha ao parsear {field} do BigQuery"))
+        })
+        .transpose()
+}
+
+fn optional_json(values: &[Option<String>], index: usize, field: &str) -> Result<Option<Value>> {
+    optional_string(values, index)
+        .map(|value| {
+            serde_json::from_str(&value)
                 .with_context(|| format!("Falha ao parsear {field} do BigQuery"))
         })
         .transpose()
@@ -684,6 +695,88 @@ impl FinanceStore for BigQueryStore {
         Ok(existing)
     }
 
+    async fn find_account_by_pluggy_item_id(
+        &self,
+        pluggy_item_id: &str,
+    ) -> Result<Vec<AccountRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              account_id,
+              owner,
+              account_type,
+              bank,
+              label,
+              pluggy_account_id,
+              pluggy_item_id,
+              status,
+              actor_id,
+              idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              CAST(created_at AS STRING),
+              CAST(updated_at AS STRING)
+            FROM {}
+            WHERE pluggy_item_id = {}
+            ORDER BY updated_at DESC, account_id ASC
+            ",
+            self.qualified_table("accounts")?,
+            sql_string(pluggy_item_id),
+        );
+        let response = self.run_query(&sql).await?;
+        let mut accounts = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let created_at = required_string(&values, 11, "created_at")?;
+            let updated_at = required_string(&values, 12, "updated_at")?;
+            accounts.push(AccountRecord {
+                account_id: required_string(&values, 0, "account_id")?,
+                owner: required_string(&values, 1, "owner")?,
+                account_type: required_string(&values, 2, "account_type")?,
+                bank: required_string(&values, 3, "bank")?,
+                label: required_string(&values, 4, "label")?,
+                pluggy_account_id: optional_string(&values, 5),
+                pluggy_item_id: optional_string(&values, 6),
+                status: required_string(&values, 7, "status")?,
+                actor_id: required_string(&values, 8, "actor_id")?,
+                idempotency_key: required_string(&values, 9, "idempotency_key")?,
+                metadata_json: optional_json(&values, 10, "metadata_json")?
+                    .unwrap_or_else(|| json!({})),
+                created_at: parse_datetime_or_now(Some(&created_at)),
+                updated_at: parse_datetime_or_now(Some(&updated_at)),
+            });
+        }
+        Ok(accounts)
+    }
+
+    async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
+        let sql = format!(
+            "
+            SELECT rule_id, body, status, actor_id, idempotency_key,
+                   CAST(created_at AS STRING), CAST(updated_at AS STRING)
+            FROM {}
+            ORDER BY rule_id ASC
+            ",
+            self.qualified_table("rules")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut rules = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let created_at = required_string(&values, 5, "created_at")?;
+            let updated_at = required_string(&values, 6, "updated_at")?;
+            rules.push(RuleRecord {
+                rule_id: required_string(&values, 0, "rule_id")?,
+                body: required_string(&values, 1, "body")?,
+                status: required_string(&values, 2, "status")?,
+                actor_id: required_string(&values, 3, "actor_id")?,
+                idempotency_key: required_string(&values, 4, "idempotency_key")?,
+                created_at: parse_datetime_or_now(Some(&created_at)),
+                updated_at: parse_datetime_or_now(Some(&updated_at)),
+            });
+        }
+        Ok(rules)
+    }
+
     async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> {
         let sql = format!(
             "SELECT MAX(transaction_date) FROM {} WHERE source = 'pluggy'",
@@ -695,6 +788,99 @@ impl FinanceStore for BigQueryStore {
         };
         let values = row_values(row);
         optional_date(&values, 0, "max_transaction_date")
+    }
+
+    async fn active_rules(&self) -> Result<Vec<RuleRecord>> {
+        let sql = format!(
+            "
+            SELECT rule_id, body, status, actor_id, idempotency_key,
+                   CAST(created_at AS STRING), CAST(updated_at AS STRING)
+            FROM {}
+            WHERE LOWER(status) = 'active'
+            ORDER BY rule_id ASC
+            ",
+            self.qualified_table("rules")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut rules = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let created_at = required_string(&values, 5, "created_at")?;
+            let updated_at = required_string(&values, 6, "updated_at")?;
+            rules.push(RuleRecord {
+                rule_id: required_string(&values, 0, "rule_id")?,
+                body: required_string(&values, 1, "body")?,
+                status: required_string(&values, 2, "status")?,
+                actor_id: required_string(&values, 3, "actor_id")?,
+                idempotency_key: required_string(&values, 4, "idempotency_key")?,
+                created_at: parse_datetime_or_now(Some(&created_at)),
+                updated_at: parse_datetime_or_now(Some(&updated_at)),
+            });
+        }
+        Ok(rules)
+    }
+
+    async fn internal_categories(&self) -> Result<BTreeSet<String>> {
+        let sql = format!(
+            "
+            SELECT category_id
+            FROM {}
+            ORDER BY category_id ASC
+            ",
+            self.qualified_table("internal_categories")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut categories = BTreeSet::new();
+        for row in response.rows {
+            let values = row_values(&row);
+            categories.insert(required_string(&values, 0, "category_id")?);
+        }
+        Ok(categories)
+    }
+
+    async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>> {
+        let sql = format!(
+            "
+            SELECT
+              t.transaction_id,
+              CAST(t.transaction_date AS STRING),
+              t.description,
+              CAST(t.amount AS STRING),
+              t.account_id,
+              a.label,
+              t.category_id,
+              t.context,
+              t.payment_status,
+              t.source
+            FROM {} t
+            LEFT JOIN {} a ON a.account_id = t.account_id
+            WHERE t.context IS NOT NULL
+              AND TRIM(t.context) <> ''
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
+            LIMIT {}
+            ",
+            self.qualified_table("transactions")?,
+            self.qualified_table("accounts")?,
+            limit,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(TransactionContextRow {
+                transaction_id: required_string(&values, 0, "transaction_id")?,
+                transaction_date: required_date(&values, 1, "transaction_date")?,
+                description: required_string(&values, 2, "description")?,
+                amount: required_decimal(&values, 3, "amount")?,
+                account_id: optional_string(&values, 4),
+                account_label: optional_string(&values, 5),
+                category_id: optional_string(&values, 6),
+                context: required_string(&values, 7, "context")?,
+                payment_status: required_string(&values, 8, "payment_status")?,
+                source: required_string(&values, 9, "source")?,
+            });
+        }
+        Ok(items)
     }
 
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>> {
@@ -864,19 +1050,26 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             SELECT
-              transaction_id,
-              CAST(transaction_date AS STRING),
-              description,
-              CAST(amount AS STRING),
-              account_id,
-              category_source,
-              payment_status,
-              source
-            FROM {}
-            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+              t.transaction_id,
+              CAST(t.transaction_date AS STRING),
+              t.description,
+              CAST(t.amount AS STRING),
+              t.account_id,
+              a.label,
+              t.tx_type,
+              t.category_source,
+              t.payment_status,
+              t.source,
+              COALESCE(TO_JSON_STRING(t.metadata_json), '{{}}')
+            FROM {} t
+            LEFT JOIN {} a ON a.account_id = t.account_id
+            WHERE t.category_id IS NULL
+               OR t.category_source IN ('unclassified', 'fallback')
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT {}
             ",
-            self.qualified_table("v_uncategorized")?,
+            self.qualified_table("transactions")?,
+            self.qualified_table("accounts")?,
             limit,
         );
         let response = self.run_query(&sql).await?;
@@ -889,9 +1082,13 @@ impl FinanceStore for BigQueryStore {
                 description: required_string(&values, 2, "description")?,
                 amount: required_decimal(&values, 3, "amount")?,
                 account_id: optional_string(&values, 4),
-                category_source: required_string(&values, 5, "category_source")?,
-                payment_status: required_string(&values, 6, "payment_status")?,
-                source: required_string(&values, 7, "source")?,
+                account_label: optional_string(&values, 5),
+                tx_type: required_string(&values, 6, "tx_type")?,
+                category_source: required_string(&values, 7, "category_source")?,
+                payment_status: required_string(&values, 8, "payment_status")?,
+                source: required_string(&values, 9, "source")?,
+                metadata_json: optional_json(&values, 10, "metadata_json")?
+                    .unwrap_or_else(|| json!({})),
             });
         }
         Ok(items)

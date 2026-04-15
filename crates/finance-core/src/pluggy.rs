@@ -1,6 +1,9 @@
 use crate::idempotency::{account_idempotency, category_id, pluggy_transaction_idempotency};
 use crate::legacy::{load_account_registry, AccountRegistryEntry};
-use crate::models::{json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord};
+use crate::models::{
+    json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
+};
+use crate::rules::{apply_rules, CompiledRule};
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use reqwest::Client;
@@ -8,7 +11,7 @@ use rust_decimal::Decimal;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
@@ -22,6 +25,8 @@ pub struct PluggyBindingConfig {
     pub id: String,
     #[serde(rename = "pluggyAccountId")]
     pub pluggy_account_id: String,
+    #[serde(default, rename = "pluggyItemId")]
+    pub pluggy_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,7 +77,7 @@ pub struct PluggyFixture {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PluggyAccountPayload {
     pub id: String,
-    #[serde(default, rename = "itemId")]
+    #[serde(default, rename = "itemId", alias = "item_id")]
     pub item_id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
@@ -82,15 +87,15 @@ pub struct PluggyAccountPayload {
     pub account_type: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_decimal")]
     pub balance: Option<Decimal>,
-    #[serde(default, rename = "currencyCode")]
+    #[serde(default, rename = "currencyCode", alias = "currency_code")]
     pub currency_code: Option<String>,
     #[serde(default)]
     pub number: Option<String>,
-    #[serde(default, rename = "marketingName")]
+    #[serde(default, rename = "marketingName", alias = "marketing_name")]
     pub marketing_name: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
-    #[serde(default, rename = "updatedAt")]
+    #[serde(default, rename = "updatedAt", alias = "updated_at")]
     pub updated_at: Option<String>,
     #[serde(flatten)]
     pub extra: Value,
@@ -111,9 +116,9 @@ pub struct PluggyTransactionPayload {
     pub status: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
-    #[serde(default, rename = "createdAt")]
+    #[serde(default, rename = "createdAt", alias = "created_at")]
     pub created_at: Option<String>,
-    #[serde(default, rename = "updatedAt")]
+    #[serde(default, rename = "updatedAt", alias = "updated_at")]
     pub updated_at: Option<String>,
     #[serde(flatten)]
     pub extra: Value,
@@ -133,7 +138,6 @@ struct PaginatedResponse<T> {
     total_pages: Option<u32>,
 }
 
-
 fn parse_date(value: &str) -> Result<NaiveDate> {
     let raw = value.get(0..10).unwrap_or(value);
     NaiveDate::parse_from_str(raw, "%Y-%m-%d")
@@ -147,6 +151,139 @@ fn account_type_from_payload(payload: &PluggyAccountPayload) -> String {
         .or_else(|| payload.subtype.clone())
         .unwrap_or_else(|| "unknown".to_string())
         .to_ascii_lowercase()
+}
+
+fn normalize_match_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn binding_item_id<'a>(
+    binding: &'a PluggyBindingConfig,
+    registry: Option<&'a AccountRegistryEntry>,
+) -> Option<&'a str> {
+    binding
+        .pluggy_item_id
+        .as_deref()
+        .or_else(|| registry.and_then(|entry| entry.pluggy_item_id.as_deref()))
+}
+
+fn score_account_candidate(
+    payload: &PluggyAccountPayload,
+    binding: &PluggyBindingConfig,
+    registry: Option<&AccountRegistryEntry>,
+) -> i32 {
+    let mut score = 0;
+
+    if let Some(item_id) = binding_item_id(binding, registry) {
+        if payload.item_id.as_deref() == Some(item_id) {
+            score += 40;
+        }
+    }
+
+    if let Some(entry) = registry {
+        if !entry.account_type.trim().is_empty()
+            && entry
+                .account_type
+                .eq_ignore_ascii_case(&account_type_from_payload(payload))
+        {
+            score += 20;
+        }
+
+        if let Some(name) = payload.name.as_deref() {
+            let payload_name = normalize_match_key(name);
+            let label = normalize_match_key(&entry.label);
+            if !payload_name.is_empty() && !label.is_empty() {
+                if payload_name == label {
+                    score += 15;
+                } else if payload_name.contains(&label) || label.contains(&payload_name) {
+                    score += 8;
+                }
+            }
+        }
+    }
+
+    if let Some(name) = payload.name.as_deref() {
+        let payload_name = normalize_match_key(name);
+        let binding_id = normalize_match_key(&binding.id);
+        if !payload_name.is_empty()
+            && !binding_id.is_empty()
+            && (payload_name.contains(&binding_id) || binding_id.contains(&payload_name))
+        {
+            score += 4;
+        }
+    }
+
+    if payload
+        .status
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("active"))
+    {
+        score += 1;
+    }
+
+    score
+}
+
+fn select_account_candidate(
+    candidates: Vec<PluggyAccountPayload>,
+    binding: &PluggyBindingConfig,
+    registry: Option<&AccountRegistryEntry>,
+) -> Result<PluggyAccountPayload> {
+    let item_id = binding_item_id(binding, registry).unwrap_or("desconhecido");
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "Nenhuma conta Pluggy encontrada para itemId {item_id} (binding {})",
+            binding.id
+        );
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next().expect("single candidate"));
+    }
+
+    let mut ranked = candidates
+        .into_iter()
+        .map(|payload| {
+            let score = score_account_candidate(&payload, binding, registry);
+            (score, payload)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.id.cmp(&right.1.id))
+    });
+
+    let top_score = ranked.first().map(|entry| entry.0).unwrap_or_default();
+    let next_score = ranked.get(1).map(|entry| entry.0).unwrap_or(i32::MIN);
+    if top_score <= 0 || top_score == next_score {
+        let candidates = ranked
+            .iter()
+            .take(5)
+            .map(|(_, payload)| {
+                format!(
+                    "{}:{}:{}",
+                    payload.id,
+                    payload
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "sem-nome".to_string()),
+                    account_type_from_payload(payload)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "Rebind Pluggy ambíguo para binding {} via itemId {item_id}; candidatos: {candidates}",
+            binding.id
+        );
+    }
+
+    Ok(ranked.remove(0).1)
 }
 
 fn build_account_record(
@@ -176,7 +313,11 @@ fn build_account_record(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| payload.name.clone().unwrap_or_else(|| binding.id.clone())),
         pluggy_account_id: Some(payload.id.clone()),
-        pluggy_item_id: payload.item_id.clone(),
+        pluggy_item_id: payload
+            .item_id
+            .clone()
+            .or_else(|| binding.pluggy_item_id.clone())
+            .or_else(|| registry.and_then(|entry| entry.pluggy_item_id.clone())),
         status: payload
             .status
             .clone()
@@ -204,14 +345,51 @@ fn build_transaction_record(
     binding: &PluggyBindingConfig,
     registry: Option<&AccountRegistryEntry>,
     actor_id: &str,
+    rules: &[CompiledRule],
+    internal_categories: &BTreeSet<String>,
 ) -> Result<TransactionRecord> {
     let category_name = payload
         .category
         .as_deref()
         .filter(|value| !value.trim().is_empty());
     let category_key = category_name.map(|value| category_id(value, None));
+    let (category_id, category_source) = apply_rules(
+        &payload.description,
+        category_key,
+        payload.category.is_some(),
+        rules,
+    );
     let transaction_date = parse_date(&payload.date)?;
-    let amount = payload.amount;
+
+    let tx_type = payload
+        .tx_type
+        .clone()
+        .unwrap_or_else(|| {
+            if payload.amount.is_sign_negative() {
+                "debit".to_string()
+            } else {
+                "credit".to_string()
+            }
+        })
+        .to_ascii_lowercase();
+
+    // Pluggy returns credit-card debits with positive amounts (debt added to card),
+    // sometimes without a type field. Normalize to negative so the invariant
+    // "negative = expense" holds everywhere. Only keep positive amounts for
+    // genuine credits (cashback, refunds).
+    let is_credit_account = registry
+        .map(|r| r.account_type.as_str() == "credit")
+        .unwrap_or(false);
+    let is_genuine_credit = category_id
+        .as_deref()
+        .is_some_and(|c| matches!(c, "cashback" | "refund") || internal_categories.contains(c));
+    let (amount, tx_type) =
+        if is_credit_account && payload.amount.is_sign_positive() && !is_genuine_credit {
+            (-payload.amount, "debit".to_string())
+        } else {
+            (payload.amount, tx_type)
+        };
+
     let created_at = parse_datetime_or_now(payload.created_at.as_deref());
     let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
     Ok(TransactionRecord {
@@ -222,23 +400,9 @@ fn build_transaction_record(
         transaction_date,
         description: payload.description.clone(),
         amount,
-        tx_type: payload
-            .tx_type
-            .clone()
-            .unwrap_or_else(|| {
-                if amount.is_sign_negative() {
-                    "debit".to_string()
-                } else {
-                    "credit".to_string()
-                }
-            })
-            .to_ascii_lowercase(),
-        category_id: category_key,
-        category_source: if payload.category.is_some() {
-            "pluggy".to_string()
-        } else {
-            "unclassified".to_string()
-        },
+        tx_type,
+        category_id,
+        category_source,
         context: None,
         payment_status: payload
             .status
@@ -289,13 +453,16 @@ async fn fetch_account_details(
     client: &Client,
     api_key: &str,
     account_id: &str,
-) -> Result<PluggyAccountPayload> {
+) -> Result<Option<PluggyAccountPayload>> {
     let response = client
         .get(format!("{PLUGGY_API}/accounts/{account_id}"))
         .header("X-API-KEY", api_key)
         .send()
         .await
         .with_context(|| format!("Falha ao consultar conta Pluggy {account_id}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
     if !response.status().is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
@@ -306,6 +473,68 @@ async fn fetch_account_details(
         .json()
         .await
         .context("JSON inválido ao consultar conta Pluggy")
+        .map(Some)
+}
+
+async fn fetch_accounts_by_item(
+    client: &Client,
+    api_key: &str,
+    item_id: &str,
+) -> Result<Vec<PluggyAccountPayload>> {
+    let mut page = 1;
+    let mut total_pages = 1;
+    let mut all = Vec::new();
+
+    while page <= total_pages {
+        let response = client
+            .get(format!("{PLUGGY_API}/accounts"))
+            .query(&[
+                ("itemId", item_id),
+                ("pageSize", "500"),
+                ("page", &page.to_string()),
+            ])
+            .header("X-API-KEY", api_key)
+            .send()
+            .await
+            .with_context(|| format!("Falha ao consultar contas Pluggy para itemId {item_id}"))?;
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Consulta de contas Pluggy para itemId {item_id} falhou: {body}"
+            ));
+        }
+        let body: PaginatedResponse<PluggyAccountPayload> = response
+            .json()
+            .await
+            .context("JSON inválido ao consultar contas Pluggy por itemId")?;
+        total_pages = body.total_pages.unwrap_or(1);
+        all.extend(body.results);
+        page += 1;
+    }
+
+    Ok(all)
+}
+
+async fn resolve_account_payload(
+    client: &Client,
+    api_key: &str,
+    binding: &PluggyBindingConfig,
+    registry: Option<&AccountRegistryEntry>,
+) -> Result<PluggyAccountPayload> {
+    if let Some(account) =
+        fetch_account_details(client, api_key, &binding.pluggy_account_id).await?
+    {
+        return Ok(account);
+    }
+
+    let item_id = binding_item_id(binding, registry).with_context(|| {
+        format!(
+            "Conta Pluggy {} retornou 404 e binding {} não possui pluggyItemId",
+            binding.pluggy_account_id, binding.id
+        )
+    })?;
+    let candidates = fetch_accounts_by_item(client, api_key, item_id).await?;
+    select_account_candidate(candidates, binding, registry)
 }
 
 async fn fetch_transactions(
@@ -358,6 +587,8 @@ pub async fn sync_pluggy(
     fixture_path: Option<&Path>,
     from_override: Option<&str>,
     to_date: &str,
+    rules: &[CompiledRule],
+    internal_categories: &BTreeSet<String>,
 ) -> Result<(Vec<AccountRecord>, Vec<TransactionRecord>)> {
     let registry = accounts_csv_path
         .filter(|path| path.exists())
@@ -378,26 +609,43 @@ pub async fn sync_pluggy(
             .with_context(|| format!("Falha ao ler fixture {}", fixture_path.display()))?;
         let fixture: PluggyFixture =
             serde_json::from_str(&fixture_raw).context("Falha ao parsear fixture Pluggy")?;
-        let account_map = fixture
-            .accounts
-            .into_iter()
+        let fixture_accounts = fixture.accounts;
+        let account_map = fixture_accounts
+            .iter()
+            .cloned()
             .map(|row| (row.id.clone(), row))
             .collect::<BTreeMap<_, _>>();
         let mut accounts = Vec::new();
         let mut transactions = Vec::new();
+        let mut resolved_accounts =
+            BTreeMap::<String, (PluggyBindingConfig, Option<AccountRegistryEntry>)>::new();
         for binding in &config.accounts {
-            let payload = account_map
-                .get(&binding.pluggy_account_id)
-                .cloned()
-                .with_context(|| {
-                    format!(
-                        "Fixture não contém conta Pluggy {}",
-                        binding.pluggy_account_id
-                    )
-                })?;
             let registry_entry = registry
                 .get(&binding.id)
                 .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)));
+            let payload = account_map
+                .get(&binding.pluggy_account_id)
+                .cloned()
+                .or_else(|| {
+                    let item_id = binding_item_id(binding, registry_entry)?;
+                    let candidates = fixture_accounts
+                        .iter()
+                        .filter(|row| row.item_id.as_deref() == Some(item_id))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    select_account_candidate(candidates, binding, registry_entry).ok()
+                })
+                .with_context(|| {
+                    format!(
+                        "Fixture não contém conta Pluggy {} nem candidatos para itemId {:?}",
+                        binding.pluggy_account_id,
+                        binding_item_id(binding, registry_entry)
+                    )
+                })?;
+            resolved_accounts.insert(
+                payload.id.clone(),
+                (binding.clone(), registry_entry.cloned()),
+            );
             accounts.push(build_account_record(
                 payload,
                 binding,
@@ -406,24 +654,21 @@ pub async fn sync_pluggy(
             ));
         }
         for payload in fixture.transactions {
-            let binding = config
-                .accounts
-                .iter()
-                .find(|item| item.pluggy_account_id == payload.account_id)
+            let (binding, registry_entry) = resolved_accounts
+                .get(&payload.account_id)
                 .with_context(|| {
                     format!(
                         "Transação de fixture sem binding para conta {}",
                         payload.account_id
                     )
                 })?;
-            let registry_entry = registry
-                .get(&binding.id)
-                .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)));
             transactions.push(build_transaction_record(
                 payload,
                 binding,
-                registry_entry,
+                registry_entry.as_ref(),
                 actor_id,
+                rules,
+                internal_categories,
             )?);
         }
         return Ok((accounts, transactions));
@@ -449,18 +694,28 @@ pub async fn sync_pluggy(
         let from = from.clone();
         let to = to_date.to_string();
         let actor_id = actor_id.to_string();
+        let rules = rules.to_vec();
+        let internal_categories = internal_categories.clone();
         tasks.spawn(async move {
             let account =
-                fetch_account_details(&client, &api_key, &binding.pluggy_account_id).await?;
+                resolve_account_payload(&client, &api_key, &binding, registry_entry.as_ref())
+                    .await?;
+            let resolved_account_id = account.id.clone();
             let account_record =
                 build_account_record(account, &binding, registry_entry.as_ref(), &actor_id);
             let account_transactions =
-                fetch_transactions(&client, &api_key, &binding.pluggy_account_id, &from, &to)
-                    .await?;
+                fetch_transactions(&client, &api_key, &resolved_account_id, &from, &to).await?;
             let transaction_records = account_transactions
                 .into_iter()
                 .map(|payload| {
-                    build_transaction_record(payload, &binding, registry_entry.as_ref(), &actor_id)
+                    build_transaction_record(
+                        payload,
+                        &binding,
+                        registry_entry.as_ref(),
+                        &actor_id,
+                        &rules,
+                        &internal_categories,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok::<_, anyhow::Error>((account_record, transaction_records))
@@ -468,8 +723,8 @@ pub async fn sync_pluggy(
     }
 
     while let Some(result) = tasks.join_next().await {
-        let (account, mut account_transactions) = result
-            .context("Task Pluggy falhou ao sincronizar conta")??;
+        let (account, mut account_transactions) =
+            result.context("Task Pluggy falhou ao sincronizar conta")??;
         accounts.push(account);
         transactions.append(&mut account_transactions);
     }

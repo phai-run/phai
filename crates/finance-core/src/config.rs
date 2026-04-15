@@ -102,8 +102,12 @@ impl AppConfig {
         #[cfg(unix)]
         {
             let perms = std::fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&paths.config_file, perms)
-                .with_context(|| format!("Falha ao definir permissões em {}", paths.config_file.display()))?;
+            fs::set_permissions(&paths.config_file, perms).with_context(|| {
+                format!(
+                    "Falha ao definir permissões em {}",
+                    paths.config_file.display()
+                )
+            })?;
         }
         Ok(())
     }
