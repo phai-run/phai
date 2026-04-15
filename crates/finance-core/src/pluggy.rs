@@ -207,6 +207,18 @@ pub struct RebindEvent {
     pub pluggy_item_id: Option<String>,
 }
 
+pub struct SyncPluggyParams<'a> {
+    pub actor_id: &'a str,
+    pub pluggy_config_path: &'a Path,
+    pub accounts_csv_path: Option<&'a Path>,
+    pub fixture_path: Option<&'a Path>,
+    pub from_override: Option<&'a str>,
+    pub to_date: &'a str,
+    pub rules: &'a [CompiledRule],
+    pub internal_categories: &'a BTreeSet<String>,
+    pub api_base_url: Option<&'a str>,
+}
+
 fn score_account_candidate(
     payload: &PluggyAccountPayload,
     binding: &PluggyBindingConfig,
@@ -458,12 +470,12 @@ fn build_transaction_record(
     })
 }
 
-async fn authenticate(client: &Client) -> Result<String> {
+async fn authenticate(client: &Client, base_url: &str) -> Result<String> {
     let client_id = std::env::var("PLUGGY_CLIENT_ID").context("PLUGGY_CLIENT_ID ausente")?;
     let client_secret =
         std::env::var("PLUGGY_CLIENT_SECRET").context("PLUGGY_CLIENT_SECRET ausente")?;
     let response = client
-        .post(format!("{PLUGGY_API}/auth"))
+        .post(format!("{base_url}/auth"))
         .json(&json!({
             "clientId": client_id,
             "clientSecret": client_secret,
@@ -489,9 +501,10 @@ async fn fetch_account_details(
     client: &Client,
     api_key: &str,
     account_id: &str,
+    base_url: &str,
 ) -> Result<Option<PluggyAccountPayload>> {
     let response = client
-        .get(format!("{PLUGGY_API}/accounts/{account_id}"))
+        .get(format!("{base_url}/accounts/{account_id}"))
         .header("X-API-KEY", api_key)
         .send()
         .await
@@ -516,6 +529,7 @@ async fn fetch_accounts_by_item(
     client: &Client,
     api_key: &str,
     item_id: &str,
+    base_url: &str,
 ) -> Result<Vec<PluggyAccountPayload>> {
     let mut page = 1;
     let mut total_pages = 1;
@@ -523,7 +537,7 @@ async fn fetch_accounts_by_item(
 
     while page <= total_pages {
         let response = client
-            .get(format!("{PLUGGY_API}/accounts"))
+            .get(format!("{base_url}/accounts"))
             .query(&[
                 ("itemId", item_id),
                 ("pageSize", "500"),
@@ -556,9 +570,10 @@ async fn resolve_account_payload(
     api_key: &str,
     binding: &PluggyBindingConfig,
     registry: Option<&AccountRegistryEntry>,
+    base_url: &str,
 ) -> Result<PluggyAccountPayload> {
     if let Some(account) =
-        fetch_account_details(client, api_key, &binding.pluggy_account_id).await?
+        fetch_account_details(client, api_key, &binding.pluggy_account_id, base_url).await?
     {
         return Ok(account);
     }
@@ -569,7 +584,7 @@ async fn resolve_account_payload(
             binding.pluggy_account_id, binding.id
         )
     })?;
-    let candidates = fetch_accounts_by_item(client, api_key, item_id).await?;
+    let candidates = fetch_accounts_by_item(client, api_key, item_id, base_url).await?;
     select_account_candidate(candidates, binding, registry)
 }
 
@@ -579,6 +594,7 @@ async fn fetch_transactions(
     account_id: &str,
     from: &str,
     to: &str,
+    base_url: &str,
 ) -> Result<Vec<PluggyTransactionPayload>> {
     let mut page = 1;
     let mut total_pages = 1;
@@ -586,7 +602,7 @@ async fn fetch_transactions(
 
     while page <= total_pages {
         let response = client
-            .get(format!("{PLUGGY_API}/transactions"))
+            .get(format!("{base_url}/transactions"))
             .query(&[
                 ("accountId", account_id),
                 ("from", from),
@@ -617,15 +633,21 @@ async fn fetch_transactions(
 }
 
 pub async fn sync_pluggy(
-    actor_id: &str,
-    pluggy_config_path: &Path,
-    accounts_csv_path: Option<&Path>,
-    fixture_path: Option<&Path>,
-    from_override: Option<&str>,
-    to_date: &str,
-    rules: &[CompiledRule],
-    internal_categories: &BTreeSet<String>,
+    params: SyncPluggyParams<'_>,
 ) -> Result<(Vec<AccountRecord>, Vec<TransactionRecord>, Vec<RebindEvent>)> {
+    let SyncPluggyParams {
+        actor_id,
+        pluggy_config_path,
+        accounts_csv_path,
+        fixture_path,
+        from_override,
+        to_date,
+        rules,
+        internal_categories,
+        api_base_url,
+    } = params;
+    let base_url = api_base_url.unwrap_or(PLUGGY_API);
+
     let registry = accounts_csv_path
         .filter(|path| path.exists())
         .map(load_account_registry)
@@ -739,7 +761,7 @@ pub async fn sync_pluggy(
         .connect_timeout(Duration::from_secs(10))
         .build()
         .context("Falha ao construir cliente HTTP do Pluggy")?;
-    let api_key = authenticate(&client).await?;
+    let api_key = authenticate(&client, base_url).await?;
 
     // Phase 1: resolve every binding to a Pluggy account payload upfront.
     // We do this serially before fetching transactions so we can detect
@@ -760,7 +782,8 @@ pub async fn sync_pluggy(
         let item_id_for_audit =
             resolve_binding_item_id(&binding, registry_entry.as_ref())?.map(str::to_string);
         let payload =
-            resolve_account_payload(&client, &api_key, &binding, registry_entry.as_ref()).await?;
+            resolve_account_payload(&client, &api_key, &binding, registry_entry.as_ref(), base_url)
+                .await?;
         if payload.id != binding.pluggy_account_id {
             rebind_events.push(RebindEvent {
                 binding_id: binding.id.clone(),
@@ -798,12 +821,14 @@ pub async fn sync_pluggy(
         let actor_id = actor_id.to_string();
         let rules = rules.to_vec();
         let internal_categories = internal_categories.clone();
+        let base_url = base_url.to_string();
         tasks.spawn(async move {
             let resolved_account_id = payload.id.clone();
             let account_record =
                 build_account_record(payload, &binding, registry_entry.as_ref(), &actor_id);
             let account_transactions =
-                fetch_transactions(&client, &api_key, &resolved_account_id, &from, &to).await?;
+                fetch_transactions(&client, &api_key, &resolved_account_id, &from, &to, &base_url)
+                    .await?;
             let transaction_records = account_transactions
                 .into_iter()
                 .map(|payload| {
@@ -902,5 +927,109 @@ mod tests {
         let r = registry_entry(None);
         assert_eq!(resolve_binding_item_id(&b, Some(&r)).unwrap(), None);
         assert_eq!(resolve_binding_item_id(&b, None).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn http_rebind_via_item_id_on_404() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Safety: test-only env vars; this test is not parallel-hostile
+        // because the values are only consumed inside authenticate().
+        unsafe {
+            std::env::set_var("PLUGGY_CLIENT_ID", "test-id");
+            std::env::set_var("PLUGGY_CLIENT_SECRET", "test-secret");
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/auth"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"apiKey": "test-key"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/old-acct"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts"))
+            .and(query_param("itemId", "item-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "new-acct",
+                    "itemId": "item-1",
+                    "name": "Primary Checking",
+                    "type": "checking",
+                    "status": "ACTIVE"
+                }],
+                "totalPages": 1
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "tx-001",
+                    "accountId": "new-acct",
+                    "date": "2026-04-01",
+                    "description": "Test transaction",
+                    "amount": -100.00,
+                    "status": "POSTED",
+                    "createdAt": "2026-04-01T12:00:00.000Z",
+                    "updatedAt": "2026-04-01T12:00:00.000Z"
+                }],
+                "totalPages": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let config_path = temp.path().join("pluggy-config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string(&json!({
+                "syncStartDate": "2026-03-01",
+                "accounts": [{
+                    "id": "primary_checking",
+                    "pluggyAccountId": "old-acct",
+                    "pluggyItemId": "item-1"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let params = SyncPluggyParams {
+            actor_id: "test-actor",
+            pluggy_config_path: &config_path,
+            accounts_csv_path: None,
+            fixture_path: None,
+            from_override: Some("2026-03-01"),
+            to_date: "2026-04-15",
+            rules: &[],
+            internal_categories: &BTreeSet::new(),
+            api_base_url: Some(&server.uri()),
+        };
+
+        let (accounts, transactions, rebinds) = sync_pluggy(params).await.unwrap();
+
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(
+            accounts[0].pluggy_account_id,
+            Some("new-acct".to_string())
+        );
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].transaction_id, "tx-001");
+        assert_eq!(rebinds.len(), 1);
+        assert_eq!(rebinds[0].from_pluggy_account_id, "old-acct");
+        assert_eq!(rebinds[0].to_pluggy_account_id, "new-acct");
     }
 }

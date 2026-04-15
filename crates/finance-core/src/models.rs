@@ -246,3 +246,58 @@ pub fn decimal_from_str(value: &str) -> Result<Decimal> {
 pub fn json_object_or_empty(value: Option<Value>) -> Value {
     value.unwrap_or_else(|| json!({}))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_datetime_rfc3339_millis() {
+        let dt = parse_datetime_or_now(Some("2026-04-15T12:00:00.000Z"));
+        assert_eq!(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "2026-04-15T12:00:00.000Z");
+    }
+
+    #[test]
+    fn parse_datetime_bigquery_format_timestamp_micros() {
+        // BigQuery FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', ...) produces
+        // microsecond-precision RFC3339 like "2026-04-15T12:30:45.123456Z".
+        let dt = parse_datetime_or_now(Some("2026-04-15T12:30:45.123456Z"));
+        assert_eq!(dt.year(), 2026);
+        assert_eq!(dt.month(), 4);
+        assert_eq!(dt.hour(), 12);
+        assert_eq!(dt.minute(), 30);
+        assert_eq!(dt.second(), 45);
+        assert_ne!(dt, Utc::now()); // must NOT have fallen back to now()
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_none() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(None);
+        assert!(dt >= before);
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_empty_string() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(Some(""));
+        assert!(dt >= before);
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_whitespace() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(Some("   "));
+        assert!(dt >= before);
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_invalid_format() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(Some("2026-04-15 12:00:00 UTC"));
+        assert!(dt >= before);
+    }
+
+    use chrono::Timelike;
+    use chrono::Datelike;
+}

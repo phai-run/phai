@@ -11,7 +11,7 @@ use finance_core::models::{
     decimal_from_str, AccountRecord, AuditEvent, CategoryRecord, ForecastRecord, RuleRecord,
     TransactionRecord,
 };
-use finance_core::pluggy::sync_pluggy;
+use finance_core::pluggy::{sync_pluggy, SyncPluggyParams};
 use finance_core::rules::compile_rules;
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{AppConfig, BackendKind, ConfigPaths};
@@ -699,16 +699,17 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let to = args
         .to
         .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
-    let (accounts, transactions, rebinds) = sync_pluggy(
-        &config.actor_id,
-        &args.pluggy_config,
-        Some(&args.accounts_csv),
-        args.fixture.as_deref(),
-        Some(&effective_from),
-        &to,
-        &compiled_rules,
-        &internal_categories,
-    )
+    let (accounts, transactions, rebinds) = sync_pluggy(SyncPluggyParams {
+        actor_id: &config.actor_id,
+        pluggy_config_path: &args.pluggy_config,
+        accounts_csv_path: Some(&args.accounts_csv),
+        fixture_path: args.fixture.as_deref(),
+        from_override: Some(&effective_from),
+        to_date: &to,
+        rules: &compiled_rules,
+        internal_categories: &internal_categories,
+        api_base_url: None,
+    })
     .await?;
     let existing_ids = store
         .existing_transaction_ids(

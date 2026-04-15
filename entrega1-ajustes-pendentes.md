@@ -22,7 +22,7 @@ Esta branch contem a tentativa dessa Entrega 1.
 - Expansao do storage para suportar os novos caminhos:
   - `all_rules`
   - `transactions_with_context`
-  - `find_account_by_pluggy_item_id`
+  - `count_uncategorized`
 - Testes E2E e unitarios atualizados
 
 ## Estado atual
@@ -66,10 +66,9 @@ Todos os 6 findings abaixo foram fechados no followup da branch, alem de 3 lacun
 - [FECHADO] O metodo `find_account_by_pluggy_item_id` foi removido do trait e das
   duas implementacoes. A fonte de verdade para resolucao de binding agora e apenas
   `pluggy-config.json` + `contas.csv`, validados cruzadamente.
-- [PARCIAL] Teste de rebind real no HTTP path (`404 -> GET /accounts?itemId=...`)
-  continua pendente porque requer mock HTTP mais pesado; o path de fixture agora
-  cobre 3 cenarios (rebind feliz, divergencia config/CSV, colisao entre bindings).
-  A unidade `resolve_binding_item_id` tem cobertura direta.
+- [FECHADO] Teste de rebind real no HTTP path (`404 -> GET /accounts?itemId=...`)
+  implementado com wiremock em `pluggy::tests::http_rebind_via_item_id_on_404`.
+  Cobre auth, 404 do account original, fallback por itemId, e fetch de transacoes.
 - [PENDENTE] Testes BigQuery nao rodam porque requerem credenciais GCP. Fica como
   follow-up para quando o ambiente de CI tiver secrets do sandbox.
 
