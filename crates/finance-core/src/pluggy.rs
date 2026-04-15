@@ -171,6 +171,42 @@ fn binding_item_id<'a>(
         .or_else(|| registry.and_then(|entry| entry.pluggy_item_id.as_deref()))
 }
 
+/// Returns the single `pluggyItemId` for a binding, validating that
+/// any values present in config and accounts.csv agree. If they disagree,
+/// we fail explicitly instead of silently preferring one source — rebinding
+/// to the wrong item would import another account's data.
+pub(crate) fn resolve_binding_item_id<'a>(
+    binding: &'a PluggyBindingConfig,
+    registry: Option<&'a AccountRegistryEntry>,
+) -> Result<Option<&'a str>> {
+    let config_value = binding.pluggy_item_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let registry_value = registry
+        .and_then(|entry| entry.pluggy_item_id.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (config_value, registry_value) {
+        (Some(a), Some(b)) if a != b => Err(anyhow::anyhow!(
+            "Binding {}: pluggyItemId diverge entre pluggy-config ({}) e contas.csv ({})",
+            binding.id,
+            a,
+            b
+        )),
+        (Some(v), _) | (_, Some(v)) => Ok(Some(v)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Emitted when `resolve_account_payload` had to fall back from
+/// the configured `pluggyAccountId` to a rebound one (via `itemId`).
+#[derive(Debug, Clone)]
+pub struct RebindEvent {
+    pub binding_id: String,
+    pub internal_account_id: String,
+    pub from_pluggy_account_id: String,
+    pub to_pluggy_account_id: String,
+    pub pluggy_item_id: Option<String>,
+}
+
 fn score_account_candidate(
     payload: &PluggyAccountPayload,
     binding: &PluggyBindingConfig,
@@ -527,7 +563,7 @@ async fn resolve_account_payload(
         return Ok(account);
     }
 
-    let item_id = binding_item_id(binding, registry).with_context(|| {
+    let item_id = resolve_binding_item_id(binding, registry)?.with_context(|| {
         format!(
             "Conta Pluggy {} retornou 404 e binding {} não possui pluggyItemId",
             binding.pluggy_account_id, binding.id
@@ -589,7 +625,7 @@ pub async fn sync_pluggy(
     to_date: &str,
     rules: &[CompiledRule],
     internal_categories: &BTreeSet<String>,
-) -> Result<(Vec<AccountRecord>, Vec<TransactionRecord>)> {
+) -> Result<(Vec<AccountRecord>, Vec<TransactionRecord>, Vec<RebindEvent>)> {
     let registry = accounts_csv_path
         .filter(|path| path.exists())
         .map(load_account_registry)
@@ -617,17 +653,22 @@ pub async fn sync_pluggy(
             .collect::<BTreeMap<_, _>>();
         let mut accounts = Vec::new();
         let mut transactions = Vec::new();
+        let mut rebind_events = Vec::new();
         let mut resolved_accounts =
             BTreeMap::<String, (PluggyBindingConfig, Option<AccountRegistryEntry>)>::new();
+        let mut resolved_binding_ids = BTreeMap::<String, String>::new();
         for binding in &config.accounts {
             let registry_entry = registry
                 .get(&binding.id)
                 .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)));
+            // Validate pluggyItemId cross-source consistency upfront.
+            let resolved_item_id =
+                resolve_binding_item_id(binding, registry_entry)?.map(str::to_string);
             let payload = account_map
                 .get(&binding.pluggy_account_id)
                 .cloned()
                 .or_else(|| {
-                    let item_id = binding_item_id(binding, registry_entry)?;
+                    let item_id = resolved_item_id.as_deref()?;
                     let candidates = fixture_accounts
                         .iter()
                         .filter(|row| row.item_id.as_deref() == Some(item_id))
@@ -638,10 +679,29 @@ pub async fn sync_pluggy(
                 .with_context(|| {
                     format!(
                         "Fixture não contém conta Pluggy {} nem candidatos para itemId {:?}",
-                        binding.pluggy_account_id,
-                        binding_item_id(binding, registry_entry)
+                        binding.pluggy_account_id, resolved_item_id
                     )
                 })?;
+            // Detect binding collisions onto the same resolved pluggyAccountId.
+            if let Some(prev_binding_id) =
+                resolved_binding_ids.insert(payload.id.clone(), binding.id.clone())
+            {
+                return Err(anyhow::anyhow!(
+                    "Colisão de bindings Pluggy: {} e {} resolvem para a mesma conta {}",
+                    prev_binding_id,
+                    binding.id,
+                    payload.id
+                ));
+            }
+            if payload.id != binding.pluggy_account_id {
+                rebind_events.push(RebindEvent {
+                    binding_id: binding.id.clone(),
+                    internal_account_id: binding.id.clone(),
+                    from_pluggy_account_id: binding.pluggy_account_id.clone(),
+                    to_pluggy_account_id: payload.id.clone(),
+                    pluggy_item_id: resolved_item_id.clone(),
+                });
+            }
             resolved_accounts.insert(
                 payload.id.clone(),
                 (binding.clone(), registry_entry.cloned()),
@@ -671,7 +731,7 @@ pub async fn sync_pluggy(
                 internal_categories,
             )?);
         }
-        return Ok((accounts, transactions));
+        return Ok((accounts, transactions, rebind_events));
     }
 
     let client = Client::builder()
@@ -680,15 +740,57 @@ pub async fn sync_pluggy(
         .build()
         .context("Falha ao construir cliente HTTP do Pluggy")?;
     let api_key = authenticate(&client).await?;
-    let mut accounts = Vec::new();
-    let mut transactions = Vec::new();
-    let mut tasks = JoinSet::new();
 
+    // Phase 1: resolve every binding to a Pluggy account payload upfront.
+    // We do this serially before fetching transactions so we can detect
+    // collisions (two bindings resolving to the same pluggyAccountId) and
+    // validate cross-source itemId consistency before touching any data.
+    let mut resolved: Vec<(
+        PluggyBindingConfig,
+        Option<AccountRegistryEntry>,
+        PluggyAccountPayload,
+    )> = Vec::with_capacity(config.accounts.len());
+    let mut rebind_events: Vec<RebindEvent> = Vec::new();
     for binding in config.accounts.clone() {
         let registry_entry = registry
             .get(&binding.id)
             .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)))
             .cloned();
+        // Ensure config and CSV agree on pluggyItemId before any HTTP call.
+        let item_id_for_audit =
+            resolve_binding_item_id(&binding, registry_entry.as_ref())?.map(str::to_string);
+        let payload =
+            resolve_account_payload(&client, &api_key, &binding, registry_entry.as_ref()).await?;
+        if payload.id != binding.pluggy_account_id {
+            rebind_events.push(RebindEvent {
+                binding_id: binding.id.clone(),
+                internal_account_id: binding.id.clone(),
+                from_pluggy_account_id: binding.pluggy_account_id.clone(),
+                to_pluggy_account_id: payload.id.clone(),
+                pluggy_item_id: item_id_for_audit,
+            });
+        }
+        resolved.push((binding, registry_entry, payload));
+    }
+
+    // Detect two bindings resolving onto the same pluggyAccountId.
+    let mut seen = BTreeMap::<String, String>::new();
+    for (binding, _, payload) in &resolved {
+        if let Some(prev_binding_id) = seen.insert(payload.id.clone(), binding.id.clone()) {
+            return Err(anyhow::anyhow!(
+                "Colisão de bindings Pluggy: {} e {} resolvem para a mesma conta {}",
+                prev_binding_id,
+                binding.id,
+                payload.id
+            ));
+        }
+    }
+
+    // Phase 2: fetch transactions in parallel once bindings are validated.
+    let mut accounts = Vec::new();
+    let mut transactions = Vec::new();
+    let mut tasks = JoinSet::new();
+    for (binding, registry_entry, payload) in resolved {
         let client = client.clone();
         let api_key = api_key.clone();
         let from = from.clone();
@@ -697,12 +799,9 @@ pub async fn sync_pluggy(
         let rules = rules.to_vec();
         let internal_categories = internal_categories.clone();
         tasks.spawn(async move {
-            let account =
-                resolve_account_payload(&client, &api_key, &binding, registry_entry.as_ref())
-                    .await?;
-            let resolved_account_id = account.id.clone();
+            let resolved_account_id = payload.id.clone();
             let account_record =
-                build_account_record(account, &binding, registry_entry.as_ref(), &actor_id);
+                build_account_record(payload, &binding, registry_entry.as_ref(), &actor_id);
             let account_transactions =
                 fetch_transactions(&client, &api_key, &resolved_account_id, &from, &to).await?;
             let transaction_records = account_transactions
@@ -729,5 +828,79 @@ pub async fn sync_pluggy(
         transactions.append(&mut account_transactions);
     }
 
-    Ok((accounts, transactions))
+    Ok((accounts, transactions, rebind_events))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn binding(id: &str, acc: &str, item: Option<&str>) -> PluggyBindingConfig {
+        PluggyBindingConfig {
+            id: id.to_string(),
+            pluggy_account_id: acc.to_string(),
+            pluggy_item_id: item.map(str::to_string),
+        }
+    }
+
+    fn registry_entry(item: Option<&str>) -> AccountRegistryEntry {
+        AccountRegistryEntry {
+            account_id: "acc".to_string(),
+            owner: "o".to_string(),
+            account_type: "checking".to_string(),
+            bank: "b".to_string(),
+            label: "l".to_string(),
+            pluggy_account_id: None,
+            pluggy_item_id: item.map(str::to_string),
+            metadata_json: json!({}),
+        }
+    }
+
+    #[test]
+    fn resolve_binding_item_id_accepts_matching_sources() {
+        let b = binding("a", "pa", Some("item-1"));
+        let r = registry_entry(Some("item-1"));
+        assert_eq!(
+            resolve_binding_item_id(&b, Some(&r)).unwrap(),
+            Some("item-1")
+        );
+    }
+
+    #[test]
+    fn resolve_binding_item_id_prefers_config_only() {
+        let b = binding("a", "pa", Some("item-1"));
+        let r = registry_entry(None);
+        assert_eq!(
+            resolve_binding_item_id(&b, Some(&r)).unwrap(),
+            Some("item-1")
+        );
+    }
+
+    #[test]
+    fn resolve_binding_item_id_accepts_registry_only() {
+        let b = binding("a", "pa", None);
+        let r = registry_entry(Some("item-9"));
+        assert_eq!(
+            resolve_binding_item_id(&b, Some(&r)).unwrap(),
+            Some("item-9")
+        );
+    }
+
+    #[test]
+    fn resolve_binding_item_id_rejects_divergent_sources() {
+        let b = binding("a", "pa", Some("item-1"));
+        let r = registry_entry(Some("item-2"));
+        let err = resolve_binding_item_id(&b, Some(&r)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("diverge"), "expected divergence error, got: {msg}");
+    }
+
+    #[test]
+    fn resolve_binding_item_id_returns_none_when_absent() {
+        let b = binding("a", "pa", None);
+        let r = registry_entry(None);
+        assert_eq!(resolve_binding_item_id(&b, Some(&r)).unwrap(), None);
+        assert_eq!(resolve_binding_item_id(&b, None).unwrap(), None);
+    }
 }

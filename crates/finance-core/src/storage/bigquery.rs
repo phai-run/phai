@@ -695,64 +695,12 @@ impl FinanceStore for BigQueryStore {
         Ok(existing)
     }
 
-    async fn find_account_by_pluggy_item_id(
-        &self,
-        pluggy_item_id: &str,
-    ) -> Result<Vec<AccountRecord>> {
-        let sql = format!(
-            "
-            SELECT
-              account_id,
-              owner,
-              account_type,
-              bank,
-              label,
-              pluggy_account_id,
-              pluggy_item_id,
-              status,
-              actor_id,
-              idempotency_key,
-              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
-              CAST(created_at AS STRING),
-              CAST(updated_at AS STRING)
-            FROM {}
-            WHERE pluggy_item_id = {}
-            ORDER BY updated_at DESC, account_id ASC
-            ",
-            self.qualified_table("accounts")?,
-            sql_string(pluggy_item_id),
-        );
-        let response = self.run_query(&sql).await?;
-        let mut accounts = Vec::with_capacity(response.rows.len());
-        for row in response.rows {
-            let values = row_values(&row);
-            let created_at = required_string(&values, 11, "created_at")?;
-            let updated_at = required_string(&values, 12, "updated_at")?;
-            accounts.push(AccountRecord {
-                account_id: required_string(&values, 0, "account_id")?,
-                owner: required_string(&values, 1, "owner")?,
-                account_type: required_string(&values, 2, "account_type")?,
-                bank: required_string(&values, 3, "bank")?,
-                label: required_string(&values, 4, "label")?,
-                pluggy_account_id: optional_string(&values, 5),
-                pluggy_item_id: optional_string(&values, 6),
-                status: required_string(&values, 7, "status")?,
-                actor_id: required_string(&values, 8, "actor_id")?,
-                idempotency_key: required_string(&values, 9, "idempotency_key")?,
-                metadata_json: optional_json(&values, 10, "metadata_json")?
-                    .unwrap_or_else(|| json!({})),
-                created_at: parse_datetime_or_now(Some(&created_at)),
-                updated_at: parse_datetime_or_now(Some(&updated_at)),
-            });
-        }
-        Ok(accounts)
-    }
-
     async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
         let sql = format!(
             "
             SELECT rule_id, body, status, actor_id, idempotency_key,
-                   CAST(created_at AS STRING), CAST(updated_at AS STRING)
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
             FROM {}
             ORDER BY rule_id ASC
             ",
@@ -794,7 +742,8 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             SELECT rule_id, body, status, actor_id, idempotency_key,
-                   CAST(created_at AS STRING), CAST(updated_at AS STRING)
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
             FROM {}
             WHERE LOWER(status) = 'active'
             ORDER BY rule_id ASC
@@ -1092,6 +1041,25 @@ impl FinanceStore for BigQueryStore {
             });
         }
         Ok(items)
+    }
+
+    async fn count_uncategorized(&self) -> Result<i64> {
+        let sql = format!(
+            "
+            SELECT CAST(COUNT(*) AS STRING) FROM {}
+            WHERE category_id IS NULL
+               OR category_source IN ('unclassified', 'fallback')
+            ",
+            self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let count = response
+            .rows
+            .first()
+            .and_then(|row| row.f.first())
+            .and_then(|cell| parse_scalar_string(&cell.v))
+            .unwrap_or_else(|| "0".to_string());
+        Ok(count.parse().unwrap_or(0))
     }
 
     async fn count_rows(&self, table: &str) -> Result<i64> {

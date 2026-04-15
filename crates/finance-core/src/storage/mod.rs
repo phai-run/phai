@@ -55,10 +55,6 @@ pub trait FinanceStore {
     ) -> Result<()>;
 
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>>;
-    async fn find_account_by_pluggy_item_id(
-        &self,
-        pluggy_item_id: &str,
-    ) -> Result<Vec<AccountRecord>>;
     async fn all_rules(&self) -> Result<Vec<RuleRecord>>;
     async fn active_rules(&self) -> Result<Vec<RuleRecord>>;
     async fn internal_categories(&self) -> Result<BTreeSet<String>>;
@@ -71,6 +67,7 @@ pub trait FinanceStore {
         -> Result<Vec<ForecastVsActualRow>>;
     async fn card_summary(&self, month_ref: Option<&str>) -> Result<Vec<CardSummaryRow>>;
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>>;
+    async fn count_uncategorized(&self) -> Result<i64>;
     async fn count_rows(&self, table: &str) -> Result<i64>;
 }
 

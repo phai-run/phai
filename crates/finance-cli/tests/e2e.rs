@@ -1,4 +1,5 @@
 use assert_cmd::prelude::*;
+use chrono::{Duration, Utc};
 use predicates::prelude::*;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -996,15 +997,28 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
     .assert()
     .success();
 
+    // Dates relative to today so the test stays stable over time.
+    let today = Utc::now().date_naive();
+    let tx_date = today - Duration::days(5);
+    let tx_date_str = tx_date.format("%Y-%m-%d").to_string();
+    let tx_ts_str = format!("{tx_date_str}T12:00:00.000Z");
+    let sync_start = (today - Duration::days(30))
+        .format("%Y-%m-%d")
+        .to_string();
+    let month_str = tx_date.format("%Y-%m").to_string();
+    let to_str = today.format("%Y-%m-%d").to_string();
+
     let pluggy_config = temp.path().join("pluggy-config.json");
     write_file(
         &pluggy_config,
-        r#"{
-  "syncStartDate": "2026-03-01",
+        &format!(
+            r#"{{
+  "syncStartDate": "{sync_start}",
   "accounts": [
-    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" }
+    {{ "id": "primary_checking", "pluggyAccountId": "fixture-checking" }}
   ]
-}"#,
+}}"#
+        ),
     );
 
     let accounts_csv = temp.path().join("contas.csv");
@@ -1016,30 +1030,32 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
     let fixture_path = temp.path().join("pluggy_fixture_rule.json");
     write_file(
         &fixture_path,
-        r#"{
+        &format!(
+            r#"{{
   "accounts": [
-    {
+    {{
       "id": "fixture-checking",
       "itemId": "item-1",
       "name": "Primary Checking",
       "type": "checking",
       "status": "ACTIVE",
-      "updatedAt": "2026-03-15T12:00:00.000Z"
-    }
+      "updatedAt": "{tx_ts_str}"
+    }}
   ],
   "transactions": [
-    {
+    {{
       "id": "rule-fixture-001",
       "accountId": "fixture-checking",
-      "date": "2026-03-15",
+      "date": "{tx_date_str}",
       "description": "Pagamento de fatura Visa",
       "amount": -500.00,
       "status": "POSTED",
-      "createdAt": "2026-03-15T12:00:00.000Z",
-      "updatedAt": "2026-03-15T12:00:00.000Z"
-    }
+      "createdAt": "{tx_ts_str}",
+      "updatedAt": "{tx_ts_str}"
+    }}
   ]
-}"#,
+}}"#
+        ),
     );
 
     envs(
@@ -1053,7 +1069,7 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
             .arg("--fixture")
             .arg(&fixture_path)
             .arg("--to")
-            .arg("2026-03-31"),
+            .arg(&to_str),
         &config_dir,
         &data_dir,
     )
@@ -1081,7 +1097,7 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
             .arg("report")
             .arg("monthly-spend")
             .arg("--month")
-            .arg("2026-03"),
+            .arg(&month_str),
         &config_dir,
         &data_dir,
     )
@@ -1108,4 +1124,235 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
 
     assert_eq!(category_id, "credit-card-payment");
     assert_eq!(category_source, "rule");
+}
+
+#[test]
+fn sync_fails_when_pluggy_item_id_diverges_between_sources() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking", "pluggyItemId": "item-from-config" }
+  ]
+}"#,
+    );
+
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-from-csv,,\n",
+    );
+
+    let fixture_path = repo_root().join("examples/pluggy_fixture.json");
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture_path)
+            .arg("--to")
+            .arg("2026-03-31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("diverge"));
+}
+
+#[test]
+fn sync_fails_when_two_bindings_resolve_to_same_pluggy_account() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Two bindings both targeting the same fixture account id: collision must be detected.
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" },
+    { "id": "duplicate_checking", "pluggyAccountId": "fixture-checking" }
+  ]
+}"#,
+    );
+
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\nduplicate_checking,primary,checking,fintech,Duplicate,fixture-checking,item-1,,\n",
+    );
+
+    let fixture_path = repo_root().join("examples/pluggy_fixture.json");
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture_path)
+            .arg("--to")
+            .arg("2026-03-31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("Colisão"));
+}
+
+#[test]
+fn rule_list_rejects_invalid_status_value() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("rule")
+            .arg("list")
+            .arg("--status")
+            .arg("nope"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure();
+}
+
+#[test]
+fn tx_list_context_text_output_includes_transaction_id() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("set-context")
+            .arg("--transaction-id")
+            .arg("pluggy-fixture-001")
+            .arg("--context")
+            .arg("compras-do-mes"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("tx").arg("list-context"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("pluggy-fixture-001"));
 }

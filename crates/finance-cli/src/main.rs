@@ -225,7 +225,9 @@ struct SyncSummaryOutput {
     backend: String,
     generated_at: String,
     new_transactions_count: usize,
-    needs_context_count: usize,
+    needs_context_count: i64,
+    needs_context_returned_count: usize,
+    needs_context_truncated: bool,
     new_transactions: Vec<SyncSummaryTransaction>,
     needs_context: Vec<SyncSummaryPending>,
 }
@@ -334,10 +336,27 @@ struct RuleUpsertArgs {
 
 #[derive(Args)]
 struct RuleListArgs {
-    #[arg(long, default_value = "active")]
-    status: String,
+    #[arg(long, value_enum, default_value_t = RuleStatusFilter::Active)]
+    status: RuleStatusFilter,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RuleStatusFilter {
+    Active,
+    Disabled,
+    All,
+}
+
+impl RuleStatusFilter {
+    fn as_str(self) -> &'static str {
+        match self {
+            RuleStatusFilter::Active => "active",
+            RuleStatusFilter::Disabled => "disabled",
+            RuleStatusFilter::All => "all",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -680,7 +699,7 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let to = args
         .to
         .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
-    let (accounts, transactions) = sync_pluggy(
+    let (accounts, transactions, rebinds) = sync_pluggy(
         &config.actor_id,
         &args.pluggy_config,
         Some(&args.accounts_csv),
@@ -706,6 +725,20 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     upsert_categories_chunked(store.as_ref(), &categories).await?;
     upsert_transactions_chunked(store.as_ref(), &transactions).await?;
 
+    for rebind in &rebinds {
+        audit.push(AuditEvent::from_entity(
+            "account",
+            &rebind.internal_account_id,
+            "rebind",
+            &config.actor_id,
+            &format!("rebind:{}:{}", rebind.binding_id, rebind.to_pluggy_account_id),
+            json!({
+                "from": rebind.from_pluggy_account_id,
+                "to": rebind.to_pluggy_account_id,
+                "pluggy_item_id": rebind.pluggy_item_id,
+            }),
+        ));
+    }
     for row in &accounts {
         audit.push(AuditEvent::from_entity(
             "account",
@@ -754,8 +787,10 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
             metadata_json: row.metadata_json.clone(),
         })
         .collect::<Vec<_>>();
+    let needs_context_total = store.count_uncategorized().await?;
+    const NEEDS_CONTEXT_LIMIT: usize = 100;
     let needs_context = store
-        .uncategorized(100)
+        .uncategorized(NEEDS_CONTEXT_LIMIT)
         .await?
         .into_iter()
         .map(|row| SyncSummaryPending {
@@ -780,7 +815,9 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
             backend: format!("{:?}", config.effective_backend()).to_lowercase(),
             generated_at: Utc::now().to_rfc3339(),
             new_transactions_count: new_transactions.len(),
-            needs_context_count: needs_context.len(),
+            needs_context_count: needs_context_total,
+            needs_context_returned_count: needs_context.len(),
+            needs_context_truncated: needs_context_total > needs_context.len() as i64,
             new_transactions,
             needs_context,
         };
@@ -1180,7 +1217,8 @@ async fn tx_list_context(args: ListContextArgs) -> Result<()> {
             .category_id
             .unwrap_or_else(|| "sem-categoria".to_string());
         println!(
-            "{} | {} | {} | {} | {} | {}",
+            "{} | {} | {} | {} | {} | {} | {}",
+            row.transaction_id,
             row.transaction_date.format("%Y-%m-%d"),
             brl(row.amount),
             row.description,
@@ -1269,9 +1307,12 @@ async fn rule_upsert(args: RuleUpsertArgs) -> Result<()> {
     Ok(())
 }
 
-fn rule_matches_status(rule: &RuleRecord, status: &str) -> bool {
-    let normalized = status.trim().to_ascii_lowercase();
-    normalized == "all" || rule.status.eq_ignore_ascii_case(&normalized)
+fn rule_matches_status(rule: &RuleRecord, status: RuleStatusFilter) -> bool {
+    match status {
+        RuleStatusFilter::All => true,
+        RuleStatusFilter::Active => rule.status.eq_ignore_ascii_case("active"),
+        RuleStatusFilter::Disabled => rule.status.eq_ignore_ascii_case("disabled"),
+    }
 }
 
 async fn rule_list(args: RuleListArgs) -> Result<()> {
@@ -1281,7 +1322,7 @@ async fn rule_list(args: RuleListArgs) -> Result<()> {
         .all_rules()
         .await?
         .into_iter()
-        .filter(|row| rule_matches_status(row, &args.status))
+        .filter(|row| rule_matches_status(row, args.status))
         .collect::<Vec<_>>();
 
     if args.json {
@@ -1289,7 +1330,7 @@ async fn rule_list(args: RuleListArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("Rules status={}", args.status);
+    println!("Rules status={}", args.status.as_str());
     println!("- linhas: {}", rows.len());
     println!();
 

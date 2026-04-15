@@ -433,57 +433,6 @@ impl FinanceStore for LocalStore {
         Ok(rows.into_iter().collect())
     }
 
-    async fn find_account_by_pluggy_item_id(
-        &self,
-        pluggy_item_id: &str,
-    ) -> Result<Vec<AccountRecord>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            "
-            SELECT
-              account_id,
-              owner,
-              account_type,
-              bank,
-              label,
-              pluggy_account_id,
-              pluggy_item_id,
-              status,
-              actor_id,
-              idempotency_key,
-              metadata_json,
-              created_at,
-              updated_at
-            FROM accounts
-            WHERE pluggy_item_id = ?1
-            ORDER BY updated_at DESC, account_id ASC
-            ",
-        )?;
-        let rows = stmt
-            .query_map([pluggy_item_id], |row| {
-                let metadata_json = row.get::<_, String>(10)?;
-                let created_at: String = row.get(11)?;
-                let updated_at: String = row.get(12)?;
-                Ok(AccountRecord {
-                    account_id: row.get(0)?,
-                    owner: row.get(1)?,
-                    account_type: row.get(2)?,
-                    bank: row.get(3)?,
-                    label: row.get(4)?,
-                    pluggy_account_id: row.get(5)?,
-                    pluggy_item_id: row.get(6)?,
-                    status: row.get(7)?,
-                    actor_id: row.get(8)?,
-                    idempotency_key: row.get(9)?,
-                    metadata_json: parse_sql_json(metadata_json, 10)?,
-                    created_at: parse_datetime_or_now(Some(&created_at)),
-                    updated_at: parse_datetime_or_now(Some(&updated_at)),
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
     async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
@@ -895,6 +844,18 @@ impl FinanceStore for LocalStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    async fn count_uncategorized(&self) -> Result<i64> {
+        let conn = self.connection()?;
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM transactions
+             WHERE category_id IS NULL
+                OR category_source IN ('unclassified', 'fallback')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     async fn count_rows(&self, table: &str) -> Result<i64> {
