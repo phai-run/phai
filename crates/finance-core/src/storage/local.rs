@@ -570,6 +570,18 @@ impl FinanceStore for LocalStore {
         Ok(rows)
     }
 
+    async fn count_transactions_with_context(&self) -> Result<i64> {
+        let conn = self.connection()?;
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM transactions
+             WHERE context IS NOT NULL
+               AND TRIM(context) <> ''",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(

@@ -832,6 +832,25 @@ impl FinanceStore for BigQueryStore {
         Ok(items)
     }
 
+    async fn count_transactions_with_context(&self) -> Result<i64> {
+        let sql = format!(
+            "
+            SELECT CAST(COUNT(*) AS STRING) FROM {}
+            WHERE context IS NOT NULL
+              AND TRIM(context) <> ''
+            ",
+            self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let count = response
+            .rows
+            .first()
+            .and_then(|row| row.f.first())
+            .and_then(|cell| parse_scalar_string(&cell.v))
+            .unwrap_or_else(|| "0".to_string());
+        Ok(count.parse().unwrap_or(0))
+    }
+
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>> {
         let sql = format!(
             "

@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use chrono::{Duration, NaiveDate, Utc};
+use anyhow::{bail, Context, Result};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use finance_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
@@ -18,7 +18,7 @@ use finance_core::{AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -142,6 +142,8 @@ enum ReportCommand {
     ForecastVsActual(ForecastVsActualArgs),
     CardSummary(CardSummaryArgs),
     Uncategorized(UncategorizedArgs),
+    DataHealth(DataHealthArgs),
+    Scenario(ScenarioArgs),
     Review(ReviewArgs),
 }
 
@@ -189,6 +191,28 @@ struct CardSummaryArgs {
 struct UncategorizedArgs {
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct DataHealthArgs {
+    #[arg(long, default_value_t = 180)]
+    days: i64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct ScenarioArgs {
+    #[arg(long)]
+    month: Option<String>,
+    #[arg(long, default_value_t = 3)]
+    history_months: usize,
+    #[arg(long, default_value = "0")]
+    extra_expense: String,
+    #[arg(long, default_value = "0")]
+    extra_income: String,
     #[arg(long)]
     json: bool,
 }
@@ -250,6 +274,72 @@ struct SyncSummaryOutput {
     needs_context_truncated: bool,
     new_transactions: Vec<SyncSummaryTransaction>,
     needs_context: Vec<SyncSummaryPending>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlatCategoryCount {
+    category_id: String,
+    count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataHealthOutput {
+    actor_id: String,
+    backend: String,
+    generated_at: String,
+    window_start: String,
+    window_days: i64,
+    latest_pluggy_transaction_date: Option<String>,
+    pluggy_lag_days: Option<i64>,
+    total_transactions: i64,
+    transactions_with_context: i64,
+    context_coverage_ratio: f64,
+    uncategorized_count: i64,
+    active_rules_count: usize,
+    window_rows: usize,
+    window_pluggy_rows: usize,
+    window_legacy_rows: usize,
+    window_other_rows: usize,
+    categorized_rows: usize,
+    flat_category_rows: usize,
+    overlap_candidates_count: usize,
+    overlap_candidates: Vec<OverlapCandidate>,
+    flat_categories: Vec<FlatCategoryCount>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OverlapCandidate {
+    account_id: Option<String>,
+    amount: String,
+    legacy_transaction_id: String,
+    legacy_date: String,
+    legacy_description: String,
+    pluggy_transaction_id: String,
+    pluggy_date: String,
+    pluggy_description: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioOutput {
+    target_month: String,
+    baseline_months: Vec<String>,
+    avg_income: Decimal,
+    avg_expenses: Decimal,
+    avg_net: Decimal,
+    planning_expenses: Decimal,
+    known_forecast_expenses: Decimal,
+    known_forecast_count: usize,
+    carryover_open_card_month: String,
+    carryover_open_card_amount: Decimal,
+    extra_income: Decimal,
+    extra_expense: Decimal,
+    projected_net: Decimal,
+    projected_cash_after_card_carry: Decimal,
+    looks_ok_after_card_carry: bool,
 }
 
 #[derive(Subcommand)]
@@ -441,6 +531,104 @@ fn day_of_week_text(date: NaiveDate) -> String {
     date.format("%A").to_string().to_ascii_lowercase()
 }
 
+fn parse_month_ref(value: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d")
+        .with_context(|| format!("month inválido: {value} (esperado YYYY-MM)"))
+}
+
+fn month_ref_for(date: NaiveDate) -> String {
+    date.format("%Y-%m").to_string()
+}
+
+fn shift_month(date: NaiveDate, delta: i32) -> Result<NaiveDate> {
+    let mut year = date.year();
+    let mut month = date.month() as i32 + delta;
+    while month > 12 {
+        year += 1;
+        month -= 12;
+    }
+    while month < 1 {
+        year -= 1;
+        month += 12;
+    }
+    NaiveDate::from_ymd_opt(year, month as u32, 1)
+        .with_context(|| format!("Falha ao calcular mês deslocado a partir de {}", date))
+}
+
+fn default_scenario_month(today: NaiveDate) -> Result<String> {
+    Ok(month_ref_for(shift_month(
+        NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+            .context("Falha ao calcular mês atual")?,
+        1,
+    )?))
+}
+
+fn is_flat_category(category_id: &str) -> bool {
+    !category_id.contains(':')
+}
+
+fn normalize_description(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut prev_space = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        let mapped = if ch.is_ascii_alphanumeric() { ch } else { ' ' };
+        if mapped == ' ' {
+            if !prev_space {
+                normalized.push(mapped);
+            }
+            prev_space = true;
+        } else {
+            normalized.push(mapped);
+            prev_space = false;
+        }
+    }
+    normalized.trim().to_string()
+}
+
+fn extract_installment_marker(value: &str) -> Option<String> {
+    value.split_whitespace().find_map(|token| {
+        let cleaned = token.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '/');
+        let mut parts = cleaned.split('/');
+        let left = parts.next()?;
+        let right = parts.next()?;
+        if parts.next().is_some() || left.is_empty() || right.is_empty() {
+            return None;
+        }
+        if left.chars().all(|ch| ch.is_ascii_digit()) && right.chars().all(|ch| ch.is_ascii_digit())
+        {
+            Some(format!("{left}/{right}"))
+        } else {
+            None
+        }
+    })
+}
+
+fn descriptions_look_related(left: &str, right: &str) -> bool {
+    let left_norm = normalize_description(left);
+    let right_norm = normalize_description(right);
+    if left_norm.is_empty() || right_norm.is_empty() {
+        return false;
+    }
+    if left_norm == right_norm || left_norm.contains(&right_norm) || right_norm.contains(&left_norm)
+    {
+        return true;
+    }
+    if extract_installment_marker(left) == extract_installment_marker(right)
+        && extract_installment_marker(left).is_some()
+    {
+        return true;
+    }
+    let left_tokens = left_norm
+        .split_whitespace()
+        .filter(|token| token.len() >= 4)
+        .collect::<BTreeSet<_>>();
+    let right_tokens = right_norm
+        .split_whitespace()
+        .filter(|token| token.len() >= 4)
+        .collect::<BTreeSet<_>>();
+    left_tokens.intersection(&right_tokens).count() >= 2
+}
+
 fn build_category_records_from_transactions(
     actor_id: &str,
     rows: &[TransactionRecord],
@@ -568,6 +756,8 @@ async fn main() -> Result<()> {
             ReportCommand::ForecastVsActual(args) => report_forecast_vs_actual(args).await,
             ReportCommand::CardSummary(args) => report_card_summary(args).await,
             ReportCommand::Uncategorized(args) => report_uncategorized(args).await,
+            ReportCommand::DataHealth(args) => report_data_health(args).await,
+            ReportCommand::Scenario(args) => report_scenario(args).await,
             ReportCommand::Review(args) => report_review(args).await,
         },
         Commands::Tx { command } => match command {
@@ -1188,6 +1378,333 @@ async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
             row.category_source
         );
     }
+    Ok(())
+}
+
+async fn report_data_health(args: DataHealthArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let today = Utc::now().date_naive();
+    let window_start = today
+        .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
+        .context("Falha ao calcular janela do data-health")?;
+    let items = store.daily_pulse(window_start).await?;
+    let latest_pluggy_date = store.latest_pluggy_transaction_date().await?;
+    let total_transactions = store.count_rows("transactions").await?;
+    let transactions_with_context = store.count_transactions_with_context().await?;
+    let uncategorized_count = store.count_uncategorized().await?;
+    let active_rules_count = store.active_rules().await?.len();
+
+    let mut flat_counts = BTreeMap::<String, usize>::new();
+    let mut overlap_groups = BTreeMap::<(Option<String>, String), Vec<_>>::new();
+    let mut window_pluggy_rows = 0usize;
+    let mut window_legacy_rows = 0usize;
+    let mut categorized_rows = 0usize;
+
+    for item in &items {
+        match item.source.as_str() {
+            "pluggy" => window_pluggy_rows += 1,
+            "legacy" => window_legacy_rows += 1,
+            _ => {}
+        }
+        if let Some(category_id) = item.category_id.as_deref() {
+            categorized_rows += 1;
+            if is_flat_category(category_id) {
+                *flat_counts.entry(category_id.to_string()).or_insert(0) += 1;
+            }
+        }
+        overlap_groups
+            .entry((item.account_id.clone(), decimal_text(item.amount.abs())))
+            .or_default()
+            .push(item);
+    }
+
+    let flat_category_rows = flat_counts.values().copied().sum::<usize>();
+    let mut flat_categories = flat_counts
+        .into_iter()
+        .map(|(category_id, count)| FlatCategoryCount { category_id, count })
+        .collect::<Vec<_>>();
+    flat_categories.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.category_id.cmp(&b.category_id))
+    });
+    let window_other_rows = items
+        .len()
+        .saturating_sub(window_pluggy_rows + window_legacy_rows);
+    let context_coverage_ratio = if total_transactions > 0 {
+        transactions_with_context as f64 / total_transactions as f64
+    } else {
+        0.0
+    };
+    let mut overlap_candidates = Vec::new();
+    for ((account_id, amount), rows) in overlap_groups {
+        let legacy_rows = rows
+            .iter()
+            .filter(|item| item.source == "legacy" && item.amount.is_sign_negative())
+            .copied()
+            .collect::<Vec<_>>();
+        let pluggy_rows = rows
+            .iter()
+            .filter(|item| item.source == "pluggy" && item.amount.is_sign_negative())
+            .copied()
+            .collect::<Vec<_>>();
+        for legacy in legacy_rows {
+            if let Some(pluggy) = pluggy_rows.iter().copied().find(|pluggy| {
+                (legacy.transaction_date - pluggy.transaction_date)
+                    .num_days()
+                    .abs()
+                    <= 7
+                    && descriptions_look_related(&legacy.description, &pluggy.description)
+            }) {
+                overlap_candidates.push(OverlapCandidate {
+                    account_id: account_id.clone(),
+                    amount: amount.clone(),
+                    legacy_transaction_id: legacy.transaction_id.clone(),
+                    legacy_date: legacy.transaction_date.format("%Y-%m-%d").to_string(),
+                    legacy_description: legacy.description.clone(),
+                    pluggy_transaction_id: pluggy.transaction_id.clone(),
+                    pluggy_date: pluggy.transaction_date.format("%Y-%m-%d").to_string(),
+                    pluggy_description: pluggy.description.clone(),
+                });
+            }
+        }
+    }
+    overlap_candidates.sort_by(|a, b| {
+        b.legacy_date
+            .cmp(&a.legacy_date)
+            .then_with(|| a.account_id.cmp(&b.account_id))
+            .then_with(|| a.amount.cmp(&b.amount))
+    });
+    let overlap_candidates_count = overlap_candidates.len();
+    overlap_candidates.truncate(10);
+
+    let output = DataHealthOutput {
+        actor_id: config.actor_id.clone(),
+        backend: format!("{:?}", config.effective_backend()).to_lowercase(),
+        generated_at: Utc::now().to_rfc3339(),
+        window_start: window_start.format("%Y-%m-%d").to_string(),
+        window_days: args.days,
+        latest_pluggy_transaction_date: latest_pluggy_date
+            .map(|value| value.format("%Y-%m-%d").to_string()),
+        pluggy_lag_days: latest_pluggy_date.map(|value| (today - value).num_days()),
+        total_transactions,
+        transactions_with_context,
+        context_coverage_ratio,
+        uncategorized_count,
+        active_rules_count,
+        window_rows: items.len(),
+        window_pluggy_rows,
+        window_legacy_rows,
+        window_other_rows,
+        categorized_rows,
+        flat_category_rows,
+        overlap_candidates_count,
+        overlap_candidates,
+        flat_categories,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Data health");
+    println!("- backend: {}", output.backend);
+    println!("- actor_id: {}", output.actor_id);
+    println!(
+        "- janela: {} até hoje ({} dias)",
+        output.window_start, output.window_days
+    );
+    match (
+        &output.latest_pluggy_transaction_date,
+        output.pluggy_lag_days,
+    ) {
+        (Some(date), Some(days)) => {
+            println!("- último lançamento Pluggy: {} (lag {} dias)", date, days)
+        }
+        _ => println!("- último lançamento Pluggy: sem dado"),
+    }
+    println!("- transações totais: {}", output.total_transactions);
+    println!(
+        "- com contexto: {} ({:.1}%)",
+        output.transactions_with_context,
+        output.context_coverage_ratio * 100.0
+    );
+    println!("- uncategorized: {}", output.uncategorized_count);
+    println!("- regras ativas: {}", output.active_rules_count);
+    println!(
+        "- janela: {} linhas | pluggy {} | legacy {} | outros {}",
+        output.window_rows,
+        output.window_pluggy_rows,
+        output.window_legacy_rows,
+        output.window_other_rows
+    );
+    println!(
+        "- categorias planas na janela: {} linhas",
+        output.flat_category_rows
+    );
+    println!(
+        "- possíveis sobreposições legacy x pluggy: {}",
+        output.overlap_candidates_count
+    );
+    if output.flat_categories.is_empty() {
+        println!();
+        println!("Nenhuma categoria plana detectada na janela.");
+    } else {
+        println!();
+        println!("Top categorias planas:");
+        for row in output.flat_categories.iter().take(10) {
+            println!("{} | {} linhas", row.category_id, row.count);
+        }
+    }
+    if !output.overlap_candidates.is_empty() {
+        println!();
+        println!("Possíveis sobreposições:");
+        for row in &output.overlap_candidates {
+            println!(
+                "{} | {} | legacy {} '{}' | pluggy {} '{}'",
+                row.account_id.as_deref().unwrap_or("sem-conta"),
+                row.amount,
+                row.legacy_date,
+                row.legacy_description,
+                row.pluggy_date,
+                row.pluggy_description
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn report_scenario(args: ScenarioArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let today = Utc::now().date_naive();
+    let current_month = month_ref_for(
+        NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+            .context("Falha ao calcular o mês atual")?,
+    );
+    let target_month = match args.month.as_deref() {
+        Some(value) => {
+            parse_month_ref(value)?;
+            value.to_string()
+        }
+        None => default_scenario_month(today)?,
+    };
+    let history_months = args.history_months.max(1);
+    let extra_expense = decimal_from_str(&args.extra_expense)?;
+    let extra_income = decimal_from_str(&args.extra_income)?;
+
+    let mut cashflow_rows = store.cashflow(history_months.saturating_add(12)).await?;
+    cashflow_rows.sort_by(|a, b| b.month_ref.cmp(&a.month_ref));
+    let baseline_rows = cashflow_rows
+        .into_iter()
+        .filter(|row| row.month_ref < target_month)
+        .filter(|row| !(target_month > current_month && row.month_ref == current_month))
+        .take(history_months)
+        .collect::<Vec<_>>();
+    if baseline_rows.is_empty() {
+        bail!(
+            "Não há meses históricos suficientes antes de {} para calcular cenário",
+            target_month
+        );
+    }
+
+    let divisor = Decimal::from(baseline_rows.len() as i64);
+    let avg_income = baseline_rows
+        .iter()
+        .fold(Decimal::ZERO, |acc, row| acc + row.income)
+        / divisor;
+    let avg_expenses = baseline_rows
+        .iter()
+        .fold(Decimal::ZERO, |acc, row| acc + row.expenses)
+        / divisor;
+    let avg_net = baseline_rows
+        .iter()
+        .fold(Decimal::ZERO, |acc, row| acc + row.net)
+        / divisor;
+
+    let forecast_rows = store.forecast_vs_actual(Some(&target_month)).await?;
+    let known_forecast_expenses = forecast_rows
+        .iter()
+        .fold(Decimal::ZERO, |acc, row| acc + row.forecast_amount);
+    let planning_expenses = if known_forecast_expenses > avg_expenses {
+        known_forecast_expenses
+    } else {
+        avg_expenses
+    };
+
+    let carryover_open_card_month =
+        month_ref_for(shift_month(parse_month_ref(&target_month)?, -1)?);
+    let carryover_open_card_amount = store
+        .card_summary(Some(&carryover_open_card_month))
+        .await?
+        .into_iter()
+        .fold(Decimal::ZERO, |acc, row| acc + row.open_amount);
+
+    let projected_net = avg_income - planning_expenses + extra_income - extra_expense;
+    let projected_cash_after_card_carry = projected_net - carryover_open_card_amount;
+
+    let output = ScenarioOutput {
+        target_month,
+        baseline_months: baseline_rows
+            .iter()
+            .map(|row| row.month_ref.clone())
+            .collect(),
+        avg_income,
+        avg_expenses,
+        avg_net,
+        planning_expenses,
+        known_forecast_expenses,
+        known_forecast_count: forecast_rows.len(),
+        carryover_open_card_month,
+        carryover_open_card_amount,
+        extra_income,
+        extra_expense,
+        projected_net,
+        projected_cash_after_card_carry,
+        looks_ok_after_card_carry: projected_cash_after_card_carry >= Decimal::ZERO,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Scenario {}", output.target_month);
+    println!("- baseline meses: {}", output.baseline_months.join(", "));
+    println!("- média entradas: {}", brl(output.avg_income));
+    println!("- média saídas: {}", brl(-output.avg_expenses));
+    println!("- média líquida: {}", brl(output.avg_net));
+    println!(
+        "- despesas de planejamento: {}",
+        brl(-output.planning_expenses)
+    );
+    println!(
+        "- forecast conhecido: {} em {} itens",
+        brl(-output.known_forecast_expenses),
+        output.known_forecast_count
+    );
+    println!(
+        "- faturas em aberto carregadas de {}: {}",
+        output.carryover_open_card_month,
+        brl(-output.carryover_open_card_amount)
+    );
+    println!("- ajuste manual de receita: {}", brl(output.extra_income));
+    println!("- ajuste manual de despesa: {}", brl(-output.extra_expense));
+    println!("- líquido projetado: {}", brl(output.projected_net));
+    println!(
+        "- caixa após carregar cartões em aberto: {}",
+        brl(output.projected_cash_after_card_carry)
+    );
+    println!(
+        "- parecer: {}",
+        if output.looks_ok_after_card_carry {
+            "fica positivo"
+        } else {
+            "fica pressionado / negativo"
+        }
+    );
     Ok(())
 }
 

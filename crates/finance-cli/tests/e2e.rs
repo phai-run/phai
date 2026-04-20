@@ -443,6 +443,49 @@ fn mutating_commands_feed_reporting_views() {
     .stdout(predicate::str::contains("Farmacia Cartao"))
     .stdout(predicate::str::contains("Exame Laboratorio").not());
 
+    let health = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("data-health")
+            .arg("--days")
+            .arg("31")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("data-health output");
+    assert!(health.status.success());
+    let health_json: Value = serde_json::from_slice(&health.stdout).expect("data-health json");
+    assert_eq!(health_json["uncategorizedCount"], 1);
+    assert_eq!(health_json["windowPluggyRows"], 4);
+    assert_eq!(health_json["windowOtherRows"], 2);
+    assert!(health_json["flatCategoryRows"].as_u64().unwrap() > 0);
+    assert_eq!(health_json["overlapCandidatesCount"], 0);
+
+    let scenario = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("scenario")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--history-months")
+            .arg("1")
+            .arg("--extra-expense")
+            .arg("80")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("scenario output");
+    assert!(scenario.status.success());
+    let scenario_json: Value = serde_json::from_slice(&scenario.stdout).expect("scenario json");
+    assert_eq!(scenario_json["targetMonth"], "2026-04");
+    assert_eq!(scenario_json["baselineMonths"][0], "2026-03");
+    assert_eq!(scenario_json["extraExpense"], "80");
+    assert_ne!(scenario_json["carryoverOpenCardAmount"], "0");
+
     let db_path = data_dir.join("finance-os.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let saved_context: String = conn

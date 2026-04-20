@@ -59,6 +59,7 @@ pub trait FinanceStore {
     async fn active_rules(&self) -> Result<Vec<RuleRecord>>;
     async fn internal_categories(&self) -> Result<BTreeSet<String>>;
     async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>>;
+    async fn count_transactions_with_context(&self) -> Result<i64>;
     async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>>;
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>>;
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>>;
