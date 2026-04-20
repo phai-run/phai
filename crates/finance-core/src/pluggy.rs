@@ -179,7 +179,11 @@ pub(crate) fn resolve_binding_item_id<'a>(
     binding: &'a PluggyBindingConfig,
     registry: Option<&'a AccountRegistryEntry>,
 ) -> Result<Option<&'a str>> {
-    let config_value = binding.pluggy_item_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let config_value = binding
+        .pluggy_item_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let registry_value = registry
         .and_then(|entry| entry.pluggy_item_id.as_deref())
         .map(str::trim)
@@ -781,9 +785,14 @@ pub async fn sync_pluggy(
         // Ensure config and CSV agree on pluggyItemId before any HTTP call.
         let item_id_for_audit =
             resolve_binding_item_id(&binding, registry_entry.as_ref())?.map(str::to_string);
-        let payload =
-            resolve_account_payload(&client, &api_key, &binding, registry_entry.as_ref(), base_url)
-                .await?;
+        let payload = resolve_account_payload(
+            &client,
+            &api_key,
+            &binding,
+            registry_entry.as_ref(),
+            base_url,
+        )
+        .await?;
         if payload.id != binding.pluggy_account_id {
             rebind_events.push(RebindEvent {
                 binding_id: binding.id.clone(),
@@ -826,9 +835,15 @@ pub async fn sync_pluggy(
             let resolved_account_id = payload.id.clone();
             let account_record =
                 build_account_record(payload, &binding, registry_entry.as_ref(), &actor_id);
-            let account_transactions =
-                fetch_transactions(&client, &api_key, &resolved_account_id, &from, &to, &base_url)
-                    .await?;
+            let account_transactions = fetch_transactions(
+                &client,
+                &api_key,
+                &resolved_account_id,
+                &from,
+                &to,
+                &base_url,
+            )
+            .await?;
             let transaction_records = account_transactions
                 .into_iter()
                 .map(|payload| {
@@ -918,7 +933,10 @@ mod tests {
         let r = registry_entry(Some("item-2"));
         let err = resolve_binding_item_id(&b, Some(&r)).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("diverge"), "expected divergence error, got: {msg}");
+        assert!(
+            msg.contains("diverge"),
+            "expected divergence error, got: {msg}"
+        );
     }
 
     #[test]
@@ -945,9 +963,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/auth"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"apiKey": "test-key"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiKey": "test-key"})))
             .mount(&server)
             .await;
 
@@ -1022,10 +1038,7 @@ mod tests {
         let (accounts, transactions, rebinds) = sync_pluggy(params).await.unwrap();
 
         assert_eq!(accounts.len(), 1);
-        assert_eq!(
-            accounts[0].pluggy_account_id,
-            Some("new-acct".to_string())
-        );
+        assert_eq!(accounts[0].pluggy_account_id, Some("new-acct".to_string()));
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0].transaction_id, "tx-001");
         assert_eq!(rebinds.len(), 1);

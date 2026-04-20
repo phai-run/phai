@@ -12,7 +12,7 @@ use finance_core::models::{
     TransactionRecord,
 };
 use finance_core::pluggy::{sync_pluggy, SyncPluggyParams};
-use finance_core::rules::compile_rules;
+use finance_core::rules::{apply_rules, compile_rules};
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+mod review;
 
 const UPSERT_BATCH_SIZE: usize = 50;
 const AUDIT_BATCH_SIZE: usize = 25;
@@ -96,6 +98,13 @@ struct AuthSetupArgs {
 enum AdminCommand {
     Migrate,
     ImportLegacy(ImportLegacyArgs),
+    Reclassify(ReclassifyArgs),
+}
+
+#[derive(Args)]
+struct ReclassifyArgs {
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -133,6 +142,7 @@ enum ReportCommand {
     ForecastVsActual(ForecastVsActualArgs),
     CardSummary(CardSummaryArgs),
     Uncategorized(UncategorizedArgs),
+    Review(ReviewArgs),
 }
 
 #[derive(Args)]
@@ -181,6 +191,16 @@ struct UncategorizedArgs {
     limit: usize,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct ReviewArgs {
+    #[arg(long, default_value_t = 6)]
+    months: usize,
+    #[arg(long)]
+    output: Option<String>,
+    #[arg(long)]
+    open: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -536,6 +556,7 @@ async fn main() -> Result<()> {
         Commands::Admin { command } => match command {
             AdminCommand::Migrate => admin_migrate().await,
             AdminCommand::ImportLegacy(args) => admin_import_legacy(args).await,
+            AdminCommand::Reclassify(args) => admin_reclassify(args).await,
         },
         Commands::Sync { command } => match command {
             SyncCommand::Pluggy(args) => sync_pluggy_command(args).await,
@@ -547,6 +568,7 @@ async fn main() -> Result<()> {
             ReportCommand::ForecastVsActual(args) => report_forecast_vs_actual(args).await,
             ReportCommand::CardSummary(args) => report_card_summary(args).await,
             ReportCommand::Uncategorized(args) => report_uncategorized(args).await,
+            ReportCommand::Review(args) => report_review(args).await,
         },
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
@@ -684,6 +706,92 @@ async fn admin_import_legacy(args: ImportLegacyArgs) -> Result<()> {
     Ok(())
 }
 
+async fn admin_reclassify(args: ReclassifyArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let compiled_rules = compile_rules(&store.active_rules().await?)?;
+    if compiled_rules.is_empty() {
+        println!("Nenhuma regra ativa encontrada. Importe regras antes com `admin import-legacy`.");
+        return Ok(());
+    }
+
+    let since = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+    let items = store.daily_pulse(since).await?;
+    println!("Transações encontradas: {}", items.len());
+    println!("Regras compiladas: {}", compiled_rules.len());
+
+    let mut changed = 0u64;
+    let mut unchanged = 0u64;
+    let mut audit = Vec::new();
+
+    for item in &items {
+        let (new_category_id, new_source) = apply_rules(
+            &item.description,
+            item.category_id.clone(),
+            item.category_id.is_some(),
+            &compiled_rules,
+        );
+
+        if new_source != "rule" {
+            unchanged += 1;
+            continue;
+        }
+
+        let cat_changed = new_category_id != item.category_id;
+        if !cat_changed {
+            unchanged += 1;
+            continue;
+        }
+
+        if args.dry_run {
+            println!(
+                "  [DRY-RUN] {} {:50} {:30} -> {}",
+                item.transaction_date,
+                &item.description[..item.description.len().min(50)],
+                item.category_id.as_deref().unwrap_or("(nenhuma)"),
+                new_category_id.as_deref().unwrap_or("(nenhuma)")
+            );
+        } else {
+            let idem_key = format!("reclassify:{}", item.transaction_id);
+            store
+                .annotate_transaction(
+                    &item.transaction_id,
+                    new_category_id.as_deref(),
+                    Some(&new_source),
+                    None,
+                    &config.actor_id,
+                    &idem_key,
+                )
+                .await?;
+            audit.push(AuditEvent::from_entity(
+                "transaction",
+                &item.transaction_id,
+                "reclassify",
+                &config.actor_id,
+                &idem_key,
+                serde_json::json!({
+                    "old_category_id": item.category_id,
+                    "new_category_id": new_category_id,
+                    "source": new_source,
+                }),
+            ));
+        }
+        changed += 1;
+    }
+
+    if !audit.is_empty() {
+        insert_audit_chunked(store.as_ref(), &audit).await?;
+    }
+
+    let mode = if args.dry_run { " (dry-run)" } else { "" };
+    println!("Reclassificação concluída{mode}:");
+    println!("- alteradas: {changed}");
+    println!("- sem alteração: {unchanged}");
+    Ok(())
+}
+
 async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
@@ -732,7 +840,10 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
             &rebind.internal_account_id,
             "rebind",
             &config.actor_id,
-            &format!("rebind:{}:{}", rebind.binding_id, rebind.to_pluggy_account_id),
+            &format!(
+                "rebind:{}:{}",
+                rebind.binding_id, rebind.to_pluggy_account_id
+            ),
             json!({
                 "from": rebind.from_pluggy_account_id,
                 "to": rebind.to_pluggy_account_id,
@@ -1077,6 +1188,55 @@ async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
             row.category_source
         );
     }
+    Ok(())
+}
+
+async fn report_review(args: ReviewArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+
+    let cashflow = store.cashflow(args.months).await?;
+    let monthly_spend = store.monthly_spend(None).await?;
+    let card_summary = store.card_summary(None).await?;
+    let forecast_vs_actual = store.forecast_vs_actual(None).await?;
+    let uncategorized_count = store.count_uncategorized().await?;
+    let uncategorized = store.uncategorized(20).await?;
+
+    let payload = review::ReviewPayload {
+        generated_at: Utc::now().to_rfc3339(),
+        cashflow,
+        monthly_spend,
+        card_summary,
+        forecast_vs_actual,
+        uncategorized_count,
+        uncategorized,
+    };
+
+    let html = review::generate_html(&payload)?;
+
+    let output_path = args
+        .output
+        .unwrap_or_else(|| format!("review-{}.html", Utc::now().format("%Y-%m-%d")));
+    std::fs::write(&output_path, &html)?;
+    println!("Dashboard gerado: {output_path}");
+
+    if args.open {
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(&output_path)
+                .spawn()
+                .ok();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(&output_path)
+                .spawn()
+                .ok();
+        }
+    }
+
     Ok(())
 }
 

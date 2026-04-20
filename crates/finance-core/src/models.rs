@@ -254,7 +254,10 @@ mod tests {
     #[test]
     fn parse_datetime_rfc3339_millis() {
         let dt = parse_datetime_or_now(Some("2026-04-15T12:00:00.000Z"));
-        assert_eq!(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "2026-04-15T12:00:00.000Z");
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2026-04-15T12:00:00.000Z"
+        );
     }
 
     #[test]
@@ -298,6 +301,6 @@ mod tests {
         assert!(dt >= before);
     }
 
-    use chrono::Timelike;
     use chrono::Datelike;
+    use chrono::Timelike;
 }

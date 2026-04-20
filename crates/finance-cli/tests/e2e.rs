@@ -1002,9 +1002,7 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
     let tx_date = today - Duration::days(5);
     let tx_date_str = tx_date.format("%Y-%m-%d").to_string();
     let tx_ts_str = format!("{tx_date_str}T12:00:00.000Z");
-    let sync_start = (today - Duration::days(30))
-        .format("%Y-%m-%d")
-        .to_string();
+    let sync_start = (today - Duration::days(30)).format("%Y-%m-%d").to_string();
     let month_str = tx_date.format("%Y-%m").to_string();
     let to_str = today.format("%Y-%m-%d").to_string();
 
