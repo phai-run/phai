@@ -63,6 +63,98 @@ pub struct TransactionRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitPayload {
+    pub lines: Vec<TransactionSplitLinePayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitLinePayload {
+    #[serde(default, rename = "lineId", alias = "line_id")]
+    pub line_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(
+        rename = "amount",
+        alias = "lineAmount",
+        alias = "line_amount",
+        alias = "total",
+        alias = "totalAmount",
+        alias = "total_amount",
+        deserialize_with = "crate::split_payload::deserialize_decimal_from_json"
+    )]
+    pub amount: Decimal,
+    #[serde(default)]
+    pub items: Vec<TransactionSplitItemPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitItemPayload {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, rename = "itemCode", alias = "item_code")]
+    pub item_code: Option<String>,
+    #[serde(
+        default,
+        rename = "quantity",
+        alias = "qty",
+        deserialize_with = "crate::split_payload::deserialize_optional_decimal_from_json"
+    )]
+    pub quantity: Option<Decimal>,
+    #[serde(
+        default,
+        rename = "unitPrice",
+        alias = "unit_price",
+        deserialize_with = "crate::split_payload::deserialize_optional_decimal_from_json"
+    )]
+    pub unit_price: Option<Decimal>,
+    #[serde(
+        default,
+        rename = "amount",
+        alias = "lineAmount",
+        alias = "line_amount",
+        alias = "total",
+        alias = "totalAmount",
+        alias = "total_amount",
+        deserialize_with = "crate::split_payload::deserialize_optional_decimal_from_json"
+    )]
+    pub amount: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitLineRecord {
+    pub split_id: String,
+    pub transaction_id: String,
+    pub line_index: i64,
+    pub line_id: Option<String>,
+    pub description: Option<String>,
+    pub amount: Decimal,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub metadata_json: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitItemRecord {
+    pub split_item_id: String,
+    pub split_id: String,
+    pub transaction_id: String,
+    pub line_index: i64,
+    pub item_index: i64,
+    pub description: Option<String>,
+    pub item_code: Option<String>,
+    pub quantity: Option<Decimal>,
+    pub unit_price: Option<Decimal>,
+    pub amount: Option<Decimal>,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub metadata_json: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleRecord {
     pub rule_id: String,
@@ -151,6 +243,20 @@ pub struct CardSummaryRow {
     pub total_charges: Decimal,
     pub open_amount: Decimal,
     pub transaction_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardClosedTransactionRow {
+    pub month_ref: String,
+    pub account_id: String,
+    pub transaction_id: String,
+    pub transaction_date: NaiveDate,
+    pub label: String,
+    pub description: String,
+    pub amount: Decimal,
+    pub category_id: Option<String>,
+    pub payment_status: String,
+    pub metadata_json: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,4 +351,62 @@ pub fn decimal_from_str(value: &str) -> Result<Decimal> {
 
 pub fn json_object_or_empty(value: Option<Value>) -> Value {
     value.unwrap_or_else(|| json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_datetime_rfc3339_millis() {
+        let dt = parse_datetime_or_now(Some("2026-04-15T12:00:00.000Z"));
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2026-04-15T12:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn parse_datetime_bigquery_format_timestamp_micros() {
+        // BigQuery FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', ...) produces
+        // microsecond-precision RFC3339 like "2026-04-15T12:30:45.123456Z".
+        let dt = parse_datetime_or_now(Some("2026-04-15T12:30:45.123456Z"));
+        assert_eq!(dt.year(), 2026);
+        assert_eq!(dt.month(), 4);
+        assert_eq!(dt.hour(), 12);
+        assert_eq!(dt.minute(), 30);
+        assert_eq!(dt.second(), 45);
+        assert_ne!(dt, Utc::now()); // must NOT have fallen back to now()
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_none() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(None);
+        assert!(dt >= before);
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_empty_string() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(Some(""));
+        assert!(dt >= before);
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_whitespace() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(Some("   "));
+        assert!(dt >= before);
+    }
+
+    #[test]
+    fn parse_datetime_falls_back_on_invalid_format() {
+        let before = Utc::now();
+        let dt = parse_datetime_or_now(Some("2026-04-15 12:00:00 UTC"));
+        assert!(dt >= before);
+    }
+
+    use chrono::Datelike;
+    use chrono::Timelike;
 }

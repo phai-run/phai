@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisão Financeira</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+:root {
+  --bg:#f1f5f9; --card:#fff; --text:#0f172a; --muted:#475569;
+  --border:#e2e8f0; --green:#059669; --red:#dc2626; --blue:#2563eb; --indigo:#6366f1;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+header{background:var(--card);border-bottom:1px solid var(--border);padding:1.5rem 2rem}
+header h1{font-size:1.5rem;font-weight:700}
+header .sub{color:var(--muted);font-size:.875rem}
+nav{position:sticky;top:0;z-index:10;background:var(--card);border-bottom:1px solid var(--border);padding:0 2rem;display:flex;gap:0;overflow-x:auto}
+nav a{padding:.75rem 1rem;color:var(--muted);text-decoration:none;font-size:.875rem;white-space:nowrap;border-bottom:2px solid transparent;transition:all .2s}
+nav a:hover{color:var(--text);border-bottom-color:var(--indigo)}
+main{max-width:1200px;margin:0 auto;padding:1.5rem}
+section{margin-bottom:2rem}
+section h2{font-size:1.25rem;font-weight:600;margin-bottom:1rem;padding-bottom:.5rem;border-bottom:2px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.grid{display:grid;gap:1rem}
+.g4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+.card{background:var(--card);border-radius:12px;padding:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card-value{font-size:1.75rem;font-weight:700;margin:.25rem 0}
+.card-label{font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.card-delta{font-size:.8rem;margin-top:.25rem}
+.pos{color:var(--green)}.neg{color:var(--red)}.neu{color:var(--blue)}
+table{width:100%;border-collapse:collapse;font-size:.875rem}
+th{text-align:left;padding:.75rem;border-bottom:2px solid var(--border);color:var(--muted);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+td{padding:.75rem;border-bottom:1px solid var(--border)}
+tr:hover td{background:#f8fafc}
+.r{text-align:right}.c{text-align:center}
+.cc{position:relative;height:350px}
+.sel{padding:.5rem;border:1px solid var(--border);border-radius:8px;font-size:.875rem;background:var(--card)}
+.badge{display:inline-block;padding:.125rem .5rem;border-radius:999px;font-size:.75rem;font-weight:600}
+.bw{background:#fef3c7;color:#92400e}.bo{background:#d1fae5;color:#065f46}.bd{background:#fee2e2;color:#991b1b}
+.empty{text-align:center;padding:3rem;color:var(--muted)}
+.analysis{background:#f0f9ff;border-left:4px solid var(--blue);padding:1rem 1.5rem;border-radius:0 8px 8px 0;margin-top:1rem;font-size:.9rem;line-height:1.8}
+footer{text-align:center;padding:2rem;color:var(--muted);font-size:.75rem}
+@media print{nav{position:static}.card{break-inside:avoid}body{background:#fff}}
+@media(max-width:640px){main{padding:1rem}.g4{grid-template-columns:1fr 1fr}.g2{grid-template-columns:1fr}.card-value{font-size:1.25rem}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Revisão Financeira</h1>
+  <p class="sub" id="sub"></p>
+</header>
+<nav>
+  <a href="#resumo">Resumo</a>
+  <a href="#fluxo">Fluxo de Caixa</a>
+  <a href="#categorias">Categorias</a>
+  <a href="#cartoes">Cartões</a>
+  <a href="#forecast">Forecast</a>
+  <a href="#projecao">Projeção</a>
+  <a href="#pendencias">Pendências</a>
+</nav>
+<main>
+
+<section id="resumo">
+  <h2>Resumo Executivo</h2>
+  <div class="grid g4" id="sum"></div>
+</section>
+
+<section id="fluxo">
+  <h2>Fluxo de Caixa</h2>
+  <div class="card"><div class="cc"><canvas id="chCf"></canvas></div></div>
+  <div class="card" style="margin-top:1rem">
+    <table id="tCf"><thead><tr>
+      <th>Mês</th><th class="r">Receitas</th><th class="r">Despesas</th><th class="r">Saldo</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section id="categorias">
+  <h2><span>Gastos por Categoria</span><select id="catM" class="sel"></select></h2>
+  <div class="grid g2">
+    <div class="card"><div class="cc" style="height:300px"><canvas id="chCat"></canvas></div></div>
+    <div class="card" style="max-height:400px;overflow-y:auto">
+      <table id="tCat"><thead><tr>
+        <th>Categoria</th><th class="r">Valor</th><th class="r">Qtd</th><th class="r">%</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+</section>
+
+<section id="cartoes">
+  <h2>Cartões de Crédito</h2>
+  <div class="card">
+    <table id="tCd"><thead><tr>
+      <th>Mês</th><th>Conta</th><th class="r">Total Faturado</th><th class="r">Em Aberto</th><th class="c">Transações</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section id="forecast">
+  <h2>Forecast vs Realizado</h2>
+  <div class="card">
+    <table id="tFc"><thead><tr>
+      <th>Descrição</th><th>Mês</th><th class="r">Previsto</th><th class="r">Realizado</th><th class="r">Variação</th><th class="c">Status</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section id="projecao">
+  <h2>Projeção de Poupança</h2>
+  <div class="card"><div class="cc" style="height:280px"><canvas id="chPj"></canvas></div></div>
+  <div class="analysis" id="pjTxt"></div>
+</section>
+
+<section id="pendencias">
+  <h2><span>Pendências</span><span class="badge bw" id="pBadge"></span></h2>
+  <div class="card">
+    <table id="tPd"><thead><tr>
+      <th>Data</th><th>Descrição</th><th class="r">Valor</th><th>Conta</th><th>Origem</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+</main>
+<footer>Finance OS — gerado automaticamente</footer>
+
+<script>
+const D = __REVIEW_DATA__;
+
+const n = v => typeof v==='string' ? parseFloat(v) : (v||0);
+const brl = v => { const x=n(v); return isNaN(x)?'R$ 0,00':x.toLocaleString('pt-BR',{style:'currency',currency:'BRL'}) };
+const pct = v => { if(isNaN(v)||!isFinite(v))return'—'; return(v>0?'+':'')+v.toFixed(1)+'%' };
+const CL = ['#6366f1','#f59e0b','#10b981','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316','#06b6d4','#84cc16','#e11d48','#0ea5e9','#a855f7','#22c55e','#eab308'];
+
+const cf = [...D.cashflow].sort((a,b)=>a.month_ref.localeCompare(b.month_ref));
+const sp = D.monthly_spend||[];
+const cd = D.card_summary||[];
+const fc = D.forecast_vs_actual||[];
+const pd = D.uncategorized||[];
+const pc = D.uncategorized_count||0;
+
+document.getElementById('sub').textContent = 'Gerado em '+new Date(D.generated_at).toLocaleString('pt-BR');
+
+/* ── Resumo ── */
+(()=>{
+  const el=document.getElementById('sum');
+  if(!cf.length){el.innerHTML='<div class="empty">Sem dados de fluxo de caixa</div>';return}
+  const L=cf[cf.length-1], P=cf.length>1?cf[cf.length-2]:null;
+  const inc=n(L.income),exp=n(L.expenses),net=n(L.net);
+  const delta=(cur,prev)=>prev&&n(prev)!==0?((cur-n(prev))/Math.abs(n(prev))*100):null;
+  const mk=(lbl,val,cls,d,fmt)=>{
+    const fv=fmt?fmt(val):brl(val);
+    let dh='';
+    if(d!==null&&d!==undefined){dh=`<div class="card-delta ${d>=0?'pos':'neg'}">${pct(d)} vs mês anterior</div>`}
+    return`<div class="card"><div class="card-label">${lbl}</div><div class="card-value ${cls}">${fv}</div>${dh}</div>`
+  };
+  el.innerHTML=[
+    mk('Receitas — '+L.month_ref,inc,'pos',P?delta(inc,P.income):null),
+    mk('Despesas — '+L.month_ref,exp,'neg',P?delta(exp,P.expenses):null),
+    mk('Saldo Líquido',net,net>=0?'pos':'neg',P&&n(P.net)!==0?delta(net,P.net):null),
+    mk('Pendências',pc,pc>0?'neg':'pos',null,v=>v+' itens')
+  ].join('');
+})();
+
+/* ── Fluxo de Caixa ── */
+(()=>{
+  if(!cf.length)return;
+  new Chart(document.getElementById('chCf'),{
+    type:'bar',
+    data:{
+      labels:cf.map(r=>r.month_ref),
+      datasets:[
+        {label:'Receitas',data:cf.map(r=>n(r.income)),backgroundColor:'#059669cc',borderRadius:4,order:2},
+        {label:'Despesas',data:cf.map(r=>n(r.expenses)),backgroundColor:'#dc2626cc',borderRadius:4,order:2},
+        {label:'Saldo Líquido',data:cf.map(r=>n(r.net)),type:'line',borderColor:'#2563eb',backgroundColor:'#2563eb22',fill:true,tension:.3,pointRadius:5,pointBackgroundColor:'#2563eb',borderWidth:2.5,order:1}
+      ]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+brl(c.raw)}},legend:{position:'bottom'}},
+      scales:{y:{ticks:{callback:v=>brl(v)},grid:{color:'#e2e8f033'}},x:{grid:{display:false}}}
+    }
+  });
+  const tb=document.querySelector('#tCf tbody');
+  cf.forEach(r=>{const v=n(r.net);
+    tb.innerHTML+=`<tr><td><strong>${r.month_ref}</strong></td><td class="r pos">${brl(r.income)}</td><td class="r neg">${brl(r.expenses)}</td><td class="r ${v>=0?'pos':'neg'}"><strong>${brl(r.net)}</strong></td></tr>`
+  });
+})();
+
+/* ── Categorias ── */
+(()=>{
+  const months=[...new Set(sp.map(r=>r.month_ref))].sort();
+  const sel=document.getElementById('catM');
+  if(!months.length){sel.style.display='none';document.querySelector('#categorias .g2').innerHTML='<div class="empty">Sem dados</div>';return}
+  months.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;sel.appendChild(o)});
+  sel.value=months[months.length-1];
+  let ch=null;
+  function render(mo){
+    const agg={};
+    sp.filter(r=>r.month_ref===mo).forEach(r=>{
+      if(!agg[r.category_id])agg[r.category_id]={e:0,c:0};
+      agg[r.category_id].e+=n(r.expenses); agg[r.category_id].c+=(r.expense_count||0);
+    });
+    const sorted=Object.entries(agg).map(([k,v])=>({cat:k,...v})).sort((a,b)=>b.e-a.e);
+    const tot=sorted.reduce((s,r)=>s+r.e,0);
+    if(ch)ch.destroy();
+    ch=new Chart(document.getElementById('chCat'),{
+      type:'doughnut',
+      data:{labels:sorted.map(r=>r.cat),datasets:[{data:sorted.map(r=>r.e),backgroundColor:CL.slice(0,sorted.length),borderWidth:0}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{tooltip:{callbacks:{label:c=>c.label+': '+brl(c.raw)+' ('+(c.raw/tot*100).toFixed(1)+'%)'}},legend:{display:false}},cutout:'55%'}
+    });
+    document.querySelector('#tCat tbody').innerHTML=sorted.map(r=>
+      `<tr><td>${r.cat}</td><td class="r">${brl(r.e)}</td><td class="r">${r.c}</td><td class="r">${tot>0?(r.e/tot*100).toFixed(1)+'%':'—'}</td></tr>`
+    ).join('');
+  }
+  render(sel.value);
+  sel.addEventListener('change',()=>render(sel.value));
+})();
+
+/* ── Cartões ── */
+(()=>{
+  const tb=document.querySelector('#tCd tbody');
+  if(!cd.length){tb.innerHTML='<tr><td colspan="5" class="empty">Sem dados de cartão</td></tr>';return}
+  [...cd].sort((a,b)=>b.month_ref.localeCompare(a.month_ref)||n(b.total_charges)-n(a.total_charges)).forEach(r=>{
+    const op=n(r.open_amount);
+    tb.innerHTML+=`<tr><td>${r.month_ref}</td><td>${r.account_id}</td><td class="r">${brl(r.total_charges)}</td><td class="r ${op>0?'neg':''}">${brl(r.open_amount)}</td><td class="c">${r.transaction_count}</td></tr>`
+  });
+})();
+
+/* ── Forecast ── */
+(()=>{
+  const tb=document.querySelector('#tFc tbody');
+  if(!fc.length){tb.innerHTML='<tr><td colspan="6" class="empty">Sem dados de forecast</td></tr>';return}
+  [...fc].sort((a,b)=>b.month_ref.localeCompare(a.month_ref)||a.description.localeCompare(b.description)).forEach(r=>{
+    const v=n(r.variance), vc=v>0?'pos':v<0?'neg':'';
+    const bg=r.status==='active'?'bo':'bw';
+    tb.innerHTML+=`<tr><td>${r.description}</td><td>${r.month_ref}</td><td class="r">${brl(r.forecast_amount)}</td><td class="r">${brl(r.actual_amount)}</td><td class="r ${vc}">${brl(v)}</td><td class="c"><span class="badge ${bg}">${r.status}</span></td></tr>`
+  });
+})();
+
+/* ── Projeção ── */
+(()=>{
+  const el=document.getElementById('pjTxt');
+  if(cf.length<2){el.textContent='Dados insuficientes para projeção (mínimo 2 meses).';return}
+  const nets=cf.map(r=>n(r.net));
+  const avg=nets.reduce((s,v)=>s+v,0)/nets.length;
+  const acc=[];let sum=0;nets.forEach(v=>{sum+=v;acc.push(sum)});
+  const lbls=cf.map(r=>r.month_ref);const pv=[...acc];
+  let lm=cf[cf.length-1].month_ref;
+  for(let i=1;i<=6;i++){
+    const[y,m]=lm.split('-').map(Number);const nm=m+i;
+    const ny=y+Math.floor((nm-1)/12);const nmo=((nm-1)%12)+1;
+    lbls.push(ny+'-'+String(nmo).padStart(2,'0'));
+    sum+=avg;pv.push(sum);
+  }
+  new Chart(document.getElementById('chPj'),{
+    type:'line',
+    data:{labels:lbls,datasets:[
+      {label:'Acumulado Real',data:acc.concat(Array(6).fill(null)),borderColor:'#2563eb',backgroundColor:'#2563eb22',fill:true,tension:.3,pointRadius:4,borderWidth:2.5},
+      {label:'Projeção',data:Array(cf.length-1).fill(null).concat([acc[acc.length-1]]).concat(pv.slice(cf.length)),borderColor:'#6366f1',borderDash:[6,4],tension:.3,pointRadius:3,borderWidth:2}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+brl(c.raw)}},legend:{position:'bottom'}},
+      scales:{y:{ticks:{callback:v=>brl(v)},grid:{color:'#e2e8f033'}},x:{grid:{display:false}}}
+    }
+  });
+  let txt='';
+  if(avg>0){
+    txt=`<strong>Média de saldo líquido mensal: ${brl(avg)}</strong><br>`;
+    txt+=`No ritmo atual, vocês acumulam ~${brl(avg)} por mês de capacidade de poupança. `;
+    txt+=`Para formar uma reserva de emergência de R$ 5.000, seriam necessários ~${Math.ceil(5000/avg)} meses. `;
+    txt+=`Para R$ 10.000: ~${Math.ceil(10000/avg)} meses.<br>`;
+    txt+=`Para investir em atividades extracurriculares das crianças, destinar 30% da margem significaria ~${brl(avg*0.3)}/mês.`;
+  } else if(avg===0){
+    txt='<strong>Saldo líquido médio: R$ 0,00</strong><br>Receitas e despesas estão empatadas. Antes de formar poupança, é preciso reduzir despesas ou aumentar receitas.';
+  } else {
+    txt=`<strong>Média de saldo líquido mensal: ${brl(avg)}</strong><br>`;
+    txt+=`As despesas excedem as receitas em ~${brl(Math.abs(avg))}/mês. `;
+    txt+=`Antes de formar reserva, é necessário equilibrar o fluxo de caixa. `;
+    txt+=`Revise as categorias com maior peso na seção acima para identificar oportunidades de corte.`;
+  }
+  el.innerHTML=txt;
+})();
+
+/* ── Pendências ── */
+(()=>{
+  document.getElementById('pBadge').textContent=pc+' itens';
+  const tb=document.querySelector('#tPd tbody');
+  if(!pd.length){tb.innerHTML='<tr><td colspan="5" class="empty">Nenhuma pendência</td></tr>';return}
+  pd.forEach(r=>{
+    const acc=r.account_label||r.account_id||'—';
+    tb.innerHTML+=`<tr><td>${r.transaction_date}</td><td>${r.description}</td><td class="r ${n(r.amount)<0?'neg':'pos'}">${brl(r.amount)}</td><td>${acc}</td><td>${r.source}</td></tr>`
+  });
+})();
+</script>
+</body>
+</html>

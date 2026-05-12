@@ -1,9 +1,13 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    parse_datetime_or_now, AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord,
-    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    TransactionContextRow, TransactionRecord, UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow,
+    CashflowRow, CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
+    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+};
+use crate::splits::{
+    ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
+    TransactionSplitLineRecord, TransactionSplitRecord,
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -20,6 +24,8 @@ use std::time::{Duration, Instant};
 use yup_oauth2::{read_service_account_key, ServiceAccountAuthenticator};
 
 const BIGQUERY_SCOPE: &str = "https://www.googleapis.com/auth/bigquery";
+const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
+const BIGQUERY_SCOPES: &[&str] = &[BIGQUERY_SCOPE, DRIVE_READONLY_SCOPE];
 
 pub struct BigQueryStore {
     config: AppConfig,
@@ -91,7 +97,7 @@ impl BigQueryStore {
             .build()
             .await
             .context("Falha ao construir autenticador BigQuery")?;
-        let token = auth.token(&[BIGQUERY_SCOPE]).await?;
+        let token = auth.token(BIGQUERY_SCOPES).await?;
         let token_str = token
             .token()
             .map(|value| value.to_string())
@@ -298,6 +304,109 @@ fn optional_json(values: &[Option<String>], index: usize, field: &str) -> Result
                 .with_context(|| format!("Falha ao parsear {field} do BigQuery"))
         })
         .transpose()
+}
+
+fn transaction_record_from_values(values: &[Option<String>]) -> Result<TransactionRecord> {
+    let created_at = required_string(values, 14, "created_at")?;
+    let updated_at = required_string(values, 15, "updated_at")?;
+    Ok(TransactionRecord {
+        transaction_id: required_string(values, 0, "transaction_id")?,
+        account_id: optional_string(values, 1),
+        transaction_date: required_date(values, 2, "transaction_date")?,
+        description: required_string(values, 3, "description")?,
+        amount: required_decimal(values, 4, "amount")?,
+        tx_type: required_string(values, 5, "tx_type")?,
+        category_id: optional_string(values, 6),
+        category_source: required_string(values, 7, "category_source")?,
+        context: optional_string(values, 8),
+        payment_status: required_string(values, 9, "payment_status")?,
+        source: required_string(values, 10, "source")?,
+        actor_id: required_string(values, 11, "actor_id")?,
+        idempotency_key: required_string(values, 12, "idempotency_key")?,
+        metadata_json: optional_json(values, 13, "metadata_json")?.unwrap_or_else(|| json!({})),
+        created_at: parse_datetime_or_now(Some(&created_at)),
+        updated_at: parse_datetime_or_now(Some(&updated_at)),
+    })
+}
+
+fn split_record_from_values(values: &[Option<String>]) -> Result<TransactionSplitRecord> {
+    let created_at = required_string(values, 8, "created_at")?;
+    let updated_at = required_string(values, 9, "updated_at")?;
+    Ok(TransactionSplitRecord {
+        split_id: required_string(values, 0, "split_id")?,
+        parent_transaction_id: required_string(values, 1, "parent_transaction_id")?,
+        payload_hash: required_string(values, 2, "payload_hash")?,
+        status: required_string(values, 3, "status")?,
+        source: required_string(values, 4, "source")?,
+        notes: optional_string(values, 5),
+        actor_id: required_string(values, 6, "actor_id")?,
+        idempotency_key: required_string(values, 7, "idempotency_key")?,
+        metadata_json: optional_json(values, 10, "metadata_json")?.unwrap_or_else(|| json!({})),
+        created_at: parse_datetime_or_now(Some(&created_at)),
+        updated_at: parse_datetime_or_now(Some(&updated_at)),
+    })
+}
+
+fn split_line_record_from_values(values: &[Option<String>]) -> Result<TransactionSplitLineRecord> {
+    let created_at = required_string(values, 13, "created_at")?;
+    let updated_at = required_string(values, 14, "updated_at")?;
+    Ok(TransactionSplitLineRecord {
+        split_line_id: required_string(values, 0, "split_line_id")?,
+        split_id: required_string(values, 1, "split_id")?,
+        parent_transaction_id: required_string(values, 2, "parent_transaction_id")?,
+        line_index: required_i64(values, 3, "line_index")?,
+        description: required_string(values, 4, "description")?,
+        amount: required_decimal(values, 5, "amount")?,
+        category_id: optional_string(values, 6),
+        category_source: required_string(values, 7, "category_source")?,
+        context: optional_string(values, 8),
+        status: required_string(values, 9, "status")?,
+        actor_id: required_string(values, 10, "actor_id")?,
+        idempotency_key: required_string(values, 11, "idempotency_key")?,
+        metadata_json: optional_json(values, 12, "metadata_json")?.unwrap_or_else(|| json!({})),
+        created_at: parse_datetime_or_now(Some(&created_at)),
+        updated_at: parse_datetime_or_now(Some(&updated_at)),
+    })
+}
+
+fn receipt_item_record_from_values(values: &[Option<String>]) -> Result<ReceiptItemRecord> {
+    let created_at = required_string(values, 15, "created_at")?;
+    let updated_at = required_string(values, 16, "updated_at")?;
+    Ok(ReceiptItemRecord {
+        receipt_item_id: required_string(values, 0, "receipt_item_id")?,
+        parent_transaction_id: required_string(values, 1, "parent_transaction_id")?,
+        split_id: optional_string(values, 2),
+        split_line_id: optional_string(values, 3),
+        item_index: required_i64(values, 4, "item_index")?,
+        description: required_string(values, 5, "description")?,
+        quantity: optional_string(values, 6)
+            .map(|value| {
+                Decimal::from_str(&value)
+                    .with_context(|| "Falha ao parsear quantity do BigQuery".to_string())
+            })
+            .transpose()?,
+        unit: optional_string(values, 7),
+        unit_price: optional_string(values, 8)
+            .map(|value| {
+                Decimal::from_str(&value)
+                    .with_context(|| "Falha ao parsear unit_price do BigQuery".to_string())
+            })
+            .transpose()?,
+        total_price: optional_string(values, 9)
+            .map(|value| {
+                Decimal::from_str(&value)
+                    .with_context(|| "Falha ao parsear total_price do BigQuery".to_string())
+            })
+            .transpose()?,
+        code: optional_string(values, 10),
+        store_name: optional_string(values, 11),
+        status: required_string(values, 12, "status")?,
+        actor_id: required_string(values, 13, "actor_id")?,
+        idempotency_key: required_string(values, 14, "idempotency_key")?,
+        metadata_json: optional_json(values, 17, "metadata_json")?.unwrap_or_else(|| json!({})),
+        created_at: parse_datetime_or_now(Some(&created_at)),
+        updated_at: parse_datetime_or_now(Some(&updated_at)),
+    })
 }
 
 #[async_trait(?Send)]
@@ -605,6 +714,221 @@ impl FinanceStore for BigQueryStore {
         Ok(rows.len())
     }
 
+    async fn apply_transaction_split(
+        &self,
+        split: &TransactionSplitRecord,
+        lines: &[TransactionSplitLineRecord],
+        items: &[ReceiptItemRecord],
+    ) -> Result<()> {
+        if lines.is_empty() {
+            return Err(anyhow!("Split precisa ter pelo menos uma linha"));
+        }
+
+        let split_source = format!(
+            "SELECT {} AS split_id, {} AS parent_transaction_id, {} AS payload_hash, {} AS status, {} AS source, {} AS notes, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
+            sql_string(&split.split_id),
+            sql_string(&split.parent_transaction_id),
+            sql_string(&split.payload_hash),
+            sql_string(&split.status),
+            sql_string(&split.source),
+            sql_optional_string(split.notes.as_deref()),
+            sql_string(&split.actor_id),
+            sql_string(&split.idempotency_key),
+            sql_json(&split.metadata_json),
+            sql_timestamp(split.created_at),
+            sql_timestamp(split.updated_at),
+        );
+        let line_source = lines
+            .iter()
+            .map(|row| {
+                format!(
+                    "SELECT {} AS split_line_id, {} AS split_id, {} AS parent_transaction_id, {} AS line_index, {} AS description, {} AS amount, {} AS category_id, {} AS category_source, {} AS context, {} AS status, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
+                    sql_string(&row.split_line_id),
+                    sql_string(&row.split_id),
+                    sql_string(&row.parent_transaction_id),
+                    row.line_index,
+                    sql_string(&row.description),
+                    sql_decimal(&row.amount),
+                    sql_optional_string(row.category_id.as_deref()),
+                    sql_string(&row.category_source),
+                    sql_optional_string(row.context.as_deref()),
+                    sql_string(&row.status),
+                    sql_string(&row.actor_id),
+                    sql_string(&row.idempotency_key),
+                    sql_json(&row.metadata_json),
+                    sql_timestamp(row.created_at),
+                    sql_timestamp(row.updated_at),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\nUNION ALL\n");
+        let item_statement = if items.is_empty() {
+            String::new()
+        } else {
+            let item_source = items
+                .iter()
+                .map(|row| {
+                    let quantity = row
+                        .quantity
+                        .as_ref()
+                        .map(sql_decimal)
+                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string());
+                    let unit_price = row
+                        .unit_price
+                        .as_ref()
+                        .map(sql_decimal)
+                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string());
+                    let total_price = row
+                        .total_price
+                        .as_ref()
+                        .map(sql_decimal)
+                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string());
+                    format!(
+                        "SELECT {} AS receipt_item_id, {} AS parent_transaction_id, {} AS split_id, {} AS split_line_id, {} AS item_index, {} AS description, {} AS quantity, {} AS unit, {} AS unit_price, {} AS total_price, {} AS code, {} AS store_name, {} AS status, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
+                        sql_string(&row.receipt_item_id),
+                        sql_string(&row.parent_transaction_id),
+                        sql_optional_string(row.split_id.as_deref()),
+                        sql_optional_string(row.split_line_id.as_deref()),
+                        row.item_index,
+                        sql_string(&row.description),
+                        quantity,
+                        sql_optional_string(row.unit.as_deref()),
+                        unit_price,
+                        total_price,
+                        sql_optional_string(row.code.as_deref()),
+                        sql_optional_string(row.store_name.as_deref()),
+                        sql_string(&row.status),
+                        sql_string(&row.actor_id),
+                        sql_string(&row.idempotency_key),
+                        sql_json(&row.metadata_json),
+                        sql_timestamp(row.created_at),
+                        sql_timestamp(row.updated_at),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\nUNION ALL\n");
+            format!(
+                "
+                MERGE {} target
+                USING ({item_source}) source
+                ON target.receipt_item_id = source.receipt_item_id
+                WHEN MATCHED THEN UPDATE SET
+                  parent_transaction_id = source.parent_transaction_id,
+                  split_id = source.split_id,
+                  split_line_id = source.split_line_id,
+                  item_index = source.item_index,
+                  description = source.description,
+                  quantity = source.quantity,
+                  unit = source.unit,
+                  unit_price = source.unit_price,
+                  total_price = source.total_price,
+                  code = source.code,
+                  store_name = source.store_name,
+                  status = source.status,
+                  actor_id = source.actor_id,
+                  idempotency_key = source.idempotency_key,
+                  metadata_json = source.metadata_json,
+                  updated_at = source.updated_at
+                WHEN NOT MATCHED THEN INSERT (
+                  receipt_item_id, parent_transaction_id, split_id, split_line_id, item_index,
+                  description, quantity, unit, unit_price, total_price, code, store_name, status,
+                  actor_id, idempotency_key, metadata_json, created_at, updated_at
+                ) VALUES (
+                  source.receipt_item_id, source.parent_transaction_id, source.split_id, source.split_line_id, source.item_index,
+                  source.description, source.quantity, source.unit, source.unit_price, source.total_price, source.code, source.store_name, source.status,
+                  source.actor_id, source.idempotency_key, source.metadata_json, source.created_at, source.updated_at
+                );
+                ",
+                self.qualified_table("receipt_items")?,
+            )
+        };
+
+        let sql = format!(
+            "
+            UPDATE {}
+            SET status = 'inactive', updated_at = CURRENT_TIMESTAMP()
+            WHERE parent_transaction_id = {}
+              AND status = 'active'
+              AND split_id != {};
+
+            UPDATE {}
+            SET status = 'inactive', updated_at = CURRENT_TIMESTAMP()
+            WHERE parent_transaction_id = {}
+              AND status = 'active'
+              AND split_id != {};
+
+            UPDATE {}
+            SET status = 'inactive', updated_at = CURRENT_TIMESTAMP()
+            WHERE parent_transaction_id = {}
+              AND status = 'active'
+              AND COALESCE(split_id, '') != {};
+
+            MERGE {} target
+            USING ({split_source}) source
+            ON target.split_id = source.split_id
+            WHEN MATCHED THEN UPDATE SET
+              parent_transaction_id = source.parent_transaction_id,
+              payload_hash = source.payload_hash,
+              status = source.status,
+              source = source.source,
+              notes = source.notes,
+              actor_id = source.actor_id,
+              idempotency_key = source.idempotency_key,
+              metadata_json = source.metadata_json,
+              updated_at = source.updated_at
+            WHEN NOT MATCHED THEN INSERT (
+              split_id, parent_transaction_id, payload_hash, status, source, notes, actor_id,
+              idempotency_key, metadata_json, created_at, updated_at
+            ) VALUES (
+              source.split_id, source.parent_transaction_id, source.payload_hash, source.status, source.source, source.notes, source.actor_id,
+              source.idempotency_key, source.metadata_json, source.created_at, source.updated_at
+            );
+
+            MERGE {} target
+            USING ({line_source}) source
+            ON target.split_line_id = source.split_line_id
+            WHEN MATCHED THEN UPDATE SET
+              split_id = source.split_id,
+              parent_transaction_id = source.parent_transaction_id,
+              line_index = source.line_index,
+              description = source.description,
+              amount = source.amount,
+              category_id = source.category_id,
+              category_source = source.category_source,
+              context = source.context,
+              status = source.status,
+              actor_id = source.actor_id,
+              idempotency_key = source.idempotency_key,
+              metadata_json = source.metadata_json,
+              updated_at = source.updated_at
+            WHEN NOT MATCHED THEN INSERT (
+              split_line_id, split_id, parent_transaction_id, line_index, description, amount,
+              category_id, category_source, context, status, actor_id, idempotency_key,
+              metadata_json, created_at, updated_at
+            ) VALUES (
+              source.split_line_id, source.split_id, source.parent_transaction_id, source.line_index, source.description, source.amount,
+              source.category_id, source.category_source, source.context, source.status, source.actor_id, source.idempotency_key,
+              source.metadata_json, source.created_at, source.updated_at
+            );
+
+            {item_statement}
+            ",
+            self.qualified_table("transaction_splits")?,
+            sql_string(&split.parent_transaction_id),
+            sql_string(&split.split_id),
+            self.qualified_table("transaction_split_lines")?,
+            sql_string(&split.parent_transaction_id),
+            sql_string(&split.split_id),
+            self.qualified_table("receipt_items")?,
+            sql_string(&split.parent_transaction_id),
+            sql_string(&split.split_id),
+            self.qualified_table("transaction_splits")?,
+            self.qualified_table("transaction_split_lines")?,
+        );
+        self.run_query(&sql).await?;
+        Ok(())
+    }
+
     async fn insert_audit_events(&self, rows: &[AuditEvent]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -695,64 +1019,347 @@ impl FinanceStore for BigQueryStore {
         Ok(existing)
     }
 
-    async fn find_account_by_pluggy_item_id(
-        &self,
-        pluggy_item_id: &str,
-    ) -> Result<Vec<AccountRecord>> {
+    async fn transaction_by_id(&self, transaction_id: &str) -> Result<Option<TransactionRecord>> {
         let sql = format!(
             "
             SELECT
+              transaction_id,
               account_id,
-              owner,
-              account_type,
-              bank,
-              label,
-              pluggy_account_id,
-              pluggy_item_id,
+              CAST(transaction_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              tx_type,
+              category_id,
+              category_source,
+              context,
+              payment_status,
+              source,
+              actor_id,
+              idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
+            FROM {}
+            WHERE transaction_id = {}
+            LIMIT 1
+            ",
+            self.qualified_table("transactions")?,
+            sql_string(transaction_id),
+        );
+        let response = self.run_query(&sql).await?;
+        let Some(row) = response.rows.first() else {
+            return Ok(None);
+        };
+        let values = row_values(row);
+        transaction_record_from_values(&values).map(Some)
+    }
+
+    async fn transaction_split_detail(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Option<TransactionSplitDetail>> {
+        let Some(parent) = self.transaction_by_id(transaction_id).await? else {
+            return Ok(None);
+        };
+
+        let split_sql = format!(
+            "
+            SELECT
+              split_id,
+              parent_transaction_id,
+              payload_hash,
+              status,
+              source,
+              notes,
+              actor_id,
+              idempotency_key,
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}')
+            FROM {}
+            WHERE parent_transaction_id = {}
+              AND status = 'active'
+            ORDER BY updated_at DESC, split_id DESC
+            LIMIT 1
+            ",
+            self.qualified_table("transaction_splits")?,
+            sql_string(transaction_id),
+        );
+        let split_response = self.run_query(&split_sql).await?;
+        let split = split_response
+            .rows
+            .first()
+            .map(|row| split_record_from_values(&row_values(row)))
+            .transpose()?;
+        let Some(active_split) = split.clone() else {
+            return Ok(Some(TransactionSplitDetail {
+                parent,
+                split: None,
+                lines: Vec::new(),
+                items: Vec::new(),
+            }));
+        };
+
+        let lines_sql = format!(
+            "
+            SELECT
+              split_line_id,
+              split_id,
+              parent_transaction_id,
+              CAST(line_index AS STRING),
+              description,
+              CAST(amount AS STRING),
+              category_id,
+              category_source,
+              context,
               status,
               actor_id,
               idempotency_key,
               COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
-              CAST(created_at AS STRING),
-              CAST(updated_at AS STRING)
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
             FROM {}
-            WHERE pluggy_item_id = {}
-            ORDER BY updated_at DESC, account_id ASC
+            WHERE split_id = {}
+              AND status = 'active'
+            ORDER BY line_index ASC
             ",
-            self.qualified_table("accounts")?,
-            sql_string(pluggy_item_id),
+            self.qualified_table("transaction_split_lines")?,
+            sql_string(&active_split.split_id),
+        );
+        let line_response = self.run_query(&lines_sql).await?;
+        let mut lines = Vec::with_capacity(line_response.rows.len());
+        for row in line_response.rows {
+            lines.push(split_line_record_from_values(&row_values(&row))?);
+        }
+
+        let items_sql = format!(
+            "
+            SELECT
+              receipt_item_id,
+              parent_transaction_id,
+              split_id,
+              split_line_id,
+              CAST(item_index AS STRING),
+              description,
+              CAST(quantity AS STRING),
+              unit,
+              CAST(unit_price AS STRING),
+              CAST(total_price AS STRING),
+              code,
+              store_name,
+              status,
+              actor_id,
+              idempotency_key,
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}')
+            FROM {}
+            WHERE split_id = {}
+              AND status = 'active'
+            ORDER BY item_index ASC
+            ",
+            self.qualified_table("receipt_items")?,
+            sql_string(&active_split.split_id),
+        );
+        let item_response = self.run_query(&items_sql).await?;
+        let mut items = Vec::with_capacity(item_response.rows.len());
+        for row in item_response.rows {
+            items.push(receipt_item_record_from_values(&row_values(&row))?);
+        }
+
+        Ok(Some(TransactionSplitDetail {
+            parent,
+            split,
+            lines,
+            items,
+        }))
+    }
+
+    async fn clear_transaction_split(
+        &self,
+        transaction_id: &str,
+        actor_id: &str,
+        idempotency_key: &str,
+        _reason: Option<&str>,
+    ) -> Result<()> {
+        let sql = format!(
+            "
+            UPDATE {}
+            SET status = 'inactive',
+                actor_id = {},
+                idempotency_key = {},
+                updated_at = CURRENT_TIMESTAMP()
+            WHERE parent_transaction_id = {}
+              AND status = 'active';
+
+            UPDATE {}
+            SET status = 'inactive',
+                actor_id = {},
+                idempotency_key = {},
+                updated_at = CURRENT_TIMESTAMP()
+            WHERE parent_transaction_id = {}
+              AND status = 'active';
+
+            UPDATE {}
+            SET status = 'inactive',
+                actor_id = {},
+                idempotency_key = {},
+                updated_at = CURRENT_TIMESTAMP()
+            WHERE parent_transaction_id = {}
+              AND status = 'active';
+            ",
+            self.qualified_table("transaction_splits")?,
+            sql_string(actor_id),
+            sql_string(idempotency_key),
+            sql_string(transaction_id),
+            self.qualified_table("transaction_split_lines")?,
+            sql_string(actor_id),
+            sql_string(idempotency_key),
+            sql_string(transaction_id),
+            self.qualified_table("receipt_items")?,
+            sql_string(actor_id),
+            sql_string(idempotency_key),
+            sql_string(transaction_id),
+        );
+        self.run_query(&sql).await?;
+        Ok(())
+    }
+
+    async fn split_candidates(&self, since: NaiveDate) -> Result<Vec<SplitCandidateRow>> {
+        let sql = format!(
+            "
+            WITH unsplit_transactions AS (
+              SELECT t.*
+              FROM {} t
+              WHERE t.transaction_date >= {}
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM {} s
+                  WHERE s.parent_transaction_id = t.transaction_id
+                    AND s.status = 'active'
+                )
+            )
+            SELECT
+              t.transaction_id,
+              CAST(t.transaction_date AS STRING),
+              t.description,
+              CAST(t.amount AS STRING),
+              t.account_id,
+              t.category_id,
+              t.context,
+              p.policy_id,
+              p.name,
+              p.match_type
+            FROM unsplit_transactions t
+            JOIN {} p
+              ON p.status = 'active'
+             AND (
+               (p.match_type = 'description_contains' AND STRPOS(LOWER(t.description), LOWER(p.match_value)) > 0)
+               OR (p.match_type = 'category_prefix' AND STARTS_WITH(COALESCE(t.category_id, ''), p.match_value))
+               OR (p.match_type = 'account_id' AND COALESCE(t.account_id, '') = p.match_value)
+             )
+            WHERE p.min_abs_amount IS NULL OR ABS(t.amount) >= p.min_abs_amount
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC, p.policy_id ASC
+            LIMIT 100
+            ",
+            self.qualified_table("transactions")?,
+            sql_date(since),
+            self.qualified_table("transaction_splits")?,
+            self.qualified_table("split_review_policies")?,
         );
         let response = self.run_query(&sql).await?;
-        let mut accounts = Vec::with_capacity(response.rows.len());
+        let mut rows = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
-            let created_at = required_string(&values, 11, "created_at")?;
-            let updated_at = required_string(&values, 12, "updated_at")?;
-            accounts.push(AccountRecord {
-                account_id: required_string(&values, 0, "account_id")?,
-                owner: required_string(&values, 1, "owner")?,
-                account_type: required_string(&values, 2, "account_type")?,
-                bank: required_string(&values, 3, "bank")?,
-                label: required_string(&values, 4, "label")?,
-                pluggy_account_id: optional_string(&values, 5),
-                pluggy_item_id: optional_string(&values, 6),
-                status: required_string(&values, 7, "status")?,
-                actor_id: required_string(&values, 8, "actor_id")?,
-                idempotency_key: required_string(&values, 9, "idempotency_key")?,
-                metadata_json: optional_json(&values, 10, "metadata_json")?
-                    .unwrap_or_else(|| json!({})),
-                created_at: parse_datetime_or_now(Some(&created_at)),
-                updated_at: parse_datetime_or_now(Some(&updated_at)),
+            rows.push(SplitCandidateRow {
+                transaction_id: required_string(&values, 0, "transaction_id")?,
+                transaction_date: required_date(&values, 1, "transaction_date")?,
+                description: required_string(&values, 2, "description")?,
+                amount: required_decimal(&values, 3, "amount")?,
+                account_id: optional_string(&values, 4),
+                category_id: optional_string(&values, 5),
+                context: optional_string(&values, 6),
+                policy_id: required_string(&values, 7, "policy_id")?,
+                policy_name: required_string(&values, 8, "policy_name")?,
+                match_type: required_string(&values, 9, "match_type")?,
             });
         }
-        Ok(accounts)
+        Ok(rows)
+    }
+
+    async fn item_prices(
+        &self,
+        query: &str,
+        since: Option<NaiveDate>,
+    ) -> Result<Vec<ItemPriceRow>> {
+        let query_filter = if query.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "AND STRPOS(LOWER(i.description), LOWER({})) > 0",
+                sql_string(query.trim())
+            )
+        };
+        let since_filter = since
+            .map(|value| format!("AND t.transaction_date >= {}", sql_date(value)))
+            .unwrap_or_default();
+        let sql = format!(
+            "
+            SELECT
+              t.transaction_id,
+              CAST(t.transaction_date AS STRING),
+              i.description,
+              CAST(i.quantity AS STRING),
+              i.unit,
+              CAST(i.unit_price AS STRING),
+              CAST(i.total_price AS STRING),
+              i.code,
+              i.store_name,
+              t.description
+            FROM {} i
+            JOIN {} t
+              ON t.transaction_id = i.parent_transaction_id
+            WHERE i.status = 'active'
+              {query_filter}
+              {since_filter}
+            ORDER BY t.transaction_date DESC, i.description ASC, i.receipt_item_id ASC
+            LIMIT 100
+            ",
+            self.qualified_table("receipt_items")?,
+            self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut rows = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            rows.push(ItemPriceRow {
+                transaction_id: required_string(&values, 0, "transaction_id")?,
+                transaction_date: required_date(&values, 1, "transaction_date")?,
+                description: required_string(&values, 2, "description")?,
+                quantity: optional_string(&values, 3)
+                    .map(|value| Decimal::from_str(&value).context("quantity inválido"))
+                    .transpose()?,
+                unit: optional_string(&values, 4),
+                unit_price: optional_string(&values, 5)
+                    .map(|value| Decimal::from_str(&value).context("unit_price inválido"))
+                    .transpose()?,
+                total_price: optional_string(&values, 6)
+                    .map(|value| Decimal::from_str(&value).context("total_price inválido"))
+                    .transpose()?,
+                code: optional_string(&values, 7),
+                store_name: optional_string(&values, 8),
+                parent_description: required_string(&values, 9, "parent_description")?,
+            });
+        }
+        Ok(rows)
     }
 
     async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
         let sql = format!(
             "
             SELECT rule_id, body, status, actor_id, idempotency_key,
-                   CAST(created_at AS STRING), CAST(updated_at AS STRING)
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
             FROM {}
             ORDER BY rule_id ASC
             ",
@@ -794,7 +1401,8 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             SELECT rule_id, body, status, actor_id, idempotency_key,
-                   CAST(created_at AS STRING), CAST(updated_at AS STRING)
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+                   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
             FROM {}
             WHERE LOWER(status) = 'active'
             ORDER BY rule_id ASC
@@ -844,7 +1452,7 @@ impl FinanceStore for BigQueryStore {
             SELECT
               t.transaction_id,
               CAST(t.transaction_date AS STRING),
-              t.description,
+              t.display_label,
               CAST(t.amount AS STRING),
               t.account_id,
               a.label,
@@ -859,7 +1467,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT {}
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_effective")?,
             self.qualified_table("accounts")?,
             limit,
         );
@@ -881,6 +1489,25 @@ impl FinanceStore for BigQueryStore {
             });
         }
         Ok(items)
+    }
+
+    async fn count_transactions_with_context(&self) -> Result<i64> {
+        let sql = format!(
+            "
+            SELECT CAST(COUNT(*) AS STRING) FROM {}
+            WHERE context IS NOT NULL
+              AND TRIM(context) <> ''
+            ",
+            self.qualified_table("v_transactions_effective")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let count = response
+            .rows
+            .first()
+            .and_then(|row| row.f.first())
+            .and_then(|cell| parse_scalar_string(&cell.v))
+            .unwrap_or_else(|| "0".to_string());
+        Ok(count.parse().unwrap_or(0))
     }
 
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>> {
@@ -1046,13 +1673,73 @@ impl FinanceStore for BigQueryStore {
         Ok(items)
     }
 
+    async fn card_closed_transactions(
+        &self,
+        month_ref: Option<&str>,
+    ) -> Result<Vec<CardClosedTransactionRow>> {
+        let where_month = month_ref
+            .map(|value| {
+                format!(
+                    "AND FORMAT_DATE('%Y-%m', t.transaction_date) = {}",
+                    sql_string(value)
+                )
+            })
+            .unwrap_or_default();
+        let sql = format!(
+            "
+            SELECT
+              FORMAT_DATE('%Y-%m', t.transaction_date) AS month_ref,
+              t.account_id,
+              t.transaction_id,
+              CAST(t.transaction_date AS STRING),
+              t.display_label,
+              t.description,
+              CAST(ABS(t.amount) AS STRING),
+              t.category_id,
+              t.payment_status,
+              COALESCE(TO_JSON_STRING(t.metadata_json), '{{}}')
+            FROM {} t
+            JOIN {} a
+              ON a.account_id = t.account_id
+            WHERE a.account_type = 'credit'
+              AND t.amount < 0
+              AND t.payment_status NOT IN ('pending', 'em_aberto', 'parcial')
+              AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM {})
+              {where_month}
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
+            ",
+            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("accounts")?,
+            self.qualified_table("internal_categories")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(CardClosedTransactionRow {
+                month_ref: required_string(&values, 0, "month_ref")?,
+                account_id: required_string(&values, 1, "account_id")?,
+                transaction_id: required_string(&values, 2, "transaction_id")?,
+                transaction_date: required_date(&values, 3, "transaction_date")?,
+                label: required_string(&values, 4, "display_label")?,
+                description: required_string(&values, 5, "description")?,
+                amount: required_decimal(&values, 6, "closed_amount")?,
+                category_id: optional_string(&values, 7),
+                payment_status: required_string(&values, 8, "payment_status")?,
+                metadata_json: optional_json(&values, 9, "metadata_json")?
+                    .unwrap_or_else(|| serde_json::json!({})),
+            });
+        }
+        Ok(items)
+    }
+
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>> {
         let sql = format!(
             "
             SELECT
               t.transaction_id,
               CAST(t.transaction_date AS STRING),
-              t.description,
+              t.display_label,
               CAST(t.amount AS STRING),
               t.account_id,
               a.label,
@@ -1068,7 +1755,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT {}
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_effective")?,
             self.qualified_table("accounts")?,
             limit,
         );
@@ -1092,6 +1779,25 @@ impl FinanceStore for BigQueryStore {
             });
         }
         Ok(items)
+    }
+
+    async fn count_uncategorized(&self) -> Result<i64> {
+        let sql = format!(
+            "
+            SELECT CAST(COUNT(*) AS STRING) FROM {}
+            WHERE category_id IS NULL
+               OR category_source IN ('unclassified', 'fallback')
+            ",
+            self.qualified_table("v_transactions_effective")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let count = response
+            .rows
+            .first()
+            .and_then(|row| row.f.first())
+            .and_then(|cell| parse_scalar_string(&cell.v))
+            .unwrap_or_else(|| "0".to_string());
+        Ok(count.parse().unwrap_or(0))
     }
 
     async fn count_rows(&self, table: &str) -> Result<i64> {

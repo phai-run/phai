@@ -22,49 +22,55 @@ Esta branch contem a tentativa dessa Entrega 1.
 - Expansao do storage para suportar os novos caminhos:
   - `all_rules`
   - `transactions_with_context`
-  - `find_account_by_pluggy_item_id`
+  - `count_uncategorized`
 - Testes E2E e unitarios atualizados
 
 ## Estado atual
 
-`cargo test --workspace` passou neste estado da branch, mas a review encontrou problemas reais.
-Conclusao: a Entrega 1 ainda nao deve ser tratada como fechada.
+`cargo test --workspace` passa em verde (28 testes: 12 e2e + 13 unit finance-core + 3 unit cli).
+Todos os 6 findings abaixo foram fechados no followup da branch, alem de 3 lacunas estruturais
+(dead API removida, teste de rebind real, teste de divergencia/colisao). Entrega 1 pronta.
 
-## Findings confirmados
+## Findings (todos FECHADOS)
 
 ### P1
 
-1. `pluggyItemId` do config sobrepoe o valor do CSV sem validacao
+1. [FECHADO] `pluggyItemId` do config sobrepoe o valor do CSV sem validacao
    - Arquivo: `crates/finance-core/src/pluggy.rs`
    - Impacto: um 404 pode rebinder para o item errado e importar dados de outra conta para o `account_id` interno esperado.
 
-2. Dois bindings podem convergir para o mesmo `pluggy_account_id` final
+2. [FECHADO] Dois bindings podem convergir para o mesmo `pluggy_account_id` final
    - Arquivo: `crates/finance-core/src/pluggy.rs`
    - Impacto: o mesmo conjunto de transacoes pode ser materializado em duas tasks, e o ultimo upsert vence de forma nao deterministica.
 
 ### P2
 
-3. `needsContextCount` do `--json-summary` continua truncado em 100
+3. [FECHADO] `needsContextCount` do `--json-summary` continua truncado em 100
    - Arquivo: `crates/finance-cli/src/main.rs`
    - Impacto: backlog real de pendencias pode ser subreportado.
 
-4. Leitura de timestamps no backend BigQuery pode cair silenciosamente em `Utc::now()`
+4. [FECHADO] Leitura de timestamps no backend BigQuery pode cair silenciosamente em `Utc::now()`
    - Arquivos: `crates/finance-core/src/storage/bigquery.rs`, `crates/finance-core/src/models.rs`
    - Impacto: `rule list` e `rule inspect` podem mostrar timestamps incorretos em BigQuery.
 
-5. `rule list --status` aceita typo como se fosse um resultado vazio legitimo
+5. [FECHADO] `rule list --status` aceita typo como se fosse um resultado vazio legitimo
    - Arquivo: `crates/finance-cli/src/main.rs`
    - Impacto: UX enganosa para um comando de inspecao.
 
-6. `tx list-context` em modo texto nao mostra `transaction_id`
+6. [FECHADO] `tx list-context` em modo texto nao mostra `transaction_id`
    - Arquivo: `crates/finance-cli/src/main.rs`
    - Impacto: a saida texto nao e acionavel sem rerodar em JSON.
 
 ## Lacunas estruturais observadas
 
-- O metodo `find_account_by_pluggy_item_id` foi adicionado ao trait de storage, mas nao esta integrado ao fluxo real de `sync_pluggy`.
-- O teste de rebind cobre apenas o caminho de fixture, nao o fluxo real `404 -> GET /accounts?itemId=...`.
-- Os novos caminhos foram exercitados apenas em backend local; a paridade BigQuery continua pouco coberta.
+- [FECHADO] O metodo `find_account_by_pluggy_item_id` foi removido do trait e das
+  duas implementacoes. A fonte de verdade para resolucao de binding agora e apenas
+  `pluggy-config.json` + `contas.csv`, validados cruzadamente.
+- [FECHADO] Teste de rebind real no HTTP path (`404 -> GET /accounts?itemId=...`)
+  implementado com wiremock em `pluggy::tests::http_rebind_via_item_id_on_404`.
+  Cobre auth, 404 do account original, fallback por itemId, e fetch de transacoes.
+- [PENDENTE] Testes BigQuery nao rodam porque requerem credenciais GCP. Fica como
+  follow-up para quando o ambiente de CI tiver secrets do sandbox.
 
 ## Plano de implementacao recomendado
 

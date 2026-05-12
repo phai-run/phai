@@ -1,20 +1,40 @@
 use crate::idempotency::category_id;
+use crate::models::decimal_from_str;
 use crate::models::RuleRecord;
 use anyhow::{bail, Context, Result};
 use deunicode::deunicode;
+use rust_decimal::Decimal;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledRule {
     pub rule_id: String,
     pub category_id: String,
+    pub context: Option<String>,
+    pub amount_sign: Option<AmountSign>,
     matcher: RuleMatcher,
+    amount_match: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmountSign {
+    Positive,
+    Negative,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuleMatcher {
     ContainsAny(Vec<String>),
     Exact(String),
+    TransactionIdExact(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleApplication {
+    pub category_id: Option<String>,
+    pub category_source: String,
+    pub context: Option<String>,
+    pub amount_sign: Option<AmountSign>,
 }
 
 pub fn compile_rules(rows: &[RuleRecord]) -> Result<Vec<CompiledRule>> {
@@ -27,7 +47,15 @@ pub fn compile_rules(rows: &[RuleRecord]) -> Result<Vec<CompiledRule>> {
             compiled.push(rule);
         }
     }
-    compiled.sort_by(|left, right| left.rule_id.cmp(&right.rule_id));
+    compiled.sort_by(|left, right| {
+        right
+            .has_transaction_id_match()
+            .cmp(&left.has_transaction_id_match())
+            .then_with(|| right.has_amount_match().cmp(&left.has_amount_match()))
+            .then_with(|| right.matcher_rank().cmp(&left.matcher_rank()))
+            .then_with(|| right.matcher_len().cmp(&left.matcher_len()))
+            .then_with(|| left.rule_id.cmp(&right.rule_id))
+    });
     Ok(compiled)
 }
 
@@ -37,12 +65,56 @@ pub fn apply_rules(
     had_base_category: bool,
     rules: &[CompiledRule],
 ) -> (Option<String>, String) {
+    let result = apply_rules_with_amount(
+        description,
+        None,
+        base_category_id,
+        had_base_category,
+        rules,
+    );
+    (result.category_id, result.category_source)
+}
+
+pub fn apply_rules_with_amount(
+    description: &str,
+    amount: Option<Decimal>,
+    base_category_id: Option<String>,
+    had_base_category: bool,
+    rules: &[CompiledRule],
+) -> RuleApplication {
+    apply_rules_with_facts(
+        description,
+        amount,
+        None,
+        base_category_id,
+        had_base_category,
+        rules,
+    )
+}
+
+pub fn apply_rules_with_facts(
+    description: &str,
+    amount: Option<Decimal>,
+    transaction_id: Option<&str>,
+    base_category_id: Option<String>,
+    had_base_category: bool,
+    rules: &[CompiledRule],
+) -> RuleApplication {
     let normalized_description = normalize_text(description);
-    if let Some(rule) = rules
-        .iter()
-        .find(|rule| rule.matches(&normalized_description))
-    {
-        return (Some(rule.category_id.clone()), "rule".to_string());
+    let normalized_transaction_id = transaction_id.map(normalize_identifier);
+    if let Some(rule) = rules.iter().find(|rule| {
+        rule.matches(
+            &normalized_description,
+            normalized_transaction_id.as_deref(),
+            amount,
+        )
+    }) {
+        return RuleApplication {
+            category_id: Some(rule.category_id.clone()),
+            category_source: "rule".to_string(),
+            context: rule.context.clone(),
+            amount_sign: rule.amount_sign,
+        };
     }
 
     let source = if had_base_category {
@@ -50,16 +122,63 @@ pub fn apply_rules(
     } else {
         "unclassified"
     };
-    (base_category_id, source.to_string())
+    RuleApplication {
+        category_id: base_category_id,
+        category_source: source.to_string(),
+        context: None,
+        amount_sign: None,
+    }
 }
 
 impl CompiledRule {
-    fn matches(&self, normalized_description: &str) -> bool {
+    fn matches(
+        &self,
+        normalized_description: &str,
+        normalized_transaction_id: Option<&str>,
+        amount: Option<Decimal>,
+    ) -> bool {
+        if let Some(expected) = self.amount_match {
+            let Some(actual) = amount else {
+                return false;
+            };
+            if !amounts_match(actual, expected) {
+                return false;
+            }
+        }
         match &self.matcher {
             RuleMatcher::ContainsAny(needles) => needles
                 .iter()
                 .any(|needle| normalized_description.contains(needle)),
             RuleMatcher::Exact(needle) => normalized_description == needle,
+            RuleMatcher::TransactionIdExact(needle) => {
+                normalized_transaction_id.is_some_and(|transaction_id| transaction_id == needle)
+            }
+        }
+    }
+
+    fn has_transaction_id_match(&self) -> bool {
+        matches!(self.matcher, RuleMatcher::TransactionIdExact(_))
+    }
+
+    fn has_amount_match(&self) -> bool {
+        self.amount_match.is_some()
+    }
+
+    fn matcher_rank(&self) -> usize {
+        match self.matcher {
+            RuleMatcher::TransactionIdExact(_) => 2,
+            RuleMatcher::Exact(_) => 1,
+            RuleMatcher::ContainsAny(_) => 0,
+        }
+    }
+
+    fn matcher_len(&self) -> usize {
+        match &self.matcher {
+            RuleMatcher::TransactionIdExact(needle) => needle.len(),
+            RuleMatcher::Exact(needle) => needle.len(),
+            RuleMatcher::ContainsAny(needles) => {
+                needles.iter().map(|needle| needle.len()).max().unwrap_or(0)
+            }
         }
     }
 }
@@ -99,6 +218,9 @@ fn parse_dsl_rule(row: &RuleRecord) -> Result<Option<CompiledRule>> {
         &row.rule_id,
         vec![strip_wrapping_quotes(needle).to_string()],
         normalize_category_target(target)?,
+        None,
+        None,
+        None,
     )
     .map(Some)
 }
@@ -125,7 +247,11 @@ fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<Comp
         .unwrap_or_default();
     if !matches!(
         match_type,
-        "descricao_contains" | "description_contains" | "descricao_exata" | "description_exact"
+        "descricao_contains"
+            | "description_contains"
+            | "descricao_exata"
+            | "description_exact"
+            | "pluggy_id"
     ) {
         return Ok(None);
     }
@@ -151,14 +277,45 @@ fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<Comp
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let amount_match = value
+        .get("valor_match")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| decimal_from_str(value).ok());
+    let context = value
+        .get("finalidade")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let amount_sign = parse_amount_sign(value.get("amount_sign"))?;
 
     let category_id = category_id(category, subcategory);
-    let normalized_needle = normalize_text(needle);
     let rule = match match_type {
-        "descricao_exata" | "description_exact" => {
-            build_exact_rule(rule_id, normalized_needle, category_id)?
-        }
-        _ => build_contains_rule(rule_id, vec![normalized_needle], category_id)?,
+        "descricao_exata" | "description_exact" => build_exact_rule(
+            rule_id,
+            normalize_text(needle),
+            category_id,
+            context,
+            amount_match,
+            amount_sign,
+        )?,
+        "pluggy_id" => build_transaction_id_rule(
+            rule_id,
+            normalize_identifier(needle),
+            category_id,
+            context,
+            amount_sign,
+        )?,
+        _ => build_contains_rule(
+            rule_id,
+            vec![normalize_text(needle)],
+            category_id,
+            context,
+            amount_match,
+            amount_sign,
+        )?,
     };
 
     Ok(Some(rule))
@@ -197,14 +354,30 @@ fn parse_legacy_yaml_rule(rule_id: &str, value: &Value) -> Result<Option<Compile
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let amount_sign = parse_amount_sign(
+        value
+            .get("set")
+            .and_then(|setter| setter.get("amount_sign")),
+    )?;
 
-    build_contains_rule(rule_id, needles, category_id(category, subcategory)).map(Some)
+    build_contains_rule(
+        rule_id,
+        needles,
+        category_id(category, subcategory),
+        None,
+        None,
+        amount_sign,
+    )
+    .map(Some)
 }
 
 fn build_contains_rule(
     rule_id: &str,
     needles: Vec<String>,
     category_id: String,
+    context: Option<String>,
+    amount_match: Option<Decimal>,
+    amount_sign: Option<AmountSign>,
 ) -> Result<CompiledRule> {
     let needles = needles
         .into_iter()
@@ -220,11 +393,21 @@ fn build_contains_rule(
     Ok(CompiledRule {
         rule_id: rule_id.to_string(),
         category_id,
+        context,
+        amount_sign,
         matcher: RuleMatcher::ContainsAny(needles),
+        amount_match,
     })
 }
 
-fn build_exact_rule(rule_id: &str, needle: String, category_id: String) -> Result<CompiledRule> {
+fn build_exact_rule(
+    rule_id: &str,
+    needle: String,
+    category_id: String,
+    context: Option<String>,
+    amount_match: Option<Decimal>,
+    amount_sign: Option<AmountSign>,
+) -> Result<CompiledRule> {
     let needle = needle.trim().to_string();
     if needle.is_empty() {
         bail!("Rule {rule_id} sem termo de busca");
@@ -235,8 +418,50 @@ fn build_exact_rule(rule_id: &str, needle: String, category_id: String) -> Resul
     Ok(CompiledRule {
         rule_id: rule_id.to_string(),
         category_id,
+        context,
+        amount_sign,
         matcher: RuleMatcher::Exact(needle),
+        amount_match,
     })
+}
+
+fn build_transaction_id_rule(
+    rule_id: &str,
+    transaction_id: String,
+    category_id: String,
+    context: Option<String>,
+    amount_sign: Option<AmountSign>,
+) -> Result<CompiledRule> {
+    if transaction_id.trim().is_empty() {
+        bail!("Rule {rule_id} sem `match_value` válido para `pluggy_id`");
+    }
+    if category_id.trim().is_empty() {
+        bail!("Rule {rule_id} sem categoria de destino");
+    }
+    Ok(CompiledRule {
+        rule_id: rule_id.to_string(),
+        category_id,
+        context,
+        amount_sign,
+        matcher: RuleMatcher::TransactionIdExact(transaction_id),
+        amount_match: None,
+    })
+}
+
+fn parse_amount_sign(value: Option<&Value>) -> Result<Option<AmountSign>> {
+    let raw = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+
+    match raw.to_ascii_lowercase().as_str() {
+        "positive" => Ok(Some(AmountSign::Positive)),
+        "negative" => Ok(Some(AmountSign::Negative)),
+        other => bail!("amount_sign inválido: {other}. Valores aceitos: positive, negative"),
+    }
 }
 
 fn normalize_category_target(raw: &str) -> Result<String> {
@@ -264,6 +489,14 @@ fn strip_wrapping_quotes(value: &str) -> &str {
 
 fn normalize_text(value: &str) -> String {
     deunicode(value).to_ascii_lowercase()
+}
+
+fn normalize_identifier(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn amounts_match(actual: Decimal, expected: Decimal) -> bool {
+    actual.abs().round_dp(2) == expected.abs().round_dp(2)
 }
 
 #[cfg(test)]
@@ -354,5 +587,113 @@ mod tests {
         let (category_id, source) = apply_rules("Farmacia Central", None, false, &compiled);
         assert_eq!(category_id.as_deref(), Some("saude:farmacia"));
         assert_eq!(source, "rule");
+    }
+
+    #[test]
+    fn context_rule_with_amount_overrides_generic_rule() {
+        let compiled = compile_rules(&[
+            rule(
+                "000_generic",
+                "if description contains \"distribuidora exemplo\" then category moradia:gas",
+            ),
+            rule(
+                "context_specific",
+                r#"{"match_type":"descricao_contains","match_value":"distribuidora exemplo de agua","valor_match":"22","categoria":"Alimentacao","subcategoria":"Mercado","finalidade":"Reposição de água para casa"}"#,
+            ),
+        ])
+        .unwrap();
+
+        let result = apply_rules_with_amount(
+            "Transferência enviada|Distribuidora Exemplo de Agua",
+            Some(Decimal::new(-2200, 2)),
+            None,
+            false,
+            &compiled,
+        );
+
+        assert_eq!(result.category_id.as_deref(), Some("alimentacao:mercado"));
+        assert_eq!(
+            result.context.as_deref(),
+            Some("Reposição de água para casa")
+        );
+        assert_eq!(result.category_source, "rule");
+    }
+
+    #[test]
+    fn pluggy_id_rule_matches_transaction_id() {
+        let compiled = compile_rules(&[
+            rule(
+                "000_generic",
+                "if description contains transferencia enviada then category transfer-out",
+            ),
+            rule(
+                "context_specific",
+                r#"{"match_type":"pluggy_id","match_value":"00000000-0000-4000-8000-000000000123","categoria":"Educacao","subcategoria":"Material Escolar","finalidade":"Compra de material escolar"}"#,
+            ),
+        ])
+        .unwrap();
+
+        let result = apply_rules_with_facts(
+            "Transferência enviada|Amazon",
+            Some(Decimal::new(-4999, 2)),
+            Some("00000000-0000-4000-8000-000000000123"),
+            None,
+            false,
+            &compiled,
+        );
+
+        assert_eq!(
+            result.category_id.as_deref(),
+            Some("educacao:material-escolar")
+        );
+        assert_eq!(
+            result.context.as_deref(),
+            Some("Compra de material escolar")
+        );
+        assert_eq!(result.category_source, "rule");
+    }
+
+    #[test]
+    fn parses_amount_sign_from_legacy_context_rule() {
+        let compiled = compile_rules(&[rule(
+            "iof_cashback",
+            r#"{"match_type":"descricao_contains","match_value":"iof de volta","categoria":"Receitas","subcategoria":"Cashback / Beneficios","amount_sign":"positive"}"#,
+        )])
+        .unwrap();
+
+        let result = apply_rules_with_facts(
+            "IOF de volta de assinatura",
+            Some(Decimal::new(-72, 2)),
+            Some("00000000-0000-4000-8000-000000000321"),
+            None,
+            false,
+            &compiled,
+        );
+
+        assert_eq!(
+            result.category_id.as_deref(),
+            Some("receitas:cashback-beneficios")
+        );
+        assert_eq!(result.amount_sign, Some(AmountSign::Positive));
+    }
+
+    #[test]
+    fn parses_amount_sign_from_yaml_style_rule() {
+        let compiled = compile_rules(&[rule(
+            "bonus_rule",
+            r#"{"id":"bonus_rule","match":{"contains_any":["bonus"]},"set":{"category":"Receitas","subcategory":"Cashback / Beneficios","amount_sign":"positive"}}"#,
+        )])
+        .unwrap();
+
+        let result = apply_rules_with_facts(
+            "Bonus de estorno",
+            Some(Decimal::new(-100, 2)),
+            None,
+            None,
+            false,
+            &compiled,
+        );
+
+        assert_eq!(result.amount_sign, Some(AmountSign::Positive));
     }
 }

@@ -3,7 +3,7 @@ use crate::legacy::{load_account_registry, AccountRegistryEntry};
 use crate::models::{
     json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
 };
-use crate::rules::{apply_rules, CompiledRule};
+use crate::rules::{apply_rules_with_facts, AmountSign, CompiledRule};
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use reqwest::Client;
@@ -169,6 +169,58 @@ fn binding_item_id<'a>(
         .pluggy_item_id
         .as_deref()
         .or_else(|| registry.and_then(|entry| entry.pluggy_item_id.as_deref()))
+}
+
+/// Returns the single `pluggyItemId` for a binding, validating that
+/// any values present in config and accounts.csv agree. If they disagree,
+/// we fail explicitly instead of silently preferring one source — rebinding
+/// to the wrong item would import another account's data.
+pub(crate) fn resolve_binding_item_id<'a>(
+    binding: &'a PluggyBindingConfig,
+    registry: Option<&'a AccountRegistryEntry>,
+) -> Result<Option<&'a str>> {
+    let config_value = binding
+        .pluggy_item_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let registry_value = registry
+        .and_then(|entry| entry.pluggy_item_id.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (config_value, registry_value) {
+        (Some(a), Some(b)) if a != b => Err(anyhow::anyhow!(
+            "Binding {}: pluggyItemId diverge entre pluggy-config ({}) e contas.csv ({})",
+            binding.id,
+            a,
+            b
+        )),
+        (Some(v), _) | (_, Some(v)) => Ok(Some(v)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Emitted when `resolve_account_payload` had to fall back from
+/// the configured `pluggyAccountId` to a rebound one (via `itemId`).
+#[derive(Debug, Clone)]
+pub struct RebindEvent {
+    pub binding_id: String,
+    pub internal_account_id: String,
+    pub from_pluggy_account_id: String,
+    pub to_pluggy_account_id: String,
+    pub pluggy_item_id: Option<String>,
+}
+
+pub struct SyncPluggyParams<'a> {
+    pub actor_id: &'a str,
+    pub pluggy_config_path: &'a Path,
+    pub accounts_csv_path: Option<&'a Path>,
+    pub fixture_path: Option<&'a Path>,
+    pub from_override: Option<&'a str>,
+    pub to_date: &'a str,
+    pub rules: &'a [CompiledRule],
+    pub internal_categories: &'a BTreeSet<String>,
+    pub api_base_url: Option<&'a str>,
 }
 
 fn score_account_candidate(
@@ -353,12 +405,17 @@ fn build_transaction_record(
         .as_deref()
         .filter(|value| !value.trim().is_empty());
     let category_key = category_name.map(|value| category_id(value, None));
-    let (category_id, category_source) = apply_rules(
+    let rule_application = apply_rules_with_facts(
         &payload.description,
+        Some(payload.amount),
+        Some(payload.id.as_str()),
         category_key,
         payload.category.is_some(),
         rules,
     );
+    let category_id = rule_application.category_id;
+    let category_source = rule_application.category_source;
+    let context = rule_application.context;
     let transaction_date = parse_date(&payload.date)?;
 
     let tx_type = payload
@@ -383,12 +440,23 @@ fn build_transaction_record(
     let is_genuine_credit = category_id
         .as_deref()
         .is_some_and(|c| matches!(c, "cashback" | "refund") || internal_categories.contains(c));
-    let (amount, tx_type) =
+    let (mut amount, mut tx_type) =
         if is_credit_account && payload.amount.is_sign_positive() && !is_genuine_credit {
             (-payload.amount, "debit".to_string())
         } else {
             (payload.amount, tx_type)
         };
+    match rule_application.amount_sign {
+        Some(AmountSign::Positive) => {
+            amount = amount.abs();
+            tx_type = "credit".to_string();
+        }
+        Some(AmountSign::Negative) => {
+            amount = -amount.abs();
+            tx_type = "debit".to_string();
+        }
+        None => {}
+    }
 
     let created_at = parse_datetime_or_now(payload.created_at.as_deref());
     let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
@@ -403,7 +471,7 @@ fn build_transaction_record(
         tx_type,
         category_id,
         category_source,
-        context: None,
+        context,
         payment_status: payload
             .status
             .clone()
@@ -422,12 +490,12 @@ fn build_transaction_record(
     })
 }
 
-async fn authenticate(client: &Client) -> Result<String> {
+async fn authenticate(client: &Client, base_url: &str) -> Result<String> {
     let client_id = std::env::var("PLUGGY_CLIENT_ID").context("PLUGGY_CLIENT_ID ausente")?;
     let client_secret =
         std::env::var("PLUGGY_CLIENT_SECRET").context("PLUGGY_CLIENT_SECRET ausente")?;
     let response = client
-        .post(format!("{PLUGGY_API}/auth"))
+        .post(format!("{base_url}/auth"))
         .json(&json!({
             "clientId": client_id,
             "clientSecret": client_secret,
@@ -453,9 +521,10 @@ async fn fetch_account_details(
     client: &Client,
     api_key: &str,
     account_id: &str,
+    base_url: &str,
 ) -> Result<Option<PluggyAccountPayload>> {
     let response = client
-        .get(format!("{PLUGGY_API}/accounts/{account_id}"))
+        .get(format!("{base_url}/accounts/{account_id}"))
         .header("X-API-KEY", api_key)
         .send()
         .await
@@ -480,6 +549,7 @@ async fn fetch_accounts_by_item(
     client: &Client,
     api_key: &str,
     item_id: &str,
+    base_url: &str,
 ) -> Result<Vec<PluggyAccountPayload>> {
     let mut page = 1;
     let mut total_pages = 1;
@@ -487,7 +557,7 @@ async fn fetch_accounts_by_item(
 
     while page <= total_pages {
         let response = client
-            .get(format!("{PLUGGY_API}/accounts"))
+            .get(format!("{base_url}/accounts"))
             .query(&[
                 ("itemId", item_id),
                 ("pageSize", "500"),
@@ -520,20 +590,21 @@ async fn resolve_account_payload(
     api_key: &str,
     binding: &PluggyBindingConfig,
     registry: Option<&AccountRegistryEntry>,
+    base_url: &str,
 ) -> Result<PluggyAccountPayload> {
     if let Some(account) =
-        fetch_account_details(client, api_key, &binding.pluggy_account_id).await?
+        fetch_account_details(client, api_key, &binding.pluggy_account_id, base_url).await?
     {
         return Ok(account);
     }
 
-    let item_id = binding_item_id(binding, registry).with_context(|| {
+    let item_id = resolve_binding_item_id(binding, registry)?.with_context(|| {
         format!(
             "Conta Pluggy {} retornou 404 e binding {} não possui pluggyItemId",
             binding.pluggy_account_id, binding.id
         )
     })?;
-    let candidates = fetch_accounts_by_item(client, api_key, item_id).await?;
+    let candidates = fetch_accounts_by_item(client, api_key, item_id, base_url).await?;
     select_account_candidate(candidates, binding, registry)
 }
 
@@ -543,6 +614,7 @@ async fn fetch_transactions(
     account_id: &str,
     from: &str,
     to: &str,
+    base_url: &str,
 ) -> Result<Vec<PluggyTransactionPayload>> {
     let mut page = 1;
     let mut total_pages = 1;
@@ -550,7 +622,7 @@ async fn fetch_transactions(
 
     while page <= total_pages {
         let response = client
-            .get(format!("{PLUGGY_API}/transactions"))
+            .get(format!("{base_url}/transactions"))
             .query(&[
                 ("accountId", account_id),
                 ("from", from),
@@ -581,15 +653,21 @@ async fn fetch_transactions(
 }
 
 pub async fn sync_pluggy(
-    actor_id: &str,
-    pluggy_config_path: &Path,
-    accounts_csv_path: Option<&Path>,
-    fixture_path: Option<&Path>,
-    from_override: Option<&str>,
-    to_date: &str,
-    rules: &[CompiledRule],
-    internal_categories: &BTreeSet<String>,
-) -> Result<(Vec<AccountRecord>, Vec<TransactionRecord>)> {
+    params: SyncPluggyParams<'_>,
+) -> Result<(Vec<AccountRecord>, Vec<TransactionRecord>, Vec<RebindEvent>)> {
+    let SyncPluggyParams {
+        actor_id,
+        pluggy_config_path,
+        accounts_csv_path,
+        fixture_path,
+        from_override,
+        to_date,
+        rules,
+        internal_categories,
+        api_base_url,
+    } = params;
+    let base_url = api_base_url.unwrap_or(PLUGGY_API);
+
     let registry = accounts_csv_path
         .filter(|path| path.exists())
         .map(load_account_registry)
@@ -617,17 +695,22 @@ pub async fn sync_pluggy(
             .collect::<BTreeMap<_, _>>();
         let mut accounts = Vec::new();
         let mut transactions = Vec::new();
+        let mut rebind_events = Vec::new();
         let mut resolved_accounts =
             BTreeMap::<String, (PluggyBindingConfig, Option<AccountRegistryEntry>)>::new();
+        let mut resolved_binding_ids = BTreeMap::<String, String>::new();
         for binding in &config.accounts {
             let registry_entry = registry
                 .get(&binding.id)
                 .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)));
+            // Validate pluggyItemId cross-source consistency upfront.
+            let resolved_item_id =
+                resolve_binding_item_id(binding, registry_entry)?.map(str::to_string);
             let payload = account_map
                 .get(&binding.pluggy_account_id)
                 .cloned()
                 .or_else(|| {
-                    let item_id = binding_item_id(binding, registry_entry)?;
+                    let item_id = resolved_item_id.as_deref()?;
                     let candidates = fixture_accounts
                         .iter()
                         .filter(|row| row.item_id.as_deref() == Some(item_id))
@@ -638,10 +721,29 @@ pub async fn sync_pluggy(
                 .with_context(|| {
                     format!(
                         "Fixture não contém conta Pluggy {} nem candidatos para itemId {:?}",
-                        binding.pluggy_account_id,
-                        binding_item_id(binding, registry_entry)
+                        binding.pluggy_account_id, resolved_item_id
                     )
                 })?;
+            // Detect binding collisions onto the same resolved pluggyAccountId.
+            if let Some(prev_binding_id) =
+                resolved_binding_ids.insert(payload.id.clone(), binding.id.clone())
+            {
+                return Err(anyhow::anyhow!(
+                    "Colisão de bindings Pluggy: {} e {} resolvem para a mesma conta {}",
+                    prev_binding_id,
+                    binding.id,
+                    payload.id
+                ));
+            }
+            if payload.id != binding.pluggy_account_id {
+                rebind_events.push(RebindEvent {
+                    binding_id: binding.id.clone(),
+                    internal_account_id: binding.id.clone(),
+                    from_pluggy_account_id: binding.pluggy_account_id.clone(),
+                    to_pluggy_account_id: payload.id.clone(),
+                    pluggy_item_id: resolved_item_id.clone(),
+                });
+            }
             resolved_accounts.insert(
                 payload.id.clone(),
                 (binding.clone(), registry_entry.cloned()),
@@ -671,7 +773,7 @@ pub async fn sync_pluggy(
                 internal_categories,
             )?);
         }
-        return Ok((accounts, transactions));
+        return Ok((accounts, transactions, rebind_events));
     }
 
     let client = Client::builder()
@@ -679,16 +781,64 @@ pub async fn sync_pluggy(
         .connect_timeout(Duration::from_secs(10))
         .build()
         .context("Falha ao construir cliente HTTP do Pluggy")?;
-    let api_key = authenticate(&client).await?;
-    let mut accounts = Vec::new();
-    let mut transactions = Vec::new();
-    let mut tasks = JoinSet::new();
+    let api_key = authenticate(&client, base_url).await?;
 
+    // Phase 1: resolve every binding to a Pluggy account payload upfront.
+    // We do this serially before fetching transactions so we can detect
+    // collisions (two bindings resolving to the same pluggyAccountId) and
+    // validate cross-source itemId consistency before touching any data.
+    let mut resolved: Vec<(
+        PluggyBindingConfig,
+        Option<AccountRegistryEntry>,
+        PluggyAccountPayload,
+    )> = Vec::with_capacity(config.accounts.len());
+    let mut rebind_events: Vec<RebindEvent> = Vec::new();
     for binding in config.accounts.clone() {
         let registry_entry = registry
             .get(&binding.id)
             .or_else(|| registry.get(&format!("pluggy:{}", binding.pluggy_account_id)))
             .cloned();
+        // Ensure config and CSV agree on pluggyItemId before any HTTP call.
+        let item_id_for_audit =
+            resolve_binding_item_id(&binding, registry_entry.as_ref())?.map(str::to_string);
+        let payload = resolve_account_payload(
+            &client,
+            &api_key,
+            &binding,
+            registry_entry.as_ref(),
+            base_url,
+        )
+        .await?;
+        if payload.id != binding.pluggy_account_id {
+            rebind_events.push(RebindEvent {
+                binding_id: binding.id.clone(),
+                internal_account_id: binding.id.clone(),
+                from_pluggy_account_id: binding.pluggy_account_id.clone(),
+                to_pluggy_account_id: payload.id.clone(),
+                pluggy_item_id: item_id_for_audit,
+            });
+        }
+        resolved.push((binding, registry_entry, payload));
+    }
+
+    // Detect two bindings resolving onto the same pluggyAccountId.
+    let mut seen = BTreeMap::<String, String>::new();
+    for (binding, _, payload) in &resolved {
+        if let Some(prev_binding_id) = seen.insert(payload.id.clone(), binding.id.clone()) {
+            return Err(anyhow::anyhow!(
+                "Colisão de bindings Pluggy: {} e {} resolvem para a mesma conta {}",
+                prev_binding_id,
+                binding.id,
+                payload.id
+            ));
+        }
+    }
+
+    // Phase 2: fetch transactions in parallel once bindings are validated.
+    let mut accounts = Vec::new();
+    let mut transactions = Vec::new();
+    let mut tasks = JoinSet::new();
+    for (binding, registry_entry, payload) in resolved {
         let client = client.clone();
         let api_key = api_key.clone();
         let from = from.clone();
@@ -696,15 +846,20 @@ pub async fn sync_pluggy(
         let actor_id = actor_id.to_string();
         let rules = rules.to_vec();
         let internal_categories = internal_categories.clone();
+        let base_url = base_url.to_string();
         tasks.spawn(async move {
-            let account =
-                resolve_account_payload(&client, &api_key, &binding, registry_entry.as_ref())
-                    .await?;
-            let resolved_account_id = account.id.clone();
+            let resolved_account_id = payload.id.clone();
             let account_record =
-                build_account_record(account, &binding, registry_entry.as_ref(), &actor_id);
-            let account_transactions =
-                fetch_transactions(&client, &api_key, &resolved_account_id, &from, &to).await?;
+                build_account_record(payload, &binding, registry_entry.as_ref(), &actor_id);
+            let account_transactions = fetch_transactions(
+                &client,
+                &api_key,
+                &resolved_account_id,
+                &from,
+                &to,
+                &base_url,
+            )
+            .await?;
             let transaction_records = account_transactions
                 .into_iter()
                 .map(|payload| {
@@ -729,5 +884,235 @@ pub async fn sync_pluggy(
         transactions.append(&mut account_transactions);
     }
 
-    Ok((accounts, transactions))
+    Ok((accounts, transactions, rebind_events))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn binding(id: &str, acc: &str, item: Option<&str>) -> PluggyBindingConfig {
+        PluggyBindingConfig {
+            id: id.to_string(),
+            pluggy_account_id: acc.to_string(),
+            pluggy_item_id: item.map(str::to_string),
+        }
+    }
+
+    fn registry_entry(item: Option<&str>) -> AccountRegistryEntry {
+        AccountRegistryEntry {
+            account_id: "acc".to_string(),
+            owner: "o".to_string(),
+            account_type: "checking".to_string(),
+            bank: "b".to_string(),
+            label: "l".to_string(),
+            pluggy_account_id: None,
+            pluggy_item_id: item.map(str::to_string),
+            metadata_json: json!({}),
+        }
+    }
+
+    fn credit_registry_entry(item: Option<&str>) -> AccountRegistryEntry {
+        AccountRegistryEntry {
+            account_type: "credit".to_string(),
+            ..registry_entry(item)
+        }
+    }
+
+    #[test]
+    fn resolve_binding_item_id_accepts_matching_sources() {
+        let b = binding("a", "pa", Some("item-1"));
+        let r = registry_entry(Some("item-1"));
+        assert_eq!(
+            resolve_binding_item_id(&b, Some(&r)).unwrap(),
+            Some("item-1")
+        );
+    }
+
+    #[test]
+    fn resolve_binding_item_id_prefers_config_only() {
+        let b = binding("a", "pa", Some("item-1"));
+        let r = registry_entry(None);
+        assert_eq!(
+            resolve_binding_item_id(&b, Some(&r)).unwrap(),
+            Some("item-1")
+        );
+    }
+
+    #[test]
+    fn resolve_binding_item_id_accepts_registry_only() {
+        let b = binding("a", "pa", None);
+        let r = registry_entry(Some("item-9"));
+        assert_eq!(
+            resolve_binding_item_id(&b, Some(&r)).unwrap(),
+            Some("item-9")
+        );
+    }
+
+    #[test]
+    fn resolve_binding_item_id_rejects_divergent_sources() {
+        let b = binding("a", "pa", Some("item-1"));
+        let r = registry_entry(Some("item-2"));
+        let err = resolve_binding_item_id(&b, Some(&r)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("diverge"),
+            "expected divergence error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_binding_item_id_returns_none_when_absent() {
+        let b = binding("a", "pa", None);
+        let r = registry_entry(None);
+        assert_eq!(resolve_binding_item_id(&b, Some(&r)).unwrap(), None);
+        assert_eq!(resolve_binding_item_id(&b, None).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn http_rebind_via_item_id_on_404() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Safety: test-only env vars; this test is not parallel-hostile
+        // because the values are only consumed inside authenticate().
+        unsafe {
+            std::env::set_var("PLUGGY_CLIENT_ID", "test-id");
+            std::env::set_var("PLUGGY_CLIENT_SECRET", "test-secret");
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/auth"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiKey": "test-key"})))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/old-acct"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts"))
+            .and(query_param("itemId", "item-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "new-acct",
+                    "itemId": "item-1",
+                    "name": "Primary Checking",
+                    "type": "checking",
+                    "status": "ACTIVE"
+                }],
+                "totalPages": 1
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "tx-001",
+                    "accountId": "new-acct",
+                    "date": "2026-04-01",
+                    "description": "Test transaction",
+                    "amount": -100.00,
+                    "status": "POSTED",
+                    "createdAt": "2026-04-01T12:00:00.000Z",
+                    "updatedAt": "2026-04-01T12:00:00.000Z"
+                }],
+                "totalPages": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let config_path = temp.path().join("pluggy-config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string(&json!({
+                "syncStartDate": "2026-03-01",
+                "accounts": [{
+                    "id": "primary_checking",
+                    "pluggyAccountId": "old-acct",
+                    "pluggyItemId": "item-1"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let params = SyncPluggyParams {
+            actor_id: "test-actor",
+            pluggy_config_path: &config_path,
+            accounts_csv_path: None,
+            fixture_path: None,
+            from_override: Some("2026-03-01"),
+            to_date: "2026-04-15",
+            rules: &[],
+            internal_categories: &BTreeSet::new(),
+            api_base_url: Some(&server.uri()),
+        };
+
+        let (accounts, transactions, rebinds) = sync_pluggy(params).await.unwrap();
+
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].pluggy_account_id, Some("new-acct".to_string()));
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].transaction_id, "tx-001");
+        assert_eq!(rebinds.len(), 1);
+        assert_eq!(rebinds[0].from_pluggy_account_id, "old-acct");
+        assert_eq!(rebinds[0].to_pluggy_account_id, "new-acct");
+    }
+
+    #[test]
+    fn rule_can_force_positive_amount_sign() {
+        let binding = binding("card_acc", "pluggy-card-1", None);
+        let registry = credit_registry_entry(None);
+        let payload = PluggyTransactionPayload {
+            id: "tx-iof-001".to_string(),
+            account_id: "pluggy-card-1".to_string(),
+            date: "2026-05-07".to_string(),
+            description: "IOF de volta de assinatura".to_string(),
+            amount: Decimal::new(-72, 2),
+            tx_type: Some("debit".to_string()),
+            status: Some("pending".to_string()),
+            category: Some("shopping".to_string()),
+            created_at: Some("2026-05-07T10:00:00.000Z".to_string()),
+            updated_at: Some("2026-05-07T10:00:00.000Z".to_string()),
+            extra: json!({}),
+        };
+        let now = chrono::Utc::now();
+        let rules = vec![crate::models::RuleRecord {
+            rule_id: "iof_cashback".to_string(),
+            body: r#"{"match_type":"descricao_contains","match_value":"iof de volta","categoria":"Receitas","subcategoria":"Cashback / Beneficios","amount_sign":"positive"}"#.to_string(),
+            status: "active".to_string(),
+            actor_id: "test-actor".to_string(),
+            idempotency_key: "rule:iof-cashback".to_string(),
+            created_at: now,
+            updated_at: now,
+        }];
+        let compiled = crate::rules::compile_rules(&rules).unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &compiled,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.amount, Decimal::new(72, 2));
+        assert_eq!(tx.tx_type, "credit");
+        assert_eq!(
+            tx.category_id.as_deref(),
+            Some("receitas:cashback-beneficios")
+        );
+    }
 }

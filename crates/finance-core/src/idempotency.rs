@@ -1,7 +1,9 @@
 use crate::models::{AccountRecord, ForecastRecord, RuleRecord, TransactionRecord};
+use crate::split_payload::decimal_to_cents_exact;
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use deunicode::deunicode;
+use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -30,6 +32,76 @@ pub fn hash_key(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     hex::encode(hasher.finalize())
+}
+
+fn optional_str_part(value: Option<&str>) -> &str {
+    value.unwrap_or("")
+}
+
+fn decimal_cents_part(value: Decimal, field_name: &str) -> Result<String> {
+    Ok(decimal_to_cents_exact(value, field_name)?.to_string())
+}
+
+fn optional_decimal_part(value: Option<Decimal>) -> String {
+    match value {
+        Some(amount) => amount.normalize().to_string(),
+        None => String::new(),
+    }
+}
+
+pub fn split_line_hash(
+    transaction_id: &str,
+    line_index: i64,
+    line_id: Option<&str>,
+    description: Option<&str>,
+    amount: Decimal,
+) -> Result<String> {
+    let amount_cents = decimal_cents_part(amount, "amount da linha de split")?;
+    let parts = [
+        transaction_id.to_string(),
+        line_index.to_string(),
+        optional_str_part(line_id).to_string(),
+        slugify(optional_str_part(description)),
+        amount_cents,
+    ];
+    let part_refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    Ok(hash_key(&part_refs))
+}
+
+pub fn split_line_idempotency(transaction_id: &str, line_hash: &str) -> String {
+    format!("split-line:{transaction_id}:{}", &line_hash[..16])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn split_item_hash(
+    transaction_id: &str,
+    line_index: i64,
+    item_index: i64,
+    item_code: Option<&str>,
+    description: Option<&str>,
+    quantity: Option<Decimal>,
+    unit_price: Option<Decimal>,
+    amount: Option<Decimal>,
+) -> Result<String> {
+    let quantity_raw = optional_decimal_part(quantity);
+    let unit_price_raw = optional_decimal_part(unit_price);
+    let item_amount_raw = optional_decimal_part(amount);
+    let parts = [
+        transaction_id.to_string(),
+        line_index.to_string(),
+        item_index.to_string(),
+        optional_str_part(item_code).to_string(),
+        slugify(optional_str_part(description)),
+        quantity_raw,
+        unit_price_raw,
+        item_amount_raw,
+    ];
+    let part_refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    Ok(hash_key(&part_refs))
+}
+
+pub fn split_item_idempotency(transaction_id: &str, item_hash: &str) -> String {
+    format!("split-item:{transaction_id}:{}", &item_hash[..16])
 }
 
 pub fn pluggy_transaction_idempotency(transaction_id: &str) -> String {
@@ -126,5 +198,80 @@ mod tests {
             "saude:consulta-medica".to_string()
         );
         assert_eq!(category_id("Moradia", None), "moradia".to_string());
+    }
+
+    #[test]
+    fn split_line_hash_is_deterministic() {
+        let hash_a = split_line_hash(
+            "tx-123",
+            0,
+            Some("line-a"),
+            Some("Combustível"),
+            Decimal::new(1300, 2),
+        )
+        .unwrap();
+        let hash_b = split_line_hash(
+            "tx-123",
+            0,
+            Some("line-a"),
+            Some("Combustível"),
+            Decimal::new(1300, 2),
+        )
+        .unwrap();
+        assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn split_line_hash_changes_when_line_changes() {
+        let hash_a = split_line_hash(
+            "tx-123",
+            0,
+            Some("line-a"),
+            Some("Combustível"),
+            Decimal::new(1300, 2),
+        )
+        .unwrap();
+        let hash_b = split_line_hash(
+            "tx-123",
+            1,
+            Some("line-b"),
+            Some("Lavagem"),
+            Decimal::new(1300, 2),
+        )
+        .unwrap();
+        assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn split_line_hash_rejects_fraction_of_cent() {
+        let err = split_line_hash("tx-123", 0, None, None, Decimal::new(1001, 3)).unwrap_err();
+        assert!(err.to_string().contains("2 casas decimais"));
+    }
+
+    #[test]
+    fn split_item_hash_is_deterministic() {
+        let hash_a = split_item_hash(
+            "tx-123",
+            0,
+            0,
+            Some("sku-1"),
+            Some("Gasolina"),
+            Some(Decimal::new(401, 1)),
+            Some(Decimal::new(300, 2)),
+            Some(Decimal::new(12030, 2)),
+        )
+        .unwrap();
+        let hash_b = split_item_hash(
+            "tx-123",
+            0,
+            0,
+            Some("sku-1"),
+            Some("Gasolina"),
+            Some(Decimal::new(401, 1)),
+            Some(Decimal::new(300, 2)),
+            Some(Decimal::new(12030, 2)),
+        )
+        .unwrap();
+        assert_eq!(hash_a, hash_b);
     }
 }
