@@ -28,6 +28,15 @@ cargo test --workspace
    ```
 4. Open a pull request against `main`
 
+## Commit Messages
+
+Use Conventional Commits so Release Please can infer the next version and changelog:
+
+- `feat:` for new functionality
+- `fix:` for bug fixes
+- `docs:`, `test:`, `chore:`, and `refactor:` for supporting changes
+- Add `!` after the type or a `BREAKING CHANGE:` footer for breaking changes
+
 ## Code Conventions
 
 - Use `anyhow::Result` with `.context()` for error propagation — no `.unwrap()` in production code

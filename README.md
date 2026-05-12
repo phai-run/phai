@@ -198,6 +198,14 @@ cargo test --workspace
 
 E2E tests run against SQLite using temporary directories. No external services required.
 
+## Release Process
+
+Releases are managed by Release Please on pushes to `main`.
+
+- Use Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`).
+- Use `!` or a `BREAKING CHANGE:` footer for breaking changes.
+- Release Please opens a release PR that updates `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and tags the release after merge.
+
 ## Contributing
 
 Contributions are welcome. Please open an issue before submitting large changes so we can discuss the approach. For bug fixes and small improvements, a pull request is sufficient.

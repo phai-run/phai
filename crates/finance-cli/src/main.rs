@@ -811,7 +811,7 @@ fn category_family(category_id: Option<&str>) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    let normalized = raw.replace(':', " ").replace('-', " ").replace('>', " ");
+    let normalized = raw.replace([':', '-', '>'], " ");
     normalized
         .split_whitespace()
         .next()
@@ -1884,7 +1884,7 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
     let mut month_rows = BTreeMap::<String, Vec<CardClosedTransactionRow>>::new();
     month_rows.insert(target_month.clone(), target_rows.clone());
     for delta in 1..=2 {
-        let month = month_ref_for(shift_month(target_month_date, -(delta as i32))?);
+        let month = month_ref_for(shift_month(target_month_date, -delta)?);
         let rows = store.card_closed_transactions(Some(&month)).await?;
         month_rows.insert(month, rows);
     }

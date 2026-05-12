@@ -745,11 +745,11 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     assert!(json_output.status.success());
     let payload: Value = serde_json::from_slice(&json_output.stdout).expect("valid json payload");
     assert_eq!(payload["monthRef"], "2026-03");
-    assert!(payload["accounts"].as_array().unwrap().len() >= 1);
-    assert!(payload["categories"].as_array().unwrap().len() >= 1);
-    assert!(payload["recurring"].as_array().unwrap().len() >= 1);
-    assert!(payload["subscriptions"].as_array().unwrap().len() >= 1);
-    assert!(payload["installments"].as_array().unwrap().len() >= 1);
+    assert!(!payload["accounts"].as_array().unwrap().is_empty());
+    assert!(!payload["categories"].as_array().unwrap().is_empty());
+    assert!(!payload["recurring"].as_array().unwrap().is_empty());
+    assert!(!payload["subscriptions"].as_array().unwrap().is_empty());
+    assert!(!payload["installments"].as_array().unwrap().is_empty());
 }
 
 #[test]
