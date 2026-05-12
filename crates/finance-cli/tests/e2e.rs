@@ -107,7 +107,7 @@ fn milestone_zero_local_sync_and_report() {
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
-            .arg("31"),
+            .arg("120"),
         &config_dir,
         &data_dir,
     )
@@ -115,6 +115,66 @@ fn milestone_zero_local_sync_and_report() {
     .success()
     .stdout(predicate::str::contains("Supermercado Angeloni"))
     .stdout(predicate::str::contains("Pagamento recebido"));
+}
+
+#[test]
+fn split_commands_are_bigquery_only_on_local_backend() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    let unsupported = "transaction split/detailing is supported only on the BigQuery backend";
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    for args in [
+        vec![
+            "tx",
+            "split",
+            "preview",
+            "--transaction-id",
+            "tx-1",
+            "--payload",
+            "missing.json",
+        ],
+        vec![
+            "tx",
+            "split",
+            "apply",
+            "--transaction-id",
+            "tx-1",
+            "--payload",
+            "missing.json",
+        ],
+        vec!["tx", "split", "show", "--transaction-id", "tx-1"],
+        vec![
+            "tx",
+            "split",
+            "clear",
+            "--transaction-id",
+            "tx-1",
+            "--reason",
+            "test",
+        ],
+        vec!["report", "split-candidates", "--json"],
+        vec!["report", "item-prices", "--query", "leite", "--json"],
+    ] {
+        envs(cargo_bin().args(args), &config_dir, &data_dir)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(unsupported));
+    }
 }
 
 #[test]
@@ -382,9 +442,9 @@ fn mutating_commands_feed_reporting_views() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("alimentacao-mercado"))
-    .stdout(predicate::str::contains("saude:exames"))
-    .stdout(predicate::str::contains("gas-stations"))
+    .stdout(predicate::str::contains("alimentacao mercado"))
+    .stdout(predicate::str::contains("saude > exames"))
+    .stdout(predicate::str::contains("gas stations"))
     .stdout(predicate::str::contains("financeiro-pagamento-recebido").not());
 
     envs(
@@ -448,7 +508,7 @@ fn mutating_commands_feed_reporting_views() {
             .arg("report")
             .arg("data-health")
             .arg("--days")
-            .arg("31")
+            .arg("120")
             .arg("--json"),
         &config_dir,
         &data_dir,
@@ -561,6 +621,135 @@ fn mutating_commands_feed_reporting_views() {
         cc_credit_val > 0.0,
         "credit-card credit must stay positive, got {cc_credit_amount}"
     );
+}
+
+#[test]
+fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_installments() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let manual_rows = [
+        (
+            "cc-rec-2026-01",
+            "2026-01-18",
+            "Academia Fit",
+            "-180.00",
+            Some(("Saude", "Academia")),
+        ),
+        (
+            "cc-rec-2026-02",
+            "2026-02-18",
+            "Academia Fit",
+            "-180.00",
+            Some(("Saude", "Academia")),
+        ),
+        (
+            "cc-rec-2026-03",
+            "2026-03-18",
+            "Academia Fit",
+            "-180.00",
+            Some(("Saude", "Academia")),
+        ),
+        (
+            "cc-sub-2026-03",
+            "2026-03-21",
+            "Assinatura Cloud Backup",
+            "-49.90",
+            Some(("Assinaturas", "Cloud")),
+        ),
+        (
+            "cc-inst-2026-03",
+            "2026-03-22",
+            "Notebook Pro 03/10",
+            "-450.00",
+            Some(("Tecnologia", "Eletronicos")),
+        ),
+    ];
+
+    for (tx_id, date, description, amount, category) in manual_rows {
+        let mut cmd = cargo_bin();
+        cmd.arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg(tx_id)
+            .arg("--account-id")
+            .arg("shared_credit")
+            .arg("--date")
+            .arg(date)
+            .arg("--description")
+            .arg(description)
+            .arg(format!("--amount={amount}"))
+            .arg("--payment-status")
+            .arg("posted");
+        if let Some((cat, sub)) = category {
+            cmd.arg("--category").arg(cat).arg("--subcategory").arg(sub);
+        }
+        envs(&mut cmd, &config_dir, &data_dir).assert().success();
+    }
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("card-closed-insights")
+            .arg("--month")
+            .arg("2026-03"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Card closed insights 2026-03"))
+    .stdout(predicate::str::contains("Recorrentes:"))
+    .stdout(predicate::str::contains("Assinaturas:"))
+    .stdout(predicate::str::contains("Parcelados:"))
+    .stdout(predicate::str::contains("academia fit"))
+    .stdout(predicate::str::contains("03/10"));
+
+    let json_output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("card-closed-insights")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("card-closed-insights json output");
+    assert!(json_output.status.success());
+    let payload: Value = serde_json::from_slice(&json_output.stdout).expect("valid json payload");
+    assert_eq!(payload["monthRef"], "2026-03");
+    assert!(payload["accounts"].as_array().unwrap().len() >= 1);
+    assert!(payload["categories"].as_array().unwrap().len() >= 1);
+    assert!(payload["recurring"].as_array().unwrap().len() >= 1);
+    assert!(payload["subscriptions"].as_array().unwrap().len() >= 1);
+    assert!(payload["installments"].as_array().unwrap().len() >= 1);
 }
 
 #[test]
@@ -784,6 +973,265 @@ fn sync_json_summary_includes_pending_metadata_fields() {
         pending["metadataJson"]["pluggy_account_id"],
         "fixture-checking"
     );
+}
+
+#[test]
+fn sync_notify_summary_outputs_human_readable_message() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" },
+    { "id": "shared_credit", "pluggyAccountId": "fixture-credit" }
+  ]
+}"#,
+    );
+
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\nshared_credit,secondary,credit,fintech,Shared Credit Card,fixture-credit,item-2,3,10\n",
+    );
+
+    let fixture_path = repo_root().join("examples/pluggy_fixture.json");
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture_path)
+            .arg("--to")
+            .arg("2026-03-31")
+            .arg("--notify-summary"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Novas transações detectadas (4):"))
+    .stdout(predicate::str::contains("🍽️ Supermercado Angeloni"))
+    .stdout(predicate::str::contains("🍽️ alimentacao mercado (pluggy)"))
+    .stdout(predicate::str::contains("Pendências de contexto (0):"))
+    .stdout(predicate::str::contains("Fonte: local | cli: finance"));
+}
+
+#[test]
+fn sync_rejects_multiple_summary_output_modes() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--json-summary")
+            .arg("--notify-summary"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(
+        "Use apenas uma saída de resumo: --json-summary ou --notify-summary",
+    ));
+}
+
+#[test]
+fn sync_json_summary_survives_missing_effective_view() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" },
+    { "id": "shared_credit", "pluggyAccountId": "fixture-credit" }
+  ]
+}"#,
+    );
+
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\nshared_credit,secondary,credit,fintech,Shared Credit Card,fixture-credit,item-2,3,10\n",
+    );
+
+    let db_path = data_dir.join("finance-os.local.db");
+    {
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute("DROP VIEW v_transactions_effective", [])
+            .expect("drop effective view");
+    }
+
+    let fixture_path = temp.path().join("pluggy_fixture_uncategorized.json");
+    write_file(
+        &fixture_path,
+        r#"{
+  "accounts": [
+    {
+      "id": "fixture-checking",
+      "itemId": "item-1",
+      "name": "Primary Checking",
+      "type": "checking",
+      "status": "ACTIVE",
+      "updatedAt": "2026-03-15T12:00:00.000Z"
+    },
+    {
+      "id": "fixture-credit",
+      "itemId": "item-2",
+      "name": "Shared Credit Card",
+      "type": "credit",
+      "status": "ACTIVE",
+      "updatedAt": "2026-03-15T12:00:00.000Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "uncat-fixture-001",
+      "accountId": "fixture-checking",
+      "date": "2026-03-16",
+      "description": "Compra sem categoria",
+      "amount": -19.90,
+      "type": "debit",
+      "status": "POSTED",
+      "createdAt": "2026-03-16T12:00:00.000Z",
+      "updatedAt": "2026-03-16T12:00:00.000Z"
+    },
+    {
+      "id": "pluggy-fixture-aux-002",
+      "accountId": "fixture-credit",
+      "date": "2026-03-16",
+      "description": "Compra categorizada",
+      "amount": -11.50,
+      "type": "debit",
+      "status": "POSTED",
+      "category": "alimentacao:restaurantes",
+      "createdAt": "2026-03-16T12:00:00.000Z",
+      "updatedAt": "2026-03-16T12:00:00.000Z"
+    }
+  ]
+}"#,
+    );
+    let output = envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture_path)
+            .arg("--to")
+            .arg("2026-03-31")
+            .arg("--json-summary"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("partial sync output");
+    assert!(output.status.success());
+
+    let summary: Value = serde_json::from_slice(&output.stdout).expect("partial summary json");
+    assert_eq!(summary["summaryStatus"], "partial");
+    assert_eq!(summary["newTransactionsCount"], 2);
+    assert_eq!(summary["needsContextCount"], 1);
+    assert_eq!(summary["needsContextReturnedCount"], 1);
+    let pending = summary["needsContext"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("pending row");
+    assert_eq!(pending["transactionId"], "uncat-fixture-001");
+    assert_eq!(pending["description"], "Compra sem categoria");
+    let warnings = summary["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("needs_context_fallback_sync_only"),
+        "warning should explain degraded summary: {warnings:?}"
+    );
+
+    let conn = Connection::open(&db_path).expect("reopen db");
+    let tx_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
+        .expect("count transactions");
+    assert_eq!(tx_count, 2);
 }
 
 #[test]
@@ -1123,7 +1571,7 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
-            .arg("31"),
+            .arg("120"),
         &config_dir,
         &data_dir,
     )

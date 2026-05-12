@@ -16,9 +16,9 @@ Usage:
 Example:
   scripts/setup-private-links.sh \
     --configs-root "$HOME/finance-os-configs" \
-    --runtime felipe-mac \
-    --pluggy-config "$HOME/ford/finance/pluggy-config.json" \
-    --accounts-csv "$HOME/ford/finance/data/contas.csv"
+    --runtime personal-runtime \
+    --pluggy-config "$HOME/private-finance/pluggy-config.json" \
+    --accounts-csv "$HOME/private-finance/data/contas.csv"
 EOF
 }
 

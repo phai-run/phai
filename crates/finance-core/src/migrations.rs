@@ -4,7 +4,7 @@ use anyhow::Result;
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 11] = [
+const SQLITE_MIGRATIONS: [Migration; 13] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -49,9 +49,17 @@ const SQLITE_MIGRATIONS: [Migration; 11] = [
         "011_reclassify_internal_transfers",
         include_str!("../../../schema/sqlite/011_reclassify_internal_transfers.sql"),
     ),
+    (
+        "012_effective_transactions_view",
+        include_str!("../../../schema/sqlite/012_effective_transactions_view.sql"),
+    ),
+    (
+        "013_display_labels_view",
+        include_str!("../../../schema/sqlite/013_display_labels_view.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 11] = [
+const BIGQUERY_MIGRATIONS: [Migration; 14] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -96,6 +104,18 @@ const BIGQUERY_MIGRATIONS: [Migration; 11] = [
         "011_reclassify_internal_transfers",
         include_str!("../../../schema/bigquery/011_reclassify_internal_transfers.sql"),
     ),
+    (
+        "012_effective_transactions_view",
+        include_str!("../../../schema/bigquery/012_effective_transactions_view.sql"),
+    ),
+    (
+        "013_display_labels_view",
+        include_str!("../../../schema/bigquery/013_display_labels_view.sql"),
+    ),
+    (
+        "014_transaction_splits",
+        include_str!("../../../schema/bigquery/014_transaction_splits.sql"),
+    ),
 ];
 
 fn backend_migrations(backend: BackendKind) -> &'static [Migration] {
@@ -129,4 +149,23 @@ pub async fn run_migrations(store: &dyn FinanceStore, config: &AppConfig) -> Res
     }
 
     Ok(executed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BIGQUERY_MIGRATIONS, SQLITE_MIGRATIONS};
+
+    #[test]
+    fn bigquery_migrations_include_transaction_splits() {
+        assert!(BIGQUERY_MIGRATIONS
+            .iter()
+            .any(|(version, _)| *version == "014_transaction_splits"));
+    }
+
+    #[test]
+    fn sqlite_migrations_do_not_include_transaction_splits() {
+        assert!(SQLITE_MIGRATIONS
+            .iter()
+            .all(|(version, _)| *version != "014_transaction_splits"));
+    }
 }

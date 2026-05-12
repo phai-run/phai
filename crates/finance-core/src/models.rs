@@ -63,6 +63,98 @@ pub struct TransactionRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitPayload {
+    pub lines: Vec<TransactionSplitLinePayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitLinePayload {
+    #[serde(default, rename = "lineId", alias = "line_id")]
+    pub line_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(
+        rename = "amount",
+        alias = "lineAmount",
+        alias = "line_amount",
+        alias = "total",
+        alias = "totalAmount",
+        alias = "total_amount",
+        deserialize_with = "crate::split_payload::deserialize_decimal_from_json"
+    )]
+    pub amount: Decimal,
+    #[serde(default)]
+    pub items: Vec<TransactionSplitItemPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitItemPayload {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, rename = "itemCode", alias = "item_code")]
+    pub item_code: Option<String>,
+    #[serde(
+        default,
+        rename = "quantity",
+        alias = "qty",
+        deserialize_with = "crate::split_payload::deserialize_optional_decimal_from_json"
+    )]
+    pub quantity: Option<Decimal>,
+    #[serde(
+        default,
+        rename = "unitPrice",
+        alias = "unit_price",
+        deserialize_with = "crate::split_payload::deserialize_optional_decimal_from_json"
+    )]
+    pub unit_price: Option<Decimal>,
+    #[serde(
+        default,
+        rename = "amount",
+        alias = "lineAmount",
+        alias = "line_amount",
+        alias = "total",
+        alias = "totalAmount",
+        alias = "total_amount",
+        deserialize_with = "crate::split_payload::deserialize_optional_decimal_from_json"
+    )]
+    pub amount: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitLineRecord {
+    pub split_id: String,
+    pub transaction_id: String,
+    pub line_index: i64,
+    pub line_id: Option<String>,
+    pub description: Option<String>,
+    pub amount: Decimal,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub metadata_json: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransactionSplitItemRecord {
+    pub split_item_id: String,
+    pub split_id: String,
+    pub transaction_id: String,
+    pub line_index: i64,
+    pub item_index: i64,
+    pub description: Option<String>,
+    pub item_code: Option<String>,
+    pub quantity: Option<Decimal>,
+    pub unit_price: Option<Decimal>,
+    pub amount: Option<Decimal>,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub metadata_json: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleRecord {
     pub rule_id: String,
@@ -151,6 +243,20 @@ pub struct CardSummaryRow {
     pub total_charges: Decimal,
     pub open_amount: Decimal,
     pub transaction_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardClosedTransactionRow {
+    pub month_ref: String,
+    pub account_id: String,
+    pub transaction_id: String,
+    pub transaction_date: NaiveDate,
+    pub label: String,
+    pub description: String,
+    pub amount: Decimal,
+    pub category_id: Option<String>,
+    pub payment_status: String,
+    pub metadata_json: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

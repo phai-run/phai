@@ -3,7 +3,7 @@ use crate::legacy::{load_account_registry, AccountRegistryEntry};
 use crate::models::{
     json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
 };
-use crate::rules::{apply_rules, CompiledRule};
+use crate::rules::{apply_rules_with_facts, AmountSign, CompiledRule};
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use reqwest::Client;
@@ -405,12 +405,17 @@ fn build_transaction_record(
         .as_deref()
         .filter(|value| !value.trim().is_empty());
     let category_key = category_name.map(|value| category_id(value, None));
-    let (category_id, category_source) = apply_rules(
+    let rule_application = apply_rules_with_facts(
         &payload.description,
+        Some(payload.amount),
+        Some(payload.id.as_str()),
         category_key,
         payload.category.is_some(),
         rules,
     );
+    let category_id = rule_application.category_id;
+    let category_source = rule_application.category_source;
+    let context = rule_application.context;
     let transaction_date = parse_date(&payload.date)?;
 
     let tx_type = payload
@@ -435,12 +440,23 @@ fn build_transaction_record(
     let is_genuine_credit = category_id
         .as_deref()
         .is_some_and(|c| matches!(c, "cashback" | "refund") || internal_categories.contains(c));
-    let (amount, tx_type) =
+    let (mut amount, mut tx_type) =
         if is_credit_account && payload.amount.is_sign_positive() && !is_genuine_credit {
             (-payload.amount, "debit".to_string())
         } else {
             (payload.amount, tx_type)
         };
+    match rule_application.amount_sign {
+        Some(AmountSign::Positive) => {
+            amount = amount.abs();
+            tx_type = "credit".to_string();
+        }
+        Some(AmountSign::Negative) => {
+            amount = -amount.abs();
+            tx_type = "debit".to_string();
+        }
+        None => {}
+    }
 
     let created_at = parse_datetime_or_now(payload.created_at.as_deref());
     let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
@@ -455,7 +471,7 @@ fn build_transaction_record(
         tx_type,
         category_id,
         category_source,
-        context: None,
+        context,
         payment_status: payload
             .status
             .clone()
@@ -897,6 +913,13 @@ mod tests {
         }
     }
 
+    fn credit_registry_entry(item: Option<&str>) -> AccountRegistryEntry {
+        AccountRegistryEntry {
+            account_type: "credit".to_string(),
+            ..registry_entry(item)
+        }
+    }
+
     #[test]
     fn resolve_binding_item_id_accepts_matching_sources() {
         let b = binding("a", "pa", Some("item-1"));
@@ -1044,5 +1067,52 @@ mod tests {
         assert_eq!(rebinds.len(), 1);
         assert_eq!(rebinds[0].from_pluggy_account_id, "old-acct");
         assert_eq!(rebinds[0].to_pluggy_account_id, "new-acct");
+    }
+
+    #[test]
+    fn rule_can_force_positive_amount_sign() {
+        let binding = binding("card_acc", "pluggy-card-1", None);
+        let registry = credit_registry_entry(None);
+        let payload = PluggyTransactionPayload {
+            id: "tx-iof-001".to_string(),
+            account_id: "pluggy-card-1".to_string(),
+            date: "2026-05-07".to_string(),
+            description: "IOF de volta de assinatura".to_string(),
+            amount: Decimal::new(-72, 2),
+            tx_type: Some("debit".to_string()),
+            status: Some("pending".to_string()),
+            category: Some("shopping".to_string()),
+            created_at: Some("2026-05-07T10:00:00.000Z".to_string()),
+            updated_at: Some("2026-05-07T10:00:00.000Z".to_string()),
+            extra: json!({}),
+        };
+        let now = chrono::Utc::now();
+        let rules = vec![crate::models::RuleRecord {
+            rule_id: "iof_cashback".to_string(),
+            body: r#"{"match_type":"descricao_contains","match_value":"iof de volta","categoria":"Receitas","subcategoria":"Cashback / Beneficios","amount_sign":"positive"}"#.to_string(),
+            status: "active".to_string(),
+            actor_id: "test-actor".to_string(),
+            idempotency_key: "rule:iof-cashback".to_string(),
+            created_at: now,
+            updated_at: now,
+        }];
+        let compiled = crate::rules::compile_rules(&rules).unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &compiled,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.amount, Decimal::new(72, 2));
+        assert_eq!(tx.tx_type, "credit");
+        assert_eq!(
+            tx.category_id.as_deref(),
+            Some("receitas:cashback-beneficios")
+        );
     }
 }

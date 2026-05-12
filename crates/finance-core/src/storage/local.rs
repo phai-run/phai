@@ -1,9 +1,13 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    parse_datetime_or_now, AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord,
-    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    TransactionContextRow, TransactionRecord, UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow,
+    CashflowRow, CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
+    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+};
+use crate::splits::{
+    ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
+    TransactionSplitLineRecord, TransactionSplitRecord,
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -96,6 +100,10 @@ fn parse_sql_json(
             Box::new(err),
         )
     })
+}
+
+fn split_bigquery_only_error() -> anyhow::Error {
+    anyhow::anyhow!("transaction split/detailing is supported only on the BigQuery backend")
 }
 
 #[async_trait(?Send)]
@@ -348,6 +356,15 @@ impl FinanceStore for LocalStore {
         Ok(rows.len())
     }
 
+    async fn apply_transaction_split(
+        &self,
+        _split: &TransactionSplitRecord,
+        _lines: &[TransactionSplitLineRecord],
+        _items: &[ReceiptItemRecord],
+    ) -> Result<()> {
+        Err(split_bigquery_only_error())
+    }
+
     async fn insert_audit_events(&self, rows: &[AuditEvent]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -431,6 +448,87 @@ impl FinanceStore for LocalStore {
             .query_map(params_from_iter(ids.iter()), |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows.into_iter().collect())
+    }
+
+    async fn transaction_by_id(&self, transaction_id: &str) -> Result<Option<TransactionRecord>> {
+        let conn = self.connection()?;
+        let row = conn
+            .query_row(
+                "
+                SELECT
+                  transaction_id, account_id, transaction_date, description, CAST(amount AS TEXT),
+                  tx_type, category_id, category_source, context, payment_status, source,
+                  actor_id, idempotency_key, metadata_json, created_at, updated_at
+                FROM transactions
+                WHERE transaction_id = ?1
+                ",
+                [transaction_id],
+                |row| {
+                    let transaction_date = row.get::<_, String>(2)?;
+                    let amount = row.get::<_, String>(4)?;
+                    let metadata_json = row.get::<_, String>(13)?;
+                    let created_at = row.get::<_, String>(14)?;
+                    let updated_at = row.get::<_, String>(15)?;
+                    Ok(TransactionRecord {
+                        transaction_id: row.get(0)?,
+                        account_id: row.get(1)?,
+                        transaction_date: parse_sql_date(transaction_date, 2)?,
+                        description: row.get(3)?,
+                        amount: parse_decimal(amount).map_err(|err| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Text,
+                                Box::new(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    err.to_string(),
+                                )),
+                            )
+                        })?,
+                        tx_type: row.get(5)?,
+                        category_id: row.get(6)?,
+                        category_source: row.get(7)?,
+                        context: row.get(8)?,
+                        payment_status: row.get(9)?,
+                        source: row.get(10)?,
+                        actor_id: row.get(11)?,
+                        idempotency_key: row.get(12)?,
+                        metadata_json: parse_sql_json(metadata_json, 13)?,
+                        created_at: parse_datetime_or_now(Some(&created_at)),
+                        updated_at: parse_datetime_or_now(Some(&updated_at)),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    async fn transaction_split_detail(
+        &self,
+        _transaction_id: &str,
+    ) -> Result<Option<TransactionSplitDetail>> {
+        Err(split_bigquery_only_error())
+    }
+
+    async fn clear_transaction_split(
+        &self,
+        _transaction_id: &str,
+        _actor_id: &str,
+        _idempotency_key: &str,
+        _reason: Option<&str>,
+    ) -> Result<()> {
+        Err(split_bigquery_only_error())
+    }
+
+    async fn split_candidates(&self, _since: NaiveDate) -> Result<Vec<SplitCandidateRow>> {
+        Err(split_bigquery_only_error())
+    }
+
+    async fn item_prices(
+        &self,
+        _query: &str,
+        _since: Option<NaiveDate>,
+    ) -> Result<Vec<ItemPriceRow>> {
+        Err(split_bigquery_only_error())
     }
 
     async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
@@ -527,7 +625,7 @@ impl FinanceStore for LocalStore {
             SELECT
               t.transaction_id,
               t.transaction_date,
-              t.description,
+              t.display_label,
               CAST(t.amount AS TEXT),
               t.account_id,
               a.label,
@@ -535,7 +633,7 @@ impl FinanceStore for LocalStore {
               t.context,
               t.payment_status,
               t.source
-            FROM transactions t
+            FROM v_transactions_effective t
             LEFT JOIN accounts a ON a.account_id = t.account_id
             WHERE t.context IS NOT NULL
               AND TRIM(t.context) <> ''
@@ -573,7 +671,7 @@ impl FinanceStore for LocalStore {
     async fn count_transactions_with_context(&self) -> Result<i64> {
         let conn = self.connection()?;
         let count = conn.query_row(
-            "SELECT COUNT(*) FROM transactions
+            "SELECT COUNT(*) FROM v_transactions_effective
              WHERE context IS NOT NULL
                AND TRIM(context) <> ''",
             [],
@@ -805,6 +903,62 @@ impl FinanceStore for LocalStore {
         Ok(rows)
     }
 
+    async fn card_closed_transactions(
+        &self,
+        month_ref: Option<&str>,
+    ) -> Result<Vec<CardClosedTransactionRow>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              strftime('%Y-%m', t.transaction_date) AS month_ref,
+              t.account_id,
+              t.transaction_id,
+              t.transaction_date,
+              t.display_label,
+              t.description,
+              CAST(ABS(CAST(t.amount AS REAL)) AS TEXT) AS closed_amount,
+              t.category_id,
+              t.payment_status,
+              t.metadata_json
+            FROM v_transactions_effective t
+            JOIN accounts a ON a.account_id = t.account_id
+            WHERE a.account_type = 'credit'
+              AND CAST(t.amount AS REAL) < 0
+              AND t.payment_status NOT IN ('pending', 'em_aberto', 'parcial')
+              AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
+              AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
+            ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([month_ref], |row| {
+                let transaction_date = row.get::<_, String>(3)?;
+                let amount = row.get::<_, String>(6)?;
+                let metadata_json = row.get::<_, String>(9)?;
+                Ok(CardClosedTransactionRow {
+                    month_ref: row.get(0)?,
+                    account_id: row.get(1)?,
+                    transaction_id: row.get(2)?,
+                    transaction_date: parse_sql_date(transaction_date, 3)?,
+                    label: row.get(4)?,
+                    description: row.get(5)?,
+                    amount: parse_decimal(amount).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    category_id: row.get(7)?,
+                    payment_status: row.get(8)?,
+                    metadata_json: parse_sql_json(metadata_json, 9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
@@ -812,7 +966,7 @@ impl FinanceStore for LocalStore {
             SELECT
               t.transaction_id,
               t.transaction_date,
-              t.description,
+              t.display_label,
               CAST(t.amount AS TEXT),
               t.account_id,
               a.label,
@@ -821,7 +975,7 @@ impl FinanceStore for LocalStore {
               t.payment_status,
               t.source,
               t.metadata_json
-            FROM transactions t
+            FROM v_transactions_effective t
             LEFT JOIN accounts a ON a.account_id = t.account_id
             WHERE t.category_id IS NULL
                OR t.category_source IN ('unclassified', 'fallback')
@@ -861,7 +1015,7 @@ impl FinanceStore for LocalStore {
     async fn count_uncategorized(&self) -> Result<i64> {
         let conn = self.connection()?;
         let count = conn.query_row(
-            "SELECT COUNT(*) FROM transactions
+            "SELECT COUNT(*) FROM v_transactions_effective
              WHERE category_id IS NULL
                 OR category_source IN ('unclassified', 'fallback')",
             [],
