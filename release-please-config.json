@@ -4,10 +4,9 @@
   "include-component-in-tag": false,
   "include-v-in-tag": true,
   "packages": {
-    ".": {
+    "crates/finance-cli": {
       "release-type": "rust",
-      "changelog-path": "CHANGELOG.md"
+      "package-name": "finance-cli"
     }
-  },
-  "plugins": ["cargo-workspace"]
+  }
 }
