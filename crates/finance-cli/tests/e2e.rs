@@ -753,6 +753,134 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
 }
 
 #[test]
+fn report_ofx_consistency_compares_transactions_row_by_row() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    for (tx_id, date, description, amount) in [
+        ("tx-ofx-1", "2026-05-01", "Padaria Centro", "-20.00"),
+        ("tx-only-db", "2026-05-02", "Transação Extra", "-15.50"),
+    ] {
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(tx_id)
+                .arg("--date")
+                .arg(date)
+                .arg("--description")
+                .arg(description)
+                .arg(format!("--amount={amount}"))
+                .arg("--payment-status")
+                .arg("posted"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    let ofx_file = temp.path().join("check.ofx");
+    write_file(
+        &ofx_file,
+        r#"OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+<OFX>
+<CREDITCARDMSGSRSV1>
+<CCSTMTTRNRS>
+<CCSTMTRS>
+<CCACCTFROM>
+<ACCTID>fixture-card-1</ACCTID>
+</CCACCTFROM>
+<BANKTRANLIST>
+<DTSTART>20260501000000[-3:BRT]</DTSTART>
+<DTEND>20260502000000[-3:BRT]</DTEND>
+<STMTTRN>
+<TRNTYPE>DEBIT</TRNTYPE>
+<DTPOSTED>20260501000000[-3:BRT]</DTPOSTED>
+<TRNAMT>-20.00</TRNAMT>
+<FITID>fit-1</FITID>
+<MEMO>Padaria Centro</MEMO>
+</STMTTRN>
+<STMTTRN>
+<TRNTYPE>DEBIT</TRNTYPE>
+<DTPOSTED>20260502</DTPOSTED>
+<TRNAMT>-40.00</TRNAMT>
+<FITID>fit-2</FITID>
+<MEMO>Supermercado Delta</MEMO>
+</STMTTRN>
+</BANKTRANLIST>
+</CCSTMTRS>
+</CCSTMTTRNRS>
+</CREDITCARDMSGSRSV1>
+</OFX>
+"#,
+    );
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("ofx-consistency")
+            .arg("--ofx")
+            .arg(&ofx_file),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("OFX consistency check"))
+    .stdout(predicate::str::contains("faltando na base: 1"))
+    .stdout(predicate::str::contains("sobrando na base: 1"))
+    .stdout(predicate::str::contains("Padaria Centro"))
+    .stdout(predicate::str::contains("Supermercado Delta"));
+
+    let json_output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("ofx-consistency")
+            .arg("--ofx")
+            .arg(&ofx_file)
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("ofx-consistency json output");
+    assert!(json_output.status.success());
+    let payload: Value = serde_json::from_slice(&json_output.stdout).expect("valid json payload");
+    assert_eq!(payload["ofxTransactions"], 2);
+    assert_eq!(payload["matched"], 1);
+    assert_eq!(payload["missingInFinance"], 1);
+    assert_eq!(payload["extraInFinance"], 1);
+    assert_eq!(payload["consistent"], false);
+}
+
+#[test]
 fn sync_json_summary_counts_only_new_transactions() {
     let temp = TempDir::new().expect("tempdir");
     let config_dir = temp.path().join("config");

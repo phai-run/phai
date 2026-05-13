@@ -153,6 +153,7 @@ enum ReportCommand {
     ItemPrices(ItemPricesArgs),
     DataHealth(DataHealthArgs),
     Scenario(ScenarioArgs),
+    OfxConsistency(OfxConsistencyArgs),
     Review(ReviewArgs),
 }
 
@@ -248,6 +249,18 @@ struct ScenarioArgs {
     extra_expense: String,
     #[arg(long, default_value = "0")]
     extra_income: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct OfxConsistencyArgs {
+    #[arg(long)]
+    ofx: PathBuf,
+    #[arg(long)]
+    account_id: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    date_tolerance_days: i64,
     #[arg(long)]
     json: bool,
 }
@@ -565,6 +578,58 @@ struct CardClosedInsightsOutput {
     recurring: Vec<CardClosedRecurringInsight>,
     subscriptions: Vec<CardClosedSubscriptionInsight>,
     installments: Vec<CardClosedInstallmentInsight>,
+}
+
+#[derive(Debug, Clone)]
+struct OfxTransaction {
+    fit_id: Option<String>,
+    transaction_date: NaiveDate,
+    amount: Decimal,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OfxConsistencyMatch {
+    status: String,
+    ofx_fit_id: Option<String>,
+    ofx_date: String,
+    ofx_amount: Decimal,
+    ofx_description: String,
+    transaction_id: Option<String>,
+    account_id: Option<String>,
+    transaction_date: Option<String>,
+    transaction_amount: Option<Decimal>,
+    transaction_description: Option<String>,
+    date_diff_days: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OfxConsistencyDbOnly {
+    transaction_id: String,
+    transaction_date: String,
+    amount: Decimal,
+    description: String,
+    account_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OfxConsistencyOutput {
+    ofx_path: String,
+    account_filter: Option<String>,
+    range_start: String,
+    range_end: String,
+    date_tolerance_days: i64,
+    ofx_transactions: usize,
+    db_candidates: usize,
+    matched: usize,
+    missing_in_finance: usize,
+    extra_in_finance: usize,
+    consistent: bool,
+    matches: Vec<OfxConsistencyMatch>,
+    extra_transactions: Vec<OfxConsistencyDbOnly>,
 }
 
 #[derive(Subcommand)]
@@ -1111,6 +1176,257 @@ fn descriptions_look_related(left: &str, right: &str) -> bool {
     left_tokens.intersection(&right_tokens).count() >= 2
 }
 
+fn extract_ofx_tag_value_from_line(line: &str, tag: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let open_tag = format!("<{tag}>");
+    let prefix = trimmed.get(..open_tag.len())?;
+    if !prefix.eq_ignore_ascii_case(&open_tag) {
+        return None;
+    }
+    let tail = trimmed.get(open_tag.len()..)?.trim();
+    let value = tail.split('<').next().unwrap_or_default().trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn parse_ofx_tag_values(raw: &str, tag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for line in raw.lines() {
+        if let Some(value) = extract_ofx_tag_value_from_line(line, tag) {
+            values.push(value);
+        }
+    }
+    values
+}
+
+fn parse_ofx_date(value: &str) -> Result<NaiveDate> {
+    let digits = value
+        .chars()
+        .filter(char::is_ascii_digit)
+        .take(8)
+        .collect::<String>();
+    if digits.len() != 8 {
+        bail!("Data OFX inválida: {value}");
+    }
+    NaiveDate::parse_from_str(&digits, "%Y%m%d")
+        .with_context(|| format!("Falha ao parsear data OFX {value}"))
+}
+
+fn parse_ofx_amount(value: &str) -> Result<Decimal> {
+    let normalized = value.trim().replace(',', ".");
+    decimal_from_str(&normalized).with_context(|| format!("Valor OFX inválido: {value}"))
+}
+
+fn parse_ofx_transactions(raw: &str) -> Result<Vec<OfxTransaction>> {
+    let mut blocks = Vec::<String>::new();
+    let mut current_block = Vec::<String>::new();
+    let mut in_statement = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("<STMTTRN>") {
+            if in_statement && !current_block.is_empty() {
+                blocks.push(current_block.join("\n"));
+                current_block.clear();
+            }
+            in_statement = true;
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("</STMTTRN>") {
+            if in_statement {
+                blocks.push(current_block.join("\n"));
+                current_block.clear();
+                in_statement = false;
+            }
+            continue;
+        }
+        if in_statement {
+            current_block.push(trimmed.to_string());
+        }
+    }
+
+    if in_statement && !current_block.is_empty() {
+        blocks.push(current_block.join("\n"));
+    }
+
+    let mut rows = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let date_raw = parse_ofx_tag_values(&block, "DTPOSTED")
+            .into_iter()
+            .next()
+            .context("Transação OFX sem DTPOSTED")?;
+        let amount_raw = parse_ofx_tag_values(&block, "TRNAMT")
+            .into_iter()
+            .next()
+            .context("Transação OFX sem TRNAMT")?;
+        let fit_id = parse_ofx_tag_values(&block, "FITID").into_iter().next();
+        let description = parse_ofx_tag_values(&block, "MEMO")
+            .into_iter()
+            .next()
+            .or_else(|| parse_ofx_tag_values(&block, "NAME").into_iter().next())
+            .or_else(|| parse_ofx_tag_values(&block, "PAYEE").into_iter().next())
+            .unwrap_or_else(|| "sem-descricao".to_string());
+        rows.push(OfxTransaction {
+            fit_id,
+            transaction_date: parse_ofx_date(&date_raw)?,
+            amount: parse_ofx_amount(&amount_raw)?,
+            description: normalize_inline_text(&description),
+        });
+    }
+    Ok(rows)
+}
+
+fn description_distance(left: &str, right: &str) -> usize {
+    let left_norm = normalize_description(left);
+    let right_norm = normalize_description(right);
+    if left_norm.is_empty() || right_norm.is_empty() {
+        return usize::MAX / 2;
+    }
+    if left_norm == right_norm {
+        return 0;
+    }
+    if left_norm.contains(&right_norm) || right_norm.contains(&left_norm) {
+        return 1;
+    }
+    let left_tokens = left_norm
+        .split_whitespace()
+        .filter(|token| token.len() >= 3)
+        .collect::<BTreeSet<_>>();
+    let right_tokens = right_norm
+        .split_whitespace()
+        .filter(|token| token.len() >= 3)
+        .collect::<BTreeSet<_>>();
+    let overlap = left_tokens.intersection(&right_tokens).count();
+    if overlap >= 3 {
+        2
+    } else if overlap == 2 {
+        3
+    } else if overlap == 1 {
+        6
+    } else {
+        10
+    }
+}
+
+fn metadata_pluggy_account_id(row: &TransactionRecord) -> Option<&str> {
+    row.metadata_json
+        .get("pluggy_account_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            row.metadata_json
+                .get("raw")
+                .and_then(|raw| raw.get("accountId"))
+                .and_then(Value::as_str)
+        })
+}
+
+fn infer_account_id_from_fit_ids(
+    ofx_rows: &[OfxTransaction],
+    db_rows: &[TransactionRecord],
+) -> Option<String> {
+    let fit_ids = ofx_rows
+        .iter()
+        .filter_map(|row| row.fit_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    if fit_ids.is_empty() {
+        return None;
+    }
+
+    let mut counts = BTreeMap::<String, usize>::new();
+    for row in db_rows {
+        if !fit_ids.contains(row.transaction_id.as_str()) {
+            continue;
+        }
+        if let Some(account_id) = row.account_id.as_deref() {
+            *counts.entry(account_id.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|(left_id, left_count), (right_id, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_id.cmp(left_id))
+        })
+        .map(|(account_id, _)| account_id)
+}
+
+fn infer_account_id_from_overlap(
+    ofx_rows: &[OfxTransaction],
+    db_rows: &[TransactionRecord],
+    date_tolerance_days: i64,
+) -> Option<String> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for row in db_rows {
+        let Some(account_id) = row.account_id.as_deref() else {
+            continue;
+        };
+        let matches_any = ofx_rows.iter().any(|ofx_row| {
+            let amount_diff = (row.amount - ofx_row.amount).abs();
+            if amount_diff > Decimal::new(1, 2) {
+                return false;
+            }
+            let date_diff = (row.transaction_date - ofx_row.transaction_date)
+                .num_days()
+                .abs();
+            date_diff <= date_tolerance_days
+        });
+        if matches_any {
+            *counts.entry(account_id.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    counts
+        .into_iter()
+        .max_by(|(left_id, left_count), (right_id, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_id.cmp(left_id))
+        })
+        .map(|(account_id, _)| account_id)
+}
+
+fn find_best_ofx_match(
+    ofx_tx: &OfxTransaction,
+    db_rows: &[TransactionRecord],
+    used_rows: &[bool],
+    date_tolerance_days: i64,
+) -> Option<(usize, Decimal, i64, usize)> {
+    let mut best: Option<(usize, Decimal, i64, usize)> = None;
+    for (idx, candidate) in db_rows.iter().enumerate() {
+        if used_rows.get(idx).copied().unwrap_or(false) {
+            continue;
+        }
+        let amount_diff = (candidate.amount - ofx_tx.amount).abs();
+        if amount_diff > Decimal::new(1, 2) {
+            continue;
+        }
+        let date_diff = (candidate.transaction_date - ofx_tx.transaction_date)
+            .num_days()
+            .abs();
+        if date_diff > date_tolerance_days {
+            continue;
+        }
+        let desc_distance = description_distance(&ofx_tx.description, &candidate.description);
+        let replace_best = match best {
+            None => true,
+            Some((_, best_amount, best_date, best_desc)) => {
+                amount_diff < best_amount
+                    || (amount_diff == best_amount
+                        && (date_diff < best_date
+                            || (date_diff == best_date && desc_distance < best_desc)))
+            }
+        };
+        if replace_best {
+            best = Some((idx, amount_diff, date_diff, desc_distance));
+        }
+    }
+    best
+}
+
 fn build_category_records_from_transactions(
     actor_id: &str,
     rows: &[TransactionRecord],
@@ -1266,6 +1582,7 @@ async fn main() -> Result<()> {
             ReportCommand::ItemPrices(args) => report_item_prices(args).await,
             ReportCommand::DataHealth(args) => report_data_health(args).await,
             ReportCommand::Scenario(args) => report_scenario(args).await,
+            ReportCommand::OfxConsistency(args) => report_ofx_consistency(args).await,
             ReportCommand::Review(args) => report_review(args).await,
         },
         Commands::Tx { command } => match command {
@@ -2129,6 +2446,253 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
                 row.marker,
                 brl(-row.amount),
                 row.transactions
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
+    if args.date_tolerance_days < 0 {
+        bail!("date_tolerance_days deve ser >= 0");
+    }
+
+    let ofx_raw = fs::read_to_string(&args.ofx)
+        .with_context(|| format!("Falha ao ler OFX {}", args.ofx.display()))?;
+    let mut ofx_rows = parse_ofx_transactions(&ofx_raw)?;
+    if ofx_rows.is_empty() {
+        bail!("Nenhuma transação <STMTTRN> encontrada no OFX");
+    }
+    ofx_rows.sort_by(|a, b| {
+        a.transaction_date
+            .cmp(&b.transaction_date)
+            .then_with(|| a.amount.cmp(&b.amount))
+            .then_with(|| a.description.cmp(&b.description))
+    });
+
+    let range_start = ofx_rows
+        .iter()
+        .map(|row| row.transaction_date)
+        .min()
+        .context("OFX sem data mínima")?;
+    let range_end = ofx_rows
+        .iter()
+        .map(|row| row.transaction_date)
+        .max()
+        .context("OFX sem data máxima")?;
+    let query_since = range_start
+        .checked_sub_signed(Duration::days(args.date_tolerance_days))
+        .context("Falha ao calcular início da janela de busca")?;
+    let query_until = range_end
+        .checked_add_signed(Duration::days(args.date_tolerance_days))
+        .context("Falha ao calcular fim da janela de busca")?;
+
+    let ofx_account_ids = parse_ofx_tag_values(&ofx_raw, "ACCTID")
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let mut db_rows = store
+        .effective_transactions_window(query_since, query_until)
+        .await?;
+
+    let inferred_account_id = infer_account_id_from_fit_ids(&ofx_rows, &db_rows)
+        .or_else(|| infer_account_id_from_overlap(&ofx_rows, &db_rows, args.date_tolerance_days));
+    let account_filter = if let Some(account_id) = args.account_id.as_deref() {
+        db_rows.retain(|row| row.account_id.as_deref() == Some(account_id));
+        Some(format!("account_id:{account_id}"))
+    } else if let Some(account_id) = inferred_account_id.as_deref() {
+        db_rows.retain(|row| row.account_id.as_deref() == Some(account_id));
+        Some(format!("inferred_account_id:{account_id}"))
+    } else if !ofx_account_ids.is_empty() {
+        let filtered = db_rows
+            .iter()
+            .filter(|row| {
+                metadata_pluggy_account_id(row)
+                    .is_some_and(|pluggy_id| ofx_account_ids.contains(pluggy_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !filtered.is_empty() {
+            db_rows = filtered;
+            Some(format!(
+                "pluggy_account_id:{}",
+                ofx_account_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    db_rows.sort_by(|a, b| {
+        a.transaction_date
+            .cmp(&b.transaction_date)
+            .then_with(|| a.amount.cmp(&b.amount))
+            .then_with(|| a.transaction_id.cmp(&b.transaction_id))
+    });
+
+    let mut used_rows = vec![false; db_rows.len()];
+    let mut matches = Vec::with_capacity(ofx_rows.len());
+    let mut matched = 0usize;
+    let mut missing = 0usize;
+
+    for ofx_row in &ofx_rows {
+        if let Some((best_idx, amount_diff, date_diff, desc_distance)) =
+            find_best_ofx_match(ofx_row, &db_rows, &used_rows, args.date_tolerance_days)
+        {
+            used_rows[best_idx] = true;
+            matched += 1;
+            let db_row = &db_rows[best_idx];
+            let status = if amount_diff == Decimal::ZERO && date_diff == 0 && desc_distance <= 1 {
+                "matched"
+            } else {
+                "matched-near"
+            };
+            matches.push(OfxConsistencyMatch {
+                status: status.to_string(),
+                ofx_fit_id: ofx_row.fit_id.clone(),
+                ofx_date: ofx_row.transaction_date.format("%Y-%m-%d").to_string(),
+                ofx_amount: ofx_row.amount,
+                ofx_description: ofx_row.description.clone(),
+                transaction_id: Some(db_row.transaction_id.clone()),
+                account_id: db_row.account_id.clone(),
+                transaction_date: Some(db_row.transaction_date.format("%Y-%m-%d").to_string()),
+                transaction_amount: Some(db_row.amount),
+                transaction_description: Some(normalize_inline_text(&db_row.description)),
+                date_diff_days: Some(date_diff),
+            });
+        } else {
+            missing += 1;
+            matches.push(OfxConsistencyMatch {
+                status: "missing-in-finance".to_string(),
+                ofx_fit_id: ofx_row.fit_id.clone(),
+                ofx_date: ofx_row.transaction_date.format("%Y-%m-%d").to_string(),
+                ofx_amount: ofx_row.amount,
+                ofx_description: ofx_row.description.clone(),
+                transaction_id: None,
+                account_id: None,
+                transaction_date: None,
+                transaction_amount: None,
+                transaction_description: None,
+                date_diff_days: None,
+            });
+        }
+    }
+
+    let extra_transactions = db_rows
+        .iter()
+        .zip(used_rows.iter())
+        .filter_map(|(row, used)| {
+            if *used {
+                None
+            } else {
+                Some(OfxConsistencyDbOnly {
+                    transaction_id: row.transaction_id.clone(),
+                    transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
+                    amount: row.amount,
+                    description: normalize_inline_text(&row.description),
+                    account_id: row.account_id.clone(),
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let output = OfxConsistencyOutput {
+        ofx_path: args.ofx.display().to_string(),
+        account_filter,
+        range_start: range_start.format("%Y-%m-%d").to_string(),
+        range_end: range_end.format("%Y-%m-%d").to_string(),
+        date_tolerance_days: args.date_tolerance_days,
+        ofx_transactions: ofx_rows.len(),
+        db_candidates: db_rows.len(),
+        matched,
+        missing_in_finance: missing,
+        extra_in_finance: extra_transactions.len(),
+        consistent: missing == 0 && extra_transactions.is_empty(),
+        matches,
+        extra_transactions,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("🧪 OFX consistency check");
+    println!("- arquivo: {}", output.ofx_path);
+    println!(
+        "- período OFX: {} -> {}",
+        output.range_start, output.range_end
+    );
+    if let Some(filter) = &output.account_filter {
+        println!("- filtro de conta: {filter}");
+    }
+    println!("- tolerância de data: {} dias", output.date_tolerance_days);
+    println!("- transações OFX: {}", output.ofx_transactions);
+    println!("- transações base (janela): {}", output.db_candidates);
+    println!("- casadas: {}", output.matched);
+    println!("- faltando na base: {}", output.missing_in_finance);
+    println!("- sobrando na base: {}", output.extra_in_finance);
+    println!(
+        "- consistente: {}",
+        if output.consistent { "sim" } else { "não" }
+    );
+
+    println!();
+    println!("Comparação transação a transação:");
+    for row in &output.matches {
+        match row.status.as_str() {
+            "matched" => {
+                println!(
+                    "✅ {} | {} | {} | {}",
+                    row.ofx_date,
+                    brl(row.ofx_amount),
+                    row.ofx_description,
+                    row.transaction_id.as_deref().unwrap_or("sem-id")
+                );
+            }
+            "matched-near" => {
+                println!(
+                    "⚠️ {} | {} | {} | match aproximado {} | delta-data {}d",
+                    row.ofx_date,
+                    brl(row.ofx_amount),
+                    row.ofx_description,
+                    row.transaction_id.as_deref().unwrap_or("sem-id"),
+                    row.date_diff_days.unwrap_or(0)
+                );
+            }
+            _ => {
+                println!(
+                    "❌ {} | {} | {} | sem match",
+                    row.ofx_date,
+                    brl(row.ofx_amount),
+                    row.ofx_description
+                );
+            }
+        }
+    }
+
+    println!();
+    println!("Extras na base (sem par no OFX):");
+    if output.extra_transactions.is_empty() {
+        println!("Nenhum extra detectado.");
+    } else {
+        for row in &output.extra_transactions {
+            println!(
+                "{} | {} | {} | {}",
+                row.transaction_date,
+                brl(row.amount),
+                row.description,
+                row.transaction_id
             );
         }
     }

@@ -105,6 +105,7 @@ finance report cashflow     Monthly income/expenses/net
 finance report forecast-vs-actual  Budget vs actual comparison
 finance report card-summary Credit card statement summary
 finance report card-closed-insights Closed-bill insights (categories, recurring, subscriptions, installments)
+finance report ofx-consistency Transaction-by-transaction consistency check against an OFX file
 finance report uncategorized Transactions needing categorization
 finance tx upsert-manual    Add a manual transaction
 finance tx categorize       Assign category to a transaction

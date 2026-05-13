@@ -1541,6 +1541,48 @@ impl FinanceStore for BigQueryStore {
         Ok(items)
     }
 
+    async fn effective_transactions_window(
+        &self,
+        since: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<TransactionRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              transaction_id,
+              account_id,
+              CAST(transaction_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              tx_type,
+              category_id,
+              category_source,
+              context,
+              payment_status,
+              source,
+              actor_id,
+              idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              CAST(created_at AS STRING),
+              CAST(updated_at AS STRING)
+            FROM {}
+            WHERE transaction_date >= {}
+              AND transaction_date <= {}
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            ",
+            self.qualified_table("v_transactions_effective")?,
+            sql_date(since),
+            sql_date(until),
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(transaction_record_from_values(&values)?);
+        }
+        Ok(items)
+    }
+
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>> {
         let where_clause = month_ref
             .map(|value| format!("WHERE month_ref = {}", sql_string(value)))
