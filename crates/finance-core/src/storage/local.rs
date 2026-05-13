@@ -1022,6 +1022,61 @@ impl FinanceStore for LocalStore {
         Ok(rows)
     }
 
+    async fn card_reportable_transactions(
+        &self,
+        month_ref: Option<&str>,
+    ) -> Result<Vec<CardClosedTransactionRow>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              strftime('%Y-%m', t.transaction_date) AS month_ref,
+              t.account_id,
+              t.transaction_id,
+              t.transaction_date,
+              t.display_label,
+              t.description,
+              CAST(ABS(CAST(t.amount AS REAL)) AS TEXT) AS amount,
+              t.category_id,
+              t.payment_status,
+              t.metadata_json
+            FROM v_transactions_reportable t
+            JOIN accounts a ON a.account_id = t.account_id
+            WHERE a.account_type = 'credit'
+              AND CAST(t.amount AS REAL) < 0
+              AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
+              AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
+            ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([month_ref], |row| {
+                let transaction_date = row.get::<_, String>(3)?;
+                let amount = row.get::<_, String>(6)?;
+                let metadata_json = row.get::<_, String>(9)?;
+                Ok(CardClosedTransactionRow {
+                    month_ref: row.get(0)?,
+                    account_id: row.get(1)?,
+                    transaction_id: row.get(2)?,
+                    transaction_date: parse_sql_date(transaction_date, 3)?,
+                    label: row.get(4)?,
+                    description: row.get(5)?,
+                    amount: parse_decimal(amount).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    category_id: row.get(7)?,
+                    payment_status: row.get(8)?,
+                    metadata_json: parse_sql_json(metadata_json, 9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(

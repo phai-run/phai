@@ -1775,6 +1775,65 @@ impl FinanceStore for BigQueryStore {
         Ok(items)
     }
 
+    async fn card_reportable_transactions(
+        &self,
+        month_ref: Option<&str>,
+    ) -> Result<Vec<CardClosedTransactionRow>> {
+        let where_month = month_ref
+            .map(|value| {
+                format!(
+                    "AND FORMAT_DATE('%Y-%m', t.transaction_date) = {}",
+                    sql_string(value)
+                )
+            })
+            .unwrap_or_default();
+        let sql = format!(
+            "
+            SELECT
+              FORMAT_DATE('%Y-%m', t.transaction_date) AS month_ref,
+              t.account_id,
+              t.transaction_id,
+              CAST(t.transaction_date AS STRING),
+              t.display_label,
+              t.description,
+              CAST(ABS(t.amount) AS STRING),
+              t.category_id,
+              t.payment_status,
+              COALESCE(TO_JSON_STRING(t.metadata_json), '{{}}')
+            FROM {} t
+            JOIN {} a
+              ON a.account_id = t.account_id
+            WHERE a.account_type = 'credit'
+              AND t.amount < 0
+              AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM {})
+              {where_month}
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
+            ",
+            self.qualified_table("v_transactions_reportable")?,
+            self.qualified_table("accounts")?,
+            self.qualified_table("internal_categories")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(CardClosedTransactionRow {
+                month_ref: required_string(&values, 0, "month_ref")?,
+                account_id: required_string(&values, 1, "account_id")?,
+                transaction_id: required_string(&values, 2, "transaction_id")?,
+                transaction_date: required_date(&values, 3, "transaction_date")?,
+                label: required_string(&values, 4, "display_label")?,
+                description: required_string(&values, 5, "description")?,
+                amount: required_decimal(&values, 6, "amount")?,
+                category_id: optional_string(&values, 7),
+                payment_status: required_string(&values, 8, "payment_status")?,
+                metadata_json: optional_json(&values, 9, "metadata_json")?
+                    .unwrap_or_else(|| serde_json::json!({})),
+            });
+        }
+        Ok(items)
+    }
+
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>> {
         let sql = format!(
             "

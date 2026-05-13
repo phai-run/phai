@@ -577,7 +577,8 @@ struct CardClosedInsightsOutput {
     categories: Vec<CardClosedCategoryInsight>,
     recurring: Vec<CardClosedRecurringInsight>,
     subscriptions: Vec<CardClosedSubscriptionInsight>,
-    installments: Vec<CardClosedInstallmentInsight>,
+    closed_installments: Vec<CardClosedInstallmentInsight>,
+    open_installments: Vec<CardClosedInstallmentInsight>,
 }
 
 #[derive(Debug, Clone)]
@@ -1050,6 +1051,13 @@ fn default_closed_cards_month(today: NaiveDate) -> Result<String> {
             .context("Falha ao calcular mês atual")?,
         -1,
     )?))
+}
+
+fn is_open_card_payment_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "pending" | "em_aberto" | "parcial"
+    )
 }
 
 fn is_flat_category(category_id: &str) -> bool {
@@ -2252,10 +2260,13 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
     let target_month_date = parse_month_ref(&target_month)?;
 
     let card_rows = store.card_summary(Some(&target_month)).await?;
-    let target_rows = store.card_closed_transactions(Some(&target_month)).await?;
+    let target_closed_rows = store.card_closed_transactions(Some(&target_month)).await?;
+    let target_reportable_rows = store
+        .card_reportable_transactions(Some(&target_month))
+        .await?;
 
     let mut month_rows = BTreeMap::<String, Vec<CardClosedTransactionRow>>::new();
-    month_rows.insert(target_month.clone(), target_rows.clone());
+    month_rows.insert(target_month.clone(), target_closed_rows.clone());
     for delta in 1..=2 {
         let month = month_ref_for(shift_month(target_month_date, -delta)?);
         let rows = store.card_closed_transactions(Some(&month)).await?;
@@ -2276,9 +2287,10 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
     let mut categories = BTreeMap::<String, (Decimal, usize)>::new();
     let mut recurring = BTreeMap::<String, (Decimal, usize)>::new();
     let mut subscriptions = BTreeMap::<String, (Decimal, usize)>::new();
-    let mut installments = BTreeMap::<(String, String), (Decimal, usize)>::new();
+    let mut closed_installments = BTreeMap::<(String, String), (Decimal, usize)>::new();
+    let mut open_installments = BTreeMap::<(String, String), (Decimal, usize)>::new();
 
-    for row in &target_rows {
+    for row in &target_closed_rows {
         *closed_count_by_account
             .entry(row.account_id.clone())
             .or_insert(0) += 1;
@@ -2311,7 +2323,21 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         }
 
         if let Some(marker) = detect_installment_marker(row) {
-            let installment_entry = installments
+            let installment_entry = closed_installments
+                .entry((merchant, marker))
+                .or_insert((Decimal::ZERO, 0));
+            installment_entry.0 += row.amount;
+            installment_entry.1 += 1;
+        }
+    }
+
+    for row in &target_reportable_rows {
+        if !is_open_card_payment_status(&row.payment_status) {
+            continue;
+        }
+        if let Some(marker) = detect_installment_marker(row) {
+            let merchant = merchant_key_for_card_row(row);
+            let installment_entry = open_installments
                 .entry((merchant, marker))
                 .or_insert((Decimal::ZERO, 0));
             installment_entry.0 += row.amount;
@@ -2390,7 +2416,7 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
             .then_with(|| a.merchant_key.cmp(&b.merchant_key))
     });
 
-    let mut installment_rows = installments
+    let mut closed_installment_rows = closed_installments
         .into_iter()
         .map(
             |((merchant_key, marker), (amount, transactions))| CardClosedInstallmentInsight {
@@ -2401,7 +2427,25 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
             },
         )
         .collect::<Vec<_>>();
-    installment_rows.sort_by(|a, b| {
+    closed_installment_rows.sort_by(|a, b| {
+        b.amount
+            .cmp(&a.amount)
+            .then_with(|| a.merchant_key.cmp(&b.merchant_key))
+            .then_with(|| a.marker.cmp(&b.marker))
+    });
+
+    let mut open_installment_rows = open_installments
+        .into_iter()
+        .map(
+            |((merchant_key, marker), (amount, transactions))| CardClosedInstallmentInsight {
+                merchant_key,
+                marker,
+                amount,
+                transactions,
+            },
+        )
+        .collect::<Vec<_>>();
+    open_installment_rows.sort_by(|a, b| {
         b.amount
             .cmp(&a.amount)
             .then_with(|| a.merchant_key.cmp(&b.merchant_key))
@@ -2414,7 +2458,8 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         categories: category_rows,
         recurring: recurring_rows,
         subscriptions: subscription_rows,
-        installments: installment_rows,
+        closed_installments: closed_installment_rows,
+        open_installments: open_installment_rows,
     };
 
     if args.json {
@@ -2424,7 +2469,7 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
 
     println!("💳 Card closed insights {}", output.month_ref);
     println!("- contas: {}", output.accounts.len());
-    println!("- transações fechadas: {}", target_rows.len());
+    println!("- transações fechadas: {}", target_closed_rows.len());
     println!();
 
     if output.accounts.is_empty() {
@@ -2491,11 +2536,27 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
     }
 
     println!();
-    println!("Parcelados:");
-    if output.installments.is_empty() {
-        println!("Sem parcelados detectados.");
+    println!("Parceladas fechadas:");
+    if output.closed_installments.is_empty() {
+        println!("Sem parceladas fechadas detectadas.");
     } else {
-        for row in output.installments.iter().take(8) {
+        for row in output.closed_installments.iter().take(8) {
+            println!(
+                "{} | {} | {} | {} transações",
+                row.merchant_key,
+                row.marker,
+                brl(-row.amount),
+                row.transactions
+            );
+        }
+    }
+
+    println!();
+    println!("Parceladas em aberto:");
+    if output.open_installments.is_empty() {
+        println!("Sem parceladas em aberto detectadas.");
+    } else {
+        for row in output.open_installments.iter().take(8) {
             println!(
                 "{} | {} | {} | {} transações",
                 row.merchant_key,

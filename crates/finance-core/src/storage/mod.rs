@@ -105,6 +105,10 @@ pub trait FinanceStore {
         &self,
         month_ref: Option<&str>,
     ) -> Result<Vec<CardClosedTransactionRow>>;
+    async fn card_reportable_transactions(
+        &self,
+        month_ref: Option<&str>,
+    ) -> Result<Vec<CardClosedTransactionRow>>;
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>>;
     async fn count_uncategorized(&self) -> Result<i64>;
     async fn count_rows(&self, table: &str) -> Result<i64>;

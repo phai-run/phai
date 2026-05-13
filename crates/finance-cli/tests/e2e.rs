@@ -660,6 +660,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Academia Fit",
             "-180.00",
             Some(("Saude", "Academia")),
+            "posted",
         ),
         (
             "cc-rec-2026-02",
@@ -667,6 +668,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Academia Fit",
             "-180.00",
             Some(("Saude", "Academia")),
+            "posted",
         ),
         (
             "cc-rec-2026-03",
@@ -674,6 +676,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Academia Fit",
             "-180.00",
             Some(("Saude", "Academia")),
+            "posted",
         ),
         (
             "cc-sub-2026-03",
@@ -681,6 +684,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Assinatura Cloud Backup",
             "-49.90",
             Some(("Assinaturas", "Cloud")),
+            "posted",
         ),
         (
             "cc-inst-2026-03",
@@ -688,6 +692,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Notebook Pro 03/10",
             "-450.00",
             Some(("Tecnologia", "Eletronicos")),
+            "posted",
         ),
         (
             "cc-inst-2026-03-parc",
@@ -695,10 +700,19 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Yelumseg Parc8",
             "-197.71",
             Some(("Transporte", "Seguro Auto")),
+            "posted",
+        ),
+        (
+            "cc-inst-open-2026-03",
+            "2026-03-24",
+            "Amazon Marketplace Parcela 4/6",
+            "-145.60",
+            Some(("Shopping", "Marketplace")),
+            "pending",
         ),
     ];
 
-    for (tx_id, date, description, amount, category) in manual_rows {
+    for (tx_id, date, description, amount, category, payment_status) in manual_rows {
         let mut cmd = cargo_bin();
         cmd.arg("tx")
             .arg("upsert-manual")
@@ -712,7 +726,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             .arg(description)
             .arg(format!("--amount={amount}"))
             .arg("--payment-status")
-            .arg("posted");
+            .arg(payment_status);
         if let Some((cat, sub)) = category {
             cmd.arg("--category").arg(cat).arg("--subcategory").arg(sub);
         }
@@ -733,10 +747,12 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     .stdout(predicate::str::contains("Card closed insights 2026-03"))
     .stdout(predicate::str::contains("Recorrentes:"))
     .stdout(predicate::str::contains("Assinaturas:"))
-    .stdout(predicate::str::contains("Parcelados:"))
+    .stdout(predicate::str::contains("Parceladas fechadas:"))
+    .stdout(predicate::str::contains("Parceladas em aberto:"))
     .stdout(predicate::str::contains("academia fit"))
     .stdout(predicate::str::contains("03/10"))
-    .stdout(predicate::str::contains("parcela-8"));
+    .stdout(predicate::str::contains("parcela-8"))
+    .stdout(predicate::str::contains("4/6"));
 
     let json_output = envs(
         cargo_bin()
@@ -757,12 +773,18 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     assert!(!payload["categories"].as_array().unwrap().is_empty());
     assert!(!payload["recurring"].as_array().unwrap().is_empty());
     assert!(!payload["subscriptions"].as_array().unwrap().is_empty());
-    assert!(!payload["installments"].as_array().unwrap().is_empty());
-    assert!(payload["installments"]
+    assert!(!payload["closedInstallments"].as_array().unwrap().is_empty());
+    assert!(!payload["openInstallments"].as_array().unwrap().is_empty());
+    assert!(payload["closedInstallments"]
         .as_array()
         .unwrap()
         .iter()
         .any(|item| item["marker"] == "parcela-8"));
+    assert!(payload["openInstallments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["marker"] == "4/6"));
 }
 
 #[test]
