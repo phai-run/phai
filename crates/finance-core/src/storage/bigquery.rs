@@ -1467,7 +1467,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT {}
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
             self.qualified_table("accounts")?,
             limit,
         );
@@ -1498,7 +1498,7 @@ impl FinanceStore for BigQueryStore {
             WHERE context IS NOT NULL
               AND TRIM(context) <> ''
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self.run_query(&sql).await?;
         let count = response
@@ -1537,6 +1537,48 @@ impl FinanceStore for BigQueryStore {
                     .unwrap_or_else(|| "unknown".to_string()),
                 account_id: optional_string(&values, 7),
             });
+        }
+        Ok(items)
+    }
+
+    async fn effective_transactions_window(
+        &self,
+        since: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<TransactionRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              transaction_id,
+              account_id,
+              CAST(transaction_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              tx_type,
+              category_id,
+              category_source,
+              context,
+              payment_status,
+              source,
+              actor_id,
+              idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              CAST(created_at AS STRING),
+              CAST(updated_at AS STRING)
+            FROM {}
+            WHERE transaction_date >= {}
+              AND transaction_date <= {}
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            ",
+            self.qualified_table("v_transactions_reportable")?,
+            sql_date(since),
+            sql_date(until),
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(transaction_record_from_values(&values)?);
         }
         Ok(items)
     }
@@ -1708,7 +1750,7 @@ impl FinanceStore for BigQueryStore {
               {where_month}
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
             self.qualified_table("accounts")?,
             self.qualified_table("internal_categories")?,
         );
@@ -1724,6 +1766,65 @@ impl FinanceStore for BigQueryStore {
                 label: required_string(&values, 4, "display_label")?,
                 description: required_string(&values, 5, "description")?,
                 amount: required_decimal(&values, 6, "closed_amount")?,
+                category_id: optional_string(&values, 7),
+                payment_status: required_string(&values, 8, "payment_status")?,
+                metadata_json: optional_json(&values, 9, "metadata_json")?
+                    .unwrap_or_else(|| serde_json::json!({})),
+            });
+        }
+        Ok(items)
+    }
+
+    async fn card_reportable_transactions(
+        &self,
+        month_ref: Option<&str>,
+    ) -> Result<Vec<CardClosedTransactionRow>> {
+        let where_month = month_ref
+            .map(|value| {
+                format!(
+                    "AND FORMAT_DATE('%Y-%m', t.transaction_date) = {}",
+                    sql_string(value)
+                )
+            })
+            .unwrap_or_default();
+        let sql = format!(
+            "
+            SELECT
+              FORMAT_DATE('%Y-%m', t.transaction_date) AS month_ref,
+              t.account_id,
+              t.transaction_id,
+              CAST(t.transaction_date AS STRING),
+              t.display_label,
+              t.description,
+              CAST(ABS(t.amount) AS STRING),
+              t.category_id,
+              t.payment_status,
+              COALESCE(TO_JSON_STRING(t.metadata_json), '{{}}')
+            FROM {} t
+            JOIN {} a
+              ON a.account_id = t.account_id
+            WHERE a.account_type = 'credit'
+              AND t.amount < 0
+              AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM {})
+              {where_month}
+            ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
+            ",
+            self.qualified_table("v_transactions_reportable")?,
+            self.qualified_table("accounts")?,
+            self.qualified_table("internal_categories")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(CardClosedTransactionRow {
+                month_ref: required_string(&values, 0, "month_ref")?,
+                account_id: required_string(&values, 1, "account_id")?,
+                transaction_id: required_string(&values, 2, "transaction_id")?,
+                transaction_date: required_date(&values, 3, "transaction_date")?,
+                label: required_string(&values, 4, "display_label")?,
+                description: required_string(&values, 5, "description")?,
+                amount: required_decimal(&values, 6, "amount")?,
                 category_id: optional_string(&values, 7),
                 payment_status: required_string(&values, 8, "payment_status")?,
                 metadata_json: optional_json(&values, 9, "metadata_json")?
@@ -1755,7 +1856,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT {}
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
             self.qualified_table("accounts")?,
             limit,
         );
@@ -1788,7 +1889,7 @@ impl FinanceStore for BigQueryStore {
             WHERE category_id IS NULL
                OR category_source IN ('unclassified', 'fallback')
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self.run_query(&sql).await?;
         let count = response

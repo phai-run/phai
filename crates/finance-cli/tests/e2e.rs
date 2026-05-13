@@ -660,6 +660,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Academia Fit",
             "-180.00",
             Some(("Saude", "Academia")),
+            "posted",
         ),
         (
             "cc-rec-2026-02",
@@ -667,6 +668,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Academia Fit",
             "-180.00",
             Some(("Saude", "Academia")),
+            "posted",
         ),
         (
             "cc-rec-2026-03",
@@ -674,6 +676,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Academia Fit",
             "-180.00",
             Some(("Saude", "Academia")),
+            "posted",
         ),
         (
             "cc-sub-2026-03",
@@ -681,6 +684,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Assinatura Cloud Backup",
             "-49.90",
             Some(("Assinaturas", "Cloud")),
+            "posted",
         ),
         (
             "cc-inst-2026-03",
@@ -688,10 +692,27 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "Notebook Pro 03/10",
             "-450.00",
             Some(("Tecnologia", "Eletronicos")),
+            "posted",
+        ),
+        (
+            "cc-inst-2026-03-parc",
+            "2026-03-23",
+            "Yelumseg Parc8",
+            "-197.71",
+            Some(("Transporte", "Seguro Auto")),
+            "posted",
+        ),
+        (
+            "cc-inst-open-2026-03",
+            "2026-03-24",
+            "Amazon Marketplace Parcela 4/6",
+            "-145.60",
+            Some(("Shopping", "Marketplace")),
+            "pending",
         ),
     ];
 
-    for (tx_id, date, description, amount, category) in manual_rows {
+    for (tx_id, date, description, amount, category, payment_status) in manual_rows {
         let mut cmd = cargo_bin();
         cmd.arg("tx")
             .arg("upsert-manual")
@@ -705,7 +726,7 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             .arg(description)
             .arg(format!("--amount={amount}"))
             .arg("--payment-status")
-            .arg("posted");
+            .arg(payment_status);
         if let Some((cat, sub)) = category {
             cmd.arg("--category").arg(cat).arg("--subcategory").arg(sub);
         }
@@ -726,9 +747,12 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     .stdout(predicate::str::contains("Card closed insights 2026-03"))
     .stdout(predicate::str::contains("Recorrentes:"))
     .stdout(predicate::str::contains("Assinaturas:"))
-    .stdout(predicate::str::contains("Parcelados:"))
+    .stdout(predicate::str::contains("Parceladas fechadas:"))
+    .stdout(predicate::str::contains("Parceladas em aberto:"))
     .stdout(predicate::str::contains("academia fit"))
-    .stdout(predicate::str::contains("03/10"));
+    .stdout(predicate::str::contains("03/10"))
+    .stdout(predicate::str::contains("parcela-8"))
+    .stdout(predicate::str::contains("4/6"));
 
     let json_output = envs(
         cargo_bin()
@@ -749,7 +773,237 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     assert!(!payload["categories"].as_array().unwrap().is_empty());
     assert!(!payload["recurring"].as_array().unwrap().is_empty());
     assert!(!payload["subscriptions"].as_array().unwrap().is_empty());
-    assert!(!payload["installments"].as_array().unwrap().is_empty());
+    assert!(!payload["closedInstallments"].as_array().unwrap().is_empty());
+    assert!(!payload["openInstallments"].as_array().unwrap().is_empty());
+    assert!(payload["closedInstallments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["marker"] == "parcela-8"));
+    assert!(payload["openInstallments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["marker"] == "4/6"));
+}
+
+#[test]
+fn report_views_exclude_legacy_manual_statement_when_pluggy_match_exists() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("manual_statement_test_dup")
+            .arg("--account-id")
+            .arg("shared_credit")
+            .arg("--date")
+            .arg("2026-03-26")
+            .arg("--description")
+            .arg("Posto de Gasolina")
+            .arg("--amount=-150.00")
+            .arg("--payment-status")
+            .arg("posted"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    conn.execute(
+        "UPDATE transactions SET source = 'legacy' WHERE transaction_id = 'manual_statement_test_dup'",
+        [],
+    )
+    .expect("set manual source as legacy");
+
+    let json_output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("monthly-spend")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("monthly-spend json output");
+    assert!(json_output.status.success());
+    let payload: Value = serde_json::from_slice(&json_output.stdout).expect("valid json payload");
+    let sum_expenses = payload
+        .as_array()
+        .expect("array payload")
+        .iter()
+        .map(|item| {
+            item["expenses"]
+                .as_str()
+                .expect("expense string")
+                .parse::<f64>()
+                .expect("expense decimal")
+        })
+        .sum::<f64>();
+    assert!(
+        (sum_expenses - 302.30).abs() < 0.01,
+        "monthly spend must ignore deduped manual statement row; got {sum_expenses}"
+    );
+}
+
+#[test]
+fn report_ofx_consistency_compares_transactions_row_by_row() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    for (tx_id, date, description, amount) in [
+        ("tx-ofx-1", "2026-05-01", "Padaria Centro", "-20.00"),
+        ("tx-only-db", "2026-05-02", "Transação Extra", "-15.50"),
+    ] {
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(tx_id)
+                .arg("--date")
+                .arg(date)
+                .arg("--description")
+                .arg(description)
+                .arg(format!("--amount={amount}"))
+                .arg("--payment-status")
+                .arg("posted"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    let ofx_file = temp.path().join("check.ofx");
+    write_file(
+        &ofx_file,
+        r#"OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+<OFX>
+<CREDITCARDMSGSRSV1>
+<CCSTMTTRNRS>
+<CCSTMTRS>
+<CCACCTFROM>
+<ACCTID>fixture-card-1</ACCTID>
+</CCACCTFROM>
+<BANKTRANLIST>
+<DTSTART>20260501000000[-3:BRT]</DTSTART>
+<DTEND>20260502000000[-3:BRT]</DTEND>
+<STMTTRN>
+<TRNTYPE>DEBIT</TRNTYPE>
+<DTPOSTED>20260501000000[-3:BRT]</DTPOSTED>
+<TRNAMT>-20.00</TRNAMT>
+<FITID>fit-1</FITID>
+<MEMO>Padaria Centro</MEMO>
+</STMTTRN>
+<STMTTRN>
+<TRNTYPE>DEBIT</TRNTYPE>
+<DTPOSTED>20260502</DTPOSTED>
+<TRNAMT>-40.00</TRNAMT>
+<FITID>fit-2</FITID>
+<MEMO>Supermercado Delta</MEMO>
+</STMTTRN>
+</BANKTRANLIST>
+</CCSTMTRS>
+</CCSTMTTRNRS>
+</CREDITCARDMSGSRSV1>
+</OFX>
+"#,
+    );
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("ofx-consistency")
+            .arg("--ofx")
+            .arg(&ofx_file),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("OFX consistency check"))
+    .stdout(predicate::str::contains("faltando na base: 1"))
+    .stdout(predicate::str::contains("sobrando na base: 1"))
+    .stdout(predicate::str::contains("Padaria Centro"))
+    .stdout(predicate::str::contains("Supermercado Delta"));
+
+    let json_output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("ofx-consistency")
+            .arg("--ofx")
+            .arg(&ofx_file)
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("ofx-consistency json output");
+    assert!(json_output.status.success());
+    let payload: Value = serde_json::from_slice(&json_output.stdout).expect("valid json payload");
+    assert_eq!(payload["ofxTransactions"], 2);
+    assert_eq!(payload["matched"], 1);
+    assert_eq!(payload["missingInFinance"], 1);
+    assert_eq!(payload["extraInFinance"], 1);
+    assert_eq!(payload["consistent"], false);
 }
 
 #[test]

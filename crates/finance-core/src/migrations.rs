@@ -4,7 +4,7 @@ use anyhow::Result;
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 13] = [
+const SQLITE_MIGRATIONS: [Migration; 15] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -57,9 +57,17 @@ const SQLITE_MIGRATIONS: [Migration; 13] = [
         "013_display_labels_view",
         include_str!("../../../schema/sqlite/013_display_labels_view.sql"),
     ),
+    (
+        "014_reportable_transactions_view",
+        include_str!("../../../schema/sqlite/014_reportable_transactions_view.sql"),
+    ),
+    (
+        "015_update_reportable_legacy_filter",
+        include_str!("../../../schema/sqlite/015_update_reportable_legacy_filter.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 14] = [
+const BIGQUERY_MIGRATIONS: [Migration; 16] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -115,6 +123,14 @@ const BIGQUERY_MIGRATIONS: [Migration; 14] = [
     (
         "014_transaction_splits",
         include_str!("../../../schema/bigquery/014_transaction_splits.sql"),
+    ),
+    (
+        "015_reportable_transactions_view",
+        include_str!("../../../schema/bigquery/015_reportable_transactions_view.sql"),
+    ),
+    (
+        "016_update_reportable_legacy_filter",
+        include_str!("../../../schema/bigquery/016_update_reportable_legacy_filter.sql"),
     ),
 ];
 
