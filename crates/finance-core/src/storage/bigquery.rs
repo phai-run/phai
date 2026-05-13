@@ -1467,7 +1467,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT {}
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
             self.qualified_table("accounts")?,
             limit,
         );
@@ -1498,7 +1498,7 @@ impl FinanceStore for BigQueryStore {
             WHERE context IS NOT NULL
               AND TRIM(context) <> ''
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self.run_query(&sql).await?;
         let count = response
@@ -1570,7 +1570,7 @@ impl FinanceStore for BigQueryStore {
               AND transaction_date <= {}
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
             sql_date(since),
             sql_date(until),
         );
@@ -1750,7 +1750,7 @@ impl FinanceStore for BigQueryStore {
               {where_month}
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
             self.qualified_table("accounts")?,
             self.qualified_table("internal_categories")?,
         );
@@ -1797,7 +1797,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
             LIMIT {}
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
             self.qualified_table("accounts")?,
             limit,
         );
@@ -1830,7 +1830,7 @@ impl FinanceStore for BigQueryStore {
             WHERE category_id IS NULL
                OR category_source IN ('unclassified', 'fallback')
             ",
-            self.qualified_table("v_transactions_effective")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self.run_query(&sql).await?;
         let count = response

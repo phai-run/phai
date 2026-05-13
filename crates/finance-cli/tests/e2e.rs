@@ -689,6 +689,13 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
             "-450.00",
             Some(("Tecnologia", "Eletronicos")),
         ),
+        (
+            "cc-inst-2026-03-parc",
+            "2026-03-23",
+            "Yelumseg Parc8",
+            "-197.71",
+            Some(("Transporte", "Seguro Auto")),
+        ),
     ];
 
     for (tx_id, date, description, amount, category) in manual_rows {
@@ -728,7 +735,8 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     .stdout(predicate::str::contains("Assinaturas:"))
     .stdout(predicate::str::contains("Parcelados:"))
     .stdout(predicate::str::contains("academia fit"))
-    .stdout(predicate::str::contains("03/10"));
+    .stdout(predicate::str::contains("03/10"))
+    .stdout(predicate::str::contains("parcela-8"));
 
     let json_output = envs(
         cargo_bin()
@@ -750,6 +758,102 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     assert!(!payload["recurring"].as_array().unwrap().is_empty());
     assert!(!payload["subscriptions"].as_array().unwrap().is_empty());
     assert!(!payload["installments"].as_array().unwrap().is_empty());
+    assert!(payload["installments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["marker"] == "parcela-8"));
+}
+
+#[test]
+fn report_views_exclude_legacy_manual_statement_when_pluggy_match_exists() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("manual_statement_test_dup")
+            .arg("--account-id")
+            .arg("shared_credit")
+            .arg("--date")
+            .arg("2026-03-26")
+            .arg("--description")
+            .arg("Posto de Gasolina")
+            .arg("--amount=-150.00")
+            .arg("--payment-status")
+            .arg("posted"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    conn.execute(
+        "UPDATE transactions SET source = 'legacy' WHERE transaction_id = 'manual_statement_test_dup'",
+        [],
+    )
+    .expect("set manual source as legacy");
+
+    let json_output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("monthly-spend")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("monthly-spend json output");
+    assert!(json_output.status.success());
+    let payload: Value = serde_json::from_slice(&json_output.stdout).expect("valid json payload");
+    let sum_expenses = payload
+        .as_array()
+        .expect("array payload")
+        .iter()
+        .map(|item| {
+            item["expenses"]
+                .as_str()
+                .expect("expense string")
+                .parse::<f64>()
+                .expect("expense decimal")
+        })
+        .sum::<f64>();
+    assert!(
+        (sum_expenses - 302.30).abs() < 0.01,
+        "monthly spend must ignore deduped manual statement row; got {sum_expenses}"
+    );
 }
 
 #[test]

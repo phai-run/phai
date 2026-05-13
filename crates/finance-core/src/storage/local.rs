@@ -633,7 +633,7 @@ impl FinanceStore for LocalStore {
               t.context,
               t.payment_status,
               t.source
-            FROM v_transactions_effective t
+            FROM v_transactions_reportable t
             LEFT JOIN accounts a ON a.account_id = t.account_id
             WHERE t.context IS NOT NULL
               AND TRIM(t.context) <> ''
@@ -671,7 +671,7 @@ impl FinanceStore for LocalStore {
     async fn count_transactions_with_context(&self) -> Result<i64> {
         let conn = self.connection()?;
         let count = conn.query_row(
-            "SELECT COUNT(*) FROM v_transactions_effective
+            "SELECT COUNT(*) FROM v_transactions_reportable
              WHERE context IS NOT NULL
                AND TRIM(context) <> ''",
             [],
@@ -734,7 +734,7 @@ impl FinanceStore for LocalStore {
               transaction_id, account_id, transaction_date, description, CAST(amount AS TEXT),
               tx_type, category_id, category_source, context, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at
-            FROM v_transactions_effective
+            FROM v_transactions_reportable
             WHERE transaction_date >= ?1
               AND transaction_date <= ?2
             ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
@@ -984,7 +984,7 @@ impl FinanceStore for LocalStore {
               t.category_id,
               t.payment_status,
               t.metadata_json
-            FROM v_transactions_effective t
+            FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
               AND CAST(t.amount AS REAL) < 0
@@ -1038,7 +1038,7 @@ impl FinanceStore for LocalStore {
               t.payment_status,
               t.source,
               t.metadata_json
-            FROM v_transactions_effective t
+            FROM v_transactions_reportable t
             LEFT JOIN accounts a ON a.account_id = t.account_id
             WHERE t.category_id IS NULL
                OR t.category_source IN ('unclassified', 'fallback')
@@ -1078,7 +1078,7 @@ impl FinanceStore for LocalStore {
     async fn count_uncategorized(&self) -> Result<i64> {
         let conn = self.connection()?;
         let count = conn.query_row(
-            "SELECT COUNT(*) FROM v_transactions_effective
+            "SELECT COUNT(*) FROM v_transactions_reportable
              WHERE category_id IS NULL
                 OR category_source IN ('unclassified', 'fallback')",
             [],

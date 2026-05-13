@@ -259,7 +259,7 @@ struct OfxConsistencyArgs {
     ofx: PathBuf,
     #[arg(long)]
     account_id: Option<String>,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 1)]
     date_tolerance_days: i64,
     #[arg(long)]
     json: bool,
@@ -1074,30 +1074,94 @@ fn normalize_description(value: &str) -> String {
     normalized.trim().to_string()
 }
 
-fn extract_installment_marker(value: &str) -> Option<String> {
-    value.split_whitespace().find_map(|token| {
-        let cleaned = token.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '/');
-        let mut parts = cleaned.split('/');
-        let left = parts.next()?;
-        let right = parts.next()?;
-        if parts.next().is_some() || left.is_empty() || right.is_empty() {
-            return None;
-        }
-        if left.chars().all(|ch| ch.is_ascii_digit()) && right.chars().all(|ch| ch.is_ascii_digit())
+fn compact_token_ascii(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+}
+
+fn extract_installment_marker_from_tokens(tokens: &[&str], idx: usize) -> Option<String> {
+    let token = tokens.get(idx)?;
+    let cleaned = token.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '/');
+    let mut parts = cleaned.split('/');
+    if let (Some(left), Some(right), None) = (parts.next(), parts.next(), parts.next()) {
+        if !left.is_empty()
+            && !right.is_empty()
+            && left.chars().all(|ch| ch.is_ascii_digit())
+            && right.chars().all(|ch| ch.is_ascii_digit())
         {
-            Some(format!("{left}/{right}"))
-        } else {
-            None
+            return Some(format!("{left}/{right}"));
         }
-    })
+    }
+
+    let compact = compact_token_ascii(token);
+    if let Some(number) = compact
+        .strip_prefix("parcela")
+        .or_else(|| compact.strip_prefix("parc"))
+    {
+        if !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()) {
+            return Some(format!("parcela-{number}"));
+        }
+        if number.is_empty() {
+            let next = tokens.get(idx + 1)?;
+            let next_clean = next.trim_matches(|ch: char| !ch.is_ascii_digit());
+            if !next_clean.is_empty() && next_clean.chars().all(|ch| ch.is_ascii_digit()) {
+                return Some(format!("parcela-{next_clean}"));
+            }
+        }
+    }
+    None
+}
+
+fn extract_installment_marker(value: &str) -> Option<String> {
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    for idx in 0..tokens.len() {
+        if let Some(marker) = extract_installment_marker_from_tokens(&tokens, idx) {
+            return Some(marker);
+        }
+    }
+    None
 }
 
 fn strip_installment_marker(value: &str) -> String {
-    value
-        .split_whitespace()
-        .filter(|token| extract_installment_marker(token).is_none())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    let mut kept = Vec::new();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        if extract_installment_marker_from_tokens(&tokens, idx).is_some() {
+            let compact = compact_token_ascii(tokens[idx]);
+            if (compact == "parcela" || compact == "parc") && idx + 1 < tokens.len() {
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+        kept.push(tokens[idx]);
+        idx += 1;
+    }
+    kept.join(" ")
+}
+
+fn metadata_contains_installment_signal(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, child)| {
+            let key_lc = key.to_ascii_lowercase();
+            key_lc.contains("installment")
+                || key_lc.contains("parcela")
+                || metadata_contains_installment_signal(child)
+        }),
+        Value::Array(items) => items.iter().any(metadata_contains_installment_signal),
+        Value::String(text) => {
+            let text_lc = text.to_ascii_lowercase();
+            extract_installment_marker(text).is_some()
+                || text_lc.contains("parc")
+                || text_lc.contains("parcela")
+        }
+        _ => false,
+    }
 }
 
 fn merchant_key_for_card_row(row: &CardClosedTransactionRow) -> String {
@@ -1111,20 +1175,6 @@ fn merchant_key_for_card_row(row: &CardClosedTransactionRow) -> String {
         "sem-chave".to_string()
     } else {
         normalized
-    }
-}
-
-fn metadata_contains_installment_signal(value: &Value) -> bool {
-    match value {
-        Value::Object(map) => map.iter().any(|(key, child)| {
-            let key_lc = key.to_ascii_lowercase();
-            key_lc.contains("installment")
-                || key_lc.contains("parcela")
-                || metadata_contains_installment_signal(child)
-        }),
-        Value::Array(items) => items.iter().any(metadata_contains_installment_signal),
-        Value::String(text) => extract_installment_marker(text).is_some(),
-        _ => false,
     }
 }
 
@@ -2000,6 +2050,7 @@ fn resolve_sync_from(
 async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let since = Utc::now()
         .date_naive()
         .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
@@ -2050,6 +2101,7 @@ async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
 async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store.monthly_spend(args.month.as_deref()).await?;
 
     if args.json {
@@ -2084,6 +2136,7 @@ async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {
 async fn report_cashflow(args: CashflowArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store.cashflow(args.months).await?;
 
     if args.json {
@@ -2110,6 +2163,7 @@ async fn report_cashflow(args: CashflowArgs) -> Result<()> {
 async fn report_forecast_vs_actual(args: ForecastVsActualArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store.forecast_vs_actual(args.month.as_deref()).await?;
 
     if args.json {
@@ -2152,6 +2206,7 @@ async fn report_forecast_vs_actual(args: ForecastVsActualArgs) -> Result<()> {
 async fn report_card_summary(args: CardSummaryArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store.card_summary(args.month.as_deref()).await?;
 
     if args.json {
@@ -2185,6 +2240,7 @@ async fn report_card_summary(args: CardSummaryArgs) -> Result<()> {
 async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let today = Utc::now().date_naive();
     let target_month = match args.month.as_deref() {
         Some(value) => {
@@ -2495,6 +2551,7 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
 
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let mut db_rows = store
         .effective_transactions_window(query_since, query_until)
         .await?;
@@ -2703,6 +2760,7 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
 async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store.uncategorized(args.limit).await?;
 
     if args.json {
@@ -2807,6 +2865,7 @@ async fn report_item_prices(args: ItemPricesArgs) -> Result<()> {
 async fn report_data_health(args: DataHealthArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let today = Utc::now().date_naive();
     let window_start = today
         .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
@@ -3002,6 +3061,7 @@ async fn report_data_health(args: DataHealthArgs) -> Result<()> {
 async fn report_scenario(args: ScenarioArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let today = Utc::now().date_naive();
     let current_month = month_ref_for(
         NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
