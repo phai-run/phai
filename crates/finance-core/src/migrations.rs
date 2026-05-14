@@ -4,7 +4,7 @@ use anyhow::Result;
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 16] = [
+const SQLITE_MIGRATIONS: [Migration; 17] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -69,9 +69,13 @@ const SQLITE_MIGRATIONS: [Migration; 16] = [
         "016_account_snapshots",
         include_str!("../../../schema/sqlite/016_account_snapshots.sql"),
     ),
+    (
+        "017_category_budgets",
+        include_str!("../../../schema/sqlite/017_category_budgets.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 17] = [
+const BIGQUERY_MIGRATIONS: [Migration; 18] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -140,6 +144,10 @@ const BIGQUERY_MIGRATIONS: [Migration; 17] = [
         "017_account_snapshots",
         include_str!("../../../schema/bigquery/017_account_snapshots.sql"),
     ),
+    (
+        "018_category_budgets",
+        include_str!("../../../schema/bigquery/018_category_budgets.sql"),
+    ),
 ];
 
 fn backend_migrations(backend: BackendKind) -> &'static [Migration] {
@@ -191,5 +199,19 @@ mod tests {
         assert!(SQLITE_MIGRATIONS
             .iter()
             .all(|(version, _)| *version != "014_transaction_splits"));
+    }
+
+    #[test]
+    fn sqlite_migrations_include_category_budgets() {
+        assert!(SQLITE_MIGRATIONS
+            .iter()
+            .any(|(version, _)| *version == "017_category_budgets"));
+    }
+
+    #[test]
+    fn bigquery_migrations_include_category_budgets() {
+        assert!(BIGQUERY_MIGRATIONS
+            .iter()
+            .any(|(version, _)| *version == "018_category_budgets"));
     }
 }

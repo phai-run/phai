@@ -1,8 +1,9 @@
 use crate::config::{AppConfig, BackendKind};
 use crate::models::{
-    AccountRecord, AccountSnapshotRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow,
-    CashflowRow, CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
-    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow, CardClosedTransactionRow,
+    CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, DailyPulseItem,
+    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
+    TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -21,6 +22,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "accounts",
     "account_snapshots",
     "categories",
+    "category_budgets",
     "internal_categories",
     "rules",
     "transactions",
@@ -124,6 +126,11 @@ pub trait FinanceStore {
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>>;
     async fn count_uncategorized(&self) -> Result<i64>;
     async fn count_rows(&self, table: &str) -> Result<i64>;
+
+    async fn upsert_category_budget(&self, record: &CategoryBudgetRecord) -> Result<()>;
+    async fn list_category_budgets(&self, month: Option<&str>)
+        -> Result<Vec<CategoryBudgetRecord>>;
+    async fn budget_status_for_month(&self, month: &str) -> Result<Vec<BudgetStatusRow>>;
 }
 
 pub async fn open_store(config: &AppConfig) -> Result<Box<dyn FinanceStore>> {

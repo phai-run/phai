@@ -1,10 +1,10 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent,
-    CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
-    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
-    TransactionRecord, UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
+    CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
+    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -12,7 +12,7 @@ use crate::splits::{
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, Days, NaiveDate, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -2019,5 +2019,246 @@ impl FinanceStore for BigQueryStore {
             .and_then(|cell| parse_scalar_string(&cell.v))
             .unwrap_or_else(|| "0".to_string());
         Ok(count.parse().unwrap_or(0))
+    }
+
+    async fn upsert_category_budget(&self, record: &CategoryBudgetRecord) -> Result<()> {
+        let table = self.qualified_table("category_budgets")?;
+        // BigQuery doesn't enforce UNIQUE; use MERGE for upsert by business key
+        let sub_key = record
+            .subcategory_id
+            .as_deref()
+            .map(sql_string)
+            .unwrap_or_else(|| "CAST(NULL AS STRING)".to_string());
+        let month_key = record
+            .month_ref
+            .as_deref()
+            .map(sql_string)
+            .unwrap_or_else(|| "CAST(NULL AS STRING)".to_string());
+        let sql = format!(
+            "
+            MERGE {table} target
+            USING (SELECT
+              {budget_id} AS budget_id,
+              {category_id} AS category_id,
+              {subcategory_id} AS subcategory_id,
+              {month_ref} AS month_ref,
+              {amount} AS amount,
+              {alert_threshold_pct} AS alert_threshold_pct,
+              {actor_id} AS actor_id,
+              {idempotency_key} AS idempotency_key,
+              {created_at} AS created_at,
+              {updated_at} AS updated_at
+            ) source
+            ON (
+              target.category_id = source.category_id
+              AND COALESCE(target.subcategory_id, '') = COALESCE(source.subcategory_id, '')
+              AND COALESCE(target.month_ref, '_default') = COALESCE(source.month_ref, '_default')
+            )
+            WHEN MATCHED THEN UPDATE SET
+              budget_id = source.budget_id,
+              amount = source.amount,
+              alert_threshold_pct = source.alert_threshold_pct,
+              actor_id = source.actor_id,
+              idempotency_key = source.idempotency_key,
+              updated_at = source.updated_at
+            WHEN NOT MATCHED THEN INSERT (
+              budget_id, category_id, subcategory_id, month_ref, amount,
+              alert_threshold_pct, actor_id, idempotency_key, created_at, updated_at
+            ) VALUES (
+              source.budget_id, source.category_id, source.subcategory_id, source.month_ref,
+              source.amount, source.alert_threshold_pct, source.actor_id, source.idempotency_key,
+              source.created_at, source.updated_at
+            )
+            ",
+            table = table,
+            budget_id = sql_string(&record.budget_id),
+            category_id = sql_string(&record.category_id),
+            subcategory_id = sub_key,
+            month_ref = month_key,
+            amount = sql_decimal(&record.amount),
+            alert_threshold_pct = record.alert_threshold_pct,
+            actor_id = sql_string(&record.actor_id),
+            idempotency_key = sql_string(&record.idempotency_key),
+            created_at = sql_timestamp(record.created_at),
+            updated_at = sql_timestamp(record.updated_at),
+        );
+        self.run_query(&sql).await?;
+        Ok(())
+    }
+
+    async fn list_category_budgets(
+        &self,
+        month: Option<&str>,
+    ) -> Result<Vec<CategoryBudgetRecord>> {
+        let table = self.qualified_table("category_budgets")?;
+        let month_filter = match month {
+            Some(m) => format!("month_ref = {} OR month_ref IS NULL", sql_string(m)),
+            None => "TRUE".to_string(),
+        };
+        let sql = format!(
+            "
+            SELECT
+              budget_id, category_id, subcategory_id, month_ref,
+              CAST(amount AS STRING), alert_threshold_pct,
+              actor_id, idempotency_key,
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
+            FROM {table}
+            WHERE {month_filter}
+            ORDER BY category_id ASC, subcategory_id ASC, month_ref ASC
+            ",
+        );
+        let response = self.run_query(&sql).await?;
+        let mut records = Vec::new();
+        for row in response.rows {
+            let values = row_values(&row);
+            let created_at = required_string(&values, 8, "created_at")?;
+            let updated_at = required_string(&values, 9, "updated_at")?;
+            records.push(CategoryBudgetRecord {
+                budget_id: required_string(&values, 0, "budget_id")?,
+                category_id: required_string(&values, 1, "category_id")?,
+                subcategory_id: optional_string(&values, 2),
+                month_ref: optional_string(&values, 3),
+                amount: required_decimal(&values, 4, "amount")?,
+                alert_threshold_pct: required_i64(&values, 5, "alert_threshold_pct")?,
+                actor_id: required_string(&values, 6, "actor_id")?,
+                idempotency_key: required_string(&values, 7, "idempotency_key")?,
+                created_at: parse_datetime_or_now(Some(&created_at)),
+                updated_at: parse_datetime_or_now(Some(&updated_at)),
+            });
+        }
+        Ok(records)
+    }
+
+    async fn budget_status_for_month(&self, month: &str) -> Result<Vec<BudgetStatusRow>> {
+        let spend_table = self.qualified_table("v_monthly_spend")?;
+        let budget_table = self.qualified_table("category_budgets")?;
+
+        // Fetch spend for the month
+        let spend_sql = format!(
+            "
+            SELECT category_id, CAST(SUM(CAST(expenses AS NUMERIC)) AS STRING)
+            FROM {spend_table}
+            WHERE month_ref = {month}
+            GROUP BY category_id
+            ",
+            month = sql_string(month),
+        );
+        let spend_response = self.run_query(&spend_sql).await?;
+        let mut spend_by_cat = std::collections::BTreeMap::<String, Decimal>::new();
+        for row in spend_response.rows {
+            let values = row_values(&row);
+            if let (Some(cat), Some(exp)) =
+                (optional_string(&values, 0), optional_string(&values, 1))
+            {
+                let expenses = Decimal::from_str(&exp).unwrap_or(Decimal::ZERO);
+                spend_by_cat.insert(cat, expenses);
+            }
+        }
+
+        // Fetch budgets applicable to this month
+        let budget_sql = format!(
+            "
+            SELECT
+              budget_id, category_id, subcategory_id, month_ref,
+              CAST(amount AS STRING), alert_threshold_pct,
+              actor_id, idempotency_key,
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
+            FROM {budget_table}
+            WHERE month_ref = {month} OR month_ref IS NULL
+            ORDER BY category_id ASC, subcategory_id ASC,
+                     CASE WHEN month_ref IS NOT NULL THEN 0 ELSE 1 END ASC
+            ",
+            month = sql_string(month),
+        );
+        let budget_response = self.run_query(&budget_sql).await?;
+        let mut all_records = Vec::new();
+        for row in budget_response.rows {
+            let values = row_values(&row);
+            let created_at = required_string(&values, 8, "created_at")?;
+            let updated_at = required_string(&values, 9, "updated_at")?;
+            all_records.push(CategoryBudgetRecord {
+                budget_id: required_string(&values, 0, "budget_id")?,
+                category_id: required_string(&values, 1, "category_id")?,
+                subcategory_id: optional_string(&values, 2),
+                month_ref: optional_string(&values, 3),
+                amount: required_decimal(&values, 4, "amount")?,
+                alert_threshold_pct: required_i64(&values, 5, "alert_threshold_pct")?,
+                actor_id: required_string(&values, 6, "actor_id")?,
+                idempotency_key: required_string(&values, 7, "idempotency_key")?,
+                created_at: parse_datetime_or_now(Some(&created_at)),
+                updated_at: parse_datetime_or_now(Some(&updated_at)),
+            });
+        }
+
+        // Dedup: explicit month wins over default
+        let mut seen =
+            std::collections::BTreeMap::<(String, Option<String>), CategoryBudgetRecord>::new();
+        for record in all_records {
+            let key = (record.category_id.clone(), record.subcategory_id.clone());
+            let entry = seen.entry(key);
+            match entry {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(record);
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    if record.month_ref.is_some() {
+                        e.insert(record);
+                    }
+                }
+            }
+        }
+
+        let today = Utc::now().date_naive();
+        let current_month = today.format("%Y-%m").to_string();
+        let (day_of_month, days_in_month) = if month == current_month {
+            let day = today.day();
+            let first_next = if today.month() == 12 {
+                NaiveDate::from_ymd_opt(today.year() + 1, 1, 1)
+            } else {
+                NaiveDate::from_ymd_opt(today.year(), today.month() + 1, 1)
+            }
+            .unwrap_or(today);
+            let last = first_next.checked_sub_days(Days::new(1)).unwrap_or(today);
+            (day, last.day())
+        } else {
+            (0u32, 0u32)
+        };
+
+        let mut results = Vec::new();
+        for ((cat, _sub), record) in seen {
+            let actual = spend_by_cat.get(&cat).copied().unwrap_or(Decimal::ZERO);
+            let budget = record.amount;
+            let usage_pct = if budget.is_zero() {
+                Decimal::ZERO
+            } else {
+                (actual / budget * Decimal::from(100)).round_dp(2)
+            };
+            let projected_pct = if month == current_month && day_of_month > 0 {
+                let projected = actual / Decimal::from(day_of_month) * Decimal::from(days_in_month);
+                if budget.is_zero() {
+                    Decimal::ZERO
+                } else {
+                    (projected / budget * Decimal::from(100)).round_dp(2)
+                }
+            } else {
+                usage_pct
+            };
+            let alert = usage_pct >= Decimal::from(record.alert_threshold_pct);
+            results.push(BudgetStatusRow {
+                category_id: cat,
+                subcategory_id: record.subcategory_id,
+                month_ref: month.to_string(),
+                budget_amount: budget,
+                actual_amount: actual,
+                usage_pct,
+                projected_pct,
+                alert,
+                alert_threshold_pct: record.alert_threshold_pct,
+            });
+        }
+        results.sort_by(|a, b| a.category_id.cmp(&b.category_id));
+        Ok(results)
     }
 }

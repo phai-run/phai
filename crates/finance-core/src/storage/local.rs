@@ -1,10 +1,10 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent,
-    CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
-    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
-    TransactionRecord, UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
+    CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
+    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -12,7 +12,7 @@ use crate::splits::{
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, Days, NaiveDate, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -1363,5 +1363,217 @@ impl FinanceStore for LocalStore {
         let sql = format!("SELECT COUNT(*) FROM [{table}]");
         let count = conn.query_row(&sql, [], |row| row.get(0))?;
         Ok(count)
+    }
+
+    async fn upsert_category_budget(&self, record: &CategoryBudgetRecord) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "
+            INSERT INTO category_budgets (
+              budget_id, category_id, subcategory_id, month_ref, amount,
+              alert_threshold_pct, actor_id, idempotency_key, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(category_id, COALESCE(subcategory_id, ''), COALESCE(month_ref, '_default')) DO UPDATE SET
+              budget_id = excluded.budget_id,
+              amount = excluded.amount,
+              alert_threshold_pct = excluded.alert_threshold_pct,
+              actor_id = excluded.actor_id,
+              idempotency_key = excluded.idempotency_key,
+              updated_at = excluded.updated_at
+            ",
+            params![
+                record.budget_id,
+                record.category_id,
+                record.subcategory_id,
+                record.month_ref,
+                decimal_to_sql(&record.amount),
+                record.alert_threshold_pct,
+                record.actor_id,
+                record.idempotency_key,
+                record.created_at.to_rfc3339(),
+                record.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn list_category_budgets(
+        &self,
+        month: Option<&str>,
+    ) -> Result<Vec<CategoryBudgetRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              budget_id, category_id, subcategory_id, month_ref,
+              CAST(amount AS TEXT), alert_threshold_pct,
+              actor_id, idempotency_key, created_at, updated_at
+            FROM category_budgets
+            WHERE (?1 IS NULL OR month_ref = ?1 OR month_ref IS NULL)
+            ORDER BY category_id ASC, subcategory_id ASC, month_ref ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([month], |row| {
+                let amount = row.get::<_, String>(4)?;
+                let created_at: String = row.get(8)?;
+                let updated_at: String = row.get(9)?;
+                Ok(CategoryBudgetRecord {
+                    budget_id: row.get(0)?,
+                    category_id: row.get(1)?,
+                    subcategory_id: row.get(2)?,
+                    month_ref: row.get(3)?,
+                    amount: parse_decimal(amount).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    alert_threshold_pct: row.get(5)?,
+                    actor_id: row.get(6)?,
+                    idempotency_key: row.get(7)?,
+                    created_at: parse_datetime_or_now(Some(&created_at)),
+                    updated_at: parse_datetime_or_now(Some(&updated_at)),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn budget_status_for_month(&self, month: &str) -> Result<Vec<BudgetStatusRow>> {
+        let conn = self.connection()?;
+        // Fetch spend for this month aggregated by category (no subcategory split in v_monthly_spend)
+        let mut spend_stmt = conn.prepare(
+            "
+            SELECT category_id, CAST(SUM(CAST(expenses AS REAL)) AS TEXT)
+            FROM v_monthly_spend
+            WHERE month_ref = ?1
+            GROUP BY category_id
+            ",
+        )?;
+        let mut spend_by_cat = std::collections::BTreeMap::<String, Decimal>::new();
+        let spend_rows = spend_stmt
+            .query_map([month], |row| {
+                let cat: String = row.get(0)?;
+                let expenses: String = row.get(1)?;
+                Ok((cat, expenses))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (cat, expenses_str) in spend_rows {
+            let expenses = parse_decimal(expenses_str).unwrap_or(Decimal::ZERO);
+            spend_by_cat.insert(cat, expenses);
+        }
+
+        // Fetch budgets: explicit month wins over default
+        let mut budget_stmt = conn.prepare(
+            "
+            SELECT
+              budget_id, category_id, subcategory_id, month_ref,
+              CAST(amount AS TEXT), alert_threshold_pct,
+              actor_id, idempotency_key, created_at, updated_at
+            FROM category_budgets
+            WHERE month_ref = ?1 OR month_ref IS NULL
+            ORDER BY category_id ASC, subcategory_id ASC,
+                     CASE WHEN month_ref IS NOT NULL THEN 0 ELSE 1 END ASC
+            ",
+        )?;
+        let budget_rows = budget_stmt
+            .query_map([month], |row| {
+                let amount: String = row.get(4)?;
+                let created_at: String = row.get(8)?;
+                let updated_at: String = row.get(9)?;
+                Ok(CategoryBudgetRecord {
+                    budget_id: row.get(0)?,
+                    category_id: row.get(1)?,
+                    subcategory_id: row.get(2)?,
+                    month_ref: row.get(3)?,
+                    amount: parse_decimal(amount).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    alert_threshold_pct: row.get(5)?,
+                    actor_id: row.get(6)?,
+                    idempotency_key: row.get(7)?,
+                    created_at: parse_datetime_or_now(Some(&created_at)),
+                    updated_at: parse_datetime_or_now(Some(&updated_at)),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Dedup: explicit month_ref takes precedence over default (null)
+        let mut seen =
+            std::collections::BTreeMap::<(String, Option<String>), CategoryBudgetRecord>::new();
+        for record in budget_rows {
+            let key = (record.category_id.clone(), record.subcategory_id.clone());
+            let entry = seen.entry(key);
+            match entry {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(record);
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    // Explicit month_ref wins over default (null)
+                    if record.month_ref.is_some() {
+                        e.insert(record);
+                    }
+                }
+            }
+        }
+
+        // Compute projection factors
+        let today = Utc::now().date_naive();
+        let current_month = today.format("%Y-%m").to_string();
+        let (day_of_month, days_in_month) = if month == current_month {
+            let day = today.day();
+            // Last day of month: advance to next month day 1, subtract 1
+            let first_next = if today.month() == 12 {
+                NaiveDate::from_ymd_opt(today.year() + 1, 1, 1)
+            } else {
+                NaiveDate::from_ymd_opt(today.year(), today.month() + 1, 1)
+            }
+            .unwrap_or(today);
+            let last = first_next.checked_sub_days(Days::new(1)).unwrap_or(today);
+            (day, last.day())
+        } else {
+            (0u32, 0u32)
+        };
+
+        let mut results = Vec::new();
+        for ((cat, _sub), record) in seen {
+            let actual = spend_by_cat.get(&cat).copied().unwrap_or(Decimal::ZERO);
+            let budget = record.amount;
+            let usage_pct = if budget.is_zero() {
+                Decimal::ZERO
+            } else {
+                (actual / budget * Decimal::from(100)).round_dp(2)
+            };
+            let projected_pct = if month == current_month && day_of_month > 0 {
+                let projected = actual / Decimal::from(day_of_month) * Decimal::from(days_in_month);
+                if budget.is_zero() {
+                    Decimal::ZERO
+                } else {
+                    (projected / budget * Decimal::from(100)).round_dp(2)
+                }
+            } else {
+                usage_pct
+            };
+            let alert = usage_pct >= Decimal::from(record.alert_threshold_pct);
+            results.push(BudgetStatusRow {
+                category_id: cat,
+                subcategory_id: record.subcategory_id,
+                month_ref: month.to_string(),
+                budget_amount: budget,
+                actual_amount: actual,
+                usage_pct,
+                projected_pct,
+                alert,
+                alert_threshold_pct: record.alert_threshold_pct,
+            });
+        }
+        results.sort_by(|a, b| a.category_id.cmp(&b.category_id));
+        Ok(results)
     }
 }

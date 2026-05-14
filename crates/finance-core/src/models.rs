@@ -304,6 +304,33 @@ pub struct AccountSnapshotRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryBudgetRecord {
+    pub budget_id: String,
+    pub category_id: String,
+    pub subcategory_id: Option<String>,
+    pub month_ref: Option<String>,
+    pub amount: Decimal,
+    pub alert_threshold_pct: i64,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetStatusRow {
+    pub category_id: String,
+    pub subcategory_id: Option<String>,
+    pub month_ref: String,
+    pub budget_amount: Decimal,
+    pub actual_amount: Decimal,
+    pub usage_pct: Decimal,
+    pub projected_pct: Decimal,
+    pub alert: bool,
+    pub alert_threshold_pct: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub event_id: String,
     pub entity_type: String,
