@@ -2898,14 +2898,13 @@ fn print_forecast_vs_actual_human(
                 "✅"
             };
 
+            let due_label = match row.due_date {
+                Some(d) => format!("({})", d.format("%d/%m")),
+                None => String::new(),
+            };
             println!(
-                "  {} {} {indicator}  previsto {}  realizado {}  variação {}",
+                "  {} {due_label} {indicator}  previsto {}  realizado {}  variação {}",
                 short_description(&row.description),
-                if row.due_date.is_some() {
-                    format!("({})", row.due_date.unwrap().format("%d/%m"))
-                } else {
-                    String::new()
-                },
                 brl(forecast),
                 brl(actual),
                 brl_signed(variance),
