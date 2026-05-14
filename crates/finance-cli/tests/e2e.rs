@@ -466,10 +466,9 @@ fn mutating_commands_feed_reporting_views() {
     )
     .assert()
     .success()
-    // human format: family groups, not raw category paths
-    .stdout(predicate::str::contains("alimentacao"))
-    .stdout(predicate::str::contains("saude"))
-    .stdout(predicate::str::contains("gas"))
+    // human format: family groups use display labels (capitalized, with accents)
+    .stdout(predicate::str::contains("Alimentação"))
+    .stdout(predicate::str::contains("Saúde"))
     .stdout(predicate::str::contains("financeiro-pagamento-recebido").not());
 
     envs(

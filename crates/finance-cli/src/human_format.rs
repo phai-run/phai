@@ -213,9 +213,9 @@ pub fn pct(value: Decimal) -> String {
     format!("{rounded}%")
 }
 
-/// Format `"YYYY-MM"` as `"<month-pt>/<YY>"`. Falls back to the raw string
+/// Format `"YYYY-MM"` as `"<month-pt>/<YYYY>"`. Falls back to the raw string
 /// if it doesn't parse.
-/// `"2026-05"` → `"mai/26"`.
+/// `"2026-05"` → `"maio/2026"`.
 pub fn month_label(month_ref: &str) -> String {
     let parts: Vec<&str> = month_ref.split('-').collect();
     if parts.len() != 2 {
@@ -229,7 +229,25 @@ pub fn month_label(month_ref: &str) -> String {
         Ok(m) if (1..=12).contains(&m) => m,
         _ => return month_ref.to_string(),
     };
-    format!("{}/{:02}", month_pt_short(month), year % 100)
+    format!("{}/{}", month_pt_full(month), year)
+}
+
+fn month_pt_full(month: u32) -> &'static str {
+    match month {
+        1 => "janeiro",
+        2 => "fevereiro",
+        3 => "março",
+        4 => "abril",
+        5 => "maio",
+        6 => "junho",
+        7 => "julho",
+        8 => "agosto",
+        9 => "setembro",
+        10 => "outubro",
+        11 => "novembro",
+        12 => "dezembro",
+        _ => "??",
+    }
 }
 
 /// Render a 10-cell unicode progress bar, `[▓▓▓░░░░░░░] 35%`.
@@ -341,9 +359,9 @@ mod tests {
 
     #[test]
     fn month_label_formats_known_month() {
-        assert_eq!(month_label("2026-05"), "mai/26");
-        assert_eq!(month_label("2024-12"), "dez/24");
-        assert_eq!(month_label("2030-01"), "jan/30");
+        assert_eq!(month_label("2026-05"), "maio/2026");
+        assert_eq!(month_label("2024-12"), "dezembro/2024");
+        assert_eq!(month_label("2030-01"), "janeiro/2030");
     }
 
     #[test]
