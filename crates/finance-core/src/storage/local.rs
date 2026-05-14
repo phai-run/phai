@@ -1,9 +1,10 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    parse_datetime_or_now, AccountRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow,
-    CashflowRow, CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
-    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent,
+    CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
+    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
+    TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -176,6 +177,40 @@ impl FinanceStore for LocalStore {
                 row.metadata_json.to_string(),
                 row.created_at.to_rfc3339(),
                 row.updated_at.to_rfc3339(),
+            ])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "
+            INSERT OR IGNORE INTO account_snapshots (
+              snapshot_id, account_id, snapshot_date, balance, credit_limit, currency_code,
+              source, actor_id, idempotency_key, metadata_json, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                row.snapshot_id,
+                row.account_id,
+                row.snapshot_date.format("%Y-%m-%d").to_string(),
+                row.balance.as_ref().map(decimal_to_sql),
+                row.credit_limit.as_ref().map(decimal_to_sql),
+                row.currency_code,
+                row.source,
+                row.actor_id,
+                row.idempotency_key,
+                row.metadata_json.to_string(),
+                row.created_at.to_rfc3339(),
             ])?;
         }
         drop(stmt);
@@ -448,6 +483,186 @@ impl FinanceStore for LocalStore {
             .query_map(params_from_iter(ids.iter()), |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows.into_iter().collect())
+    }
+
+    async fn find_transactions_by_description(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let pattern = format!("%{}%", query.to_ascii_lowercase());
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, description, CAST(amount AS TEXT),
+              tx_type, category_id, category_source, context, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at
+            FROM transactions
+            WHERE LOWER(description) LIKE ?1
+            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            LIMIT ?2
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![pattern, limit as i64], |row| {
+                let transaction_date = row.get::<_, String>(2)?;
+                let amount = row.get::<_, String>(4)?;
+                let metadata_json = row.get::<_, String>(13)?;
+                let created_at = row.get::<_, String>(14)?;
+                let updated_at = row.get::<_, String>(15)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    transaction_date,
+                    row.get::<_, String>(3)?,
+                    amount,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    metadata_json,
+                    created_at,
+                    updated_at,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    transaction_id,
+                    account_id,
+                    transaction_date,
+                    description,
+                    amount,
+                    tx_type,
+                    category_id,
+                    category_source,
+                    context,
+                    payment_status,
+                    source,
+                    actor_id,
+                    idempotency_key,
+                    metadata_json,
+                    created_at,
+                    updated_at,
+                )| {
+                    Ok(TransactionRecord {
+                        transaction_id,
+                        account_id,
+                        transaction_date: parse_sql_date(transaction_date, 2)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?,
+                        description,
+                        amount: parse_decimal(amount).map_err(|e| anyhow::anyhow!("{e}"))?,
+                        tx_type,
+                        category_id,
+                        category_source,
+                        context,
+                        payment_status,
+                        source,
+                        actor_id,
+                        idempotency_key,
+                        metadata_json: serde_json::from_str(&metadata_json)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                        created_at: parse_datetime_or_now(Some(&created_at)),
+                        updated_at: parse_datetime_or_now(Some(&updated_at)),
+                    })
+                },
+            )
+            .collect()
+    }
+
+    async fn latest_uncategorized_transactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, description, CAST(amount AS TEXT),
+              tx_type, category_id, category_source, context, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at
+            FROM transactions
+            WHERE context IS NULL
+            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                let transaction_date = row.get::<_, String>(2)?;
+                let amount = row.get::<_, String>(4)?;
+                let metadata_json = row.get::<_, String>(13)?;
+                let created_at = row.get::<_, String>(14)?;
+                let updated_at = row.get::<_, String>(15)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    transaction_date,
+                    row.get::<_, String>(3)?,
+                    amount,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    metadata_json,
+                    created_at,
+                    updated_at,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    transaction_id,
+                    account_id,
+                    transaction_date,
+                    description,
+                    amount,
+                    tx_type,
+                    category_id,
+                    category_source,
+                    context,
+                    payment_status,
+                    source,
+                    actor_id,
+                    idempotency_key,
+                    metadata_json,
+                    created_at,
+                    updated_at,
+                )| {
+                    Ok(TransactionRecord {
+                        transaction_id,
+                        account_id,
+                        transaction_date: parse_sql_date(transaction_date, 2)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?,
+                        description,
+                        amount: parse_decimal(amount).map_err(|e| anyhow::anyhow!("{e}"))?,
+                        tx_type,
+                        category_id,
+                        category_source,
+                        context,
+                        payment_status,
+                        source,
+                        actor_id,
+                        idempotency_key,
+                        metadata_json: serde_json::from_str(&metadata_json)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                        created_at: parse_datetime_or_now(Some(&created_at)),
+                        updated_at: parse_datetime_or_now(Some(&updated_at)),
+                    })
+                },
+            )
+            .collect()
     }
 
     async fn transaction_by_id(&self, transaction_id: &str) -> Result<Option<TransactionRecord>> {

@@ -8,8 +8,8 @@ use finance_core::idempotency::{
 use finance_core::legacy::load_legacy_bundle;
 use finance_core::migrations::run_migrations;
 use finance_core::models::{
-    decimal_from_str, AccountRecord, AuditEvent, CardClosedTransactionRow, CategoryRecord,
-    ForecastRecord, RuleRecord, TransactionRecord,
+    decimal_from_str, AccountRecord, AccountSnapshotRecord, AuditEvent, CardClosedTransactionRow,
+    CategoryRecord, ForecastRecord, RuleRecord, TransactionRecord,
 };
 use finance_core::pluggy::{sync_pluggy, SyncPluggyParams};
 use finance_core::rules::{apply_rules_with_facts, compile_rules};
@@ -639,6 +639,9 @@ enum TxCommand {
     Categorize(CategorizeTransactionArgs),
     SetContext(SetContextArgs),
     ListContext(ListContextArgs),
+    Find(TxFindArgs),
+    Pending(TxPendingArgs),
+    SetContextByDesc(SetContextByDescArgs),
     Split {
         #[command(subcommand)]
         command: TxSplitCommand,
@@ -699,6 +702,36 @@ struct SetContextArgs {
 struct ListContextArgs {
     #[arg(long, default_value_t = 50)]
     limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct TxFindArgs {
+    #[arg(long)]
+    query: String,
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct TxPendingArgs {
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SetContextByDescArgs {
+    #[arg(long)]
+    query: String,
+    #[arg(long)]
+    context: String,
+    #[arg(long)]
+    dry_run: bool,
     #[arg(long)]
     json: bool,
 }
@@ -1583,6 +1616,17 @@ async fn insert_audit_chunked(store: &dyn FinanceStore, rows: &[AuditEvent]) -> 
     Ok(total)
 }
 
+async fn insert_snapshots_chunked(
+    store: &dyn FinanceStore,
+    rows: &[AccountSnapshotRecord],
+) -> Result<usize> {
+    let mut total = 0;
+    for chunk in rows.chunks(UPSERT_BATCH_SIZE) {
+        total += store.insert_account_snapshots(chunk).await?;
+    }
+    Ok(total)
+}
+
 async fn load_config() -> Result<(ConfigPaths, AppConfig)> {
     let paths = ConfigPaths::discover()?;
     paths.ensure()?;
@@ -1648,6 +1692,9 @@ async fn main() -> Result<()> {
             TxCommand::Categorize(args) => tx_categorize(args).await,
             TxCommand::SetContext(args) => tx_set_context(args).await,
             TxCommand::ListContext(args) => tx_list_context(args).await,
+            TxCommand::Find(args) => tx_find(args).await,
+            TxCommand::Pending(args) => tx_pending(args).await,
+            TxCommand::SetContextByDesc(args) => tx_set_context_by_desc(args).await,
             TxCommand::Split { command } => match command {
                 TxSplitCommand::Preview(args) => tx_split_preview(args).await,
                 TxSplitCommand::Apply(args) => tx_split_apply(args).await,
@@ -1920,6 +1967,45 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let mut audit = Vec::new();
 
     upsert_accounts_chunked(store.as_ref(), &accounts).await?;
+
+    // Insert one snapshot per account for today's date — idempotent on repeated syncs.
+    let today = Utc::now().date_naive();
+    let snapshots: Vec<AccountSnapshotRecord> = accounts
+        .iter()
+        .map(|row| {
+            let idempotency_key = format!(
+                "snapshot:{}:{}:pluggy",
+                row.account_id,
+                today.format("%Y-%m-%d")
+            );
+            AccountSnapshotRecord {
+                snapshot_id: Uuid::now_v7().to_string(),
+                account_id: row.account_id.clone(),
+                snapshot_date: today,
+                balance: row.metadata_json.get("balance").and_then(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .or_else(|| {
+                            v.as_f64()
+                                .and_then(|f| format!("{f:.2}").parse::<Decimal>().ok())
+                        })
+                }),
+                credit_limit: None,
+                currency_code: row
+                    .metadata_json
+                    .get("currency_code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                source: "pluggy".to_string(),
+                actor_id: config.actor_id.clone(),
+                idempotency_key,
+                metadata_json: serde_json::json!({}),
+                created_at: Utc::now(),
+            }
+        })
+        .collect();
+    insert_snapshots_chunked(store.as_ref(), &snapshots).await?;
+
     upsert_categories_chunked(store.as_ref(), &categories).await?;
     upsert_transactions_chunked(store.as_ref(), &transactions).await?;
 
@@ -3448,6 +3534,148 @@ async fn tx_list_context(args: ListContextArgs) -> Result<()> {
             category,
             row.context
         );
+    }
+    Ok(())
+}
+
+fn print_transaction_row(row: &TransactionRecord) {
+    let account = row.account_id.as_deref().unwrap_or("sem-conta");
+    println!(
+        "{} | {} | {} | {} | {} | {:?}",
+        row.transaction_id,
+        row.transaction_date.format("%Y-%m-%d"),
+        decimal_text(row.amount),
+        row.description,
+        account,
+        row.context,
+    );
+}
+
+async fn tx_find(args: TxFindArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store
+        .find_transactions_by_description(&args.query, args.limit)
+        .await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Transactions matching {:?}", args.query);
+    println!("- linhas: {}", rows.len());
+    println!();
+    for row in &rows {
+        print_transaction_row(row);
+    }
+    Ok(())
+}
+
+async fn tx_pending(args: TxPendingArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store.latest_uncategorized_transactions(args.limit).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Pending (no context) transactions");
+    println!("- linhas: {}", rows.len());
+    println!();
+    for row in &rows {
+        print_transaction_row(row);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetContextByDescResult {
+    transaction_id: String,
+    description: String,
+    old_context: Option<String>,
+    new_context: String,
+}
+
+async fn tx_set_context_by_desc(args: SetContextByDescArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store
+        .find_transactions_by_description(&args.query, 100)
+        .await?;
+
+    let results: Vec<SetContextByDescResult> = rows
+        .iter()
+        .map(|row| SetContextByDescResult {
+            transaction_id: row.transaction_id.clone(),
+            description: row.description.clone(),
+            old_context: row.context.clone(),
+            new_context: args.context.clone(),
+        })
+        .collect();
+
+    if args.dry_run {
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        } else {
+            println!("Dry-run: {} transaction(s) would be updated", results.len());
+            for r in &results {
+                println!(
+                    "{} | {} | {:?} -> {:?}",
+                    r.transaction_id, r.description, r.old_context, r.new_context
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // Real run: apply context to each matching transaction
+    let mut audit = Vec::new();
+    for row in &rows {
+        let idempotency_key = format!(
+            "context-by-desc:{}:{}:{}",
+            row.transaction_id,
+            args.context,
+            Uuid::now_v7()
+        );
+        store
+            .annotate_transaction(
+                &row.transaction_id,
+                None,
+                Some("manual"),
+                Some(&args.context),
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await?;
+        audit.push(AuditEvent::from_entity(
+            "transaction",
+            &row.transaction_id,
+            "set_context_by_desc",
+            &config.actor_id,
+            &idempotency_key,
+            json!({
+                "query": args.query,
+                "context": args.context,
+                "old_context": row.context,
+            }),
+        ));
+    }
+    insert_audit_chunked(store.as_ref(), &audit).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        println!("Contexto atualizado para {} transação(ões)", results.len());
+        for r in &results {
+            println!(
+                "{} | {} | {:?} -> {:?}",
+                r.transaction_id, r.description, r.old_context, r.new_context
+            );
+        }
     }
     Ok(())
 }

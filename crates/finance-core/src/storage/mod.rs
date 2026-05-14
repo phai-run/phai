@@ -1,8 +1,8 @@
 use crate::config::{AppConfig, BackendKind};
 use crate::models::{
-    AccountRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow, CashflowRow,
-    CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
-    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    AccountRecord, AccountSnapshotRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow,
+    CashflowRow, CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
+    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -19,6 +19,7 @@ pub mod local;
 const ALLOWED_TABLES: &[&str] = &[
     "schema_versions",
     "accounts",
+    "account_snapshots",
     "categories",
     "internal_categories",
     "rules",
@@ -46,6 +47,7 @@ pub trait FinanceStore {
     async fn record_migration(&self, version: &str) -> Result<()>;
 
     async fn upsert_accounts(&self, rows: &[AccountRecord]) -> Result<usize>;
+    async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize>;
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize>;
     async fn upsert_rules(&self, rows: &[RuleRecord]) -> Result<usize>;
     async fn upsert_categories(&self, rows: &[CategoryRecord]) -> Result<usize>;
@@ -67,6 +69,16 @@ pub trait FinanceStore {
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()>;
+
+    async fn find_transactions_by_description(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>>;
+    async fn latest_uncategorized_transactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>>;
 
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>>;
     async fn transaction_by_id(&self, transaction_id: &str) -> Result<Option<TransactionRecord>>;
