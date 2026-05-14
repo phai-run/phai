@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/feliperun/finance-os/compare/v0.4.1...v0.5.0) (2026-05-14)
+
+
+### Features
+
+* **cli:** add --json output to `finance self check` ([#7](https://github.com/feliperun/finance-os/issues/7)) ([f991505](https://github.com/feliperun/finance-os/commit/f991505e19e01b05292fd87ab9ca2ae25bb62427))
+
 ## [0.4.1](https://github.com/feliperun/finance-os/compare/v0.4.0...v0.4.1) (2026-05-14)
 
 
