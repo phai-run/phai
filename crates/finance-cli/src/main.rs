@@ -8,8 +8,8 @@ use finance_core::idempotency::{
 use finance_core::legacy::load_legacy_bundle;
 use finance_core::migrations::run_migrations;
 use finance_core::models::{
-    decimal_from_str, AccountRecord, AuditEvent, CardClosedTransactionRow, CategoryRecord,
-    ForecastRecord, RuleRecord, TransactionRecord,
+    decimal_from_str, AccountRecord, AuditEvent, BudgetStatusRow, CardClosedTransactionRow,
+    CategoryBudgetRecord, CategoryRecord, ForecastRecord, RuleRecord, TransactionRecord,
 };
 use finance_core::pluggy::{sync_pluggy, SyncPluggyParams};
 use finance_core::rules::{apply_rules_with_facts, compile_rules};
@@ -72,6 +72,10 @@ enum Commands {
     Account {
         #[command(subcommand)]
         command: AccountCommand,
+    },
+    Budget {
+        #[command(subcommand)]
+        command: BudgetCommand,
     },
 }
 
@@ -155,6 +159,7 @@ enum ReportCommand {
     Scenario(ScenarioArgs),
     OfxConsistency(OfxConsistencyArgs),
     Review(ReviewArgs),
+    BudgetStatus(BudgetStatusArgs),
 }
 
 #[derive(Args)]
@@ -837,6 +842,42 @@ struct AccountUpsertArgs {
     pluggy_item_id: Option<String>,
     #[arg(long, default_value = "active")]
     status: String,
+}
+
+#[derive(Subcommand)]
+enum BudgetCommand {
+    Upsert(BudgetUpsertArgs),
+    List(BudgetListArgs),
+}
+
+#[derive(Args)]
+struct BudgetUpsertArgs {
+    #[arg(long)]
+    category_id: String,
+    #[arg(long)]
+    subcategory_id: Option<String>,
+    #[arg(long)]
+    month: Option<String>,
+    #[arg(long)]
+    amount: String,
+    #[arg(long, default_value_t = 80)]
+    alert_threshold_pct: i64,
+}
+
+#[derive(Args)]
+struct BudgetListArgs {
+    #[arg(long)]
+    month: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct BudgetStatusArgs {
+    #[arg(long)]
+    month: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1642,6 +1683,7 @@ async fn main() -> Result<()> {
             ReportCommand::Scenario(args) => report_scenario(args).await,
             ReportCommand::OfxConsistency(args) => report_ofx_consistency(args).await,
             ReportCommand::Review(args) => report_review(args).await,
+            ReportCommand::BudgetStatus(args) => report_budget_status(args).await,
         },
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
@@ -1665,6 +1707,10 @@ async fn main() -> Result<()> {
         },
         Commands::Account { command } => match command {
             AccountCommand::Upsert(args) => account_upsert(args).await,
+        },
+        Commands::Budget { command } => match command {
+            BudgetCommand::Upsert(args) => budget_upsert(args).await,
+            BudgetCommand::List(args) => budget_list(args).await,
         },
     }
 }
@@ -3801,6 +3847,123 @@ async fn account_upsert(args: AccountUpsertArgs) -> Result<()> {
         )])
         .await?;
     println!("Conta salva: {}", row.account_id);
+    Ok(())
+}
+
+async fn budget_upsert(args: BudgetUpsertArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    if let Some(ref month) = args.month {
+        parse_month_ref(month)?;
+    }
+
+    let amount = decimal_from_str(&args.amount)?;
+    let now = Utc::now();
+    let budget_id = format!("budget_{}", uuid::Uuid::now_v7());
+    let idempotency_key = format!(
+        "budget:{}:{}:{}",
+        args.category_id,
+        args.subcategory_id.as_deref().unwrap_or(""),
+        args.month.as_deref().unwrap_or("_default"),
+    );
+    let record = CategoryBudgetRecord {
+        budget_id: budget_id.clone(),
+        category_id: args.category_id.clone(),
+        subcategory_id: args.subcategory_id.clone(),
+        month_ref: args.month.clone(),
+        amount,
+        alert_threshold_pct: args.alert_threshold_pct,
+        actor_id: config.actor_id.clone(),
+        idempotency_key: idempotency_key.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.upsert_category_budget(&record).await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "category_budget",
+            &budget_id,
+            "upsert",
+            &config.actor_id,
+            &idempotency_key,
+            serde_json::to_value(&record)?,
+        )])
+        .await?;
+    println!(
+        "Budget salvo: {} (category: {}, month: {})",
+        budget_id,
+        args.category_id,
+        args.month.as_deref().unwrap_or("_default"),
+    );
+    Ok(())
+}
+
+async fn budget_list(args: BudgetListArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    let rows = store.list_category_budgets(args.month.as_deref()).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!(
+        "Budgets{}",
+        args.month
+            .as_deref()
+            .map(|m| format!(" {m}"))
+            .unwrap_or_default()
+    );
+    println!("- linhas: {}", rows.len());
+    println!();
+
+    for row in rows {
+        let subcat = row.subcategory_id.as_deref().unwrap_or("-");
+        let month = row.month_ref.as_deref().unwrap_or("_default");
+        println!(
+            "{} | sub: {} | month: {} | budget: {} | threshold: {}%",
+            row.category_id,
+            subcat,
+            month,
+            brl(row.amount),
+            row.alert_threshold_pct,
+        );
+    }
+    Ok(())
+}
+
+async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    parse_month_ref(&args.month)?;
+    let rows: Vec<BudgetStatusRow> = store.budget_status_for_month(&args.month).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Budget status {}", args.month);
+    println!("- linhas: {}", rows.len());
+    println!();
+
+    for row in &rows {
+        let alert_flag = if row.alert { " [ALERT]" } else { "" };
+        println!(
+            "{} | budget {} | real {} | uso {:.1}% | proj {:.1}%{}",
+            row.category_id,
+            brl(row.budget_amount),
+            brl(row.actual_amount),
+            row.usage_pct,
+            row.projected_pct,
+            alert_flag,
+        );
+    }
     Ok(())
 }
 

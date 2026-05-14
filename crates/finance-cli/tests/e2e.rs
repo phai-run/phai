@@ -2099,3 +2099,386 @@ fn tx_list_context_text_output_includes_transaction_id() {
     .success()
     .stdout(predicate::str::contains("pluggy-fixture-001"));
 }
+
+fn setup_local(temp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    (config_dir, data_dir)
+}
+
+#[test]
+fn budget_upsert_creates_and_updates() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // First upsert — creates
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-1")
+            .arg("--amount")
+            .arg("1000.00")
+            .arg("--alert-threshold-pct")
+            .arg("80"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Budget salvo:"))
+    .stdout(predicate::str::contains("test-cat-1"));
+
+    // List and verify
+    envs(
+        cargo_bin().arg("budget").arg("list").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("test-cat-1"))
+    .stdout(predicate::str::contains("1000"));
+
+    // Second upsert with same key — updates amount
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-1")
+            .arg("--amount")
+            .arg("1500.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // List should still show only one budget and the updated amount
+    let output = envs(
+        cargo_bin().arg("budget").arg("list").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    let arr = parsed.as_array().expect("array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "should have exactly one budget after two upserts"
+    );
+    let amount = arr[0]["amount"].as_str().expect("amount str");
+    assert!(amount.contains("1500"), "amount should be updated to 1500");
+}
+
+#[test]
+fn budget_list_filters_by_month() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // Insert a default budget (no month)
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-1")
+            .arg("--amount")
+            .arg("500.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Insert a month-specific budget
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-2")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--amount")
+            .arg("800.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // List without filter returns both
+    let output = envs(
+        cargo_bin().arg("budget").arg("list").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(parsed.as_array().unwrap().len(), 2);
+
+    // List filtered by month returns both (default + explicit for that month)
+    let output = envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("list")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        !parsed.as_array().unwrap().is_empty(),
+        "at least the default budget should appear"
+    );
+}
+
+#[test]
+fn budget_status_shows_usage_pct() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // Insert a budget for alimentacao (the fixture has grocery spend)
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("alimentacao")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--amount")
+            .arg("300.00")
+            .arg("--alert-threshold-pct")
+            .arg("50"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2026-03"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("alimentacao"))
+    .stdout(predicate::str::contains("Budget status 2026-03"));
+}
+
+#[test]
+fn budget_status_json_is_parseable() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-json")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--amount")
+            .arg("100.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value =
+        serde_json::from_slice(&output).expect("report budget-status --json must be valid JSON");
+    let arr = parsed.as_array().expect("must be an array");
+    assert!(
+        arr.iter().any(|row| row["category_id"] == "test-cat-json"),
+        "test-cat-json should appear in budget status"
+    );
+    // Check required fields exist
+    let row = arr
+        .iter()
+        .find(|r| r["category_id"] == "test-cat-json")
+        .unwrap();
+    assert!(row.get("budget_amount").is_some());
+    assert!(row.get("actual_amount").is_some());
+    assert!(row.get("usage_pct").is_some());
+    assert!(row.get("projected_pct").is_some());
+    assert!(row.get("alert").is_some());
+}
+
+#[test]
+fn budget_default_applies_to_every_month() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // Default budget (no month_ref)
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-default")
+            .arg("--amount")
+            .arg("200.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Should appear in budget-status for any queried month
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2025-01")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    let arr = parsed.as_array().expect("array");
+    assert!(
+        arr.iter()
+            .any(|row| row["category_id"] == "test-cat-default"),
+        "default budget should appear for any queried month"
+    );
+}
+
+#[test]
+fn budget_explicit_month_takes_precedence_over_default() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // Default budget
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-prec")
+            .arg("--amount")
+            .arg("200.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Month-specific override
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-prec")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--amount")
+            .arg("999.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    let arr = parsed.as_array().expect("array");
+    let row = arr
+        .iter()
+        .find(|r| r["category_id"] == "test-cat-prec")
+        .expect("test-cat-prec must appear");
+    let budget = row["budget_amount"].as_str().unwrap_or_default();
+    assert!(
+        budget.contains("999"),
+        "explicit month budget (999) should take precedence over default (200), got: {budget}"
+    );
+}
