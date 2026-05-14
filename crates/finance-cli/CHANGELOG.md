@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/feliperun/finance-os/compare/v0.3.1...v0.4.0) (2026-05-14)
+
+
+### Features
+
+* **cli:** self-update + port legacy operational features (entregas 2, 4B, 5B) ([#3](https://github.com/feliperun/finance-os/issues/3)) ([8ca2ff3](https://github.com/feliperun/finance-os/commit/8ca2ff39852de12b5844298909d5575b75c27f8e))
+
 ## [0.3.1](https://github.com/feliperun/finance-os/compare/v0.3.0...v0.3.1) (2026-05-13)
 
 
