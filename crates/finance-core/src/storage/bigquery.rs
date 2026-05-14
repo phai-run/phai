@@ -1583,6 +1583,53 @@ impl FinanceStore for BigQueryStore {
         Ok(items)
     }
 
+    async fn transactions_in_date_range(
+        &self,
+        account_id: Option<&str>,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<TransactionRecord>> {
+        let account_clause = account_id
+            .map(|id| format!("AND account_id = {}", sql_string(id)))
+            .unwrap_or_default();
+        let sql = format!(
+            "
+            SELECT
+              transaction_id,
+              account_id,
+              CAST(transaction_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              tx_type,
+              category_id,
+              category_source,
+              context,
+              payment_status,
+              source,
+              actor_id,
+              idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              CAST(created_at AS STRING),
+              CAST(updated_at AS STRING)
+            FROM {}
+            WHERE transaction_date >= {}
+              AND transaction_date <= {}
+              {account_clause}
+            ORDER BY transaction_date ASC, transaction_id ASC
+            ",
+            self.qualified_table("transactions")?,
+            sql_date(from),
+            sql_date(to),
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(transaction_record_from_values(&values)?);
+        }
+        Ok(items)
+    }
+
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>> {
         let where_clause = month_ref
             .map(|value| format!("WHERE month_ref = {}", sql_string(value)))

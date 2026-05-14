@@ -5,6 +5,7 @@ use finance_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
     ensure_transaction_idempotency, manual_transaction_idempotency,
 };
+use finance_core::installments::{group_into_chains, InstallmentChain};
 use finance_core::legacy::load_legacy_bundle;
 use finance_core::migrations::run_migrations;
 use finance_core::models::{
@@ -148,6 +149,7 @@ enum ReportCommand {
     ForecastVsActual(ForecastVsActualArgs),
     CardSummary(CardSummaryArgs),
     CardClosedInsights(CardClosedInsightsArgs),
+    Installments(InstallmentsArgs),
     Uncategorized(UncategorizedArgs),
     SplitCandidates(SplitCandidatesArgs),
     ItemPrices(ItemPricesArgs),
@@ -203,6 +205,18 @@ struct CardClosedInsightsArgs {
     month: Option<String>,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct InstallmentsArgs {
+    #[arg(long)]
+    account_id: Option<String>,
+    #[arg(long, default_value_t = 12)]
+    lookback_months: u32,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Args)]
@@ -579,6 +593,36 @@ struct CardClosedInsightsOutput {
     subscriptions: Vec<CardClosedSubscriptionInsight>,
     closed_installments: Vec<CardClosedInstallmentInsight>,
     open_installments: Vec<CardClosedInstallmentInsight>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallmentChainView {
+    account_id: String,
+    base_description: String,
+    total: u32,
+    current: u32,
+    first_date: String,
+    projected_end: String,
+    remaining: u32,
+    released_next_month: bool,
+    total_amount: Decimal,
+}
+
+impl InstallmentChainView {
+    fn from_chain(chain: &InstallmentChain) -> Self {
+        Self {
+            account_id: chain.account_id.clone(),
+            base_description: chain.base_description.clone(),
+            total: chain.total,
+            current: chain.current,
+            first_date: chain.first_date.format("%Y-%m-%d").to_string(),
+            projected_end: chain.projected_end.format("%Y-%m-%d").to_string(),
+            remaining: chain.remaining,
+            released_next_month: chain.released_next_month,
+            total_amount: chain.total_amount,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1635,6 +1679,7 @@ async fn main() -> Result<()> {
             ReportCommand::ForecastVsActual(args) => report_forecast_vs_actual(args).await,
             ReportCommand::CardSummary(args) => report_card_summary(args).await,
             ReportCommand::CardClosedInsights(args) => report_card_closed_insights(args).await,
+            ReportCommand::Installments(args) => report_installments(args).await,
             ReportCommand::Uncategorized(args) => report_uncategorized(args).await,
             ReportCommand::SplitCandidates(args) => report_split_candidates(args).await,
             ReportCommand::ItemPrices(args) => report_item_prices(args).await,
@@ -2567,6 +2612,87 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         }
     }
 
+    Ok(())
+}
+
+async fn report_installments(args: InstallmentsArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let today = Utc::now().date_naive();
+    let from = shift_month(
+        NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+            .context("Falha ao calcular mês atual")?,
+        -(args.lookback_months as i32),
+    )?;
+    let to = today;
+
+    let transactions = store
+        .transactions_in_date_range(args.account_id.as_deref(), from, to)
+        .await?;
+
+    let all_chains = group_into_chains(&transactions);
+    // Report only active chains (remaining > 0)
+    let active_chains: Vec<&InstallmentChain> = all_chains
+        .iter()
+        .filter(|chain| chain.remaining > 0)
+        .collect();
+
+    if args.json {
+        if args.verbose {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &all_chains
+                        .iter()
+                        .filter(|c| c.remaining > 0)
+                        .collect::<Vec<_>>()
+                )?
+            );
+        } else {
+            let views: Vec<InstallmentChainView> = active_chains
+                .iter()
+                .map(|chain| InstallmentChainView::from_chain(chain))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&views)?);
+        }
+        return Ok(());
+    }
+
+    println!(
+        "Installment chains (últimos {} meses){}",
+        args.lookback_months,
+        args.account_id
+            .as_deref()
+            .map(|id| format!(" | conta: {id}"))
+            .unwrap_or_default()
+    );
+    println!("- cadeias ativas: {}", active_chains.len());
+    println!();
+
+    if active_chains.is_empty() {
+        println!("Nenhuma cadeia de parcelamento ativa encontrada.");
+        return Ok(());
+    }
+
+    for chain in &active_chains {
+        let flag = if chain.released_next_month {
+            " [libera-no-proximo-mes]"
+        } else {
+            ""
+        };
+        println!(
+            "{} | {} | {}/{} | fim: {} | restantes: {}{}",
+            chain.account_id,
+            chain.base_description,
+            chain.current,
+            chain.total,
+            chain.projected_end.format("%Y-%m-%d"),
+            chain.remaining,
+            flag
+        );
+    }
     Ok(())
 }
 
