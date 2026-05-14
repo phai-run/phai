@@ -120,8 +120,8 @@ export PLUGGY_CLIENT_SECRET=your-client-secret
 
 | Variable | Description |
 |---|---|
-| `FINANCE_OS_CONFIG_DIR` | Config directory (default: `~/.config/finance-os`) |
-| `FINANCE_OS_DATA_DIR` | Data directory (default: `~/.local/share/finance-os`) |
+| `FINANCE_OS_CONFIG_DIR` | Config directory (default follows platform conventions: `~/.config/finance-os` on Linux, `~/Library/Application Support/finance-os` on macOS) |
+| `FINANCE_OS_DATA_DIR` | Data directory (default follows platform conventions: `~/.local/share/finance-os` on Linux, `~/Library/Application Support/finance-os` on macOS). Houses `finance-os.db` (SQLite backend) and `update-state.json` (auto-update throttle). |
 | `FINANCE_OS_NO_AUTO_UPDATE` | Set to `1` to disable automatic update checks |
 | `PLUGGY_CLIENT_ID` | Pluggy API client ID |
 | `PLUGGY_CLIENT_SECRET` | Pluggy API client secret |

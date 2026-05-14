@@ -295,16 +295,22 @@ fn exec_new_binary(_new_version: &str) {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn download_and_replace(
-    client: &reqwest::Client,
+    _api_client: &reqwest::Client,
     release: &GitHubRelease,
 ) -> Result<()> {
     let tarball_asset = find_asset(release, ASSET_NAME)?;
     let checksum_asset = find_asset(release, CHECKSUM_ASSET_NAME)?;
 
+    // Use a dedicated client for the download with a generous timeout. The
+    // API-check client passed in by auto_check has a 2s timeout (tight to
+    // avoid blocking startup), which is too short for a multi-megabyte
+    // tarball on average networks.
+    let download_client = http_client(30);
+
     // Download in parallel
     let (tarball, checksum_text) = tokio::try_join!(
-        download_tarball(client, &tarball_asset.browser_download_url),
-        download_checksum(client, &checksum_asset.browser_download_url),
+        download_tarball(&download_client, &tarball_asset.browser_download_url),
+        download_checksum(&download_client, &checksum_asset.browser_download_url),
     )?;
 
     let expected_sha256 = parse_sha256(&checksum_text)?;
