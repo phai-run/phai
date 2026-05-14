@@ -223,9 +223,6 @@ fn validate_tarball_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
 fn extract_binary(tarball: &[u8], dest_dir: &Path) -> Result<PathBuf> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(tarball));
     let mut archive = tar::Archive::new(decoder);
-    let canonical_dest = dest_dir
-        .canonicalize()
-        .context("failed to canonicalize temp dir")?;
 
     // We only expect one entry: `finance-cli`
     let mut binary_path: Option<PathBuf> = None;
@@ -236,21 +233,27 @@ fn extract_binary(tarball: &[u8], dest_dir: &Path) -> Result<PathBuf> {
     {
         let mut entry = entry.context("failed to read tarball entry")?;
 
-        // Path traversal guard
+        // Path traversal guard: reject entries with `..`, absolute paths, or
+        // root prefixes. The file doesn't exist yet, so canonicalize-based
+        // checks don't work — inspect the path components instead.
         let entry_path = entry
             .path()
             .context("failed to read entry path")?
             .to_path_buf();
-        let full_path = dest_dir.join(&entry_path);
-        let canonical_full = full_path
-            .canonicalize()
-            .unwrap_or_else(|_| full_path.clone());
-        if !canonical_full.starts_with(&canonical_dest) {
-            bail!(
-                "path traversal rejected: {} resolves outside temp dir",
-                entry_path.display()
-            );
+        for component in entry_path.components() {
+            match component {
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
+                    bail!(
+                        "path traversal rejected: {} resolves outside temp dir",
+                        entry_path.display()
+                    );
+                }
+                _ => {}
+            }
         }
+        let full_path = dest_dir.join(&entry_path);
 
         entry
             .unpack_in(dest_dir)
