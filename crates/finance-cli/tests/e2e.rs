@@ -512,7 +512,7 @@ fn mutating_commands_feed_reporting_views() {
     .assert()
     .success()
     .stdout(predicate::str::contains("shared_credit"))
-    .stdout(predicate::str::contains("em aberto"));
+    .stdout(predicate::str::contains("Cartões"));
 
     envs(
         cargo_bin()
@@ -769,11 +769,10 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("Card closed insights 2026-03"))
-    .stdout(predicate::str::contains("Recorrentes:"))
-    .stdout(predicate::str::contains("Assinaturas:"))
-    .stdout(predicate::str::contains("Parceladas fechadas:"))
-    .stdout(predicate::str::contains("Parceladas em aberto:"))
+    .stdout(predicate::str::contains("Fatura fechada"))
+    .stdout(predicate::str::contains("Recorrentes"))
+    .stdout(predicate::str::contains("Assinaturas"))
+    .stdout(predicate::str::contains("Parcelamentos"))
     .stdout(predicate::str::contains("academia fit"))
     .stdout(predicate::str::contains("03/10"))
     .stdout(predicate::str::contains("parcela-8"))
@@ -2844,7 +2843,7 @@ fn budget_status_shows_usage_pct() {
     .assert()
     .success()
     .stdout(predicate::str::contains("alimentacao"))
-    .stdout(predicate::str::contains("Budget status 2026-03"));
+    .stdout(predicate::str::contains("Orçamentos"));
 }
 
 #[test]

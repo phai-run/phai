@@ -35,6 +35,8 @@ mod self_cmd;
 mod update;
 mod update_state;
 
+use human_format::{bold, brl as hf_brl, month_label, progress_bar, subsection_header};
+
 const UPSERT_BATCH_SIZE: usize = 50;
 const AUDIT_BATCH_SIZE: usize = 25;
 const DEFAULT_SYNC_LOOKBACK_DAYS: i64 = 14;
@@ -252,16 +254,36 @@ impl ForecastVsActualArgs {
 struct CardSummaryArgs {
     #[arg(long)]
     month: Option<String>,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl CardSummaryArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
 struct CardClosedInsightsArgs {
     #[arg(long)]
     month: Option<String>,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl CardClosedInsightsArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -1035,8 +1057,18 @@ struct BudgetListArgs {
 struct BudgetStatusArgs {
     #[arg(long)]
     month: String,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl BudgetStatusArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -2861,31 +2893,72 @@ async fn report_card_summary(args: CardSummaryArgs) -> Result<()> {
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.card_summary(args.month.as_deref()).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!(
-        "💳 Card summary{}",
-        args.month
-            .as_deref()
-            .map(|value| format!(" {value}"))
-            .unwrap_or_default()
-    );
-    println!("- linhas: {}", rows.len());
+    let month_label_str = args
+        .month
+        .as_deref()
+        .map(month_label)
+        .unwrap_or_else(|| "—".to_string());
+    println!("💳 {}", bold(&format!("Cartões · {month_label_str}")));
     println!();
 
-    for row in rows {
+    if rows.is_empty() {
+        println!("Sem movimentos de cartão no período.");
+        return Ok(());
+    }
+
+    let today = Utc::now().date_naive();
+    let mut total_charges = Decimal::ZERO;
+
+    for row in &rows {
+        // Parse cycle window from month_ref (YYYY-MM → 13/prev → 12/curr)
+        // We use the account_id as label (no technical UUID shown)
+        let account_label = human_format::truncate_with_ellipsis(&human_format::short_description(&row.account_id), 24);
+        let charged = -row.total_charges; // total_charges is stored negative
+        let open = -row.open_amount;
+        total_charges += charged;
+
+        // Payment status emoji
+        let status_emoji = if open <= Decimal::ZERO {
+            "🟢"
+        } else if open < charged {
+            "🟡"
+        } else {
+            // fully open — check if month is past
+            let month_ref_str = &row.month_ref;
+            let is_past = NaiveDate::parse_from_str(&format!("{month_ref_str}-28"), "%Y-%m-%d")
+                .map(|d| d < today)
+                .unwrap_or(false);
+            if is_past {
+                "🔴"
+            } else {
+                "🟡"
+            }
+        };
+
+        let paid_label = if open <= Decimal::ZERO {
+            "pago".to_string()
+        } else if open < charged {
+            format!("aberto {}", hf_brl(open))
+        } else {
+            format!("em aberto {}", hf_brl(open))
+        };
+
         println!(
-            "{} | 💳 {} | total {} | em aberto {} | {} transações",
-            row.month_ref,
-            row.account_id,
-            brl(-row.total_charges),
-            brl(-row.open_amount),
-            row.transaction_count
+            "{status_emoji} {} · {} · {}",
+            bold(&account_label),
+            hf_brl(charged),
+            paid_label
         );
     }
+
+    println!();
+    println!("Total cobrado: {}", bold(&hf_brl(total_charges)));
+
     Ok(())
 }
 
@@ -3106,14 +3179,18 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         open_installments: open_installment_rows,
     };
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
-    println!("💳 Card closed insights {}", output.month_ref);
-    println!("- contas: {}", output.accounts.len());
-    println!("- transações fechadas: {}", target_closed_rows.len());
+    println!(
+        "🧾 {}",
+        bold(&format!(
+            "Fatura fechada · {}",
+            month_label(&output.month_ref)
+        ))
+    );
     println!();
 
     if output.accounts.is_empty() {
@@ -3121,92 +3198,111 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         return Ok(());
     }
 
-    println!("Fechamento por cartão:");
+    // ── Fechamento por cartão ──
+    println!("{}", subsection_header("Fechamento por cartão"));
     for row in &output.accounts {
+        let account_label = human_format::truncate_with_ellipsis(&human_format::short_description(&row.account_id), 24);
+        let charged = -row.closed_amount;
+        let open = -row.open_amount;
+        let status = if open <= Decimal::ZERO {
+            "🟢 pago".to_string()
+        } else {
+            format!("🟡 aberto {}", hf_brl(open))
+        };
         println!(
-            "{} | fechado {} | total {} | em aberto {} | {} transações fechadas",
-            row.account_id,
-            brl(-row.closed_amount),
-            brl(-row.total_charges),
-            brl(-row.open_amount),
-            row.closed_transactions
+            "• {} — {} · {}",
+            bold(&account_label),
+            hf_brl(charged),
+            status
         );
     }
 
+    // ── Top categorias ──
     println!();
-    println!("Top categorias (fatura fechada):");
+    println!("{}", subsection_header("Top categorias"));
     if output.categories.is_empty() {
         println!("Sem categorias detectadas.");
     } else {
-        for row in output.categories.iter().take(8) {
+        for row in output.categories.iter().take(3) {
+            let emoji = category_emoji(Some(&row.category_id), None);
+            let label = row.category_id.replace(':', " › ").replace('-', " ");
             println!(
-                "{} | {} | {} transações",
-                category_display(Some(&row.category_id), Some(-row.amount)),
-                brl(-row.amount),
+                "• {} {} — {} ({} txn)",
+                emoji,
+                label,
+                hf_brl(-row.amount),
                 row.transactions
             );
         }
     }
 
+    // ── Assinaturas ──
     println!();
-    println!("Recorrentes:");
-    if output.recurring.is_empty() {
-        println!("Sem recorrentes detectados.");
-    } else {
-        for row in output.recurring.iter().take(8) {
-            println!(
-                "{} | {} | {} transações | {} meses",
-                row.merchant_key,
-                brl(-row.amount),
-                row.transactions,
-                row.months_detected
-            );
-        }
-    }
-
-    println!();
-    println!("Assinaturas:");
+    println!("{}", subsection_header("Assinaturas"));
     if output.subscriptions.is_empty() {
-        println!("Sem assinaturas detectadas.");
+        println!("Nenhuma assinatura detectada.");
     } else {
         for row in output.subscriptions.iter().take(8) {
             println!(
-                "{} | {} | {} transações",
-                row.merchant_key,
-                brl(-row.amount),
-                row.transactions
+                "• {} — {}/mês",
+                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 28),
+                hf_brl(-row.amount)
             );
         }
     }
 
+    // ── Parcelamentos ──
     println!();
-    println!("Parceladas fechadas:");
-    if output.closed_installments.is_empty() {
-        println!("Sem parceladas fechadas detectadas.");
+    println!("{}", subsection_header("Parcelamentos"));
+    let total_open_installments = output
+        .open_installments
+        .iter()
+        .fold(Decimal::ZERO, |acc, r| acc + (-r.amount));
+    let n_open = output.open_installments.len();
+    if n_open == 0 {
+        println!("Sem parcelas em aberto.");
     } else {
-        for row in output.closed_installments.iter().take(8) {
+        println!(
+            "{} parcela{} ativa{}, {} restantes",
+            n_open,
+            if n_open == 1 { "" } else { "s" },
+            if n_open == 1 { "" } else { "s" },
+            hf_brl(total_open_installments)
+        );
+        for row in output.open_installments.iter().take(5) {
             println!(
-                "{} | {} | {} | {} transações",
-                row.merchant_key,
+                "• {} ({}) — {}",
+                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 24),
                 row.marker,
-                brl(-row.amount),
-                row.transactions
+                hf_brl(-row.amount)
+            );
+        }
+    }
+    if !output.closed_installments.is_empty() {
+        println!();
+        println!("{}", bold("Fechadas nesta fatura:"));
+        for row in output.closed_installments.iter().take(5) {
+            println!(
+                "• {} ({}) — {}",
+                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 24),
+                row.marker,
+                hf_brl(-row.amount)
             );
         }
     }
 
+    // ── Recorrentes ──
     println!();
-    println!("Parceladas em aberto:");
-    if output.open_installments.is_empty() {
-        println!("Sem parceladas em aberto detectadas.");
+    println!("{}", subsection_header("Recorrentes"));
+    if output.recurring.is_empty() {
+        println!("Nenhum recorrente detectado.");
     } else {
-        for row in output.open_installments.iter().take(8) {
+        for row in output.recurring.iter().take(6) {
             println!(
-                "{} | {} | {} | {} transações",
-                row.merchant_key,
-                row.marker,
-                brl(-row.amount),
-                row.transactions
+                "• {} — {} ({} meses)",
+                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 28),
+                hf_brl(-row.amount),
+                row.months_detected
             );
         }
     }
@@ -4882,27 +4978,70 @@ async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
     parse_month_ref(&args.month)?;
     let rows: Vec<BudgetStatusRow> = store.budget_status_for_month(&args.month).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!("Budget status {}", args.month);
-    println!("- linhas: {}", rows.len());
+    println!(
+        "🎯 {}",
+        bold(&format!("Orçamentos · {}", month_label(&args.month)))
+    );
     println!();
 
-    for row in &rows {
-        let alert_flag = if row.alert { " [ALERT]" } else { "" };
-        println!(
-            "{} | budget {} | real {} | uso {:.1}% | proj {:.1}%{}",
-            row.category_id,
-            brl(row.budget_amount),
-            brl(row.actual_amount),
-            row.usage_pct,
-            row.projected_pct,
-            alert_flag,
-        );
+    if rows.is_empty() {
+        println!("Nenhum orçamento configurado para o período.");
+        return Ok(());
     }
+
+    // Sort: over budget first, then alert, then by usage_pct descending
+    let mut sorted = rows.clone();
+    sorted.sort_by_key(|r| {
+        let tier: i32 = if r.actual_amount > r.budget_amount {
+            0 // over
+        } else if r.alert {
+            1 // near threshold
+        } else {
+            2 // ok
+        };
+        let usage_inv = -(r.usage_pct.to_string().parse::<f64>().unwrap_or(0.0) as i64);
+        (tier, usage_inv)
+    });
+
+    let mut total_budget = Decimal::ZERO;
+    let mut total_actual = Decimal::ZERO;
+
+    for row in &sorted {
+        let usage_i64 = row.usage_pct.to_string().parse::<i64>().unwrap_or(0);
+        let bar = progress_bar(usage_i64);
+        let status_emoji = if row.actual_amount > row.budget_amount {
+            "🔻"
+        } else if row.alert {
+            "🟡"
+        } else {
+            "✅"
+        };
+        let label = row.category_id.replace(':', " › ").replace('-', " ");
+        println!(
+            "{} {} — {} / {} ({}%)",
+            status_emoji,
+            bold(&label),
+            hf_brl(row.actual_amount),
+            hf_brl(row.budget_amount),
+            usage_i64
+        );
+        println!("   {bar}");
+        total_budget += row.budget_amount;
+        total_actual += row.actual_amount;
+    }
+
+    println!();
+    println!(
+        "Total: {} de {} orçados",
+        bold(&hf_brl(total_actual)),
+        hf_brl(total_budget)
+    );
+
     Ok(())
 }
 

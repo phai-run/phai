@@ -196,6 +196,13 @@ pub fn section_header(emoji: &str, title: &str) -> String {
     format!("{emoji} {}", bold(title))
 }
 
+/// Render a subsection delimiter as `── *Title* ──`, used inside multi-block
+/// reports (e.g. card-closed-insights) where visual grouping helps but
+/// emojis would feel repetitive.
+pub fn subsection_header(title: &str) -> String {
+    format!("── {} ──", bold(title))
+}
+
 /// Format a category subtotal line: `🍽️ Alimentação · R$ 487,30`.
 pub fn category_subtotal(category_id: Option<&str>, total: Decimal) -> String {
     let family = category_family(category_id);
@@ -248,6 +255,21 @@ fn month_pt_full(month: u32) -> &'static str {
         12 => "dezembro",
         _ => "??",
     }
+}
+
+/// Truncate `s` to at most `max_chars` (counted by Unicode scalar values),
+/// appending `…` when truncated. Returns the original string when within
+/// the limit. Used to keep WhatsApp-friendly labels from running long.
+pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    // Reserve one slot for the ellipsis.
+    let cutoff = max_chars.saturating_sub(1);
+    let mut out: String = s.chars().take(cutoff).collect();
+    out.push('…');
+    out
 }
 
 /// Render a 10-cell unicode progress bar, `[▓▓▓░░░░░░░] 35%`.
