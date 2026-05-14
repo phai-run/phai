@@ -110,6 +110,14 @@ pub trait FinanceStore {
         since: NaiveDate,
         until: NaiveDate,
     ) -> Result<Vec<TransactionRecord>>;
+    /// Returns all transactions in `[from, to]` optionally filtered by account_id.
+    /// If `account_id` is `None`, all accounts are included.
+    async fn transactions_in_date_range(
+        &self,
+        account_id: Option<&str>,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<TransactionRecord>>;
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>>;
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>>;
     async fn forecast_vs_actual(&self, month_ref: Option<&str>)

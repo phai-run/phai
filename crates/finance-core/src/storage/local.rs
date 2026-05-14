@@ -1000,6 +1000,72 @@ impl FinanceStore for LocalStore {
         Ok(rows)
     }
 
+    async fn transactions_in_date_range(
+        &self,
+        account_id: Option<&str>,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, description, CAST(amount AS TEXT),
+              tx_type, category_id, category_source, context, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at
+            FROM transactions
+            WHERE transaction_date >= ?1
+              AND transaction_date <= ?2
+              AND (?3 IS NULL OR account_id = ?3)
+            ORDER BY transaction_date ASC, transaction_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    from.format("%Y-%m-%d").to_string(),
+                    to.format("%Y-%m-%d").to_string(),
+                    account_id,
+                ],
+                |row| {
+                    let transaction_date = row.get::<_, String>(2)?;
+                    let amount = row.get::<_, String>(4)?;
+                    let metadata_json = row.get::<_, String>(13)?;
+                    let created_at = row.get::<_, String>(14)?;
+                    let updated_at = row.get::<_, String>(15)?;
+                    Ok(TransactionRecord {
+                        transaction_id: row.get(0)?,
+                        account_id: row.get(1)?,
+                        transaction_date: parse_sql_date(transaction_date, 2)?,
+                        description: row.get(3)?,
+                        amount: parse_decimal(amount).map_err(|err| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Text,
+                                Box::new(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    err.to_string(),
+                                )),
+                            )
+                        })?,
+                        tx_type: row.get(5)?,
+                        category_id: row.get(6)?,
+                        category_source: row.get(7)?,
+                        context: row.get(8)?,
+                        payment_status: row.get(9)?,
+                        source: row.get(10)?,
+                        actor_id: row.get(11)?,
+                        idempotency_key: row.get(12)?,
+                        metadata_json: parse_sql_json(metadata_json, 13)?,
+                        created_at: parse_datetime_or_now(Some(&created_at)),
+                        updated_at: parse_datetime_or_now(Some(&updated_at)),
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
