@@ -10,9 +10,9 @@ use crate::update_state::{compute_exe_path_hash, state_file_path, UpdateState};
 // Constants
 // ---------------------------------------------------------------------------
 
-const REPO_OWNER: &str = "feliperbroering";
+const REPO_OWNER: &str = "feliperun";
 const REPO_NAME: &str = "finance-os";
-pub const REPO_URL: &str = "https://github.com/feliperbroering/finance-os";
+pub const REPO_URL: &str = "https://github.com/feliperun/finance-os";
 pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 
 const ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz";
