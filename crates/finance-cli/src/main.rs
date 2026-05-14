@@ -270,18 +270,38 @@ struct InstallmentsArgs {
     account_id: Option<String>,
     #[arg(long, default_value_t = 12)]
     lookback_months: u32,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
     #[arg(long)]
     verbose: bool,
+}
+
+impl InstallmentsArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
 struct UncategorizedArgs {
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl UncategorizedArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -306,8 +326,18 @@ struct ItemPricesArgs {
 struct DataHealthArgs {
     #[arg(long, default_value_t = 180)]
     days: i64,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl DataHealthArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -1028,6 +1058,59 @@ fn brl(value: Decimal) -> String {
     let sign = if value.is_sign_negative() { "-" } else { "+" };
     let rounded = format!("{:.2}", value.abs().round_dp(2)).replace('.', ",");
     format!("{sign}R$ {rounded}")
+}
+
+/// Formats a Decimal as BRL with sign and thousands separator: `-R$ 1.500,00`.
+fn brl_signed(value: Decimal) -> String {
+    let sign = if value.is_sign_negative() { "-" } else { "+" };
+    let abs_val = value.abs().round_dp(2);
+    let formatted = format!("{:.2}", abs_val).replace('.', ",");
+    // Insert thousands separators (period) before the comma
+    let (integer_part, decimal_part) = formatted.split_once(',').unwrap_or((&formatted, "00"));
+    let with_thousands = insert_thousands(integer_part);
+    format!("{sign}R$ {with_thousands},{decimal_part}")
+}
+
+/// Formats a Decimal as unsigned BRL with thousands separator: `R$ 1.500,00`.
+fn brl_abs(value: Decimal) -> String {
+    let abs_val = value.abs().round_dp(2);
+    let formatted = format!("{:.2}", abs_val).replace('.', ",");
+    let (integer_part, decimal_part) = formatted.split_once(',').unwrap_or((&formatted, "00"));
+    let with_thousands = insert_thousands(integer_part);
+    format!("R$ {with_thousands},{decimal_part}")
+}
+
+fn insert_thousands(s: &str) -> String {
+    let digits: Vec<char> = s.chars().collect();
+    let n = digits.len();
+    let mut result = String::with_capacity(n + n / 3);
+    for (i, ch) in digits.iter().enumerate() {
+        if i > 0 && (n - i).is_multiple_of(3) {
+            result.push('.');
+        }
+        result.push(*ch);
+    }
+    result
+}
+
+/// Formats a NaiveDate as short Portuguese date: `14/mai/2026`.
+fn short_date_pt(date: NaiveDate) -> String {
+    let month_abbr = match date.month() {
+        1 => "jan",
+        2 => "fev",
+        3 => "mar",
+        4 => "abr",
+        5 => "mai",
+        6 => "jun",
+        7 => "jul",
+        8 => "ago",
+        9 => "set",
+        10 => "out",
+        11 => "nov",
+        12 => "dez",
+        _ => "???",
+    };
+    format!("{:02}/{}/{}", date.day(), month_abbr, date.year())
 }
 
 fn decimal_text(value: Decimal) -> String {
@@ -3155,7 +3238,7 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
         .filter(|chain| chain.remaining > 0)
         .collect();
 
-    if args.json {
+    if args.structured_output() {
         if args.verbose {
             println!(
                 "{}",
@@ -3176,39 +3259,71 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "Installment chains (últimos {} meses){}",
-        args.lookback_months,
-        args.account_id
-            .as_deref()
-            .map(|id| format!(" | conta: {id}"))
-            .unwrap_or_default()
-    );
-    println!("- cadeias ativas: {}", active_chains.len());
+    println!("📦 *Parcelas ativas*");
     println!();
 
     if active_chains.is_empty() {
-        println!("Nenhuma cadeia de parcelamento ativa encontrada.");
+        println!("Nenhuma parcela ativa encontrada.");
         return Ok(());
     }
 
-    for chain in &active_chains {
-        let flag = if chain.released_next_month {
-            " [libera-no-proximo-mes]"
-        } else {
-            ""
-        };
-        println!(
-            "{} | {} | {}/{} | fim: {} | restantes: {}{}",
-            chain.account_id,
-            chain.base_description,
-            chain.current,
-            chain.total,
-            chain.projected_end.format("%Y-%m-%d"),
-            chain.remaining,
-            flag
-        );
+    let releasing: Vec<&&InstallmentChain> = active_chains
+        .iter()
+        .filter(|c| c.released_next_month)
+        .collect();
+    let ongoing: Vec<&&InstallmentChain> = active_chains
+        .iter()
+        .filter(|c| !c.released_next_month && c.remaining > 1)
+        .collect();
+
+    if !releasing.is_empty() {
+        println!("🔔 *Liberam no próximo mês*");
+        for chain in &releasing {
+            println!(
+                "{} · {}/{} · {} · termina {}",
+                normalize_inline_text(&chain.base_description),
+                chain.current,
+                chain.total,
+                brl_signed(chain.total_amount),
+                short_date_pt(chain.projected_end),
+            );
+        }
+        println!();
     }
+
+    if !ongoing.is_empty() {
+        let mut sorted_ongoing = ongoing.clone();
+        sorted_ongoing.sort_by_key(|c| c.projected_end);
+        println!("📅 *Em andamento*");
+        for chain in &sorted_ongoing {
+            println!(
+                "{} · {}/{} · {} · termina {}",
+                normalize_inline_text(&chain.base_description),
+                chain.current,
+                chain.total,
+                brl_signed(chain.total_amount),
+                short_date_pt(chain.projected_end),
+            );
+        }
+        println!();
+    }
+
+    // Footer: total monthly commitment (next installment per chain = total_amount / total)
+    let monthly_commitment: rust_decimal::Decimal = active_chains
+        .iter()
+        .map(|c| {
+            if c.total > 0 {
+                c.total_amount / rust_decimal::Decimal::from(c.total)
+            } else {
+                rust_decimal::Decimal::ZERO
+            }
+        })
+        .fold(rust_decimal::Decimal::ZERO, |acc, v| acc + v);
+    println!(
+        "Compromisso mensal estimado: {}",
+        brl_abs(monthly_commitment.abs())
+    );
+
     Ok(())
 }
 
@@ -3466,27 +3581,66 @@ async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.uncategorized(args.limit).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!("❗ Uncategorized");
-    println!("- linhas: {}", rows.len());
+    let total_count = rows.len();
+    let total_amount: rust_decimal::Decimal = rows
+        .iter()
+        .fold(rust_decimal::Decimal::ZERO, |acc, r| acc + r.amount);
+
+    // Group by normalized description prefix (first 3 tokens, case-insensitive key)
+    // Value: (display_label, total_amount, count, latest_date)
+    let mut groups: std::collections::BTreeMap<
+        String,
+        (String, rust_decimal::Decimal, usize, chrono::NaiveDate),
+    > = std::collections::BTreeMap::new();
+    for row in &rows {
+        let prefix: Vec<&str> = row.description.split_whitespace().take(3).collect();
+        let key = prefix.join(" ").to_ascii_uppercase();
+        let display = normalize_inline_text(&row.description);
+        let entry = groups.entry(key).or_insert((
+            display,
+            rust_decimal::Decimal::ZERO,
+            0,
+            row.transaction_date,
+        ));
+        entry.1 += row.amount;
+        entry.2 += 1;
+        if row.transaction_date > entry.3 {
+            entry.3 = row.transaction_date;
+        }
+    }
+
+    // Sort by absolute total descending
+    let mut sorted_groups: Vec<(String, rust_decimal::Decimal, usize, chrono::NaiveDate)> = groups
+        .into_iter()
+        .map(|(_, (label, amount, count, latest))| (label, amount, count, latest))
+        .collect();
+    sorted_groups.sort_by_key(|(_, amount, _, _)| std::cmp::Reverse(amount.abs()));
+
+    println!("❓ *Sem categoria · top {}*", args.limit);
     println!();
 
-    for row in rows {
-        let account = row.account_id.unwrap_or_else(|| "sem-conta".to_string());
+    for (desc, amount, count, latest) in &sorted_groups {
         println!(
-            "{} | {} | {} | 🏦 {} | {} | {}",
-            row.transaction_date.format("%Y-%m-%d"),
-            brl(row.amount),
-            normalize_inline_text(&row.description),
-            account,
-            row.payment_status,
-            row.category_source
+            "{} ({}×) · {} · mais recente {}",
+            desc,
+            count,
+            brl_abs(*amount),
+            short_date_pt(*latest),
         );
     }
+
+    println!();
+    println!(
+        "Total: {} transações · {}",
+        total_count,
+        brl_abs(total_amount.abs())
+    );
+
     Ok(())
 }
 
@@ -3689,75 +3843,122 @@ async fn report_data_health(args: DataHealthArgs) -> Result<()> {
         flat_categories,
     };
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
-    println!("Data health");
-    println!("- backend: {}", output.backend);
-    println!("- actor_id: {}", output.actor_id);
-    println!(
-        "- janela: {} até hoje ({} dias)",
-        output.window_start, output.window_days
-    );
-    match (
-        &output.latest_pluggy_transaction_date,
-        output.pluggy_lag_days,
-    ) {
-        (Some(date), Some(days)) => {
-            println!("- último lançamento Pluggy: {} (lag {} dias)", date, days)
+    // Build check items: (severity 0=fail 1=warn 2=ok, emoji, description)
+    let mut checks: Vec<(u8, &str, String)> = Vec::new();
+
+    // Pluggy lag
+    match output.pluggy_lag_days {
+        Some(days) if days > 3 => {
+            checks.push((0, "🔻", format!("Pluggy desatualizado · lag {} dias", days)))
         }
-        _ => println!("- último lançamento Pluggy: sem dado"),
+        Some(days) if days > 1 => checks.push((
+            1,
+            "🟡",
+            format!("Pluggy levemente atrasado · lag {} dias", days),
+        )),
+        Some(_) => checks.push((2, "✅", "Pluggy atualizado".to_string())),
+        None => checks.push((1, "🟡", "Sem data Pluggy registrada".to_string())),
     }
-    println!("- transações totais: {}", output.total_transactions);
-    println!(
-        "- com contexto: {} ({:.1}%)",
-        output.transactions_with_context,
-        output.context_coverage_ratio * 100.0
-    );
-    println!("- uncategorized: {}", output.uncategorized_count);
-    println!("- regras ativas: {}", output.active_rules_count);
-    println!(
-        "- janela: {} linhas | pluggy {} | legacy {} | outros {}",
-        output.window_rows,
-        output.window_pluggy_rows,
-        output.window_legacy_rows,
-        output.window_other_rows
-    );
-    println!(
-        "- categorias planas na janela: {} linhas",
-        output.flat_category_rows
-    );
-    println!(
-        "- possíveis sobreposições legacy x pluggy: {}",
-        output.overlap_candidates_count
-    );
-    if output.flat_categories.is_empty() {
-        println!();
-        println!("Nenhuma categoria plana detectada na janela.");
+
+    // Uncategorized
+    if output.uncategorized_count > 10 {
+        checks.push((
+            0,
+            "🔻",
+            format!("Sem categoria · {} transações", output.uncategorized_count),
+        ));
+    } else if output.uncategorized_count > 0 {
+        checks.push((
+            1,
+            "🟡",
+            format!("Sem categoria · {} transações", output.uncategorized_count),
+        ));
     } else {
-        println!();
-        println!("Top categorias planas:");
-        for row in output.flat_categories.iter().take(10) {
-            println!("{} | {} linhas", row.category_id, row.count);
-        }
+        checks.push((2, "✅", "Todas as transações categorizadas".to_string()));
     }
-    if !output.overlap_candidates.is_empty() {
-        println!();
-        println!("Possíveis sobreposições:");
-        for row in &output.overlap_candidates {
-            println!(
-                "{} | {} | legacy {} '{}' | pluggy {} '{}'",
-                row.account_id.as_deref().unwrap_or("sem-conta"),
-                row.amount,
-                row.legacy_date,
-                row.legacy_description,
-                row.pluggy_date,
-                row.pluggy_description
-            );
-        }
+
+    // Flat categories
+    if output.flat_category_rows > 0 {
+        checks.push((
+            1,
+            "🟡",
+            format!(
+                "Categorias planas (sem hierarquia) · {} linhas",
+                output.flat_category_rows
+            ),
+        ));
+    } else {
+        checks.push((2, "✅", "Sem categorias planas".to_string()));
     }
+
+    // Overlaps
+    if output.overlap_candidates_count > 0 {
+        checks.push((
+            0,
+            "🔻",
+            format!(
+                "Sobreposições legacy×pluggy · {} candidatos",
+                output.overlap_candidates_count
+            ),
+        ));
+    } else {
+        checks.push((2, "✅", "Sem sobreposições detectadas".to_string()));
+    }
+
+    // Context coverage
+    let coverage_pct = output.context_coverage_ratio * 100.0;
+    if coverage_pct < 50.0 {
+        checks.push((
+            1,
+            "🟡",
+            format!("Cobertura de contexto baixa · {:.0}%", coverage_pct),
+        ));
+    } else {
+        checks.push((
+            2,
+            "✅",
+            format!("Cobertura de contexto · {:.0}%", coverage_pct),
+        ));
+    }
+
+    // Sort: failures first, then warnings, then ok
+    checks.sort_by_key(|(severity, _, _)| *severity);
+
+    let total_checks = checks.len();
+    let problems = checks.iter().filter(|(s, _, _)| *s < 2).count();
+
+    println!("🩹 *Saúde dos dados*");
+    println!();
+
+    if problems == 0 {
+        println!("✅ Tudo certo · {} verificações.", total_checks);
+    } else {
+        for (_, emoji, desc) in &checks {
+            println!("{} {}", emoji, desc);
+        }
+
+        if !output.overlap_candidates.is_empty() {
+            println!();
+            println!("*Sobreposições detectadas:*");
+            for row in &output.overlap_candidates {
+                println!(
+                    "  {} · legacy {} · pluggy {}",
+                    row.account_id.as_deref().unwrap_or("sem-conta"),
+                    row.legacy_date,
+                    row.pluggy_date,
+                );
+            }
+        }
+
+        println!();
+        println!("{} problema(s) em {} verificações.", problems, total_checks);
+    }
+
     Ok(())
 }
 
