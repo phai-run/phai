@@ -278,12 +278,7 @@ pub fn progress_bar(pct: i64) -> String {
     let pct_clamped = pct.clamp(0, 100);
     let filled = ((pct_clamped as f64 / 10.0).round() as usize).min(10);
     let empty = 10 - filled;
-    format!(
-        "[{}{}] {}%",
-        "▓".repeat(filled),
-        "░".repeat(empty),
-        pct
-    )
+    format!("[{}{}] {}%", "▓".repeat(filled), "░".repeat(empty), pct)
 }
 
 #[cfg(test)]

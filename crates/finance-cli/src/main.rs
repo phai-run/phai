@@ -330,8 +330,18 @@ impl UncategorizedArgs {
 struct SplitCandidatesArgs {
     #[arg(long, default_value_t = 30)]
     days: i64,
+    /// Emit machine-readable JSON.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl SplitCandidatesArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -340,8 +350,18 @@ struct ItemPricesArgs {
     query: String,
     #[arg(long)]
     since: Option<String>,
+    /// Emit machine-readable JSON.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl ItemPricesArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -372,8 +392,18 @@ struct ScenarioArgs {
     extra_expense: String,
     #[arg(long, default_value = "0")]
     extra_income: String,
+    /// Emit machine-readable JSON.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl ScenarioArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -384,8 +414,18 @@ struct OfxConsistencyArgs {
     account_id: Option<String>,
     #[arg(long, default_value_t = 1)]
     date_tolerance_days: i64,
+    /// Emit machine-readable JSON.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl OfxConsistencyArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -2917,7 +2957,10 @@ async fn report_card_summary(args: CardSummaryArgs) -> Result<()> {
     for row in &rows {
         // Parse cycle window from month_ref (YYYY-MM → 13/prev → 12/curr)
         // We use the account_id as label (no technical UUID shown)
-        let account_label = human_format::truncate_with_ellipsis(&human_format::short_description(&row.account_id), 24);
+        let account_label = human_format::truncate_with_ellipsis(
+            &human_format::short_description(&row.account_id),
+            24,
+        );
         let charged = -row.total_charges; // total_charges is stored negative
         let open = -row.open_amount;
         total_charges += charged;
@@ -3201,7 +3244,10 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
     // ── Fechamento por cartão ──
     println!("{}", subsection_header("Fechamento por cartão"));
     for row in &output.accounts {
-        let account_label = human_format::truncate_with_ellipsis(&human_format::short_description(&row.account_id), 24);
+        let account_label = human_format::truncate_with_ellipsis(
+            &human_format::short_description(&row.account_id),
+            24,
+        );
         let charged = -row.closed_amount;
         let open = -row.open_amount;
         let status = if open <= Decimal::ZERO {
@@ -3245,7 +3291,10 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         for row in output.subscriptions.iter().take(8) {
             println!(
                 "• {} — {}/mês",
-                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 28),
+                human_format::truncate_with_ellipsis(
+                    &human_format::short_description(&row.merchant_key),
+                    28
+                ),
                 hf_brl(-row.amount)
             );
         }
@@ -3272,7 +3321,10 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         for row in output.open_installments.iter().take(5) {
             println!(
                 "• {} ({}) — {}",
-                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 24),
+                human_format::truncate_with_ellipsis(
+                    &human_format::short_description(&row.merchant_key),
+                    24
+                ),
                 row.marker,
                 hf_brl(-row.amount)
             );
@@ -3284,7 +3336,10 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         for row in output.closed_installments.iter().take(5) {
             println!(
                 "• {} ({}) — {}",
-                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 24),
+                human_format::truncate_with_ellipsis(
+                    &human_format::short_description(&row.merchant_key),
+                    24
+                ),
                 row.marker,
                 hf_brl(-row.amount)
             );
@@ -3300,7 +3355,10 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         for row in output.recurring.iter().take(6) {
             println!(
                 "• {} — {} ({} meses)",
-                human_format::truncate_with_ellipsis(&human_format::short_description(&row.merchant_key), 28),
+                human_format::truncate_with_ellipsis(
+                    &human_format::short_description(&row.merchant_key),
+                    28
+                ),
                 hf_brl(-row.amount),
                 row.months_detected
             );
@@ -3593,7 +3651,7 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
         extra_transactions,
     };
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -3751,7 +3809,7 @@ async fn report_split_candidates(args: SplitCandidatesArgs) -> Result<()> {
         .context("Falha ao calcular janela de split candidates")?;
     let rows = store.split_candidates(since).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
@@ -3786,7 +3844,7 @@ async fn report_item_prices(args: ItemPricesArgs) -> Result<()> {
         .context("since inválido; use YYYY-MM-DD")?;
     let rows = store.item_prices(&args.query, since).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
@@ -4149,7 +4207,7 @@ async fn report_scenario(args: ScenarioArgs) -> Result<()> {
         looks_ok_after_card_carry: projected_cash_after_card_carry >= Decimal::ZERO,
     };
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
