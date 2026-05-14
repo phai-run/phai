@@ -19,6 +19,7 @@ use finance_core::splits::{
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
+use self_cmd::SelfCommand;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +28,9 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 mod review;
+mod self_cmd;
+mod update;
+mod update_state;
 
 const UPSERT_BATCH_SIZE: usize = 50;
 const AUDIT_BATCH_SIZE: usize = 25;
@@ -72,6 +76,11 @@ enum Commands {
     Account {
         #[command(subcommand)]
         command: AccountCommand,
+    },
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        command: SelfCommand,
     },
 }
 
@@ -1613,10 +1622,41 @@ async fn load_split_payload_preview(
     Ok((parent, payload, preview))
 }
 
+fn should_run_auto_check(cli: &Cli) -> bool {
+    if std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_some() {
+        return false;
+    }
+    if let Some(updated_ver) = std::env::var_os("FINANCE_OS_UPDATED") {
+        let updated_ver = updated_ver.to_string_lossy();
+        if updated_ver != env!("CARGO_PKG_VERSION") {
+            eprintln!(
+                "warning: re-exec sentinel mismatch — old binary still running? \
+                 (sentinel={updated_ver}, binary={})",
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        return false;
+    }
+    if matches!(cli.command, Commands::SelfCmd { .. }) {
+        return false;
+    }
+    true
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Auto-update check (never blocks command execution)
+    if should_run_auto_check(&cli) {
+        let paths = ConfigPaths::discover().ok();
+        if let Some(ref p) = paths {
+            update::auto_check(&p.data_dir).await;
+        }
+    }
+
     match cli.command {
+        Commands::SelfCmd { command } => self_cmd::run(command).await,
         Commands::Auth { command } => match command {
             AuthCommand::Setup(args) => auth_setup(args).await,
         },

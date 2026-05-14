@@ -20,3 +20,7 @@ config.toml
 # Local private workspace overlays
 /.private/
 /.local/
+
+# Internal planning documents (not for public repo)
+entrega1-ajustes-pendentes.md
+gaps.plan.md

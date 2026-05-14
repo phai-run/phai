@@ -8,6 +8,7 @@ edition = "2021"
 license = "MIT"
 authors = ["Finance OS contributors"]
 rust-version = "1.90"
+repository = "https://github.com/feliperbroering/finance-os"
 
 [workspace.dependencies]
 anyhow = "1.0"
