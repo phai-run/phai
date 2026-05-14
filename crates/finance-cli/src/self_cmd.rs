@@ -1,56 +1,100 @@
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
+use serde::Serialize;
 
 use crate::update;
 
 #[derive(Subcommand)]
 pub enum SelfCommand {
     /// Report current version, latest available version, and whether an update exists
-    Check,
+    Check(SelfCheckArgs),
     /// Download and install the latest release, then re-exec
     Update,
 }
 
+#[derive(Args)]
+pub struct SelfCheckArgs {
+    /// Emit machine-readable JSON instead of the default human-readable table
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Serialize)]
+struct SelfCheckReport<'a> {
+    current_version: &'a str,
+    target_triple: &'a str,
+    latest_version: Option<String>,
+    release_url: Option<String>,
+    update_available: Option<bool>,
+    error: Option<String>,
+}
+
 pub async fn run(cmd: SelfCommand) -> Result<()> {
     match cmd {
-        SelfCommand::Check => self_check().await,
+        SelfCommand::Check(args) => self_check(args).await,
         SelfCommand::Update => self_update().await,
     }
 }
 
-async fn self_check() -> Result<()> {
+async fn self_check(args: SelfCheckArgs) -> Result<()> {
     let current_version = env!("CARGO_PKG_VERSION");
     let target_triple = update::TARGET_TRIPLE;
 
-    println!("Current version: {current_version}");
-    println!("Target triple:   {target_triple}");
-
     let client = update::http_client(30);
-    match update::get_latest_release(&client).await {
-        Ok(release) => {
-            let latest_str = update::strip_tag_prefix(&release.tag_name);
-            println!("Latest version:  {latest_str}");
-            println!(
-                "Release URL:     {}/releases/tag/{}",
-                update::REPO_URL,
-                release.tag_name
-            );
+    let result = update::get_latest_release(&client).await;
 
-            let latest = update::parse_version(latest_str);
-            let current = update::parse_version(current_version);
-            match (current, latest) {
-                (Ok(c), Ok(l)) if update::is_newer(&l, &c) => {
-                    println!("Update available: yes");
-                }
-                _ => {
-                    println!("Update available: no (already up to date)");
-                }
+    let report = match &result {
+        Ok(release) => {
+            let latest_str = update::strip_tag_prefix(&release.tag_name).to_string();
+            let release_url = format!("{}/releases/tag/{}", update::REPO_URL, release.tag_name);
+            let update_available = match (
+                update::parse_version(current_version),
+                update::parse_version(&latest_str),
+            ) {
+                (Ok(c), Ok(l)) => Some(update::is_newer(&l, &c)),
+                _ => None,
+            };
+            SelfCheckReport {
+                current_version,
+                target_triple,
+                latest_version: Some(latest_str),
+                release_url: Some(release_url),
+                update_available,
+                error: None,
             }
         }
-        Err(e) => {
-            println!("Latest version:  unavailable");
-            println!("Update available: unknown");
-            eprintln!("Warning: could not check for updates: {e}");
+        Err(e) => SelfCheckReport {
+            current_version,
+            target_triple,
+            latest_version: None,
+            release_url: None,
+            update_available: None,
+            error: Some(e.to_string()),
+        },
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Current version: {}", report.current_version);
+        println!("Target triple:   {}", report.target_triple);
+        match (&report.latest_version, &report.release_url) {
+            (Some(v), Some(u)) => {
+                println!("Latest version:  {v}");
+                println!("Release URL:     {u}");
+                match report.update_available {
+                    Some(true) => println!("Update available: yes"),
+                    Some(false) => println!("Update available: no (already up to date)"),
+                    None => println!("Update available: unknown (version parse failed)"),
+                }
+            }
+            _ => {
+                println!("Latest version:  unavailable");
+                println!("Update available: unknown");
+                if let Some(e) = &report.error {
+                    eprintln!("Warning: could not check for updates: {e}");
+                }
+            }
         }
     }
 
