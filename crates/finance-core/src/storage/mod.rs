@@ -1,8 +1,9 @@
 use crate::config::{AppConfig, BackendKind};
 use crate::models::{
-    AccountRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow, CashflowRow,
-    CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
-    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow, CardClosedTransactionRow,
+    CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, DailyPulseItem,
+    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
+    TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -19,7 +20,9 @@ pub mod local;
 const ALLOWED_TABLES: &[&str] = &[
     "schema_versions",
     "accounts",
+    "account_snapshots",
     "categories",
+    "category_budgets",
     "internal_categories",
     "rules",
     "transactions",
@@ -46,6 +49,7 @@ pub trait FinanceStore {
     async fn record_migration(&self, version: &str) -> Result<()>;
 
     async fn upsert_accounts(&self, rows: &[AccountRecord]) -> Result<usize>;
+    async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize>;
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize>;
     async fn upsert_rules(&self, rows: &[RuleRecord]) -> Result<usize>;
     async fn upsert_categories(&self, rows: &[CategoryRecord]) -> Result<usize>;
@@ -67,6 +71,16 @@ pub trait FinanceStore {
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()>;
+
+    async fn find_transactions_by_description(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>>;
+    async fn latest_uncategorized_transactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>>;
 
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>>;
     async fn transaction_by_id(&self, transaction_id: &str) -> Result<Option<TransactionRecord>>;
@@ -96,6 +110,14 @@ pub trait FinanceStore {
         since: NaiveDate,
         until: NaiveDate,
     ) -> Result<Vec<TransactionRecord>>;
+    /// Returns all transactions in `[from, to]` optionally filtered by account_id.
+    /// If `account_id` is `None`, all accounts are included.
+    async fn transactions_in_date_range(
+        &self,
+        account_id: Option<&str>,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<TransactionRecord>>;
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>>;
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>>;
     async fn forecast_vs_actual(&self, month_ref: Option<&str>)
@@ -112,6 +134,11 @@ pub trait FinanceStore {
     async fn uncategorized(&self, limit: usize) -> Result<Vec<UncategorizedRow>>;
     async fn count_uncategorized(&self) -> Result<i64>;
     async fn count_rows(&self, table: &str) -> Result<i64>;
+
+    async fn upsert_category_budget(&self, record: &CategoryBudgetRecord) -> Result<()>;
+    async fn list_category_budgets(&self, month: Option<&str>)
+        -> Result<Vec<CategoryBudgetRecord>>;
+    async fn budget_status_for_month(&self, month: &str) -> Result<Vec<BudgetStatusRow>>;
 }
 
 pub async fn open_store(config: &AppConfig) -> Result<Box<dyn FinanceStore>> {

@@ -56,18 +56,18 @@ pub fn decimal_to_cents_exact(value: Decimal, field_name: &str) -> Result<i128> 
 }
 
 #[cfg(test)]
-pub fn parse_ford_split_payload(
+pub fn parse_test_split_payload(
     payload_json: &Value,
     parent_amount: Decimal,
 ) -> Result<TransactionSplitPayload> {
     let payload: TransactionSplitPayload = serde_json::from_value(payload_json.clone())
         .context("Payload de split inválido: formato JSON incompatível")?;
-    validate_ford_split_payload(&payload, parent_amount)?;
+    validate_test_split_payload(&payload, parent_amount)?;
     Ok(payload)
 }
 
 #[cfg(test)]
-pub fn validate_ford_split_payload(
+pub fn validate_test_split_payload(
     payload: &TransactionSplitPayload,
     parent_amount: Decimal,
 ) -> Result<()> {
@@ -105,7 +105,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parse_ford_split_payload_accepts_valid_lines_and_optional_items() {
+    fn parse_test_split_payload_accepts_valid_lines_and_optional_items() {
         let payload = json!({
             "lines": [
                 {
@@ -129,39 +129,39 @@ mod tests {
             ]
         });
 
-        let parsed = parse_ford_split_payload(&payload, Decimal::new(13000, 2)).unwrap();
+        let parsed = parse_test_split_payload(&payload, Decimal::new(13000, 2)).unwrap();
         assert_eq!(parsed.lines.len(), 2);
         assert_eq!(parsed.lines[0].items.len(), 1);
     }
 
     #[test]
-    fn parse_ford_split_payload_rejects_empty_lines() {
+    fn parse_test_split_payload_rejects_empty_lines() {
         let payload = json!({ "lines": [] });
-        let err = parse_ford_split_payload(&payload, Decimal::new(1000, 2)).unwrap_err();
+        let err = parse_test_split_payload(&payload, Decimal::new(1000, 2)).unwrap_err();
         assert!(err.to_string().contains("'lines' é obrigatório"));
     }
 
     #[test]
-    fn parse_ford_split_payload_rejects_amount_mismatch() {
+    fn parse_test_split_payload_rejects_amount_mismatch() {
         let payload = json!({
             "lines": [
                 { "amount": "10.00" },
                 { "amount": "10.01" }
             ]
         });
-        let err = parse_ford_split_payload(&payload, Decimal::new(2000, 2)).unwrap_err();
+        let err = parse_test_split_payload(&payload, Decimal::new(2000, 2)).unwrap_err();
         assert!(err.to_string().contains("difere do amount da transação"));
     }
 
     #[test]
-    fn parse_ford_split_payload_rejects_wrong_sign() {
+    fn parse_test_split_payload_rejects_wrong_sign() {
         let payload = json!({
             "lines": [
                 { "amount": "10.00" },
                 { "amount": "-1.00" }
             ]
         });
-        let err = parse_ford_split_payload(&payload, Decimal::new(900, 2)).unwrap_err();
+        let err = parse_test_split_payload(&payload, Decimal::new(900, 2)).unwrap_err();
         assert!(err.to_string().contains("sinal divergente"));
     }
 

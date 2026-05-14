@@ -1,8 +1,32 @@
 # Finance OS
 
+[![CI](https://github.com/feliperbroering/finance-os/actions/workflows/ci.yml/badge.svg)](https://github.com/feliperbroering/finance-os/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A personal finance CLI and data pipeline built in Rust. Syncs bank transactions from [Pluggy](https://pluggy.ai), stores them in BigQuery (production) or SQLite (local development), and provides reporting views for budgeting, cashflow analysis, and forecast tracking.
 
 > **Brazilian banking focus:** Pluggy is a Brazilian open-finance aggregator. The data model and reporting are designed for Brazilian accounts (checking, credit cards, investments), but the architecture is backend-agnostic and can be adapted for other providers.
+
+## Install
+
+### Download a release (macOS ARM)
+
+```bash
+curl -fsSL https://github.com/feliperbroering/finance-os/releases/latest/download/finance-cli-aarch64-apple-darwin.tar.gz | tar xz
+chmod +x finance-cli
+./finance-cli --version
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/feliperbroering/finance-os.git
+cd finance-os
+cargo build --release
+./target/release/finance-cli --version
+```
+
+The CLI checks for updates automatically (at most once every 24 hours). Run `finance self check` to see if a newer release is available.
 
 ## Features
 
@@ -89,6 +113,7 @@ export PLUGGY_CLIENT_SECRET=your-client-secret
 |---|---|
 | `FINANCE_OS_CONFIG_DIR` | Config directory (default: `~/.config/finance-os`) |
 | `FINANCE_OS_DATA_DIR` | Data directory (default: `~/.local/share/finance-os`) |
+| `FINANCE_OS_NO_AUTO_UPDATE` | Set to `1` to disable automatic update checks |
 | `PLUGGY_CLIENT_ID` | Pluggy API client ID |
 | `PLUGGY_CLIENT_SECRET` | Pluggy API client secret |
 
@@ -113,6 +138,8 @@ finance tx set-context      Add context to a transaction
 finance forecast upsert     Create or update a forecast entry
 finance rule upsert         Create or update a classification rule
 finance account upsert      Create or update an account
+finance self check          Check for available updates
+finance self update         Download and install the latest release
 ```
 
 All report commands support `--json` for machine-readable output.
@@ -206,6 +233,43 @@ Releases are managed by Release Please on pushes to `main`.
 - Use Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`).
 - Use `!` or a `BREAKING CHANGE:` footer for breaking changes.
 - Release Please opens a release PR that updates `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and tags the release after merge.
+- CI builds and attaches a `finance-cli-aarch64-apple-darwin.tar.gz` + `.sha256` to each release.
+
+### Auto-Update
+
+The CLI checks for updates at most once every 24 hours before running commands.
+This check is **silent** — it only prints to stderr when a download is in progress or
+when an error occurs. It never blocks your command.
+
+**Skip the auto-check:**
+
+```bash
+FINANCE_OS_NO_AUTO_UPDATE=1 finance report daily-pulse
+```
+
+Or disable it permanently in your shell profile:
+
+```bash
+export FINANCE_OS_NO_AUTO_UPDATE=1
+```
+
+**Manual update commands:**
+
+```bash
+finance self check          # Report current vs latest version
+finance self update         # Download and install the latest release
+```
+
+The updater replaces the running binary in-place on macOS (atomic `rename(2)` +
+`execv`). After a successful update your original command re-runs with the new
+binary automatically.
+
+**Runtime binary layout:** The updater discovers the current executable via
+`std::env::current_exe()`. The recommended path for OpenClaw wrapper users is:
+
+```text
+~/.local/share/finance-os/runtime/bin/finance-cli
+```
 
 ## Contributing
 

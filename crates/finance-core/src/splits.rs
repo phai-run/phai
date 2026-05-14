@@ -377,7 +377,7 @@ pub fn build_split_records(
         source: payload_source
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("ford")
+            .unwrap_or("cli")
             .to_string(),
         notes: payload_notes
             .map(str::trim)

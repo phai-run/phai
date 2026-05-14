@@ -31,6 +31,30 @@ fn repo_root() -> PathBuf {
         .expect("repo root")
 }
 
+fn setup_local_auth_migrate(config_dir: &Path, data_dir: &Path) {
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        config_dir,
+        data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        config_dir,
+        data_dir,
+    )
+    .assert()
+    .success();
+}
+
 fn seed_fixture_sync(temp: &TempDir, config_dir: &Path, data_dir: &Path) {
     let pluggy_config = temp.path().join("pluggy-config.json");
     write_file(
@@ -2098,4 +2122,893 @@ fn tx_list_context_text_output_includes_transaction_id() {
     .assert()
     .success()
     .stdout(predicate::str::contains("pluggy-fixture-001"));
+}
+
+// ─── Part A: account_snapshots ──────────────────────────────────────────────
+
+/// Syncing twice on the same day must produce exactly one snapshot per account
+/// (idempotency via UNIQUE idempotency_key with INSERT OR IGNORE).
+#[test]
+fn account_snapshot_idempotent_same_day() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    // Sync twice — snapshots must not duplicate.
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM account_snapshots", [], |row| {
+            row.get(0)
+        })
+        .expect("count snapshots");
+    // Two accounts, synced twice in the same run → still 2 (idempotent).
+    assert_eq!(count, 2, "expected 1 snapshot per account, not duplicates");
+}
+
+/// Each snapshot must record the balance from the fixture at sync time.
+#[test]
+fn account_snapshot_records_balance() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+
+    // Checking account fixture balance is 1342.44.
+    let checking_balance: Option<String> = conn
+        .query_row(
+            "SELECT balance FROM account_snapshots WHERE account_id = 'primary_checking'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query checking balance");
+    assert!(
+        checking_balance.is_some(),
+        "checking snapshot must have a balance"
+    );
+    let balance_str = checking_balance.unwrap();
+    assert!(
+        balance_str.contains("1342"),
+        "balance should be ~1342.44, got {balance_str}"
+    );
+}
+
+/// Snapshot source column must be 'pluggy'.
+#[test]
+fn account_snapshot_source_is_pluggy() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+
+    let distinct_sources: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT source FROM account_snapshots")
+            .expect("prepare");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect")
+    };
+    assert_eq!(distinct_sources, vec!["pluggy"]);
+}
+
+// ─── Part B: tx find ────────────────────────────────────────────────────────
+
+/// `tx find` with no matching description returns empty results without error.
+#[test]
+fn tx_find_no_match_returns_empty() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("find")
+            .arg("--query")
+            .arg("xyznonexistent"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("- linhas: 0"));
+}
+
+/// `tx find` with a matching description returns that transaction.
+#[test]
+fn tx_find_single_match() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // "Supermercado Angeloni" is in the fixture.
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("find")
+            .arg("--query")
+            .arg("Angeloni"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("pluggy-fixture-001"));
+}
+
+/// `tx find` is case-insensitive.
+#[test]
+fn tx_find_case_insensitive() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // "angeloni" lower-case should still match "Supermercado Angeloni".
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("find")
+            .arg("--query")
+            .arg("angeloni"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("pluggy-fixture-001"));
+}
+
+/// `tx find --json` returns valid JSON array.
+#[test]
+fn tx_find_json_output() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let output = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("find")
+            .arg("--query")
+            .arg("recebido")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert!(parsed.is_array(), "should be a JSON array");
+}
+
+/// `tx find` with multiple matching descriptions returns all of them.
+#[test]
+fn tx_find_multiple_matches() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // Add a manual transaction that also matches "compra".
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("manual-compra-001")
+            .arg("--account-id")
+            .arg("primary_checking")
+            .arg("--date")
+            .arg("2026-03-20")
+            .arg("--description")
+            .arg("Loja de Compras Alpha")
+            .arg("--amount=-50.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("manual-compra-002")
+            .arg("--account-id")
+            .arg("primary_checking")
+            .arg("--date")
+            .arg("2026-03-21")
+            .arg("--description")
+            .arg("Loja de Compras Beta")
+            .arg("--amount=-75.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let output = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("find")
+            .arg("--query")
+            .arg("compras")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid JSON");
+    let arr = parsed.as_array().expect("array");
+    assert!(
+        arr.len() >= 2,
+        "expected at least 2 matches, got {}",
+        arr.len()
+    );
+}
+
+// ─── Part B: tx pending ─────────────────────────────────────────────────────
+
+/// `tx pending` only returns transactions with context IS NULL.
+#[test]
+fn tx_pending_returns_only_no_context_txs() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // Assign context to one transaction so it should not appear in pending.
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("set-context")
+            .arg("--transaction-id")
+            .arg("pluggy-fixture-001")
+            .arg("--context")
+            .arg("compras"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let output = envs(
+        cargo_bin().arg("tx").arg("pending").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid JSON");
+    let arr = parsed.as_array().expect("array");
+
+    // pluggy-fixture-001 must NOT appear (it has context now).
+    let has_001 = arr
+        .iter()
+        .any(|v| v["transaction_id"].as_str() == Some("pluggy-fixture-001"));
+    assert!(
+        !has_001,
+        "fixture-001 should not appear in pending (has context)"
+    );
+
+    // All returned transactions must have null context.
+    for tx in arr {
+        let ctx = &tx["context"];
+        assert!(
+            ctx.is_null(),
+            "pending tx should have null context, got {ctx}"
+        );
+    }
+}
+
+/// `tx pending` respects the --limit flag.
+#[test]
+fn tx_pending_respects_limit() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let output = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("pending")
+            .arg("--limit")
+            .arg("1")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid JSON");
+    let arr = parsed.as_array().expect("array");
+    assert!(arr.len() <= 1, "limit 1 should return at most 1 result");
+}
+
+// ─── Part B: tx set-context-by-desc ─────────────────────────────────────────
+
+/// `--dry-run` must not write any changes to the database.
+#[test]
+fn tx_set_context_by_desc_dry_run_writes_nothing() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // Dry-run: should succeed and show what would change.
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("set-context-by-desc")
+            .arg("--query")
+            .arg("Angeloni")
+            .arg("--context")
+            .arg("mercado-teste")
+            .arg("--dry-run"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("pluggy-fixture-001"));
+
+    // Verify nothing was written to DB.
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    let ctx: Option<String> = conn
+        .query_row(
+            "SELECT context FROM transactions WHERE transaction_id = 'pluggy-fixture-001'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query");
+    assert!(ctx.is_none(), "dry-run must not write context, got {ctx:?}");
+}
+
+/// Real `set-context-by-desc` applies the context and emits audit events.
+#[test]
+fn tx_set_context_by_desc_real_applies_context() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("set-context-by-desc")
+            .arg("--query")
+            .arg("angeloni")
+            .arg("--context")
+            .arg("mercado-mes"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("1 transação"));
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    let ctx: Option<String> = conn
+        .query_row(
+            "SELECT context FROM transactions WHERE transaction_id = 'pluggy-fixture-001'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query");
+    assert_eq!(ctx.as_deref(), Some("mercado-mes"));
+
+    // Audit event must exist.
+    let audit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE entity_id = 'pluggy-fixture-001' AND action = 'set_context_by_desc'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("audit count");
+    assert!(audit_count >= 1, "audit event must be recorded");
+}
+
+/// Re-running `set-context-by-desc` with the same context is a no-op (idempotent result,
+/// context stays the same, no crash).
+#[test]
+fn tx_set_context_by_desc_idempotent_rerun() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    for _ in 0..2 {
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("set-context-by-desc")
+                .arg("--query")
+                .arg("Angeloni")
+                .arg("--context")
+                .arg("mercado-idem"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(db_path).expect("open db");
+    let ctx: Option<String> = conn
+        .query_row(
+            "SELECT context FROM transactions WHERE transaction_id = 'pluggy-fixture-001'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query");
+    assert_eq!(ctx.as_deref(), Some("mercado-idem"));
+}
+
+/// `set-context-by-desc --json` returns a JSON array of result objects.
+#[test]
+fn tx_set_context_by_desc_json_output() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let output = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("set-context-by-desc")
+            .arg("--query")
+            .arg("Angeloni")
+            .arg("--context")
+            .arg("mercado-json")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid JSON");
+    let arr = parsed.as_array().expect("JSON array");
+    assert!(!arr.is_empty(), "should return at least one result");
+    assert_eq!(arr[0]["newContext"].as_str(), Some("mercado-json"));
+    assert_eq!(arr[0]["transactionId"].as_str(), Some("pluggy-fixture-001"));
+}
+
+fn setup_local(temp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    (config_dir, data_dir)
+}
+
+#[test]
+fn budget_upsert_creates_and_updates() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // First upsert — creates
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-1")
+            .arg("--amount")
+            .arg("1000.00")
+            .arg("--alert-threshold-pct")
+            .arg("80"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Budget salvo:"))
+    .stdout(predicate::str::contains("test-cat-1"));
+
+    // List and verify
+    envs(
+        cargo_bin().arg("budget").arg("list").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("test-cat-1"))
+    .stdout(predicate::str::contains("1000"));
+
+    // Second upsert with same key — updates amount
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-1")
+            .arg("--amount")
+            .arg("1500.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // List should still show only one budget and the updated amount
+    let output = envs(
+        cargo_bin().arg("budget").arg("list").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    let arr = parsed.as_array().expect("array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "should have exactly one budget after two upserts"
+    );
+    let amount = arr[0]["amount"].as_str().expect("amount str");
+    assert!(amount.contains("1500"), "amount should be updated to 1500");
+}
+
+#[test]
+fn budget_list_filters_by_month() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // Insert a default budget (no month)
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-1")
+            .arg("--amount")
+            .arg("500.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Insert a month-specific budget
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-2")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--amount")
+            .arg("800.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // List without filter returns both
+    let output = envs(
+        cargo_bin().arg("budget").arg("list").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(parsed.as_array().unwrap().len(), 2);
+
+    // List filtered by month returns both (default + explicit for that month)
+    let output = envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("list")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    assert!(
+        !parsed.as_array().unwrap().is_empty(),
+        "at least the default budget should appear"
+    );
+}
+
+#[test]
+fn budget_status_shows_usage_pct() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // Insert a budget for alimentacao (the fixture has grocery spend)
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("alimentacao")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--amount")
+            .arg("300.00")
+            .arg("--alert-threshold-pct")
+            .arg("50"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2026-03"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("alimentacao"))
+    .stdout(predicate::str::contains("Budget status 2026-03"));
+}
+
+#[test]
+fn budget_status_json_is_parseable() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-json")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--amount")
+            .arg("100.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value =
+        serde_json::from_slice(&output).expect("report budget-status --json must be valid JSON");
+    let arr = parsed.as_array().expect("must be an array");
+    assert!(
+        arr.iter().any(|row| row["category_id"] == "test-cat-json"),
+        "test-cat-json should appear in budget status"
+    );
+    // Check required fields exist
+    let row = arr
+        .iter()
+        .find(|r| r["category_id"] == "test-cat-json")
+        .unwrap();
+    assert!(row.get("budget_amount").is_some());
+    assert!(row.get("actual_amount").is_some());
+    assert!(row.get("usage_pct").is_some());
+    assert!(row.get("projected_pct").is_some());
+    assert!(row.get("alert").is_some());
+}
+
+#[test]
+fn budget_default_applies_to_every_month() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // Default budget (no month_ref)
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-default")
+            .arg("--amount")
+            .arg("200.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Should appear in budget-status for any queried month
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2025-01")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    let arr = parsed.as_array().expect("array");
+    assert!(
+        arr.iter()
+            .any(|row| row["category_id"] == "test-cat-default"),
+        "default budget should appear for any queried month"
+    );
+}
+
+#[test]
+fn budget_explicit_month_takes_precedence_over_default() {
+    let temp = TempDir::new().expect("tempdir");
+    let (config_dir, data_dir) = setup_local(&temp);
+
+    // Default budget
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-prec")
+            .arg("--amount")
+            .arg("200.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Month-specific override
+    envs(
+        cargo_bin()
+            .arg("budget")
+            .arg("upsert")
+            .arg("--category-id")
+            .arg("test-cat-prec")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--amount")
+            .arg("999.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("budget-status")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("valid json");
+    let arr = parsed.as_array().expect("array");
+    let row = arr
+        .iter()
+        .find(|r| r["category_id"] == "test-cat-prec")
+        .expect("test-cat-prec must appear");
+    let budget = row["budget_amount"].as_str().unwrap_or_default();
+    assert!(
+        budget.contains("999"),
+        "explicit month budget (999) should take precedence over default (200), got: {budget}"
+    );
 }

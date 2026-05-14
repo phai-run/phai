@@ -5,11 +5,13 @@ use finance_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
     ensure_transaction_idempotency, manual_transaction_idempotency,
 };
+use finance_core::installments::{group_into_chains, InstallmentChain};
 use finance_core::legacy::load_legacy_bundle;
 use finance_core::migrations::run_migrations;
 use finance_core::models::{
-    decimal_from_str, AccountRecord, AuditEvent, CardClosedTransactionRow, CategoryRecord,
-    ForecastRecord, RuleRecord, TransactionRecord,
+    decimal_from_str, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
+    CardClosedTransactionRow, CategoryBudgetRecord, CategoryRecord, ForecastRecord, RuleRecord,
+    TransactionRecord,
 };
 use finance_core::pluggy::{sync_pluggy, SyncPluggyParams};
 use finance_core::rules::{apply_rules_with_facts, compile_rules};
@@ -19,6 +21,7 @@ use finance_core::splits::{
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
+use self_cmd::SelfCommand;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +30,9 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 mod review;
+mod self_cmd;
+mod update;
+mod update_state;
 
 const UPSERT_BATCH_SIZE: usize = 50;
 const AUDIT_BATCH_SIZE: usize = 25;
@@ -72,6 +78,15 @@ enum Commands {
     Account {
         #[command(subcommand)]
         command: AccountCommand,
+    },
+    Budget {
+        #[command(subcommand)]
+        command: BudgetCommand,
+    },
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        command: SelfCommand,
     },
 }
 
@@ -148,6 +163,7 @@ enum ReportCommand {
     ForecastVsActual(ForecastVsActualArgs),
     CardSummary(CardSummaryArgs),
     CardClosedInsights(CardClosedInsightsArgs),
+    Installments(InstallmentsArgs),
     Uncategorized(UncategorizedArgs),
     SplitCandidates(SplitCandidatesArgs),
     ItemPrices(ItemPricesArgs),
@@ -155,6 +171,7 @@ enum ReportCommand {
     Scenario(ScenarioArgs),
     OfxConsistency(OfxConsistencyArgs),
     Review(ReviewArgs),
+    BudgetStatus(BudgetStatusArgs),
 }
 
 #[derive(Args)]
@@ -203,6 +220,18 @@ struct CardClosedInsightsArgs {
     month: Option<String>,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct InstallmentsArgs {
+    #[arg(long)]
+    account_id: Option<String>,
+    #[arg(long, default_value_t = 12)]
+    lookback_months: u32,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Args)]
@@ -581,6 +610,36 @@ struct CardClosedInsightsOutput {
     open_installments: Vec<CardClosedInstallmentInsight>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallmentChainView {
+    account_id: String,
+    base_description: String,
+    total: u32,
+    current: u32,
+    first_date: String,
+    projected_end: String,
+    remaining: u32,
+    released_next_month: bool,
+    total_amount: Decimal,
+}
+
+impl InstallmentChainView {
+    fn from_chain(chain: &InstallmentChain) -> Self {
+        Self {
+            account_id: chain.account_id.clone(),
+            base_description: chain.base_description.clone(),
+            total: chain.total,
+            current: chain.current,
+            first_date: chain.first_date.format("%Y-%m-%d").to_string(),
+            projected_end: chain.projected_end.format("%Y-%m-%d").to_string(),
+            remaining: chain.remaining,
+            released_next_month: chain.released_next_month,
+            total_amount: chain.total_amount,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OfxTransaction {
     fit_id: Option<String>,
@@ -639,6 +698,9 @@ enum TxCommand {
     Categorize(CategorizeTransactionArgs),
     SetContext(SetContextArgs),
     ListContext(ListContextArgs),
+    Find(TxFindArgs),
+    Pending(TxPendingArgs),
+    SetContextByDesc(SetContextByDescArgs),
     Split {
         #[command(subcommand)]
         command: TxSplitCommand,
@@ -699,6 +761,36 @@ struct SetContextArgs {
 struct ListContextArgs {
     #[arg(long, default_value_t = 50)]
     limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct TxFindArgs {
+    #[arg(long)]
+    query: String,
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct TxPendingArgs {
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SetContextByDescArgs {
+    #[arg(long)]
+    query: String,
+    #[arg(long)]
+    context: String,
+    #[arg(long)]
+    dry_run: bool,
     #[arg(long)]
     json: bool,
 }
@@ -837,6 +929,42 @@ struct AccountUpsertArgs {
     pluggy_item_id: Option<String>,
     #[arg(long, default_value = "active")]
     status: String,
+}
+
+#[derive(Subcommand)]
+enum BudgetCommand {
+    Upsert(BudgetUpsertArgs),
+    List(BudgetListArgs),
+}
+
+#[derive(Args)]
+struct BudgetUpsertArgs {
+    #[arg(long)]
+    category_id: String,
+    #[arg(long)]
+    subcategory_id: Option<String>,
+    #[arg(long)]
+    month: Option<String>,
+    #[arg(long)]
+    amount: String,
+    #[arg(long, default_value_t = 80)]
+    alert_threshold_pct: i64,
+}
+
+#[derive(Args)]
+struct BudgetListArgs {
+    #[arg(long)]
+    month: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct BudgetStatusArgs {
+    #[arg(long)]
+    month: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1583,6 +1711,17 @@ async fn insert_audit_chunked(store: &dyn FinanceStore, rows: &[AuditEvent]) -> 
     Ok(total)
 }
 
+async fn insert_snapshots_chunked(
+    store: &dyn FinanceStore,
+    rows: &[AccountSnapshotRecord],
+) -> Result<usize> {
+    let mut total = 0;
+    for chunk in rows.chunks(UPSERT_BATCH_SIZE) {
+        total += store.insert_account_snapshots(chunk).await?;
+    }
+    Ok(total)
+}
+
 async fn load_config() -> Result<(ConfigPaths, AppConfig)> {
     let paths = ConfigPaths::discover()?;
     paths.ensure()?;
@@ -1613,10 +1752,41 @@ async fn load_split_payload_preview(
     Ok((parent, payload, preview))
 }
 
+fn should_run_auto_check(cli: &Cli) -> bool {
+    if std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_some() {
+        return false;
+    }
+    if let Some(updated_ver) = std::env::var_os("FINANCE_OS_UPDATED") {
+        let updated_ver = updated_ver.to_string_lossy();
+        if updated_ver != env!("CARGO_PKG_VERSION") {
+            eprintln!(
+                "warning: re-exec sentinel mismatch — old binary still running? \
+                 (sentinel={updated_ver}, binary={})",
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        return false;
+    }
+    if matches!(cli.command, Commands::SelfCmd { .. }) {
+        return false;
+    }
+    true
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Auto-update check (never blocks command execution)
+    if should_run_auto_check(&cli) {
+        let paths = ConfigPaths::discover().ok();
+        if let Some(ref p) = paths {
+            update::auto_check(&p.data_dir).await;
+        }
+    }
+
     match cli.command {
+        Commands::SelfCmd { command } => self_cmd::run(command).await,
         Commands::Auth { command } => match command {
             AuthCommand::Setup(args) => auth_setup(args).await,
         },
@@ -1635,6 +1805,7 @@ async fn main() -> Result<()> {
             ReportCommand::ForecastVsActual(args) => report_forecast_vs_actual(args).await,
             ReportCommand::CardSummary(args) => report_card_summary(args).await,
             ReportCommand::CardClosedInsights(args) => report_card_closed_insights(args).await,
+            ReportCommand::Installments(args) => report_installments(args).await,
             ReportCommand::Uncategorized(args) => report_uncategorized(args).await,
             ReportCommand::SplitCandidates(args) => report_split_candidates(args).await,
             ReportCommand::ItemPrices(args) => report_item_prices(args).await,
@@ -1642,12 +1813,16 @@ async fn main() -> Result<()> {
             ReportCommand::Scenario(args) => report_scenario(args).await,
             ReportCommand::OfxConsistency(args) => report_ofx_consistency(args).await,
             ReportCommand::Review(args) => report_review(args).await,
+            ReportCommand::BudgetStatus(args) => report_budget_status(args).await,
         },
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
             TxCommand::Categorize(args) => tx_categorize(args).await,
             TxCommand::SetContext(args) => tx_set_context(args).await,
             TxCommand::ListContext(args) => tx_list_context(args).await,
+            TxCommand::Find(args) => tx_find(args).await,
+            TxCommand::Pending(args) => tx_pending(args).await,
+            TxCommand::SetContextByDesc(args) => tx_set_context_by_desc(args).await,
             TxCommand::Split { command } => match command {
                 TxSplitCommand::Preview(args) => tx_split_preview(args).await,
                 TxSplitCommand::Apply(args) => tx_split_apply(args).await,
@@ -1665,6 +1840,10 @@ async fn main() -> Result<()> {
         },
         Commands::Account { command } => match command {
             AccountCommand::Upsert(args) => account_upsert(args).await,
+        },
+        Commands::Budget { command } => match command {
+            BudgetCommand::Upsert(args) => budget_upsert(args).await,
+            BudgetCommand::List(args) => budget_list(args).await,
         },
     }
 }
@@ -1920,6 +2099,45 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let mut audit = Vec::new();
 
     upsert_accounts_chunked(store.as_ref(), &accounts).await?;
+
+    // Insert one snapshot per account for today's date — idempotent on repeated syncs.
+    let today = Utc::now().date_naive();
+    let snapshots: Vec<AccountSnapshotRecord> = accounts
+        .iter()
+        .map(|row| {
+            let idempotency_key = format!(
+                "snapshot:{}:{}:pluggy",
+                row.account_id,
+                today.format("%Y-%m-%d")
+            );
+            AccountSnapshotRecord {
+                snapshot_id: Uuid::now_v7().to_string(),
+                account_id: row.account_id.clone(),
+                snapshot_date: today,
+                balance: row.metadata_json.get("balance").and_then(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .or_else(|| {
+                            v.as_f64()
+                                .and_then(|f| format!("{f:.2}").parse::<Decimal>().ok())
+                        })
+                }),
+                credit_limit: None,
+                currency_code: row
+                    .metadata_json
+                    .get("currency_code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                source: "pluggy".to_string(),
+                actor_id: config.actor_id.clone(),
+                idempotency_key,
+                metadata_json: serde_json::json!({}),
+                created_at: Utc::now(),
+            }
+        })
+        .collect();
+    insert_snapshots_chunked(store.as_ref(), &snapshots).await?;
+
     upsert_categories_chunked(store.as_ref(), &categories).await?;
     upsert_transactions_chunked(store.as_ref(), &transactions).await?;
 
@@ -2567,6 +2785,87 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         }
     }
 
+    Ok(())
+}
+
+async fn report_installments(args: InstallmentsArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let today = Utc::now().date_naive();
+    let from = shift_month(
+        NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+            .context("Falha ao calcular mês atual")?,
+        -(args.lookback_months as i32),
+    )?;
+    let to = today;
+
+    let transactions = store
+        .transactions_in_date_range(args.account_id.as_deref(), from, to)
+        .await?;
+
+    let all_chains = group_into_chains(&transactions);
+    // Report only active chains (remaining > 0)
+    let active_chains: Vec<&InstallmentChain> = all_chains
+        .iter()
+        .filter(|chain| chain.remaining > 0)
+        .collect();
+
+    if args.json {
+        if args.verbose {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &all_chains
+                        .iter()
+                        .filter(|c| c.remaining > 0)
+                        .collect::<Vec<_>>()
+                )?
+            );
+        } else {
+            let views: Vec<InstallmentChainView> = active_chains
+                .iter()
+                .map(|chain| InstallmentChainView::from_chain(chain))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&views)?);
+        }
+        return Ok(());
+    }
+
+    println!(
+        "Installment chains (últimos {} meses){}",
+        args.lookback_months,
+        args.account_id
+            .as_deref()
+            .map(|id| format!(" | conta: {id}"))
+            .unwrap_or_default()
+    );
+    println!("- cadeias ativas: {}", active_chains.len());
+    println!();
+
+    if active_chains.is_empty() {
+        println!("Nenhuma cadeia de parcelamento ativa encontrada.");
+        return Ok(());
+    }
+
+    for chain in &active_chains {
+        let flag = if chain.released_next_month {
+            " [libera-no-proximo-mes]"
+        } else {
+            ""
+        };
+        println!(
+            "{} | {} | {}/{} | fim: {} | restantes: {}{}",
+            chain.account_id,
+            chain.base_description,
+            chain.current,
+            chain.total,
+            chain.projected_end.format("%Y-%m-%d"),
+            chain.remaining,
+            flag
+        );
+    }
     Ok(())
 }
 
@@ -3452,6 +3751,148 @@ async fn tx_list_context(args: ListContextArgs) -> Result<()> {
     Ok(())
 }
 
+fn print_transaction_row(row: &TransactionRecord) {
+    let account = row.account_id.as_deref().unwrap_or("sem-conta");
+    println!(
+        "{} | {} | {} | {} | {} | {:?}",
+        row.transaction_id,
+        row.transaction_date.format("%Y-%m-%d"),
+        decimal_text(row.amount),
+        row.description,
+        account,
+        row.context,
+    );
+}
+
+async fn tx_find(args: TxFindArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store
+        .find_transactions_by_description(&args.query, args.limit)
+        .await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Transactions matching {:?}", args.query);
+    println!("- linhas: {}", rows.len());
+    println!();
+    for row in &rows {
+        print_transaction_row(row);
+    }
+    Ok(())
+}
+
+async fn tx_pending(args: TxPendingArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store.latest_uncategorized_transactions(args.limit).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Pending (no context) transactions");
+    println!("- linhas: {}", rows.len());
+    println!();
+    for row in &rows {
+        print_transaction_row(row);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetContextByDescResult {
+    transaction_id: String,
+    description: String,
+    old_context: Option<String>,
+    new_context: String,
+}
+
+async fn tx_set_context_by_desc(args: SetContextByDescArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    let rows = store
+        .find_transactions_by_description(&args.query, 100)
+        .await?;
+
+    let results: Vec<SetContextByDescResult> = rows
+        .iter()
+        .map(|row| SetContextByDescResult {
+            transaction_id: row.transaction_id.clone(),
+            description: row.description.clone(),
+            old_context: row.context.clone(),
+            new_context: args.context.clone(),
+        })
+        .collect();
+
+    if args.dry_run {
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        } else {
+            println!("Dry-run: {} transaction(s) would be updated", results.len());
+            for r in &results {
+                println!(
+                    "{} | {} | {:?} -> {:?}",
+                    r.transaction_id, r.description, r.old_context, r.new_context
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // Real run: apply context to each matching transaction
+    let mut audit = Vec::new();
+    for row in &rows {
+        let idempotency_key = format!(
+            "context-by-desc:{}:{}:{}",
+            row.transaction_id,
+            args.context,
+            Uuid::now_v7()
+        );
+        store
+            .annotate_transaction(
+                &row.transaction_id,
+                None,
+                Some("manual"),
+                Some(&args.context),
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await?;
+        audit.push(AuditEvent::from_entity(
+            "transaction",
+            &row.transaction_id,
+            "set_context_by_desc",
+            &config.actor_id,
+            &idempotency_key,
+            json!({
+                "query": args.query,
+                "context": args.context,
+                "old_context": row.context,
+            }),
+        ));
+    }
+    insert_audit_chunked(store.as_ref(), &audit).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        println!("Contexto atualizado para {} transação(ões)", results.len());
+        for r in &results {
+            println!(
+                "{} | {} | {:?} -> {:?}",
+                r.transaction_id, r.description, r.old_context, r.new_context
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn tx_split_preview(args: TxSplitPreviewArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     ensure_bigquery_split_backend(&config)?;
@@ -3801,6 +4242,123 @@ async fn account_upsert(args: AccountUpsertArgs) -> Result<()> {
         )])
         .await?;
     println!("Conta salva: {}", row.account_id);
+    Ok(())
+}
+
+async fn budget_upsert(args: BudgetUpsertArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    if let Some(ref month) = args.month {
+        parse_month_ref(month)?;
+    }
+
+    let amount = decimal_from_str(&args.amount)?;
+    let now = Utc::now();
+    let budget_id = format!("budget_{}", uuid::Uuid::now_v7());
+    let idempotency_key = format!(
+        "budget:{}:{}:{}",
+        args.category_id,
+        args.subcategory_id.as_deref().unwrap_or(""),
+        args.month.as_deref().unwrap_or("_default"),
+    );
+    let record = CategoryBudgetRecord {
+        budget_id: budget_id.clone(),
+        category_id: args.category_id.clone(),
+        subcategory_id: args.subcategory_id.clone(),
+        month_ref: args.month.clone(),
+        amount,
+        alert_threshold_pct: args.alert_threshold_pct,
+        actor_id: config.actor_id.clone(),
+        idempotency_key: idempotency_key.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.upsert_category_budget(&record).await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "category_budget",
+            &budget_id,
+            "upsert",
+            &config.actor_id,
+            &idempotency_key,
+            serde_json::to_value(&record)?,
+        )])
+        .await?;
+    println!(
+        "Budget salvo: {} (category: {}, month: {})",
+        budget_id,
+        args.category_id,
+        args.month.as_deref().unwrap_or("_default"),
+    );
+    Ok(())
+}
+
+async fn budget_list(args: BudgetListArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    let rows = store.list_category_budgets(args.month.as_deref()).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!(
+        "Budgets{}",
+        args.month
+            .as_deref()
+            .map(|m| format!(" {m}"))
+            .unwrap_or_default()
+    );
+    println!("- linhas: {}", rows.len());
+    println!();
+
+    for row in rows {
+        let subcat = row.subcategory_id.as_deref().unwrap_or("-");
+        let month = row.month_ref.as_deref().unwrap_or("_default");
+        println!(
+            "{} | sub: {} | month: {} | budget: {} | threshold: {}%",
+            row.category_id,
+            subcat,
+            month,
+            brl(row.amount),
+            row.alert_threshold_pct,
+        );
+    }
+    Ok(())
+}
+
+async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    parse_month_ref(&args.month)?;
+    let rows: Vec<BudgetStatusRow> = store.budget_status_for_month(&args.month).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Budget status {}", args.month);
+    println!("- linhas: {}", rows.len());
+    println!();
+
+    for row in &rows {
+        let alert_flag = if row.alert { " [ALERT]" } else { "" };
+        println!(
+            "{} | budget {} | real {} | uso {:.1}% | proj {:.1}%{}",
+            row.category_id,
+            brl(row.budget_amount),
+            brl(row.actual_amount),
+            row.usage_pct,
+            row.projected_pct,
+            alert_flag,
+        );
+    }
     Ok(())
 }
 
