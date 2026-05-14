@@ -1789,6 +1789,17 @@ fn should_run_auto_check(cli: &Cli) -> bool {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // If we were just re-execed by a self-update, show the release notes
+    // for the new version once, then continue with the user's command.
+    // The sentinel only lives in the immediate post-exec env, so this
+    // fires exactly once per upgrade.
+    if let Some(updated_to) = std::env::var_os("FINANCE_OS_UPDATED") {
+        let version = updated_to.to_string_lossy().to_string();
+        if version == env!("CARGO_PKG_VERSION") {
+            update::print_release_notes(&version).await;
+        }
+    }
+
     // Auto-update check (never blocks command execution)
     if should_run_auto_check(&cli) {
         let paths = ConfigPaths::discover().ok();

@@ -97,6 +97,10 @@ pub(crate) struct GitHubRelease {
     #[allow(dead_code)]
     pub(crate) html_url: String,
     pub(crate) assets: Vec<GitHubAsset>,
+    /// Release notes body (Markdown). Set by release-please when the release
+    /// is created. May be empty for manually-cut releases.
+    #[serde(default)]
+    pub(crate) body: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -450,6 +454,68 @@ async fn auto_check_inner(data_dir: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Post-update release notes
+// ---------------------------------------------------------------------------
+
+/// Fetch the release notes (CHANGELOG body) for `version` from GitHub and
+/// print them to stderr. Called once by the new binary right after a
+/// successful self-update, so the user (and any watching agent) sees what
+/// changed in the version they just got bumped to.
+///
+/// English-only — release-please generates the body from Conventional
+/// Commits, which by convention are written in English. Failures
+/// (network, rate-limit, missing release) are silent: the upgrade
+/// already succeeded, missing release notes is not worth a warning.
+pub async fn print_release_notes(version: &str) {
+    let client = http_client(5);
+    let url =
+        format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/tags/v{version}");
+
+    let resp = match client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    if !resp.status().is_success() {
+        return;
+    }
+
+    let release: GitHubRelease = match resp.json().await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let body = match release.body.as_deref() {
+        Some(b) if !b.trim().is_empty() => b.trim(),
+        _ => return,
+    };
+
+    let release_url = format!("{REPO_URL}/releases/tag/v{version}");
+    eprintln!();
+    eprintln!("🎉 finance-cli updated to v{version}");
+    eprintln!();
+    eprintln!("{}", indent_lines(body, "  "));
+    eprintln!();
+    eprintln!("  Full release notes: {release_url}");
+    eprintln!();
+}
+
+/// Prefix every line of `s` with `prefix`. Used to gently indent the
+/// Markdown release-notes body so it's visually grouped under the
+/// "Updated to ..." banner.
+fn indent_lines(s: &str, prefix: &str) -> String {
+    s.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -717,5 +783,34 @@ mod tests {
         assert!(extracted.exists(), "extracted binary should exist");
         let contents = std::fs::read(&extracted).unwrap();
         assert_eq!(contents, binary_data);
+    }
+
+    // -----------------------------------------------------------------------
+    // indent_lines
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn indent_lines_prefixes_each_line() {
+        let input = "line one\nline two\nline three";
+        assert_eq!(
+            indent_lines(input, "  "),
+            "  line one\n  line two\n  line three"
+        );
+    }
+
+    #[test]
+    fn indent_lines_preserves_empty_lines() {
+        let input = "a\n\nb";
+        assert_eq!(indent_lines(input, ">"), ">a\n>\n>b");
+    }
+
+    #[test]
+    fn indent_lines_handles_single_line() {
+        assert_eq!(indent_lines("just one", "..."), "...just one");
+    }
+
+    #[test]
+    fn indent_lines_handles_empty_string() {
+        assert_eq!(indent_lines("", "  "), "");
     }
 }
