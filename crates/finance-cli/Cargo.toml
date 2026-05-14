@@ -26,4 +26,5 @@ uuid.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 rusqlite.workspace = true
+rust_decimal_macros = "1.36"
 tempfile.workspace = true

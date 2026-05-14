@@ -1844,20 +1844,23 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
     .success()
     .stdout(predicate::str::contains("- transactions: 1"));
 
+    // The transaction is classified as `credit-card-payment` (internal category),
+    // so the default human-friendly summary hides it from the grouped view.
+    // Use --raw to assert the JSON-shaped data still includes it.
     envs(
         cargo_bin()
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
-            .arg("120"),
+            .arg("120")
+            .arg("--raw"),
         &config_dir,
         &data_dir,
     )
     .assert()
     .success()
     .stdout(predicate::str::contains("Pagamento de fatura Visa"))
-    .stdout(predicate::str::contains("- entradas: +R$ 0,00"))
-    .stdout(predicate::str::contains("- saídas: +R$ 0,00"));
+    .stdout(predicate::str::contains("\"credit-card-payment\""));
 
     envs(
         cargo_bin()

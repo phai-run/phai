@@ -29,6 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod human_format;
 mod review;
 mod self_cmd;
 mod update;
@@ -178,8 +179,19 @@ enum ReportCommand {
 struct DailyPulseArgs {
     #[arg(long, default_value_t = 7)]
     days: i64,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`. Kept for backwards-compatibility with
+    /// agents and scripts that still pass `--json`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl DailyPulseArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -2283,45 +2295,151 @@ async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
         .context("Falha ao calcular janela do daily pulse")?;
     let items = store.daily_pulse(since).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&items)?);
         return Ok(());
     }
 
     let internal_categories = store.internal_categories().await?;
+    print_daily_pulse_human(&items, args.days, &internal_categories);
+    Ok(())
+}
+
+/// Render daily-pulse items as a WhatsApp-friendly summary grouped by category family.
+///
+/// Layout:
+///   📊 *Pulse · últimos N dias*
+///
+///   🍽️ *Alimentação* · R$ 487,30
+///     • Mercado Angeloni · R$ 150,00 (13/mai)
+///     • iFood · R$ 87,30 (12/mai)
+///
+///   💰 *Entradas* · R$ 8.500,00
+///     • Salário · R$ 5.000,00 (12/mai)
+///
+///   *Saldo do período*: +R$ 6.012,70 ✅
+fn print_daily_pulse_human(
+    items: &[finance_core::models::DailyPulseItem],
+    days: i64,
+    internal_categories: &std::collections::BTreeSet<String>,
+) {
+    use std::collections::BTreeMap;
+
     let is_internal = |cat: &Option<String>| {
         cat.as_deref()
             .is_some_and(|c| internal_categories.contains(c))
     };
-    let income = items
-        .iter()
-        .filter(|item| !item.amount.is_sign_negative() && !is_internal(&item.category_id))
-        .fold(Decimal::ZERO, |acc, item| acc + item.amount);
-    let expenses = items
-        .iter()
-        .filter(|item| item.amount.is_sign_negative() && !is_internal(&item.category_id))
-        .fold(Decimal::ZERO, |acc, item| acc + item.amount);
 
-    println!("📊 Daily pulse desde {}", since.format("%Y-%m-%d"));
-    println!("- linhas: {}", items.len());
-    println!("- entradas: {}", brl(income));
-    println!("- saídas: {}", brl(expenses));
+    let visible: Vec<&finance_core::models::DailyPulseItem> = items
+        .iter()
+        .filter(|it| !is_internal(&it.category_id))
+        .collect();
+
+    let income = visible
+        .iter()
+        .filter(|it| !it.amount.is_sign_negative())
+        .fold(Decimal::ZERO, |acc, it| acc + it.amount);
+    let expenses = visible
+        .iter()
+        .filter(|it| it.amount.is_sign_negative())
+        .fold(Decimal::ZERO, |acc, it| acc + it.amount);
+
+    println!(
+        "📊 {}",
+        human_format::bold(&format!("Pulse · últimos {days} dias"))
+    );
     println!();
 
-    for item in items {
-        let category = category_display(item.category_id.as_deref(), Some(item.amount));
-        let account = item.account_id.unwrap_or_else(|| "sem-conta".to_string());
-        println!(
-            "{} | {} | {} | {} | 🏦 {} | {}",
-            item.transaction_date.format("%Y-%m-%d"),
-            brl(item.amount),
-            normalize_inline_text(&item.description),
-            category,
-            account,
-            item.payment_status
-        );
+    if visible.is_empty() {
+        println!("_(sem transações na janela)_");
+        return;
     }
-    Ok(())
+
+    // Group by category family. Family is the part before `:` (or the whole
+    // category if no `:`). `None` becomes the bucket "Sem categoria".
+    let mut groups: BTreeMap<Option<String>, Vec<&finance_core::models::DailyPulseItem>> =
+        BTreeMap::new();
+    for item in &visible {
+        let family = human_format::category_family(item.category_id.as_deref());
+        groups.entry(family).or_default().push(item);
+    }
+
+    // Order families by absolute subtotal descending so the biggest movement appears first.
+    let mut family_totals: Vec<(Option<String>, Decimal)> = groups
+        .iter()
+        .map(|(family, items)| {
+            let total = items.iter().fold(Decimal::ZERO, |acc, it| acc + it.amount);
+            (family.clone(), total)
+        })
+        .collect();
+    family_totals.sort_by(|a, b| b.1.abs().cmp(&a.1.abs()));
+
+    const MAX_PER_GROUP: usize = 5;
+
+    for (family, subtotal) in &family_totals {
+        // Pick a representative category_id from the first item for emoji lookup.
+        let repr_category = groups
+            .get(family)
+            .and_then(|g| g.first())
+            .and_then(|it| it.category_id.clone());
+        let label = family
+            .as_deref()
+            .map(human_format::family_label)
+            .unwrap_or_else(|| "Sem categoria".into());
+        let emoji = human_format::category_emoji(repr_category.as_deref(), Some(*subtotal));
+        println!(
+            "{} {} · {}",
+            emoji,
+            human_format::bold(&label),
+            human_format::brl_signed(*subtotal)
+        );
+
+        // Show top N items in the group, biggest absolute amount first.
+        let mut group_items: Vec<&&finance_core::models::DailyPulseItem> =
+            groups[family].iter().collect();
+        group_items.sort_by(|a, b| b.amount.abs().cmp(&a.amount.abs()));
+        for item in group_items.iter().take(MAX_PER_GROUP) {
+            println!(
+                "  • {} · {} ({})",
+                human_format::short_description(&item.description),
+                human_format::brl_signed(item.amount),
+                human_format::short_date(item.transaction_date),
+            );
+        }
+        if group_items.len() > MAX_PER_GROUP {
+            println!(
+                "  _… mais {} {}_",
+                group_items.len() - MAX_PER_GROUP,
+                if group_items.len() - MAX_PER_GROUP == 1 {
+                    "lançamento"
+                } else {
+                    "lançamentos"
+                }
+            );
+        }
+        println!();
+    }
+
+    // Footer: saldo do período.
+    let net = income + expenses;
+    let net_emoji = if net.is_sign_negative() {
+        "🔻"
+    } else if net.is_zero() {
+        "⚖️"
+    } else {
+        "✅"
+    };
+    println!(
+        "{} {}: {}",
+        net_emoji,
+        human_format::bold("Saldo do período"),
+        human_format::brl_signed(net)
+    );
+    println!(
+        "  entradas: {} · saídas: {}",
+        human_format::brl_signed(income),
+        human_format::brl_signed(expenses)
+    );
 }
 
 async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {

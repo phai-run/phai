@@ -1,0 +1,294 @@
+//! Helpers for producing human-friendly, WhatsApp-readable report output.
+//!
+//! Reports default to this format; pass `--raw` (or the deprecated `--json`)
+//! to get structured JSON for agents and scripts.
+//!
+//! Some helpers (`brl`, `section_header`, `category_subtotal`) are not yet
+//! referenced from the only refactored report (`daily-pulse`) but are part
+//! of the public surface for upcoming report refactors (monthly-spend,
+//! card-summary, budget-status, etc.).
+
+#![allow(dead_code)]
+
+use chrono::{Datelike, NaiveDate, Utc};
+use rust_decimal::Decimal;
+
+/// Format an amount as Brazilian Real with grouping and 2 decimals.
+/// `+R$ 1.234,56` for positive, `-R$ 1.234,56` for negative.
+pub fn brl_signed(value: Decimal) -> String {
+    let sign = if value.is_sign_negative() { "-" } else { "+" };
+    format!("{sign}R$ {}", format_brl_number(value.abs()))
+}
+
+/// Format an unsigned amount as Brazilian Real (no leading sign).
+/// `R$ 1.234,56`.
+pub fn brl(value: Decimal) -> String {
+    format!("R$ {}", format_brl_number(value.abs()))
+}
+
+/// Group thousands with `.` and use `,` as decimal separator.
+fn format_brl_number(value: Decimal) -> String {
+    let rounded = format!("{:.2}", value.round_dp(2));
+    let (int_part, dec_part) = rounded.split_once('.').unwrap_or((&rounded, "00"));
+    let int_with_groups = group_thousands(int_part);
+    format!("{int_with_groups},{dec_part}")
+}
+
+fn group_thousands(int_part: &str) -> String {
+    let chars: Vec<char> = int_part.chars().rev().collect();
+    let mut out = String::new();
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push('.');
+        }
+        out.push(*c);
+    }
+    out.chars().rev().collect()
+}
+
+/// Short human date: `hoje`, `ontem`, `13/mai`, or `13/mai/2025` if year differs.
+pub fn short_date(date: NaiveDate) -> String {
+    let today = Utc::now().date_naive();
+    let days_diff = today.signed_duration_since(date).num_days();
+    if days_diff == 0 {
+        "hoje".to_string()
+    } else if days_diff == 1 {
+        "ontem".to_string()
+    } else {
+        let day = date.day();
+        let month = month_pt_short(date.month());
+        if date.year() == today.year() {
+            format!("{day}/{month}")
+        } else {
+            format!("{day}/{month}/{}", date.year())
+        }
+    }
+}
+
+fn month_pt_short(month: u32) -> &'static str {
+    match month {
+        1 => "jan",
+        2 => "fev",
+        3 => "mar",
+        4 => "abr",
+        5 => "mai",
+        6 => "jun",
+        7 => "jul",
+        8 => "ago",
+        9 => "set",
+        10 => "out",
+        11 => "nov",
+        12 => "dez",
+        _ => "??",
+    }
+}
+
+/// Extract the top-level family of a colon-delimited category id.
+/// `"alimentacao:restaurantes"` → `Some("alimentacao")`.
+pub fn category_family(category_id: Option<&str>) -> Option<String> {
+    let raw = category_id?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let normalized = raw.replace([':', '-', '>'], " ");
+    normalized
+        .split_whitespace()
+        .next()
+        .map(|part| part.to_string())
+}
+
+/// Emoji for a category family. Falls back to `💸` for unknown expense, `❓`
+/// for missing categorization.
+pub fn category_emoji(category_id: Option<&str>, amount: Option<Decimal>) -> &'static str {
+    let family = category_family(category_id);
+    if family.as_deref() == Some("receitas")
+        || family.as_deref() == Some("salario")
+        || amount.is_some_and(|v| v > Decimal::ZERO)
+    {
+        "💰"
+    } else if family.as_deref().is_some_and(|f| f.starts_with("transfer")) {
+        "🔁"
+    } else if family.as_deref() == Some("assinaturas") {
+        "🔂"
+    } else if matches!(family.as_deref(), Some("moradia" | "casa")) {
+        "🏠"
+    } else if family.as_deref() == Some("alimentacao") {
+        "🍽️"
+    } else if family.as_deref() == Some("saude") {
+        "🩺"
+    } else if matches!(family.as_deref(), Some("transporte" | "mobilidade")) {
+        "🚗"
+    } else if family.as_deref() == Some("educacao") {
+        "📚"
+    } else if family.as_deref() == Some("lazer") {
+        "🎉"
+    } else if family.as_deref() == Some("investimentos") {
+        "📈"
+    } else if family.as_deref() == Some("financeiro") {
+        "🧾"
+    } else if family.as_deref() == Some("vestuario") {
+        "👕"
+    } else if family.is_none() {
+        "❓"
+    } else {
+        "💸"
+    }
+}
+
+/// Human label for a category family, in Brazilian Portuguese.
+/// `"alimentacao"` → `"Alimentação"`.
+pub fn family_label(family: &str) -> String {
+    match family {
+        "alimentacao" => "Alimentação".into(),
+        "moradia" => "Moradia".into(),
+        "casa" => "Casa".into(),
+        "transporte" => "Transporte".into(),
+        "mobilidade" => "Mobilidade".into(),
+        "saude" => "Saúde".into(),
+        "lazer" => "Lazer".into(),
+        "educacao" => "Educação".into(),
+        "vestuario" => "Vestuário".into(),
+        "assinaturas" => "Assinaturas".into(),
+        "investimentos" => "Investimentos".into(),
+        "financeiro" => "Financeiro".into(),
+        "receitas" => "Entradas".into(),
+        "salario" => "Salário".into(),
+        other if other.starts_with("transfer") => "Transferências".into(),
+        other => capitalize_first(other),
+    }
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Strip a transaction description down to the bit a human cares about:
+/// remove pipe-joined raw tags, leading emoji (already shown in the group
+/// header), collapse whitespace.
+pub fn short_description(description: &str) -> String {
+    let main = description.split('|').next().unwrap_or(description).trim();
+    // Skip leading non-alphanumeric tokens (typically emojis injected by
+    // display_label upstream). The first token that starts with an alnum
+    // letter is the real start of the description.
+    let cleaned = main
+        .split_whitespace()
+        .skip_while(|token| !token.chars().next().is_some_and(|c| c.is_alphanumeric()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        main.to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// WhatsApp bold marker.
+pub fn bold(s: &str) -> String {
+    format!("*{s}*")
+}
+
+/// Render a section header with an emoji + bold title.
+pub fn section_header(emoji: &str, title: &str) -> String {
+    format!("{emoji} {}", bold(title))
+}
+
+/// Format a category subtotal line: `🍽️ Alimentação · R$ 487,30`.
+pub fn category_subtotal(category_id: Option<&str>, total: Decimal) -> String {
+    let family = category_family(category_id);
+    let label = family
+        .as_deref()
+        .map(family_label)
+        .unwrap_or_else(|| "Sem categoria".into());
+    let emoji = category_emoji(category_id, Some(total));
+    format!("{emoji} {} · {}", bold(&label), brl(total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn brl_signed_formats_positive() {
+        assert_eq!(brl_signed(dec!(1234.56)), "+R$ 1.234,56");
+    }
+
+    #[test]
+    fn brl_signed_formats_negative() {
+        assert_eq!(brl_signed(dec!(-1234.56)), "-R$ 1.234,56");
+    }
+
+    #[test]
+    fn brl_groups_thousands() {
+        assert_eq!(brl(dec!(1234567.89)), "R$ 1.234.567,89");
+    }
+
+    #[test]
+    fn brl_rounds_to_two_decimals() {
+        assert_eq!(brl(dec!(1.2345)), "R$ 1,23");
+    }
+
+    #[test]
+    fn brl_handles_zero() {
+        assert_eq!(brl(Decimal::ZERO), "R$ 0,00");
+    }
+
+    #[test]
+    fn category_family_extracts_prefix() {
+        assert_eq!(
+            category_family(Some("alimentacao:restaurantes")),
+            Some("alimentacao".into())
+        );
+        assert_eq!(category_family(Some("moradia")), Some("moradia".into()));
+        assert_eq!(category_family(Some("  ")), None);
+        assert_eq!(category_family(None), None);
+    }
+
+    #[test]
+    fn family_label_translates_known_families() {
+        assert_eq!(family_label("alimentacao"), "Alimentação");
+        assert_eq!(family_label("saude"), "Saúde");
+        assert_eq!(family_label("transferencias_internas"), "Transferências");
+    }
+
+    #[test]
+    fn family_label_falls_back_to_capitalize() {
+        assert_eq!(family_label("custom"), "Custom");
+    }
+
+    #[test]
+    fn short_description_strips_pipe_suffix() {
+        assert_eq!(
+            short_description("Transferência enviada|Maicon Steffen Rios"),
+            "Transferência enviada"
+        );
+    }
+
+    #[test]
+    fn short_description_collapses_whitespace() {
+        assert_eq!(
+            short_description("  Mercado    Angeloni  \n  loja 42  "),
+            "Mercado Angeloni loja 42"
+        );
+    }
+
+    #[test]
+    fn short_description_strips_leading_emoji() {
+        assert_eq!(
+            short_description("🏠 Aluguel do imóvel"),
+            "Aluguel do imóvel"
+        );
+        assert_eq!(short_description("🍽️ Mercado Angeloni"), "Mercado Angeloni");
+    }
+
+    #[test]
+    fn short_description_keeps_purely_emoji_input() {
+        // If the description is just emoji, don't return empty
+        let out = short_description("🏠 🚗");
+        assert!(!out.is_empty());
+    }
+}

@@ -1,32 +1,165 @@
-# Finance OS
+<div align="center">
+
+# 💸 Finance OS
+
+**Your personal-finance runtime. Sync Brazilian banks, query in SQL, report on WhatsApp.**
 
 [![CI](https://github.com/feliperun/finance-os/actions/workflows/ci.yml/badge.svg)](https://github.com/feliperun/finance-os/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/feliperun/finance-os?label=release&color=blue)](https://github.com/feliperun/finance-os/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
 
-A personal finance CLI and data pipeline built in Rust. Syncs bank transactions from [Pluggy](https://pluggy.ai), stores them in BigQuery (production) or SQLite (local development), and provides reporting views for budgeting, cashflow analysis, and forecast tracking.
+</div>
 
-> **Brazilian banking focus:** Pluggy is a Brazilian open-finance aggregator. The data model and reporting are designed for Brazilian accounts (checking, credit cards, investments), but the architecture is backend-agnostic and can be adapted for other providers.
+---
+
+Finance OS is a single-binary CLI that turns your bank feed into a **queryable, scriptable, reportable** finance database. It connects to [Pluggy](https://pluggy.ai) (Brazilian open-finance aggregator), normalizes everything into either SQLite (local) or BigQuery (production), and ships with reports designed to be read on your phone — not in a dashboard.
+
+```bash
+$ finance-cli report daily-pulse
+📊 Pulse · últimos 7 dias
+
+🍽️ Alimentação · R$ 487,30
+  • Mercado · R$ 150,00 (13/mai)
+  • iFood · R$ 87,30 (12/mai)
+
+🏠 Moradia · R$ 1.200,00
+  • Aluguel · R$ 1.200,00 (10/mai)
+
+💰 Entradas · R$ 8.500,00
+  • Salário · R$ 5.000,00 (12/mai)
+
+Saldo do período: +R$ 6.012,70 ✅
+```
 
 ## Install
 
-### Download a release (macOS ARM)
-
 ```bash
-curl -fsSL https://github.com/feliperun/finance-os/releases/latest/download/finance-cli-aarch64-apple-darwin.tar.gz | tar xz
-chmod +x finance-cli
-./finance-cli --version
+curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh | bash
 ```
 
-To make it available as `finance-cli` from any directory, move it into a PATH directory (the auto-update will overwrite this file in place when a new release is published):
+The installer downloads the latest macOS ARM binary into `~/.local/bin/finance-cli`, verifies its SHA-256, and warns if that path isn't in your `$PATH`. To pin a version or change the install dir:
 
 ```bash
-mv finance-cli ~/.local/bin/   # or /usr/local/bin, or any directory in your $PATH
-finance-cli --version
+curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh \
+  | bash -s -- --version=v0.5.1 --prefix=/usr/local
 ```
 
-> Note: if you previously installed an older version under a different name (e.g. `finance`), make sure your shell resolves to the new binary — `which finance-cli` should point to the location you just moved it to.
+Other paths: [build from source](#build-from-source) · [cargo install](#cargo-install)
 
-### Build from source
+After install, the binary self-updates: it checks GitHub Releases at most **once every 24h**, downloads, validates SHA-256, atomically replaces itself, and re-execs the command you ran. Zero ceremony.
+
+## Features
+
+- 🏦 **Pluggy sync** — Brazilian open-finance aggregator, automatic pagination, idempotent imports, account snapshots for balance history.
+- 🗃 **Dual backend** — SQLite for local/dev (zero setup) or BigQuery for production (multi-device, joinable with Sheets).
+- 📊 **Reports built for humans** — WhatsApp-friendly by default, grouped by category, `--raw` flag for agents that want JSON.
+- 💰 **Budgeting & forecasting** — category budgets with alerts, installment chain tracking, forecast vs actual.
+- 🧾 **Transaction splits** — split a single bank transaction into multiple categorized lines (groceries → food + cleaning + pets).
+- 📜 **Audit trail** — append-only event log on every write. Every change is replayable.
+- 🎯 **Decimal precision** — `rust_decimal` end-to-end. No floating-point lies on amounts.
+- 🤖 **AI-ready** — first-class skill integration for [OpenClaw](https://openclaw.io), Claude, and other agent frameworks via a single wrapper script.
+- ⬆️ **Self-updating** — single-binary install, atomic in-place upgrade on every release.
+
+## Quickstart
+
+```bash
+# Install
+curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh | bash
+
+# Initialize the local SQLite backend
+finance-cli auth setup --backend local --actor-id $USER
+finance-cli admin migrate
+
+# Sync from Pluggy
+export PLUGGY_CLIENT_ID=your-client-id
+export PLUGGY_CLIENT_SECRET=your-client-secret
+finance-cli sync pluggy --pluggy-config pluggy-config.json
+
+# Look at the result
+finance-cli report daily-pulse
+finance-cli report monthly-spend
+finance-cli report card-summary
+```
+
+See [BigQuery setup](#bigquery-setup) below for the multi-device / Sheets-friendly backend.
+
+## Reports
+
+All reports produce a human-readable output by default and accept `--raw` for JSON (consumed by AI agents, scripts, dashboards). The legacy `--json` flag continues to work.
+
+| Command | What it shows |
+|---|---|
+| `report daily-pulse` | Recent transactions, grouped by category |
+| `report monthly-spend` | Current month broken down by category |
+| `report cashflow` | Income vs expenses vs net, last N months |
+| `report card-summary` | Current credit-card cycle (open + closed bills) |
+| `report card-closed-insights` | What changed in the most recent closed bill |
+| `report budget-status` | Budget vs actual per category, with alerts |
+| `report installments` | Active parcela chains (X de Y), with projected end |
+| `report forecast-vs-actual` | Planned amounts vs what actually happened |
+| `report uncategorized` | Transactions still needing a category |
+| `report data-health` | Consistency checks across the dataset |
+
+Add `--raw` to any of them for structured output.
+
+## Command surface
+
+<details>
+<summary>Click to expand the full command tree</summary>
+
+```text
+finance-cli auth setup              Configure backend and credentials
+finance-cli admin migrate           Apply pending database migrations
+finance-cli admin import-legacy     Import from legacy CSV files
+finance-cli sync pluggy             Sync transactions from Pluggy
+finance-cli report <subcommand>     See "Reports" above
+finance-cli tx upsert-manual        Add a manual transaction
+finance-cli tx categorize           Assign category to a transaction
+finance-cli tx set-context          Add free-form context to a transaction
+finance-cli tx find                 Search transactions by description
+finance-cli tx pending              List uncategorized transactions
+finance-cli tx set-context-by-desc  Set context for all transactions matching a query
+finance-cli tx split <subcommand>   Split a transaction into multiple lines
+finance-cli forecast upsert         Create or update a forecast entry
+finance-cli rule upsert/list/inspect Classification rule management
+finance-cli account upsert          Create or update an account
+finance-cli budget upsert/list      Category budget management
+finance-cli self check              Check for available updates
+finance-cli self update             Force-update to the latest release
+```
+
+</details>
+
+## BigQuery setup
+
+```bash
+# 1. Create a GCP project + dataset (e.g. finance_os).
+# 2. Create a service account with BigQuery Data Editor + Job User roles.
+# 3. Download the JSON key.
+
+finance-cli auth setup \
+  --backend bigquery \
+  --actor-id $USER \
+  --project-id your-gcp-project \
+  --dataset-id finance_os \
+  --service-account-path /path/to/service-account.json
+
+finance-cli admin migrate
+```
+
+Optional: use a Google Sheet as a category/context override source so your manual classifications survive across machines. See [docs/google-sheets-overrides.md](docs/google-sheets-overrides.md).
+
+## Configuration
+
+| Variable | Description |
+|---|---|
+| `FINANCE_OS_CONFIG_DIR` | Config directory. Default: `~/Library/Application Support/finance-os` (macOS) or `~/.config/finance-os` (Linux). |
+| `FINANCE_OS_DATA_DIR` | Data directory (holds `finance-os.db` and `update-state.json`). Same defaults as above. |
+| `FINANCE_OS_NO_AUTO_UPDATE` | Set to `1` to disable automatic update checks. |
+| `PLUGGY_CLIENT_ID` / `PLUGGY_CLIENT_SECRET` | Pluggy API credentials. |
+
+## Build from source
 
 ```bash
 git clone https://github.com/feliperun/finance-os.git
@@ -35,259 +168,62 @@ cargo build --release
 ./target/release/finance-cli --version
 ```
 
-The CLI checks for updates automatically (at most once every 24 hours). Run `finance self check` to see if a newer release is available.
+Requires Rust 1.90+ (`rustup update stable`).
 
-## Features
-
-- **Dual-backend storage** -- BigQuery for production, SQLite for local development
-- **Bank sync** via Pluggy API with automatic pagination and idempotent imports
-- **Reporting views** -- daily pulse, monthly spend, cashflow, forecast vs actual, card summary, uncategorized transactions
-- **Audit trail** -- append-only event log for every write operation
-- **Financial precision** -- all amounts use `rust_decimal::Decimal`, never floating-point
-- **Idempotent operations** -- safe to re-run syncs and imports without duplicating data
-- **Legacy import** -- migrate from CSV-based finance tracking
-
-## Prerequisites
-
-- Rust 1.90+ (`rustup update stable`)
-- A [Pluggy](https://pluggy.ai) account with API credentials
-- For BigQuery backend: a GCP project with BigQuery API enabled and a service account key
-
-## Quick Start (Local Backend)
+### cargo install
 
 ```bash
-# Build
-cargo build --release
-
-# Configure
-./target/release/finance-cli auth setup \
-  --backend local \
-  --actor-id your-name
-
-# Run migrations
-./target/release/finance-cli admin migrate
-
-# Sync from Pluggy (using a fixture for testing)
-./target/release/finance-cli sync pluggy \
-  --pluggy-config examples/pluggy-config.example.json \
-  --fixture examples/pluggy_fixture.json
-
-# View recent transactions
-./target/release/finance-cli report daily-pulse --days 30
+cargo install --git https://github.com/feliperun/finance-os.git --bin finance-cli
 ```
 
-## BigQuery Backend Setup
+## AI assistant integration
 
-1. Create a GCP project and enable the BigQuery API
-2. Create a dataset (e.g. `finance_os`)
-3. Create a service account with **BigQuery Data Editor** and **BigQuery Job User** roles
-4. Download the service account JSON key
+The `integrations/openclaw/` directory contains a shell wrapper + skill definition that exposes `finance-cli` to an AI assistant. The pattern (wrapper + skill markdown) adapts to Claude Skills, OpenClaw, or any frame that exec's commands.
 
-```bash
-./target/release/finance-cli auth setup \
-  --backend bigquery \
-  --actor-id your-name \
-  --project-id your-gcp-project \
-  --dataset-id finance_os \
-  --service-account-path /path/to/service-account.json
-
-./target/release/finance-cli admin migrate
-```
-
-Optional private workflow: use a Google Sheet as a category/context override source for BigQuery reads. See [docs/google-sheets-overrides.md](docs/google-sheets-overrides.md).
-
-## Pluggy Configuration
-
-Create a `pluggy-config.json` mapping your internal account IDs to Pluggy account IDs (see `examples/pluggy-config.example.json`):
-
-```json
-{
-  "syncStartDate": "2025-01-01",
-  "accounts": [
-    { "id": "my-checking", "pluggyAccountId": "uuid-from-pluggy" }
-  ]
-}
-```
-
-Set your Pluggy credentials as environment variables:
-
-```bash
-export PLUGGY_CLIENT_ID=your-client-id
-export PLUGGY_CLIENT_SECRET=your-client-secret
-```
-
-## Environment Variables
-
-| Variable | Description |
-|---|---|
-| `FINANCE_OS_CONFIG_DIR` | Config directory (default follows platform conventions: `~/.config/finance-os` on Linux, `~/Library/Application Support/finance-os` on macOS) |
-| `FINANCE_OS_DATA_DIR` | Data directory (default follows platform conventions: `~/.local/share/finance-os` on Linux, `~/Library/Application Support/finance-os` on macOS). Houses `finance-os.db` (SQLite backend) and `update-state.json` (auto-update throttle). |
-| `FINANCE_OS_NO_AUTO_UPDATE` | Set to `1` to disable automatic update checks |
-| `PLUGGY_CLIENT_ID` | Pluggy API client ID |
-| `PLUGGY_CLIENT_SECRET` | Pluggy API client secret |
-
-## CLI Commands
-
-```
-finance auth setup          Configure backend and credentials
-finance admin migrate       Apply pending database migrations
-finance admin import-legacy Import from legacy CSV files
-finance sync pluggy         Sync transactions from Pluggy
-finance report daily-pulse  Recent transactions
-finance report monthly-spend Monthly expenses by category
-finance report cashflow     Monthly income/expenses/net
-finance report forecast-vs-actual  Budget vs actual comparison
-finance report card-summary Credit card statement summary
-finance report card-closed-insights Closed-bill insights (categories, recurring, subscriptions, installments)
-finance report ofx-consistency Transaction-by-transaction consistency check against an OFX file
-finance report uncategorized Transactions needing categorization
-finance tx upsert-manual    Add a manual transaction
-finance tx categorize       Assign category to a transaction
-finance tx set-context      Add context to a transaction
-finance forecast upsert     Create or update a forecast entry
-finance rule upsert         Create or update a classification rule
-finance account upsert      Create or update an account
-finance self check          Check for available updates
-finance self update         Download and install the latest release
-```
-
-All report commands support `--json` for machine-readable output.
-
-`finance sync pluggy` supports summary outputs for automation:
-- `--json-summary` for structured integrations
-- `--notify-summary` for human-readable notification text generated by Finance OS
-
-Finance OS also standardizes user-facing transaction naming through `display_label` (context-first) and emoji category hints in report outputs. See `FINANCE_OS.md` for cross-agent behavior conventions.
-
-Rules are stored in the database and applied during Pluggy sync. Supported rule formats:
-
-```bash
-finance rule upsert \
-  --rule-id bill_payment \
-  --body 'if description contains "pagamento de fatura" then category credit-card-payment'
-
-finance rule upsert \
-  --rule-id own_transfer \
-  --body 'if description contains "pix no credito" then category transfer-internal'
-```
-
-Use database-backed rules or private config for user-specific patterns. Do not commit personal classification rules to shared code or migrations.
-
-## Private Local Setup
-
-For day-to-day use, keep private files outside the open-source repo and mount them into a local gitignored overlay.
-
-Recommended layout:
-
-```text
-finance-os/                  # open-source repo
-  .private/                  # gitignored local overlay
-    runtime -> ~/finance-os-configs/runtime/<runtime-name>
-    pluggy.env -> ~/finance-os-configs/pluggy/pluggy.env
-    pluggy-config.json -> /private/path/to/pluggy-config.json
-    contas.csv -> /private/path/to/contas.csv
-```
-
-Create the local links with:
-
-```bash
-scripts/setup-private-links.sh \
-  --configs-root "$HOME/finance-os-configs" \
-  --runtime your-runtime \
-  --pluggy-config "/private/path/to/pluggy-config.json" \
-  --accounts-csv "/private/path/to/contas.csv"
-```
-
-Then run sync through the overlay:
-
-```bash
-scripts/local-sync.sh --from 2026-03-01 --to 2026-04-01
-```
-
-This keeps secrets, service-account paths, Pluggy credentials, and user-specific rules out of the shared repository.
+Agents should always invoke reports with `--raw` to get JSON instead of the human-friendly default.
 
 ## Architecture
 
-```
-crates/
-  finance-core/     Shared domain logic, storage trait, models
-  finance-cli/      CLI application (clap-based)
-schema/
-  sqlite/           SQLite migration files
-  bigquery/         BigQuery migration files (with template substitution)
-integrations/
-  openclaw/         Example AI assistant integration (skill + shell wrapper)
-```
-
-The `FinanceStore` trait abstracts over both backends. Migrations are embedded in the binary at compile time via `include_str!`.
-
-## AI Assistant Integration
-
-The `integrations/openclaw/` directory contains an example integration for [OpenClaw](https://openclaw.io), an AI assistant framework. It shows how to expose `finance-cli` commands as a skill that an AI agent can invoke — syncing transactions, categorizing spending, and generating reports through natural language.
-
-The pattern (a shell wrapper + a skill definition file) can be adapted for other AI assistant frameworks.
-
-## Testing
-
-```bash
-cargo test --workspace
-```
-
-E2E tests run against SQLite using temporary directories. No external services required.
-
-## Release Process
-
-Releases are managed by Release Please on pushes to `main`.
-
-- Use Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`).
-- Use `!` or a `BREAKING CHANGE:` footer for breaking changes.
-- Release Please opens a release PR that updates `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and tags the release after merge.
-- CI builds and attaches a `finance-cli-aarch64-apple-darwin.tar.gz` + `.sha256` to each release.
-
-### Auto-Update
-
-The CLI checks for updates at most once every 24 hours before running commands.
-This check is **silent** — it only prints to stderr when a download is in progress or
-when an error occurs. It never blocks your command.
-
-**Skip the auto-check:**
-
-```bash
-FINANCE_OS_NO_AUTO_UPDATE=1 finance report daily-pulse
-```
-
-Or disable it permanently in your shell profile:
-
-```bash
-export FINANCE_OS_NO_AUTO_UPDATE=1
-```
-
-**Manual update commands:**
-
-```bash
-finance self check          # Report current vs latest version
-finance self update         # Download and install the latest release
-```
-
-The updater replaces the running binary in-place on macOS (atomic `rename(2)` +
-`execv`). After a successful update your original command re-runs with the new
-binary automatically.
-
-**Runtime binary layout:** The updater discovers the current executable via
-`std::env::current_exe()`. The recommended path for OpenClaw wrapper users is:
-
 ```text
-~/.local/share/finance-os/runtime/bin/finance-cli
+crates/
+  finance-core/     Domain logic, storage trait, models, Pluggy client
+  finance-cli/      CLI binary, report formatters, auto-update
+schema/
+  sqlite/           SQLite migrations
+  bigquery/         BigQuery migrations
+integrations/
+  openclaw/         AI assistant skill + wrapper
 ```
+
+The `FinanceStore` trait abstracts both backends. Migrations are embedded into the binary at compile time via `include_str!`. Decimal arithmetic uses `rust_decimal` throughout.
+
+## Self-update under the hood
+
+On macOS, the updater downloads the latest tarball, validates its SHA-256 against the published `.sha256` asset, then **atomically renames** the new binary over the running one. The kernel keeps the old inode alive for the running process; the path now points to the new inode. We then `execv` to replace the process image with the new binary, passing the original argv plus a `FINANCE_OS_UPDATED=<version>` sentinel that disables auto-check in the child to prevent loops.
+
+The check is gated by:
+
+- A 24-hour throttle (`update-state.json` in your data dir).
+- Skip when `FINANCE_OS_NO_AUTO_UPDATE=1`.
+- Skip when running a `self ...` subcommand.
+- 2-second HTTP timeout on the API check — never delays your real command.
+
+## Security
+
+- Tarball SHA-256 is validated **before** unpacking.
+- Path-traversal guard rejects any archive entry containing `..` or absolute paths.
+- Auto-update runs unauthenticated against public GitHub releases — no token embedded in the binary.
+- See [SECURITY.md](SECURITY.md) for the disclosure policy.
 
 ## Contributing
 
-Contributions are welcome. Please open an issue before submitting large changes so we can discuss the approach. For bug fixes and small improvements, a pull request is sufficient.
+Pull requests welcome. Before large changes, open an issue to discuss the approach.
 
-- Keep new commands idempotent where possible
-- Add a migration file for any schema changes (both `schema/sqlite/` and `schema/bigquery/`)
-- E2E tests against the SQLite backend are preferred over unit tests that mock the store
+- Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`).
+- Migrations land in **both** `schema/sqlite/` and `schema/bigquery/` and must be idempotent.
+- E2E tests prefer the SQLite backend over mocks.
+- AGENTS.md guardrails: no personal counterparty names, account labels, or statement fingerprints in shared code.
 
 ## License
 
-MIT
+[MIT](LICENSE).
