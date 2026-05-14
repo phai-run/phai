@@ -1296,14 +1296,14 @@ impl FinanceStore for LocalStore {
               t.transaction_date,
               t.display_label,
               t.description,
-              CAST(ABS(CAST(t.amount AS REAL)) AS TEXT) AS closed_amount,
+              CAST(t.amount AS TEXT) AS amount,
               t.category_id,
               t.payment_status,
               t.metadata_json
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND CAST(t.amount AS REAL) < 0
+              AND NOT (CAST(t.amount AS REAL) > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
               AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
             ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC

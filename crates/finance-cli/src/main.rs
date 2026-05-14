@@ -5700,7 +5700,15 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
     let mut accounts_report = Vec::with_capacity(by_account.len());
     let mut grand_total = Decimal::ZERO;
     for (account_id, txs) in &by_account {
-        let total: Decimal = txs.iter().map(|t| t.amount.abs()).sum();
+        // Signed sum: debits are negative, statement credits (IOF reversals,
+        // merchant refunds) are positive. They net automatically, which is
+        // what shows up on the actual bill the user receives.
+        let net_spend: Decimal = txs.iter().map(|t| t.amount).sum();
+        // For display we keep using the absolute value of `net_spend` —
+        // the human output explicitly prefixes "-R$ ..." so showing the
+        // unsigned amount and letting the formatter add the sign is what
+        // matches the rest of the report styling.
+        let total: Decimal = net_spend.abs();
         grand_total += total;
 
         // Prefer the synthetic cycle close date when we have it (derived
@@ -5904,21 +5912,26 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
     let mut family_totals: Vec<(String, Decimal, Vec<&CardClosedTransactionRow>)> = by_family
         .into_iter()
         .map(|(f, list)| {
-            let total: Decimal = list.iter().map(|r| r.amount.abs()).sum();
-            (f, total, list)
+            // Signed sum: refunds (positive) net against charges (negative)
+            // so the category total reflects the actual cost the user paid
+            // in that category for the cycle.
+            let net: Decimal = list.iter().map(|r| r.amount).sum();
+            (f, net, list)
         })
         .collect();
-    family_totals.sort_by_key(|(_, total, _)| std::cmp::Reverse(*total));
-    for (family, family_total, list) in &family_totals {
+    // Sort by absolute net descending — categories with the biggest
+    // movement (positive or negative) come first.
+    family_totals.sort_by_key(|(_, net, _)| std::cmp::Reverse(net.abs()));
+    for (family, family_net, list) in &family_totals {
         // Pick a representative category_id for emoji
         let repr_cat = list.first().and_then(|r| r.category_id.as_deref());
-        let emoji = human_format::category_emoji(repr_cat, Some(-*family_total));
+        let emoji = human_format::category_emoji(repr_cat, Some(*family_net));
         let label = human_format::family_label(family);
         println!(
             "{} {} · {} ({} lanç)",
             emoji,
             bold(&label),
-            human_format::brl_signed(-*family_total),
+            human_format::brl_signed(*family_net),
             list.len(),
         );
         let mut sorted_list: Vec<&&CardClosedTransactionRow> = list.iter().collect();
@@ -5927,7 +5940,7 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
             println!(
                 "  • {} · {} ({})",
                 human_format::short_description(&tx.description),
-                human_format::brl_signed(-tx.amount.abs()),
+                human_format::brl_signed(tx.amount),
                 human_format::short_date(tx.transaction_date),
             );
         }

@@ -1920,6 +1920,12 @@ impl FinanceStore for BigQueryStore {
                 )
             })
             .unwrap_or_default();
+        // Returns every charge AND statement credit (IOF reversals,
+        // merchant refunds, etc.) — credits net naturally against debits in
+        // the bill total. The one credit type we exclude is the bill
+        // payment itself ("Pagamento recebido"), which appears on the card
+        // side but mirrors a debit on checking and would double-count.
+        // Amounts are returned signed (debits negative, credits positive).
         let sql = format!(
             "
             SELECT
@@ -1929,7 +1935,7 @@ impl FinanceStore for BigQueryStore {
               CAST(t.transaction_date AS STRING),
               t.display_label,
               t.description,
-              CAST(ABS(t.amount) AS STRING),
+              CAST(t.amount AS STRING),
               t.category_id,
               t.payment_status,
               COALESCE(TO_JSON_STRING(t.metadata_json), '{{}}')
@@ -1937,7 +1943,7 @@ impl FinanceStore for BigQueryStore {
             JOIN {} a
               ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND t.amount < 0
+              AND NOT (t.amount > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM {})
               {where_month}
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
