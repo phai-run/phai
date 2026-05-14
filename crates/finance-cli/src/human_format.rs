@@ -207,6 +207,45 @@ pub fn category_subtotal(category_id: Option<&str>, total: Decimal) -> String {
     format!("{emoji} {} · {}", bold(&label), brl(total))
 }
 
+/// Format a percentage value as `XX%` (rounded to integer).
+pub fn pct(value: Decimal) -> String {
+    let rounded = value.round_dp(0);
+    format!("{rounded}%")
+}
+
+/// Format `"YYYY-MM"` as `"<month-pt>/<YY>"`. Falls back to the raw string
+/// if it doesn't parse.
+/// `"2026-05"` → `"mai/26"`.
+pub fn month_label(month_ref: &str) -> String {
+    let parts: Vec<&str> = month_ref.split('-').collect();
+    if parts.len() != 2 {
+        return month_ref.to_string();
+    }
+    let year = match parts[0].parse::<i32>() {
+        Ok(y) => y,
+        Err(_) => return month_ref.to_string(),
+    };
+    let month = match parts[1].parse::<u32>() {
+        Ok(m) if (1..=12).contains(&m) => m,
+        _ => return month_ref.to_string(),
+    };
+    format!("{}/{:02}", month_pt_short(month), year % 100)
+}
+
+/// Render a 10-cell unicode progress bar, `[▓▓▓░░░░░░░] 35%`.
+/// Caps fill at 10 cells even if `pct > 100`.
+pub fn progress_bar(pct: i64) -> String {
+    let pct_clamped = pct.clamp(0, 100);
+    let filled = ((pct_clamped as f64 / 10.0).round() as usize).min(10);
+    let empty = 10 - filled;
+    format!(
+        "[{}{}] {}%",
+        "▓".repeat(filled),
+        "░".repeat(empty),
+        pct
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +329,42 @@ mod tests {
         // If the description is just emoji, don't return empty
         let out = short_description("🏠 🚗");
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn pct_formats_integer_percentage() {
+        assert_eq!(pct(dec!(35.4)), "35%");
+        assert_eq!(pct(dec!(35.6)), "36%");
+        assert_eq!(pct(dec!(100)), "100%");
+        assert_eq!(pct(dec!(0)), "0%");
+    }
+
+    #[test]
+    fn month_label_formats_known_month() {
+        assert_eq!(month_label("2026-05"), "mai/26");
+        assert_eq!(month_label("2024-12"), "dez/24");
+        assert_eq!(month_label("2030-01"), "jan/30");
+    }
+
+    #[test]
+    fn month_label_falls_back_on_invalid_input() {
+        assert_eq!(month_label("not-a-month"), "not-a-month");
+        assert_eq!(month_label("2026-13"), "2026-13");
+        assert_eq!(month_label(""), "");
+    }
+
+    #[test]
+    fn progress_bar_renders_at_thresholds() {
+        assert_eq!(progress_bar(0), "[░░░░░░░░░░] 0%");
+        assert_eq!(progress_bar(50), "[▓▓▓▓▓░░░░░] 50%");
+        assert_eq!(progress_bar(100), "[▓▓▓▓▓▓▓▓▓▓] 100%");
+    }
+
+    #[test]
+    fn progress_bar_caps_overflow_visually_but_shows_real_pct() {
+        // Bar fill caps at 10 cells but the percentage label can exceed 100.
+        let out = progress_bar(150);
+        assert!(out.starts_with("[▓▓▓▓▓▓▓▓▓▓]"));
+        assert!(out.ends_with("150%"));
     }
 }
