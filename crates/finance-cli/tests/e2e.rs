@@ -466,9 +466,9 @@ fn mutating_commands_feed_reporting_views() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("alimentacao mercado"))
-    .stdout(predicate::str::contains("saude > exames"))
-    .stdout(predicate::str::contains("gas stations"))
+    // human format: family groups use display labels (capitalized, with accents)
+    .stdout(predicate::str::contains("Alimentação"))
+    .stdout(predicate::str::contains("Saúde"))
     .stdout(predicate::str::contains("financeiro-pagamento-recebido").not());
 
     envs(
@@ -482,7 +482,8 @@ fn mutating_commands_feed_reporting_views() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("2026-03"))
+    // human format: month shown as "março/2026" not "2026-03"
+    .stdout(predicate::str::contains("março/2026"))
     .stdout(predicate::str::contains("líquido"));
 
     envs(
@@ -511,7 +512,7 @@ fn mutating_commands_feed_reporting_views() {
     .assert()
     .success()
     .stdout(predicate::str::contains("shared_credit"))
-    .stdout(predicate::str::contains("em aberto"));
+    .stdout(predicate::str::contains("Cartões"));
 
     envs(
         cargo_bin()
@@ -768,11 +769,10 @@ fn report_card_closed_insights_includes_categories_recurring_subscriptions_and_i
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("Card closed insights 2026-03"))
-    .stdout(predicate::str::contains("Recorrentes:"))
-    .stdout(predicate::str::contains("Assinaturas:"))
-    .stdout(predicate::str::contains("Parceladas fechadas:"))
-    .stdout(predicate::str::contains("Parceladas em aberto:"))
+    .stdout(predicate::str::contains("Fatura fechada"))
+    .stdout(predicate::str::contains("Recorrentes"))
+    .stdout(predicate::str::contains("Assinaturas"))
+    .stdout(predicate::str::contains("Parcelamentos"))
     .stdout(predicate::str::contains("academia fit"))
     .stdout(predicate::str::contains("03/10"))
     .stdout(predicate::str::contains("parcela-8"))
@@ -1844,20 +1844,23 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
     .success()
     .stdout(predicate::str::contains("- transactions: 1"));
 
+    // The transaction is classified as `credit-card-payment` (internal category),
+    // so the default human-friendly summary hides it from the grouped view.
+    // Use --raw to assert the JSON-shaped data still includes it.
     envs(
         cargo_bin()
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
-            .arg("120"),
+            .arg("120")
+            .arg("--raw"),
         &config_dir,
         &data_dir,
     )
     .assert()
     .success()
     .stdout(predicate::str::contains("Pagamento de fatura Visa"))
-    .stdout(predicate::str::contains("- entradas: +R$ 0,00"))
-    .stdout(predicate::str::contains("- saídas: +R$ 0,00"));
+    .stdout(predicate::str::contains("\"credit-card-payment\""));
 
     envs(
         cargo_bin()
@@ -2840,7 +2843,7 @@ fn budget_status_shows_usage_pct() {
     .assert()
     .success()
     .stdout(predicate::str::contains("alimentacao"))
-    .stdout(predicate::str::contains("Budget status 2026-03"));
+    .stdout(predicate::str::contains("Orçamentos"));
 }
 
 #[test]
