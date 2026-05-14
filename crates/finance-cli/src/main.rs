@@ -2372,7 +2372,7 @@ fn print_daily_pulse_human(
             (family.clone(), total)
         })
         .collect();
-    family_totals.sort_by(|a, b| b.1.abs().cmp(&a.1.abs()));
+    family_totals.sort_by_key(|x| std::cmp::Reverse(x.1.abs()));
 
     const MAX_PER_GROUP: usize = 5;
 
@@ -2397,7 +2397,7 @@ fn print_daily_pulse_human(
         // Show top N items in the group, biggest absolute amount first.
         let mut group_items: Vec<&&finance_core::models::DailyPulseItem> =
             groups[family].iter().collect();
-        group_items.sort_by(|a, b| b.amount.abs().cmp(&a.amount.abs()));
+        group_items.sort_by_key(|x| std::cmp::Reverse(x.amount.abs()));
         for item in group_items.iter().take(MAX_PER_GROUP) {
             println!(
                 "  • {} · {} ({})",
