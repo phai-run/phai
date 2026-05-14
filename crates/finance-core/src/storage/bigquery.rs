@@ -1,9 +1,10 @@
 use super::FinanceStore;
 use crate::config::AppConfig;
 use crate::models::{
-    parse_datetime_or_now, AccountRecord, AuditEvent, CardClosedTransactionRow, CardSummaryRow,
-    CashflowRow, CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
-    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent,
+    CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
+    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
+    TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -504,6 +505,109 @@ impl FinanceStore for BigQueryStore {
         );
         self.run_query(&sql).await?;
         Ok(rows.len())
+    }
+
+    async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let source = rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "SELECT {} AS snapshot_id, {} AS account_id, {} AS snapshot_date, {} AS balance, {} AS credit_limit, {} AS currency_code, {} AS source, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at",
+                    sql_string(&row.snapshot_id),
+                    sql_string(&row.account_id),
+                    sql_date(row.snapshot_date),
+                    row.balance.as_ref().map(sql_decimal).unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
+                    row.credit_limit.as_ref().map(sql_decimal).unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
+                    sql_optional_string(row.currency_code.as_deref()),
+                    sql_string(&row.source),
+                    sql_string(&row.actor_id),
+                    sql_string(&row.idempotency_key),
+                    sql_json(&row.metadata_json),
+                    sql_timestamp(row.created_at),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\nUNION ALL\n");
+
+        let sql = format!(
+            "
+            MERGE {} target
+            USING ({source}) source
+            ON target.idempotency_key = source.idempotency_key
+            WHEN NOT MATCHED THEN INSERT (
+              snapshot_id, account_id, snapshot_date, balance, credit_limit, currency_code,
+              source, actor_id, idempotency_key, metadata_json, created_at
+            ) VALUES (
+              source.snapshot_id, source.account_id, source.snapshot_date, source.balance, source.credit_limit, source.currency_code,
+              source.source, source.actor_id, source.idempotency_key, source.metadata_json, source.created_at
+            )
+            ",
+            self.qualified_table("account_snapshots")?,
+        );
+        self.run_query(&sql).await?;
+        Ok(rows.len())
+    }
+
+    async fn find_transactions_by_description(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>> {
+        let pattern = format!("%{}%", query.to_ascii_lowercase());
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, description, CAST(amount AS STRING),
+              tx_type, category_id, category_source, context, payment_status, source,
+              actor_id, idempotency_key, TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
+            FROM {}
+            WHERE LOWER(description) LIKE {}
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            LIMIT {}
+            ",
+            self.qualified_table("transactions")?,
+            sql_string(&pattern),
+            limit,
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
+    }
+
+    async fn latest_uncategorized_transactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, description, CAST(amount AS STRING),
+              tx_type, category_id, category_source, context, payment_status, source,
+              actor_id, idempotency_key, TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
+            FROM {}
+            WHERE context IS NULL
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            LIMIT {}
+            ",
+            self.qualified_table("transactions")?,
+            limit,
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
     }
 
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize> {

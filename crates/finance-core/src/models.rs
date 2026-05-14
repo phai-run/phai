@@ -289,6 +289,21 @@ pub struct TransactionContextRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSnapshotRecord {
+    pub snapshot_id: String,
+    pub account_id: String,
+    pub snapshot_date: NaiveDate,
+    pub balance: Option<Decimal>,
+    pub credit_limit: Option<Decimal>,
+    pub currency_code: Option<String>,
+    pub source: String,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub metadata_json: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub event_id: String,
     pub entity_type: String,
