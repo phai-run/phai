@@ -29,6 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod human_format;
 mod review;
 mod self_cmd;
 mod update;
@@ -186,24 +187,54 @@ struct DailyPulseArgs {
 struct MonthlySpendArgs {
     #[arg(long)]
     month: Option<String>,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`. Kept for backwards-compat with scripts/skills.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl MonthlySpendArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
 struct CashflowArgs {
     #[arg(long, default_value_t = 6)]
     months: usize,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`. Kept for backwards-compat with scripts/skills.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl CashflowArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
 struct ForecastVsActualArgs {
     #[arg(long)]
     month: Option<String>,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`. Kept for backwards-compat with scripts/skills.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+impl ForecastVsActualArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
 }
 
 #[derive(Args)]
@@ -2330,33 +2361,102 @@ async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.monthly_spend(args.month.as_deref()).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!(
-        "🧾 Monthly spend{}",
-        args.month
-            .as_deref()
-            .map(|value| format!(" {value}"))
-            .unwrap_or_default()
-    );
-    println!("- linhas: {}", rows.len());
-    println!();
-
-    for row in rows {
-        let category = category_display(Some(&row.category_id), Some(-row.expenses));
-        println!(
-            "{} | {} | 🏦 {} | {} | {} transações",
-            row.month_ref,
-            category,
-            row.account_id,
-            brl(-row.expenses),
-            row.expense_count
-        );
-    }
+    print_monthly_spend_human(&rows, args.month.as_deref());
     Ok(())
+}
+
+fn print_monthly_spend_human(rows: &[finance_core::models::MonthlySpendRow], month: Option<&str>) {
+    use human_format::{
+        bold, brl, category_emoji, category_family, family_label, month_label, pct,
+    };
+    use std::cmp::Reverse;
+    use std::collections::HashMap;
+
+    // Determine the month_ref label
+    let month_display = month
+        .map(month_label)
+        .or_else(|| rows.first().map(|r| month_label(&r.month_ref)))
+        .unwrap_or_else(|| "—".to_string());
+
+    println!("📊 {}", bold(&format!("Gastos · {month_display}")));
+
+    if rows.is_empty() {
+        println!("- linhas: 0");
+        return;
+    }
+
+    let internal_prefix = "financeiro-pagamento-recebido";
+
+    // Filter out internal categories
+    let visible: Vec<_> = rows
+        .iter()
+        .filter(|r| !r.category_id.starts_with(internal_prefix))
+        .collect();
+
+    // Group by family, accumulate spend per family
+    let mut family_totals: HashMap<String, Decimal> = HashMap::new();
+    // family → list of (category_id, spend)
+    let mut family_rows: HashMap<String, Vec<(&str, Decimal)>> = HashMap::new();
+
+    for row in &visible {
+        let spend = -row.expenses; // expenses are stored negative
+        let family =
+            category_family(Some(&row.category_id)).unwrap_or_else(|| "outros".to_string());
+        *family_totals.entry(family.clone()).or_insert(Decimal::ZERO) += spend;
+        family_rows
+            .entry(family)
+            .or_default()
+            .push((&row.category_id, spend));
+    }
+
+    // Sort families by spend descending
+    let mut families: Vec<String> = family_totals.keys().cloned().collect();
+    families.sort_by_key(|f| Reverse(family_totals[f]));
+
+    let grand_total: Decimal = family_totals.values().copied().sum();
+
+    println!();
+    for family in &families {
+        let family_spend = family_totals[family];
+        let emoji = category_emoji(Some(family), None);
+        let label = family_label(family);
+        println!("{emoji} *{}*   {}", label, brl(family_spend));
+
+        let sub_rows = &family_rows[family];
+        // Only show sub-breakdown when there are multiple sub-categories
+        if sub_rows.len() > 1 {
+            let mut sorted_sub = sub_rows.clone();
+            sorted_sub.sort_by_key(|&(_, v)| Reverse(v));
+            for (cat_id, spend) in &sorted_sub {
+                // Strip family prefix to show only the sub-category part
+                let sub_label = cat_id
+                    .strip_prefix(family)
+                    .and_then(|s| s.strip_prefix(':').or_else(|| s.strip_prefix('-')))
+                    .unwrap_or(cat_id)
+                    .replace(':', " > ")
+                    .replace('-', " ");
+                println!("  _{}   {}_", sub_label, brl(*spend));
+            }
+        }
+    }
+
+    println!();
+    println!("*Total*: {}", brl(grand_total));
+
+    // Top-3 category share breakdown
+    if grand_total > Decimal::ZERO && families.len() > 1 {
+        println!();
+        let top3 = families.iter().take(3);
+        for family in top3 {
+            let share = family_totals[family] / grand_total * Decimal::from(100u32);
+            println!("  {} {}%", family_label(family), pct(share));
+        }
+    }
 }
 
 async fn report_cashflow(args: CashflowArgs) -> Result<()> {
@@ -2365,25 +2465,68 @@ async fn report_cashflow(args: CashflowArgs) -> Result<()> {
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.cashflow(args.months).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!("💹 Cashflow últimos {} meses", args.months);
-    println!("- linhas: {}", rows.len());
-    println!();
+    print_cashflow_human(&rows, args.months);
+    Ok(())
+}
 
+fn print_cashflow_human(rows: &[finance_core::models::CashflowRow], months: usize) {
+    use human_format::{bold, brl, brl_signed, month_label};
+
+    println!("📊 {}", bold(&format!("Cashflow · últimos {months} meses")));
+
+    if rows.is_empty() {
+        return;
+    }
+
+    println!();
     for row in rows {
+        let net_emoji = if row.net > Decimal::ZERO {
+            "✅"
+        } else if row.net < Decimal::ZERO {
+            "🔻"
+        } else {
+            "⚖️"
+        };
         println!(
-            "{} | entradas {} | saídas {} | líquido {}",
-            row.month_ref,
+            "• *{}*  entradas {}  saídas {}  líquido {} {net_emoji}",
+            month_label(&row.month_ref),
             brl(row.income),
             brl(-row.expenses),
-            brl(row.net)
+            brl_signed(row.net),
         );
     }
-    Ok(())
+
+    // Footer: average net + best/worst month
+    let count = rows.len() as i64;
+    if count > 0 {
+        let total_net: Decimal = rows.iter().map(|r| r.net).sum();
+        let avg_net = total_net / Decimal::from(count);
+
+        let best = rows.iter().max_by_key(|r| r.net);
+        let worst = rows.iter().min_by_key(|r| r.net);
+
+        println!();
+        println!("*Média mensal*: {}", brl_signed(avg_net));
+        if let Some(b) = best {
+            println!(
+                "_Melhor mês_: {} ({})",
+                month_label(&b.month_ref),
+                brl_signed(b.net)
+            );
+        }
+        if let Some(w) = worst {
+            println!(
+                "_Pior mês_: {} ({})",
+                month_label(&w.month_ref),
+                brl_signed(w.net)
+            );
+        }
+    }
 }
 
 async fn report_forecast_vs_actual(args: ForecastVsActualArgs) -> Result<()> {
@@ -2392,41 +2535,113 @@ async fn report_forecast_vs_actual(args: ForecastVsActualArgs) -> Result<()> {
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.forecast_vs_actual(args.month.as_deref()).await?;
 
-    if args.json {
+    if args.structured_output() {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!(
-        "🧭 Forecast vs actual{}",
-        args.month
-            .as_deref()
-            .map(|value| format!(" {value}"))
-            .unwrap_or_default()
-    );
-    println!("- linhas: {}", rows.len());
-    println!();
-
-    for row in rows {
-        let due_date = row
-            .due_date
-            .map(|value| value.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "sem-data".to_string());
-        let account = row.account_id.unwrap_or_else(|| "sem-conta".to_string());
-        let category = category_display(row.category_id.as_deref(), Some(-row.actual_amount));
-        println!(
-            "{} | {} | {} | 🏦 {} | previsto {} | realizado {} | variação {} | {}",
-            row.month_ref,
-            due_date,
-            row.description,
-            account,
-            brl(-row.forecast_amount),
-            brl(-row.actual_amount),
-            brl(-row.variance),
-            category
-        );
-    }
+    print_forecast_vs_actual_human(&rows, args.month.as_deref());
     Ok(())
+}
+
+fn print_forecast_vs_actual_human(
+    rows: &[finance_core::models::ForecastVsActualRow],
+    month: Option<&str>,
+) {
+    use human_format::{
+        bold, brl, brl_signed, category_emoji, category_family, family_label, month_label,
+        short_description,
+    };
+    use std::cmp::Reverse;
+    use std::collections::HashMap;
+
+    let month_display = month
+        .map(month_label)
+        .or_else(|| rows.first().map(|r| month_label(&r.month_ref)))
+        .unwrap_or_else(|| "—".to_string());
+
+    println!(
+        "📊 {}",
+        bold(&format!("Previsto vs Realizado · {month_display}"))
+    );
+
+    if rows.is_empty() {
+        return;
+    }
+
+    // Group by category family
+    let mut family_rows: HashMap<String, Vec<&finance_core::models::ForecastVsActualRow>> =
+        HashMap::new();
+    for row in rows {
+        let family =
+            category_family(row.category_id.as_deref()).unwrap_or_else(|| "outros".to_string());
+        family_rows.entry(family).or_default().push(row);
+    }
+
+    // Sort families by absolute variance descending
+    let mut families: Vec<String> = family_rows.keys().cloned().collect();
+    families.sort_by_key(|f| {
+        Reverse(
+            family_rows[f]
+                .iter()
+                .map(|r| r.variance.abs())
+                .fold(Decimal::ZERO, |acc, v| acc + v),
+        )
+    });
+
+    println!();
+    for family in &families {
+        let fam_rows = &family_rows[family];
+        let emoji = category_emoji(Some(family), None);
+        let label = family_label(family);
+        println!("{emoji} *{}*", label);
+
+        // Sort items within family by absolute variance descending
+        let mut sorted: Vec<&&finance_core::models::ForecastVsActualRow> =
+            fam_rows.iter().collect();
+        sorted.sort_by_key(|r| Reverse(r.variance.abs()));
+
+        for row in sorted {
+            let forecast = -row.forecast_amount;
+            let actual = -row.actual_amount;
+            let variance = -row.variance;
+
+            // variance > 0 means over budget (spent more than forecast)
+            let indicator = if variance > Decimal::ZERO {
+                "🔻"
+            } else if actual > forecast * Decimal::from(80u32) / Decimal::from(100u32) {
+                "⚠️"
+            } else {
+                "✅"
+            };
+
+            println!(
+                "  {} {} {indicator}  previsto {}  realizado {}  variação {}",
+                short_description(&row.description),
+                if row.due_date.is_some() {
+                    format!("({})", row.due_date.unwrap().format("%d/%m"))
+                } else {
+                    String::new()
+                },
+                brl(forecast),
+                brl(actual),
+                brl_signed(variance),
+            );
+        }
+    }
+
+    // Footer totals
+    let total_forecast: Decimal = rows.iter().map(|r| -r.forecast_amount).sum();
+    let total_actual: Decimal = rows.iter().map(|r| -r.actual_amount).sum();
+    let total_variance: Decimal = rows.iter().map(|r| -r.variance).sum();
+
+    println!();
+    println!(
+        "*Total*  previsto {}  realizado {}  variação {}",
+        brl(total_forecast),
+        brl(total_actual),
+        brl_signed(total_variance)
+    );
 }
 
 async fn report_card_summary(args: CardSummaryArgs) -> Result<()> {

@@ -466,9 +466,10 @@ fn mutating_commands_feed_reporting_views() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("alimentacao mercado"))
-    .stdout(predicate::str::contains("saude > exames"))
-    .stdout(predicate::str::contains("gas stations"))
+    // human format: family groups, not raw category paths
+    .stdout(predicate::str::contains("alimentacao"))
+    .stdout(predicate::str::contains("saude"))
+    .stdout(predicate::str::contains("gas"))
     .stdout(predicate::str::contains("financeiro-pagamento-recebido").not());
 
     envs(
@@ -482,7 +483,8 @@ fn mutating_commands_feed_reporting_views() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("2026-03"))
+    // human format: month shown as "março/2026" not "2026-03"
+    .stdout(predicate::str::contains("março/2026"))
     .stdout(predicate::str::contains("líquido"));
 
     envs(
