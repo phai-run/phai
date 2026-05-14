@@ -1896,7 +1896,6 @@ impl FinanceStore for BigQueryStore {
               ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
               AND t.amount < 0
-              AND t.payment_status NOT IN ('pending', 'em_aberto', 'parcial')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM {})
               {where_month}
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC

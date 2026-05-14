@@ -1269,7 +1269,6 @@ impl FinanceStore for LocalStore {
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
               AND CAST(t.amount AS REAL) < 0
-              AND t.payment_status NOT IN ('pending', 'em_aberto', 'parcial')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
               AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
             ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC

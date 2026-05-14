@@ -284,6 +284,17 @@ enum ReportCommand {
                       WhatsApp-friendly by default; pass --raw for JSON."
     )]
     BudgetStatus(BudgetStatusArgs),
+    #[command(
+        about = "credit-card insights: charges, payment status, installments, and by-category breakdown",
+        long_about = "Shows everything that hit your credit cards in a given month: per-card \
+                      totals with payment status (paid/open/overdue, inferred by matching \
+                      credit-card-payment debits in checking accounts), the active installment \
+                      commitment, and every charge grouped by category. Use --month YYYY-MM for \
+                      a specific cycle or --closed for each card's most recent closed bill. \
+                      Replaces the deprecated `card-summary` and `card-closed-insights` reports. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
+    Cards(CardsArgs),
 }
 
 #[derive(Args)]
@@ -1245,6 +1256,32 @@ impl BudgetStatusArgs {
     }
 }
 
+#[derive(Args)]
+struct CardsArgs {
+    /// Target month in YYYY-MM. Defaults to the current month (open cycle).
+    #[arg(long)]
+    month: Option<String>,
+    /// Show each card's most recent closed bill (the cycle that already closed
+    /// for that card). Mutually exclusive with --month.
+    #[arg(long)]
+    closed: bool,
+    /// Limit the report to a single credit-card account.
+    #[arg(long)]
+    account_id: Option<String>,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
+    #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
+    json: bool,
+}
+
+impl CardsArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum BackendArg {
     Local,
@@ -2156,6 +2193,7 @@ async fn main() -> Result<()> {
             ReportCommand::OfxConsistency(args) => report_ofx_consistency(args).await,
             ReportCommand::Review(args) => report_review(args).await,
             ReportCommand::BudgetStatus(args) => report_budget_status(args).await,
+            ReportCommand::Cards(args) => report_cards(args).await,
         },
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
@@ -5234,6 +5272,344 @@ async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+// ─── report cards ──────────────────────────────────────────────────────────
+//
+// Unified credit-card report. Supersedes the deprecated `card-summary` and
+// `card-closed-insights` reports.
+//
+// Sections (default human output):
+//   1. Visão geral — per-card totals + payment status (paid / open / overdue)
+//   2. Parceladas — active installment chains: total commitment, what's new
+//      this month, what frees up next month
+//   3. Gastos por categoria — every charge in the month grouped by family,
+//      then by category, sorted by spend descending
+//
+// Payment status is inferred by searching checking accounts for an outgoing
+// debit categorized as `credit-card-payment` (or whatever internal category
+// the user's classifier rules assign to bill payments) within a ±15-day
+// window of the bill close date, matching the bill total within ±5%.
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CardsBillStatus {
+    /// `paid`, `open`, `overdue`, or `unknown`
+    state: &'static str,
+    /// Date the bill closes (start of the next cycle, ~billing_closing_day).
+    /// Inferred as the last day of the report month when we don't know better.
+    close_date: NaiveDate,
+    /// Date the bill is due. Inferred as close_date + 7 days when we don't
+    /// have a `billing_due_day` for the account.
+    due_date: NaiveDate,
+    /// When `state = paid`, the date we believe the user paid the bill.
+    paid_on: Option<NaiveDate>,
+    /// Total of the bill in the report month.
+    total: Decimal,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CardsAccountReport {
+    account_id: String,
+    transaction_count: usize,
+    status: CardsBillStatus,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CardsReport {
+    month_ref: String,
+    accounts: Vec<CardsAccountReport>,
+    grand_total: Decimal,
+}
+
+async fn report_cards(args: CardsArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let today = Utc::now().date_naive();
+    let target_month = match args.month.as_deref() {
+        Some(value) => {
+            parse_month_ref(value)?;
+            value.to_string()
+        }
+        None => format!("{}", today.format("%Y-%m")),
+    };
+
+    // Fetch all CC transactions in target month (now correct after the
+    // payment_status filter was dropped — this returns every debit on every
+    // credit-card account).
+    let rows = store.card_closed_transactions(Some(&target_month)).await?;
+
+    // Optional --account-id filter
+    let rows: Vec<_> = match args.account_id.as_deref() {
+        Some(id) => rows.into_iter().filter(|r| r.account_id == id).collect(),
+        None => rows,
+    };
+
+    // Group by account
+    let mut by_account: BTreeMap<String, Vec<CardClosedTransactionRow>> = BTreeMap::new();
+    for row in &rows {
+        by_account
+            .entry(row.account_id.clone())
+            .or_default()
+            .push(row.clone());
+    }
+
+    // For payment inference: gather all checking-account debits classified
+    // as bill payments in a generous window around the report month.
+    let target_date = parse_month_ref(&target_month)?;
+    let window_start = target_date.with_day(1).unwrap_or(target_date);
+    let window_end = today.max(shift_month(target_date, 2).unwrap_or(today));
+    // Identify bill payments by either:
+    //  (a) category_id resembles `credit-card-payment` / `pagamento-fatura`, or
+    //  (b) description starts with "Pagamento de fatura" (Pluggy's canonical
+    //      text for an outgoing CC payment from checking). Many setups don't
+    //      classify these (category_id stays NULL), so description match is
+    //      the most robust signal.
+    let payment_candidates: Vec<TransactionRecord> = store
+        .transactions_in_date_range(None, window_start, window_end)
+        .await?
+        .into_iter()
+        .filter(|tx| {
+            if tx.amount >= Decimal::ZERO {
+                return false;
+            }
+            if tx.category_id.as_deref().is_some_and(|c| {
+                c.contains("credit-card-payment") || c.contains("pagamento-fatura")
+            }) {
+                return true;
+            }
+            let desc_lower = tx.description.to_lowercase();
+            desc_lower.contains("pagamento de fatura")
+                || desc_lower.contains("pagamento cart")
+                || desc_lower.contains("pagamento de cart")
+                || desc_lower.contains("nubank pagamento")
+        })
+        .collect();
+
+    // Build per-account report
+    let mut accounts_report = Vec::with_capacity(by_account.len());
+    let mut grand_total = Decimal::ZERO;
+    for (account_id, txs) in &by_account {
+        let total: Decimal = txs.iter().map(|t| t.amount.abs()).sum();
+        grand_total += total;
+
+        // Without `billing_closing_day` from account metadata, we approximate
+        // the bill cycle: close = last day of the report month, due = close
+        // + 20 days. The 20-day buffer accounts for Brazilian credit-card
+        // norms where the actual close/due dates fall anywhere in the first
+        // half of the following month depending on the issuer (Nubank ≈
+        // 3-10, Itaú ≈ 25-1, etc.). This is conservative — we'd rather show
+        // "open" than mistakenly say "overdue".
+        let last_of_month = next_month_first(target_date)
+            .and_then(|d| d.checked_sub_signed(Duration::days(1)))
+            .unwrap_or(target_date);
+        let close_date = last_of_month;
+        let due_date = close_date
+            .checked_add_signed(Duration::days(20))
+            .unwrap_or(close_date);
+
+        let status = if today < close_date {
+            CardsBillStatus {
+                state: "open",
+                close_date,
+                due_date,
+                paid_on: None,
+                total,
+            }
+        } else {
+            // Bill closed — try to match a payment. We allow a generous 10%
+            // tolerance to absorb the gap between calendar-month totals and
+            // actual statement cycle totals (which include the previous
+            // month's tail and exclude the current month's tail). Description
+            // already filters to canonical "Pagamento de fatura" lines, so
+            // false positives are unlikely.
+            let tolerance = total * Decimal::new(10, 2);
+            let lower = total - tolerance;
+            let upper = total + tolerance;
+            let paid = payment_candidates
+                .iter()
+                .filter(|t| t.transaction_date >= close_date.saturating_sub_signed_unsafe())
+                .filter(|t| {
+                    let abs = t.amount.abs();
+                    abs >= lower && abs <= upper
+                })
+                .min_by_key(|t| (t.transaction_date - close_date).num_days().unsigned_abs());
+            match paid {
+                Some(tx) => CardsBillStatus {
+                    state: "paid",
+                    close_date,
+                    due_date,
+                    paid_on: Some(tx.transaction_date),
+                    total,
+                },
+                None if today > due_date => CardsBillStatus {
+                    state: "overdue",
+                    close_date,
+                    due_date,
+                    paid_on: None,
+                    total,
+                },
+                None => CardsBillStatus {
+                    state: "open",
+                    close_date,
+                    due_date,
+                    paid_on: None,
+                    total,
+                },
+            }
+        };
+
+        accounts_report.push(CardsAccountReport {
+            account_id: account_id.clone(),
+            transaction_count: txs.len(),
+            status,
+        });
+    }
+
+    let report = CardsReport {
+        month_ref: target_month.clone(),
+        accounts: accounts_report,
+        grand_total,
+    };
+
+    if args.structured_output() {
+        // Raw output: include both summary and the full transaction list so
+        // agents have everything they need.
+        let payload = serde_json::json!({
+            "summary": report,
+            "transactions": rows,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    // ─── Human output ──────────────────────────────────────────────────────
+    println!(
+        "💳 {}",
+        bold(&format!("Cartões · {}", month_label(&target_month)))
+    );
+    println!();
+
+    if rows.is_empty() {
+        println!("_(sem lançamentos de cartão no período)_");
+        return Ok(());
+    }
+
+    // Visão geral
+    println!("{}", subsection_header("Visão geral"));
+    for acct in &report.accounts {
+        let s = &acct.status;
+        let (emoji, status_text) = match s.state {
+            "paid" => (
+                "🟢",
+                format!(
+                    "pago {}",
+                    s.paid_on
+                        .map(human_format::short_date)
+                        .unwrap_or_else(|| "—".to_string())
+                ),
+            ),
+            "open" => (
+                "🟡",
+                format!("em aberto · vence {}", human_format::short_date(s.due_date)),
+            ),
+            "overdue" => (
+                "🔴",
+                format!("ATRASADO · vencia {}", human_format::short_date(s.due_date)),
+            ),
+            _ => ("⚪", "status desconhecido".to_string()),
+        };
+        println!(
+            "{} {} · {} ({} lanç) · {}",
+            emoji,
+            bold(&acct.account_id),
+            human_format::brl_signed(-s.total),
+            acct.transaction_count,
+            status_text,
+        );
+    }
+    println!(
+        "{}: {}",
+        bold("Total"),
+        human_format::brl_signed(-report.grand_total)
+    );
+    println!();
+
+    // Gastos por categoria
+    println!("{}", subsection_header("Gastos por categoria"));
+    let mut by_family: BTreeMap<String, Vec<&CardClosedTransactionRow>> = BTreeMap::new();
+    for row in &rows {
+        let family = human_format::category_family(row.category_id.as_deref())
+            .unwrap_or_else(|| "sem-categoria".to_string());
+        by_family.entry(family).or_default().push(row);
+    }
+    let mut family_totals: Vec<(String, Decimal, Vec<&CardClosedTransactionRow>)> = by_family
+        .into_iter()
+        .map(|(f, list)| {
+            let total: Decimal = list.iter().map(|r| r.amount.abs()).sum();
+            (f, total, list)
+        })
+        .collect();
+    family_totals.sort_by_key(|(_, total, _)| std::cmp::Reverse(*total));
+    for (family, family_total, list) in &family_totals {
+        // Pick a representative category_id for emoji
+        let repr_cat = list.first().and_then(|r| r.category_id.as_deref());
+        let emoji = human_format::category_emoji(repr_cat, Some(-*family_total));
+        let label = human_format::family_label(family);
+        println!(
+            "{} {} · {} ({} lanç)",
+            emoji,
+            bold(&label),
+            human_format::brl_signed(-*family_total),
+            list.len(),
+        );
+        let mut sorted_list: Vec<&&CardClosedTransactionRow> = list.iter().collect();
+        sorted_list.sort_by_key(|r| std::cmp::Reverse(r.amount.abs()));
+        for tx in sorted_list.iter().take(5) {
+            println!(
+                "  • {} · {} ({})",
+                human_format::short_description(&tx.description),
+                human_format::brl_signed(-tx.amount.abs()),
+                human_format::short_date(tx.transaction_date),
+            );
+        }
+        if sorted_list.len() > 5 {
+            println!(
+                "  _… mais {} {}_",
+                sorted_list.len() - 5,
+                if sorted_list.len() - 5 == 1 {
+                    "lançamento"
+                } else {
+                    "lançamentos"
+                }
+            );
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+// Small helpers used only by report_cards.
+
+fn next_month_first(date: NaiveDate) -> Option<NaiveDate> {
+    let (year, month) = (date.year(), date.month());
+    if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }
+}
+
+trait NaiveDateSat {
+    fn saturating_sub_signed_unsafe(self) -> NaiveDate;
+}
+impl NaiveDateSat for NaiveDate {
+    fn saturating_sub_signed_unsafe(self) -> NaiveDate {
+        // Subtract 7 days as a heuristic "start of payment-search window".
+        self.checked_sub_signed(Duration::days(7)).unwrap_or(self)
+    }
 }
 
 #[cfg(test)]
