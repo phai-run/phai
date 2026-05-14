@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/feliperun/finance-os/compare/v0.4.0...v0.4.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* **install:** update repo owner from feliperbroering to feliperun ([#5](https://github.com/feliperun/finance-os/issues/5)) ([14474d8](https://github.com/feliperun/finance-os/commit/14474d8a957becfabbf4df6990565dfdcbbab947))
+
 ## [0.4.0](https://github.com/feliperun/finance-os/compare/v0.3.1...v0.4.0) (2026-05-14)
 
 
