@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/feliperun/finance-os/compare/v0.5.0...v0.5.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* **update:** use dedicated long-timeout client for binary download ([#9](https://github.com/feliperun/finance-os/issues/9)) ([57ca255](https://github.com/feliperun/finance-os/commit/57ca2558290c4fc0ddba67d220048a01099e557a))
+
 ## [0.5.0](https://github.com/feliperun/finance-os/compare/v0.4.1...v0.5.0) (2026-05-14)
 
 
