@@ -160,25 +160,135 @@ struct SyncPluggyArgs {
 
 #[derive(Subcommand)]
 enum ReportCommand {
+    #[command(
+        about = "recent activity grouped by category, last N days",
+        long_about = "Shows transactions from the last N days, grouped by spending category \
+                      with totals and per-category breakdowns. Useful for a quick health-check \
+                      on recent spending without waiting for a full monthly close. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     DailyPulse(DailyPulseArgs),
+    #[command(
+        about = "monthly expenses broken down by category and subcategory",
+        long_about = "Summarises all expenses for a given calendar month, organised by top-level \
+                      category and subcategory, with subtotals and a grand total. Defaults to the \
+                      current month when --month is omitted. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     MonthlySpend(MonthlySpendArgs),
+    #[command(
+        about = "monthly income vs expenses vs net, last N months",
+        long_about = "Displays a side-by-side comparison of total income, total expenses, and net \
+                      cash flow for each of the last N calendar months. Good for spotting \
+                      seasonal patterns or confirming that income reliably covers expenses. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Cashflow(CashflowArgs),
+    #[command(
+        about = "planned amounts vs what actually happened, sorted by variance",
+        long_about = "Compares each budget envelope's forecasted amount against actual spend for \
+                      the selected month, ranked by the size of the variance so the biggest \
+                      over/under-runs surface first. Useful for post-month budget reviews. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     ForecastVsActual(ForecastVsActualArgs),
+    #[command(
+        about = "(deprecated alias for `report cards`) credit card cycle totals",
+        long_about = "Summarises credit card spending per card for the selected billing cycle. \
+                      This subcommand is a deprecated alias — prefer `finance report cards` once \
+                      that subcommand is available. Kept for backwards-compatibility with existing \
+                      scripts and agent integrations. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     CardSummary(CardSummaryArgs),
+    #[command(
+        about = "(deprecated alias for `report cards --closed`) most recent closed bill insights",
+        long_about = "Shows analysis of the most recently closed credit card bill: top merchants, \
+                      category breakdown, and any anomalies worth reviewing before payment. \
+                      This subcommand is a deprecated alias — prefer `finance report cards --closed` \
+                      once available. WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     CardClosedInsights(CardClosedInsightsArgs),
+    #[command(
+        about = "active installment chains (parcelas), with projected end dates and amounts",
+        long_about = "Lists all active installment purchase chains (parcelas), showing how many \
+                      installments remain, the monthly amount, and the projected final payment date. \
+                      Optionally filtered to a single account via --account-id. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Installments(InstallmentsArgs),
+    #[command(
+        about = "transactions still needing a category, grouped by description similarity",
+        long_about = "Finds transactions that have no category or are tagged as unclassified, \
+                      clusters them by description similarity so similar merchants appear together, \
+                      and shows the most impactful ones first (by total amount). Use this to \
+                      prioritise categorisation work. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Uncategorized(UncategorizedArgs),
+    #[command(
+        about = "transactions whose total matches the sum of multiple smaller items in the same \
+                 window (potential splits)",
+        long_about = "Detects transactions that look like they should be split into sub-items — \
+                      for example, a single supermarket charge whose amount equals the sum of \
+                      several receipt line items imported from a different source. Scans the last \
+                      N days. WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     SplitCandidates(SplitCandidatesArgs),
+    #[command(
+        about = "historical prices for a specific item across receipts (BigQuery only)",
+        long_about = "Searches receipt line-item data (BigQuery backend only) for a specific \
+                      product name and returns the price history across all matching purchases. \
+                      Useful for tracking price inflation on frequently bought items. \
+                      Pass --raw for JSON output instead of a formatted table."
+    )]
     ItemPrices(ItemPricesArgs),
+    #[command(
+        about = "consistency checks across accounts, categories, rules, and idempotency keys",
+        long_about = "Runs a battery of data-quality checks: orphaned transactions, missing \
+                      account references, duplicate idempotency keys, rule conflicts, and more. \
+                      Intended for periodic audits or after bulk imports to confirm data integrity. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     DataHealth(DataHealthArgs),
+    #[command(
+        about = "cash projection under a hypothetical extra income/expense for the month",
+        long_about = "Projects the month-end balance assuming an extra one-off income or expense \
+                      on top of the current actuals and the historical average for the remaining \
+                      days. Useful for quick what-if questions before a large purchase or bonus. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Scenario(ScenarioArgs),
+    #[command(
+        about = "compare an OFX file against the database transaction-by-transaction",
+        long_about = "Loads an OFX export from your bank and matches each transaction against \
+                      what is already in the database, flagging mismatches in amount, date, or \
+                      description and listing items present in only one source. Helpful for \
+                      reconciliation after a manual import. Pass --raw for JSON output."
+    )]
     OfxConsistency(OfxConsistencyArgs),
+    #[command(
+        about = "monthly review summary with key metrics and trends, optionally written to a \
+                 markdown file",
+        long_about = "Generates a narrative monthly review covering income, expenses, net, top \
+                      categories, and multi-month trends. Can write the result to a markdown file \
+                      (--output) and open it automatically (--open). \
+                      Output is always rendered as markdown; there is no --raw flag for this report."
+    )]
     Review(ReviewArgs),
+    #[command(
+        about = "category budgets vs actual spend for the month, with progress bars and alerts",
+        long_about = "Compares each category's defined budget against actual spend for the given \
+                      month, renders a progress bar for each envelope, and highlights categories \
+                      that are over budget or approaching their limit. Requires --month (YYYY-MM). \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     BudgetStatus(BudgetStatusArgs),
 }
 
 #[derive(Args)]
 struct DailyPulseArgs {
+    /// Number of days to look back (e.g. 7 for the past week, 30 for a month).
     #[arg(long, default_value_t = 7)]
     days: i64,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -198,6 +308,7 @@ impl DailyPulseArgs {
 
 #[derive(Args)]
 struct MonthlySpendArgs {
+    /// Target month in YYYY-MM format (e.g. 2024-11). Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -216,6 +327,7 @@ impl MonthlySpendArgs {
 
 #[derive(Args)]
 struct CashflowArgs {
+    /// Number of trailing calendar months to include (e.g. 6 for the past half-year).
     #[arg(long, default_value_t = 6)]
     months: usize,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -234,6 +346,7 @@ impl CashflowArgs {
 
 #[derive(Args)]
 struct ForecastVsActualArgs {
+    /// Target month in YYYY-MM format. Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -252,6 +365,7 @@ impl ForecastVsActualArgs {
 
 #[derive(Args)]
 struct CardSummaryArgs {
+    /// Billing month in YYYY-MM format. Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -270,6 +384,7 @@ impl CardSummaryArgs {
 
 #[derive(Args)]
 struct CardClosedInsightsArgs {
+    /// Billing month of the closed bill in YYYY-MM format. Defaults to the most recently closed cycle.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -288,8 +403,10 @@ impl CardClosedInsightsArgs {
 
 #[derive(Args)]
 struct InstallmentsArgs {
+    /// Filter results to a single account (e.g. `nubank-credit`).
     #[arg(long)]
     account_id: Option<String>,
+    /// How many months back to search for installment chains (default 12).
     #[arg(long, default_value_t = 12)]
     lookback_months: u32,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -298,6 +415,7 @@ struct InstallmentsArgs {
     /// Deprecated alias for `--raw`.
     #[arg(long, hide = true)]
     json: bool,
+    /// Show individual installment transactions in addition to chain summaries.
     #[arg(long)]
     verbose: bool,
 }
@@ -310,6 +428,7 @@ impl InstallmentsArgs {
 
 #[derive(Args)]
 struct UncategorizedArgs {
+    /// Maximum number of uncategorized transaction groups to show (default 20).
     #[arg(long, default_value_t = 20)]
     limit: usize,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -328,6 +447,7 @@ impl UncategorizedArgs {
 
 #[derive(Args)]
 struct SplitCandidatesArgs {
+    /// Window (in days) to scan for matching sub-item sums (default 30).
     #[arg(long, default_value_t = 30)]
     days: i64,
     /// Emit machine-readable JSON.
@@ -346,8 +466,10 @@ impl SplitCandidatesArgs {
 
 #[derive(Args)]
 struct ItemPricesArgs {
+    /// Product name or keyword to search for across receipt line items (e.g. "leite integral").
     #[arg(long)]
     query: String,
+    /// Earliest date to include, in YYYY-MM-DD format. Defaults to all available history.
     #[arg(long)]
     since: Option<String>,
     /// Emit machine-readable JSON.
@@ -366,6 +488,7 @@ impl ItemPricesArgs {
 
 #[derive(Args)]
 struct DataHealthArgs {
+    /// How many days of recent data to include in recency-sensitive checks (default 180).
     #[arg(long, default_value_t = 180)]
     days: i64,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -384,12 +507,16 @@ impl DataHealthArgs {
 
 #[derive(Args)]
 struct ScenarioArgs {
+    /// Month to project, in YYYY-MM format. Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
+    /// Number of past months used to estimate the daily spending rate (default 3).
     #[arg(long, default_value_t = 3)]
     history_months: usize,
+    /// Hypothetical one-off extra expense to add to the projection (e.g. "500.00").
     #[arg(long, default_value = "0")]
     extra_expense: String,
+    /// Hypothetical one-off extra income to add to the projection (e.g. "1000.00").
     #[arg(long, default_value = "0")]
     extra_income: String,
     /// Emit machine-readable JSON.
@@ -408,10 +535,13 @@ impl ScenarioArgs {
 
 #[derive(Args)]
 struct OfxConsistencyArgs {
+    /// Path to the OFX file exported from the bank (e.g. ~/Downloads/nubank.ofx).
     #[arg(long)]
     ofx: PathBuf,
+    /// Account ID to scope the database lookup (e.g. `nubank-checking`). Auto-detected if omitted.
     #[arg(long)]
     account_id: Option<String>,
+    /// How many days of date difference to still consider a match (default 1).
     #[arg(long, default_value_t = 1)]
     date_tolerance_days: i64,
     /// Emit machine-readable JSON.
@@ -430,10 +560,13 @@ impl OfxConsistencyArgs {
 
 #[derive(Args)]
 struct ReviewArgs {
+    /// Number of trailing months to include in trend analysis (default 6).
     #[arg(long, default_value_t = 6)]
     months: usize,
+    /// Write the markdown report to this file path instead of printing to stdout.
     #[arg(long)]
     output: Option<String>,
+    /// Open the output file in the system's default markdown viewer after writing.
     #[arg(long)]
     open: bool,
 }
@@ -1095,6 +1228,7 @@ struct BudgetListArgs {
 
 #[derive(Args)]
 struct BudgetStatusArgs {
+    /// Month to report on, in YYYY-MM format (required, e.g. 2024-11).
     #[arg(long)]
     month: String,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
