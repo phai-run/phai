@@ -468,8 +468,7 @@ mod tests {
             header.set_mode(0o755);
             // Write path bytes directly into the GNU long-name field so we can
             // embed `..` without the safe API rejecting it.
-            header.as_gnu_mut().unwrap().name[..name.len()]
-                .copy_from_slice(name.as_bytes());
+            header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
             header.set_cksum();
             builder
                 .append(&header, std::io::Cursor::new(data))
