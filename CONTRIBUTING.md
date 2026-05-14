@@ -10,7 +10,7 @@ Thank you for your interest in contributing!
 ## Getting Started
 
 ```bash
-git clone https://github.com/feliperbroering/finance-os.git
+git clone https://github.com/feliperun/finance-os.git
 cd finance-os
 cargo build
 cargo test --workspace

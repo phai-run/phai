@@ -1,6 +1,6 @@
 # Finance OS
 
-[![CI](https://github.com/feliperbroering/finance-os/actions/workflows/ci.yml/badge.svg)](https://github.com/feliperbroering/finance-os/actions/workflows/ci.yml)
+[![CI](https://github.com/feliperun/finance-os/actions/workflows/ci.yml/badge.svg)](https://github.com/feliperun/finance-os/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A personal finance CLI and data pipeline built in Rust. Syncs bank transactions from [Pluggy](https://pluggy.ai), stores them in BigQuery (production) or SQLite (local development), and provides reporting views for budgeting, cashflow analysis, and forecast tracking.
@@ -12,15 +12,24 @@ A personal finance CLI and data pipeline built in Rust. Syncs bank transactions 
 ### Download a release (macOS ARM)
 
 ```bash
-curl -fsSL https://github.com/feliperbroering/finance-os/releases/latest/download/finance-cli-aarch64-apple-darwin.tar.gz | tar xz
+curl -fsSL https://github.com/feliperun/finance-os/releases/latest/download/finance-cli-aarch64-apple-darwin.tar.gz | tar xz
 chmod +x finance-cli
 ./finance-cli --version
 ```
 
+To make it available as `finance-cli` from any directory, move it into a PATH directory (the auto-update will overwrite this file in place when a new release is published):
+
+```bash
+mv finance-cli ~/.local/bin/   # or /usr/local/bin, or any directory in your $PATH
+finance-cli --version
+```
+
+> Note: if you previously installed an older version under a different name (e.g. `finance`), make sure your shell resolves to the new binary — `which finance-cli` should point to the location you just moved it to.
+
 ### Build from source
 
 ```bash
-git clone https://github.com/feliperbroering/finance-os.git
+git clone https://github.com/feliperun/finance-os.git
 cd finance-os
 cargo build --release
 ./target/release/finance-cli --version
