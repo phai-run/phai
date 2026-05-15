@@ -17,20 +17,31 @@ pub const REPO_URL: &str = "https://github.com/feliperun/finance-os";
 // Each compiled binary is locked to one platform. We expose the triple and
 // matching asset names per architecture so the updater always asks GitHub
 // Releases for the artifact that matches the running binary.
+//
+// Linux/Windows builds are not officially released, but CI runs on Ubuntu —
+// we provide a sentinel fallback so the crate compiles there. The auto-update
+// path is gated on macOS at install time (install.sh / release matrix), so
+// the fallback is never exercised at runtime.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub const TARGET_TRIPLE: &str = "x86_64-apple-darwin";
+#[cfg(not(target_os = "macos"))]
+pub const TARGET_TRIPLE: &str = "unsupported";
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz";
+#[cfg(not(target_os = "macos"))]
+const ASSET_NAME: &str = "finance-cli-unsupported.tar.gz";
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const CHECKSUM_ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz.sha256";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const CHECKSUM_ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz.sha256";
+#[cfg(not(target_os = "macos"))]
+const CHECKSUM_ASSET_NAME: &str = "finance-cli-unsupported.tar.gz.sha256";
 
 const BINARY_NAME: &str = "finance-cli";
 
