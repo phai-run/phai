@@ -13,10 +13,25 @@ use crate::update_state::{compute_exe_path_hash, state_file_path, UpdateState};
 const REPO_OWNER: &str = "feliperun";
 const REPO_NAME: &str = "finance-os";
 pub const REPO_URL: &str = "https://github.com/feliperun/finance-os";
-pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 
+// Each compiled binary is locked to one platform. We expose the triple and
+// matching asset names per architecture so the updater always asks GitHub
+// Releases for the artifact that matches the running binary.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const TARGET_TRIPLE: &str = "aarch64-apple-darwin";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const TARGET_TRIPLE: &str = "x86_64-apple-darwin";
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz";
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const CHECKSUM_ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz.sha256";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const CHECKSUM_ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz.sha256";
+
 const BINARY_NAME: &str = "finance-cli";
 
 /// Release Please produces tags like `v0.3.1` (include-component-in-tag: false,

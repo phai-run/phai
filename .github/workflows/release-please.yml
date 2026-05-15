@@ -25,7 +25,15 @@ jobs:
   release-assets:
     needs: release-please
     if: needs.release-please.outputs.finance-cli-released == 'true'
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,14 +43,14 @@ jobs:
       - name: Package and checksum
         working-directory: target/release
         run: |
-          tar czf finance-cli-aarch64-apple-darwin.tar.gz finance-cli
-          shasum -a 256 finance-cli-aarch64-apple-darwin.tar.gz \
-            > finance-cli-aarch64-apple-darwin.tar.gz.sha256
+          tar czf finance-cli-${{ matrix.target }}.tar.gz finance-cli
+          shasum -a 256 finance-cli-${{ matrix.target }}.tar.gz \
+            > finance-cli-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to release
         run: |
           gh release upload "${{ needs.release-please.outputs.finance-cli-tag }}" \
-            target/release/finance-cli-aarch64-apple-darwin.tar.gz \
-            target/release/finance-cli-aarch64-apple-darwin.tar.gz.sha256 \
+            target/release/finance-cli-${{ matrix.target }}.tar.gz \
+            target/release/finance-cli-${{ matrix.target }}.tar.gz.sha256 \
             --clobber
         env:
           GH_TOKEN: ${{ github.token }}

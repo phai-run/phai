@@ -38,7 +38,7 @@ Saldo do período: +R$ 6.012,70 ✅
 curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh | bash
 ```
 
-The installer downloads the latest macOS ARM binary into `~/.local/bin/finance-cli`, verifies its SHA-256, and warns if that path isn't in your `$PATH`. To pin a version or change the install dir:
+The installer detects your platform (macOS Apple Silicon or Intel), downloads the matching binary into `~/.local/bin/finance-cli`, verifies its SHA-256, and warns if that path isn't in your `$PATH`. To pin a version or change the install dir:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh \
