@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/feliperun/finance-os/compare/v0.6.0...v0.7.0) (2026-05-15)
+
+
+### Features
+
+* **reports:** new `report cards` + English help text on all reports ([#13](https://github.com/feliperun/finance-os/issues/13)) ([7bff310](https://github.com/feliperun/finance-os/commit/7bff310e42ae962a318d96ed1ff5351ec030b0d5))
+
 ## [0.6.0](https://github.com/feliperun/finance-os/compare/v0.5.1...v0.6.0) (2026-05-14)
 
 
