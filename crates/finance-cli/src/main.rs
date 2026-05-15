@@ -35,7 +35,9 @@ mod self_cmd;
 mod update;
 mod update_state;
 
-use human_format::{bold, brl as hf_brl, month_label, progress_bar, subsection_header};
+use human_format::{
+    bold, brl as hf_brl, category_emoji, month_label, progress_bar, subsection_header,
+};
 
 const UPSERT_BATCH_SIZE: usize = 50;
 const AUDIT_BATCH_SIZE: usize = 25;
@@ -160,25 +162,146 @@ struct SyncPluggyArgs {
 
 #[derive(Subcommand)]
 enum ReportCommand {
+    #[command(
+        about = "recent activity grouped by category, last N days",
+        long_about = "Shows transactions from the last N days, grouped by spending category \
+                      with totals and per-category breakdowns. Useful for a quick health-check \
+                      on recent spending without waiting for a full monthly close. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     DailyPulse(DailyPulseArgs),
+    #[command(
+        about = "monthly expenses broken down by category and subcategory",
+        long_about = "Summarises all expenses for a given calendar month, organised by top-level \
+                      category and subcategory, with subtotals and a grand total. Defaults to the \
+                      current month when --month is omitted. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     MonthlySpend(MonthlySpendArgs),
+    #[command(
+        about = "monthly income vs expenses vs net, last N months",
+        long_about = "Displays a side-by-side comparison of total income, total expenses, and net \
+                      cash flow for each of the last N calendar months. Good for spotting \
+                      seasonal patterns or confirming that income reliably covers expenses. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Cashflow(CashflowArgs),
+    #[command(
+        about = "planned amounts vs what actually happened, sorted by variance",
+        long_about = "Compares each budget envelope's forecasted amount against actual spend for \
+                      the selected month, ranked by the size of the variance so the biggest \
+                      over/under-runs surface first. Useful for post-month budget reviews. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     ForecastVsActual(ForecastVsActualArgs),
+    #[command(
+        about = "(deprecated alias for `report cards`) credit card cycle totals",
+        long_about = "Summarises credit card spending per card for the selected billing cycle. \
+                      This subcommand is a deprecated alias — prefer `finance report cards` once \
+                      that subcommand is available. Kept for backwards-compatibility with existing \
+                      scripts and agent integrations. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     CardSummary(CardSummaryArgs),
+    #[command(
+        about = "(deprecated alias for `report cards --closed`) most recent closed bill insights",
+        long_about = "Shows analysis of the most recently closed credit card bill: top merchants, \
+                      category breakdown, and any anomalies worth reviewing before payment. \
+                      This subcommand is a deprecated alias — prefer `finance report cards --closed` \
+                      once available. WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     CardClosedInsights(CardClosedInsightsArgs),
+    #[command(
+        about = "active installment chains (parcelas), with projected end dates and amounts",
+        long_about = "Lists all active installment purchase chains (parcelas), showing how many \
+                      installments remain, the monthly amount, and the projected final payment date. \
+                      Optionally filtered to a single account via --account-id. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Installments(InstallmentsArgs),
+    #[command(
+        about = "transactions still needing a category, grouped by description similarity",
+        long_about = "Finds transactions that have no category or are tagged as unclassified, \
+                      clusters them by description similarity so similar merchants appear together, \
+                      and shows the most impactful ones first (by total amount). Use this to \
+                      prioritise categorisation work. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Uncategorized(UncategorizedArgs),
+    #[command(
+        about = "transactions whose total matches the sum of multiple smaller items in the same \
+                 window (potential splits)",
+        long_about = "Detects transactions that look like they should be split into sub-items — \
+                      for example, a single supermarket charge whose amount equals the sum of \
+                      several receipt line items imported from a different source. Scans the last \
+                      N days. WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     SplitCandidates(SplitCandidatesArgs),
+    #[command(
+        about = "historical prices for a specific item across receipts (BigQuery only)",
+        long_about = "Searches receipt line-item data (BigQuery backend only) for a specific \
+                      product name and returns the price history across all matching purchases. \
+                      Useful for tracking price inflation on frequently bought items. \
+                      Pass --raw for JSON output instead of a formatted table."
+    )]
     ItemPrices(ItemPricesArgs),
+    #[command(
+        about = "consistency checks across accounts, categories, rules, and idempotency keys",
+        long_about = "Runs a battery of data-quality checks: orphaned transactions, missing \
+                      account references, duplicate idempotency keys, rule conflicts, and more. \
+                      Intended for periodic audits or after bulk imports to confirm data integrity. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     DataHealth(DataHealthArgs),
+    #[command(
+        about = "cash projection under a hypothetical extra income/expense for the month",
+        long_about = "Projects the month-end balance assuming an extra one-off income or expense \
+                      on top of the current actuals and the historical average for the remaining \
+                      days. Useful for quick what-if questions before a large purchase or bonus. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     Scenario(ScenarioArgs),
+    #[command(
+        about = "compare an OFX file against the database transaction-by-transaction",
+        long_about = "Loads an OFX export from your bank and matches each transaction against \
+                      what is already in the database, flagging mismatches in amount, date, or \
+                      description and listing items present in only one source. Helpful for \
+                      reconciliation after a manual import. Pass --raw for JSON output."
+    )]
     OfxConsistency(OfxConsistencyArgs),
+    #[command(
+        about = "monthly review summary with key metrics and trends, optionally written to a \
+                 markdown file",
+        long_about = "Generates a narrative monthly review covering income, expenses, net, top \
+                      categories, and multi-month trends. Can write the result to a markdown file \
+                      (--output) and open it automatically (--open). \
+                      Output is always rendered as markdown; there is no --raw flag for this report."
+    )]
     Review(ReviewArgs),
+    #[command(
+        about = "category budgets vs actual spend for the month, with progress bars and alerts",
+        long_about = "Compares each category's defined budget against actual spend for the given \
+                      month, renders a progress bar for each envelope, and highlights categories \
+                      that are over budget or approaching their limit. Requires --month (YYYY-MM). \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
     BudgetStatus(BudgetStatusArgs),
+    #[command(
+        about = "credit-card insights: charges, payment status, installments, and by-category breakdown",
+        long_about = "Shows everything that hit your credit cards in a given month: per-card \
+                      totals with payment status (paid/open/overdue, inferred by matching \
+                      credit-card-payment debits in checking accounts), the active installment \
+                      commitment, and every charge grouped by category. Use --month YYYY-MM for \
+                      a specific cycle or --closed for each card's most recent closed bill. \
+                      Replaces the deprecated `card-summary` and `card-closed-insights` reports. \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
+    Cards(CardsArgs),
 }
 
 #[derive(Args)]
 struct DailyPulseArgs {
+    /// Number of days to look back (e.g. 7 for the past week, 30 for a month).
     #[arg(long, default_value_t = 7)]
     days: i64,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -198,6 +321,7 @@ impl DailyPulseArgs {
 
 #[derive(Args)]
 struct MonthlySpendArgs {
+    /// Target month in YYYY-MM format (e.g. 2024-11). Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -216,6 +340,7 @@ impl MonthlySpendArgs {
 
 #[derive(Args)]
 struct CashflowArgs {
+    /// Number of trailing calendar months to include (e.g. 6 for the past half-year).
     #[arg(long, default_value_t = 6)]
     months: usize,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -234,6 +359,7 @@ impl CashflowArgs {
 
 #[derive(Args)]
 struct ForecastVsActualArgs {
+    /// Target month in YYYY-MM format. Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -252,6 +378,7 @@ impl ForecastVsActualArgs {
 
 #[derive(Args)]
 struct CardSummaryArgs {
+    /// Billing month in YYYY-MM format. Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -270,6 +397,7 @@ impl CardSummaryArgs {
 
 #[derive(Args)]
 struct CardClosedInsightsArgs {
+    /// Billing month of the closed bill in YYYY-MM format. Defaults to the most recently closed cycle.
     #[arg(long)]
     month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -288,8 +416,10 @@ impl CardClosedInsightsArgs {
 
 #[derive(Args)]
 struct InstallmentsArgs {
+    /// Filter results to a single account (e.g. `nubank-credit`).
     #[arg(long)]
     account_id: Option<String>,
+    /// How many months back to search for installment chains (default 12).
     #[arg(long, default_value_t = 12)]
     lookback_months: u32,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -298,6 +428,7 @@ struct InstallmentsArgs {
     /// Deprecated alias for `--raw`.
     #[arg(long, hide = true)]
     json: bool,
+    /// Show individual installment transactions in addition to chain summaries.
     #[arg(long)]
     verbose: bool,
 }
@@ -310,6 +441,7 @@ impl InstallmentsArgs {
 
 #[derive(Args)]
 struct UncategorizedArgs {
+    /// Maximum number of uncategorized transaction groups to show (default 20).
     #[arg(long, default_value_t = 20)]
     limit: usize,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -328,6 +460,7 @@ impl UncategorizedArgs {
 
 #[derive(Args)]
 struct SplitCandidatesArgs {
+    /// Window (in days) to scan for matching sub-item sums (default 30).
     #[arg(long, default_value_t = 30)]
     days: i64,
     /// Emit machine-readable JSON.
@@ -346,8 +479,10 @@ impl SplitCandidatesArgs {
 
 #[derive(Args)]
 struct ItemPricesArgs {
+    /// Product name or keyword to search for across receipt line items (e.g. "leite integral").
     #[arg(long)]
     query: String,
+    /// Earliest date to include, in YYYY-MM-DD format. Defaults to all available history.
     #[arg(long)]
     since: Option<String>,
     /// Emit machine-readable JSON.
@@ -366,6 +501,7 @@ impl ItemPricesArgs {
 
 #[derive(Args)]
 struct DataHealthArgs {
+    /// How many days of recent data to include in recency-sensitive checks (default 180).
     #[arg(long, default_value_t = 180)]
     days: i64,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -384,12 +520,16 @@ impl DataHealthArgs {
 
 #[derive(Args)]
 struct ScenarioArgs {
+    /// Month to project, in YYYY-MM format. Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
+    /// Number of past months used to estimate the daily spending rate (default 3).
     #[arg(long, default_value_t = 3)]
     history_months: usize,
+    /// Hypothetical one-off extra expense to add to the projection (e.g. "500.00").
     #[arg(long, default_value = "0")]
     extra_expense: String,
+    /// Hypothetical one-off extra income to add to the projection (e.g. "1000.00").
     #[arg(long, default_value = "0")]
     extra_income: String,
     /// Emit machine-readable JSON.
@@ -408,10 +548,13 @@ impl ScenarioArgs {
 
 #[derive(Args)]
 struct OfxConsistencyArgs {
+    /// Path to the OFX file exported from the bank (e.g. ~/Downloads/nubank.ofx).
     #[arg(long)]
     ofx: PathBuf,
+    /// Account ID to scope the database lookup (e.g. `nubank-checking`). Auto-detected if omitted.
     #[arg(long)]
     account_id: Option<String>,
+    /// How many days of date difference to still consider a match (default 1).
     #[arg(long, default_value_t = 1)]
     date_tolerance_days: i64,
     /// Emit machine-readable JSON.
@@ -430,10 +573,13 @@ impl OfxConsistencyArgs {
 
 #[derive(Args)]
 struct ReviewArgs {
+    /// Number of trailing months to include in trend analysis (default 6).
     #[arg(long, default_value_t = 6)]
     months: usize,
+    /// Write the markdown report to this file path instead of printing to stdout.
     #[arg(long)]
     output: Option<String>,
+    /// Open the output file in the system's default markdown viewer after writing.
     #[arg(long)]
     open: bool,
 }
@@ -1095,6 +1241,7 @@ struct BudgetListArgs {
 
 #[derive(Args)]
 struct BudgetStatusArgs {
+    /// Month to report on, in YYYY-MM format (required, e.g. 2024-11).
     #[arg(long)]
     month: String,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
@@ -1106,6 +1253,45 @@ struct BudgetStatusArgs {
 }
 
 impl BudgetStatusArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
+}
+
+#[derive(Args)]
+struct CardsArgs {
+    /// Target month in YYYY-MM. Defaults to the most recent closed bill
+    /// (same as `--closed`).
+    #[arg(long, conflicts_with_all = ["closed", "next"])]
+    month: Option<String>,
+    /// Show each card's most recent closed bill. This is the default when no
+    /// month is given. Mutually exclusive with --month and --next.
+    #[arg(long, conflicts_with = "next")]
+    closed: bool,
+    /// Show the partial state of the currently open cycle (what's been
+    /// charged so far this month — payment status is not inferred since
+    /// the bill hasn't closed). Mutually exclusive with --closed and --month.
+    #[arg(long)]
+    next: bool,
+    /// Limit the report to a single credit-card account.
+    #[arg(long)]
+    account_id: Option<String>,
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
+    #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardsMode {
+    Closed,
+    Specific,
+    Next,
+}
+
+impl CardsArgs {
     fn structured_output(&self) -> bool {
         self.raw || self.json
     }
@@ -1195,52 +1381,6 @@ fn day_of_week_text(date: NaiveDate) -> String {
 
 fn normalize_inline_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn category_family(category_id: Option<&str>) -> Option<String> {
-    let raw = category_id?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let normalized = raw.replace([':', '-', '>'], " ");
-    normalized
-        .split_whitespace()
-        .next()
-        .map(|part| part.to_string())
-}
-
-fn category_emoji(category_id: Option<&str>, amount: Option<Decimal>) -> &'static str {
-    let family = category_family(category_id);
-    if family.as_deref() == Some("receitas")
-        || family.as_deref() == Some("salario")
-        || amount.is_some_and(|v| v > Decimal::ZERO)
-    {
-        "💰"
-    } else if family.as_deref().is_some_and(|f| f.starts_with("transfer")) {
-        "🔁"
-    } else if family.as_deref() == Some("assinaturas") {
-        "🔂"
-    } else if matches!(family.as_deref(), Some("moradia" | "casa")) {
-        "🏠"
-    } else if family.as_deref() == Some("alimentacao") {
-        "🍽️"
-    } else if family.as_deref() == Some("saude") {
-        "🩺"
-    } else if matches!(family.as_deref(), Some("transporte" | "mobilidade")) {
-        "🚗"
-    } else if family.as_deref() == Some("educacao") {
-        "📚"
-    } else if family.as_deref() == Some("lazer") {
-        "🎉"
-    } else if family.as_deref() == Some("investimentos") {
-        "📈"
-    } else if family.as_deref() == Some("financeiro") {
-        "🧾"
-    } else if family.is_none() {
-        "❓"
-    } else {
-        "💸"
-    }
 }
 
 fn category_display(category_id: Option<&str>, amount: Option<Decimal>) -> String {
@@ -1336,6 +1476,18 @@ fn render_sync_notify_summary(summary: &SyncSummaryOutput) -> String {
         summary.summary_status
     ));
     lines.join("\n")
+}
+
+/// Copy billing metadata keys from an existing account record into a freshly
+/// built Pluggy account so manual overrides survive re-syncs.
+fn merge_billing_metadata(new_meta: &mut serde_json::Value, existing_meta: &serde_json::Value) {
+    for key in ["billing_closing_day", "billing_due_day"] {
+        if new_meta.get(key).is_none() {
+            if let Some(v) = existing_meta.get(key) {
+                new_meta[key] = v.clone();
+            }
+        }
+    }
 }
 
 fn parse_month_ref(value: &str) -> Result<NaiveDate> {
@@ -2022,6 +2174,7 @@ async fn main() -> Result<()> {
             ReportCommand::OfxConsistency(args) => report_ofx_consistency(args).await,
             ReportCommand::Review(args) => report_review(args).await,
             ReportCommand::BudgetStatus(args) => report_budget_status(args).await,
+            ReportCommand::Cards(args) => report_cards(args).await,
         },
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
@@ -2283,7 +2436,7 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     let to = args
         .to
         .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
-    let (accounts, transactions, rebinds) = sync_pluggy(SyncPluggyParams {
+    let (mut accounts, transactions, rebinds) = sync_pluggy(SyncPluggyParams {
         actor_id: &config.actor_id,
         pluggy_config_path: &args.pluggy_config,
         accounts_csv_path: Some(&args.accounts_csv),
@@ -2303,6 +2456,21 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
                 .collect::<Vec<_>>(),
         )
         .await?;
+    // Merge billing metadata from existing accounts so that manually set
+    // billing_closing_day / billing_due_day survive Pluggy re-syncs (which
+    // always rebuild metadata_json from the API payload).
+    if let Ok(existing_accounts) = store.get_accounts().await {
+        let existing_map: BTreeMap<&str, &serde_json::Value> = existing_accounts
+            .iter()
+            .map(|a| (a.account_id.as_str(), &a.metadata_json))
+            .collect();
+        for acct in &mut accounts {
+            if let Some(existing_meta) = existing_map.get(acct.account_id.as_str()) {
+                merge_billing_metadata(&mut acct.metadata_json, existing_meta);
+            }
+        }
+    }
+
     let categories = build_category_records_from_transactions(&config.actor_id, &transactions);
     let mut audit = Vec::new();
 
@@ -5100,6 +5268,689 @@ async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+// ─── report cards ──────────────────────────────────────────────────────────
+//
+// Unified credit-card report. Supersedes the deprecated `card-summary` and
+// `card-closed-insights` reports.
+//
+// Sections (default human output):
+//   1. Visão geral — per-card totals + payment status (paid / open / overdue)
+//   2. Parceladas — active installment chains: total commitment, what's new
+//      this month, what frees up next month
+//   3. Gastos por categoria — every charge in the month grouped by family,
+//      then by category, sorted by spend descending
+//
+// Payment status is inferred by searching checking accounts for an outgoing
+// debit categorized as `credit-card-payment` (or whatever internal category
+// the user's classifier rules assign to bill payments) within a ±15-day
+// window of the bill close date, matching the bill total within ±5%.
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CardsBillStatus {
+    /// `paid`, `open`, `overdue`, or `unknown`
+    state: &'static str,
+    /// Date the bill closes (start of the next cycle, ~billing_closing_day).
+    /// Inferred as the last day of the report month when we don't know better.
+    close_date: NaiveDate,
+    /// Date the bill is due. Inferred as close_date + 7 days when we don't
+    /// have a `billing_due_day` for the account.
+    due_date: NaiveDate,
+    /// When `state = paid`, the date we believe the user paid the bill.
+    paid_on: Option<NaiveDate>,
+    /// Total of the bill in the report month.
+    total: Decimal,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CardsAccountReport {
+    account_id: String,
+    transaction_count: usize,
+    status: CardsBillStatus,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CardsReport {
+    month_ref: String,
+    accounts: Vec<CardsAccountReport>,
+    grand_total: Decimal,
+}
+
+/// Extract Pluggy's `creditCardMetadata.billId` from a transaction metadata blob.
+fn extract_bill_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("raw")
+        .and_then(|v| v.get("creditCardMetadata"))
+        .and_then(|v| v.get("billId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Compute a synthetic bill identifier from a transaction date and the
+/// account's billing closing day. Brazilian credit cards conventionally
+/// attribute transactions posted ON the closing day to the *next* cycle
+/// (Nubank's OFX statements confirm: DTSTART = closing_day_prev_month means
+/// transactions on that date are the first in the new cycle). So:
+/// transactions on day < closing_day belong to the bill closing this month;
+/// transactions on day >= closing_day belong to next month's bill.
+fn compute_bill_id(date: NaiveDate, closing_day: u32) -> String {
+    let (year, month, day) = (date.year(), date.month(), date.day());
+    let (bill_year, bill_month) = if day < closing_day {
+        (year, month)
+    } else if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    format!("cycle-{}-{:02}-{:02}", bill_year, bill_month, closing_day)
+}
+
+/// Parse `billing_closing_day` from account metadata JSON (stored as a string
+/// or integer for forward compat).  Only values in 1..=28 are accepted.
+fn parse_closing_day(metadata: &serde_json::Value) -> Option<u32> {
+    let v = metadata.get("billing_closing_day")?;
+    match v {
+        serde_json::Value::String(s) => s.parse::<u32>().ok(),
+        serde_json::Value::Number(n) => n.as_u64().map(|d| d as u32),
+        _ => None,
+    }
+    .filter(|d| (1..=28).contains(d))
+}
+
+/// Infer the account's billing closing day by inspecting Pluggy-supplied
+/// billId clusters in the transaction data. Pluggy tags some (~20%) of
+/// credit-card transactions with `creditCardMetadata.billId`. Each unique
+/// billId is a real bill; its `max(transaction_date)` is the last day of
+/// the cycle, and the bill itself closes 1–2 days later (Pluggy stops
+/// posting once the cycle ends).
+///
+/// Returns the *mode* of (max_date.day + 2), clamped to 1..=28. Returns
+/// None when fewer than 2 Pluggy-tagged bills are observed (not enough
+/// signal to commit to a value).
+fn infer_closing_day_from_pluggy(rows: &[CardClosedTransactionRow]) -> Option<u32> {
+    use std::collections::HashMap;
+    let mut bill_max: HashMap<String, NaiveDate> = HashMap::new();
+    for row in rows {
+        if let Some(bill_id) = extract_bill_id(&row.metadata_json) {
+            let entry = bill_max.entry(bill_id).or_insert(row.transaction_date);
+            if row.transaction_date > *entry {
+                *entry = row.transaction_date;
+            }
+        }
+    }
+    if bill_max.len() < 2 {
+        return None;
+    }
+    let mut day_counts: HashMap<u32, u32> = HashMap::new();
+    for max_date in bill_max.values() {
+        let close_day = (max_date.day() + 2).min(28);
+        *day_counts.entry(close_day).or_insert(0) += 1;
+    }
+    day_counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(day, _)| day)
+}
+
+async fn report_cards(args: CardsArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let accounts = store.get_accounts().await?;
+    let mut closing_days: BTreeMap<String, u32> = accounts
+        .iter()
+        .filter_map(|a| parse_closing_day(&a.metadata_json).map(|d| (a.account_id.clone(), d)))
+        .collect();
+
+    let today = Utc::now().date_naive();
+    let (mode, target_month) = match (&args.month, args.closed, args.next) {
+        (Some(value), _, _) => {
+            parse_month_ref(value)?;
+            (CardsMode::Specific, value.to_string())
+        }
+        (None, _, true) => (CardsMode::Next, format!("{}", today.format("%Y-%m"))),
+        _ => (
+            CardsMode::Closed,
+            format!("{}", today.format("%Y-%m")), // placeholder; we'll resolve later from billId clusters
+        ),
+    };
+
+    // Fetch a wide window so we capture full bill cycles regardless of where
+    // they straddle calendar months. 90 days covers the most-recent-closed
+    // bill (~30d) plus the cycle before it as fallback.
+    let window_end = today;
+    let window_start = today
+        .checked_sub_signed(Duration::days(90))
+        .unwrap_or(today);
+    let mut all_rows: Vec<CardClosedTransactionRow> = Vec::new();
+    // Existing storage API is month-scoped; iterate over months in the window.
+    let mut cursor = window_start;
+    while cursor <= window_end {
+        let m = format!("{}", cursor.format("%Y-%m"));
+        let txs = store.card_closed_transactions(Some(&m)).await?;
+        all_rows.extend(txs);
+        cursor = shift_month(cursor, 1).unwrap_or(window_end + Duration::days(1));
+    }
+
+    // Optional --account-id filter
+    if let Some(id) = args.account_id.as_deref() {
+        all_rows.retain(|r| r.account_id == id);
+    }
+
+    // For each account that doesn't have a configured `billing_closing_day`
+    // in metadata, infer one from the Pluggy billId clusters in the data.
+    // This makes the report work out of the box on accounts that were never
+    // explicitly configured, falling back to the explicit value when it
+    // exists.
+    let mut rows_by_account: BTreeMap<String, Vec<&CardClosedTransactionRow>> = BTreeMap::new();
+    for row in &all_rows {
+        rows_by_account
+            .entry(row.account_id.clone())
+            .or_default()
+            .push(row);
+    }
+    for (acct, rows_ref) in &rows_by_account {
+        if closing_days.contains_key(acct) {
+            continue;
+        }
+        let owned: Vec<CardClosedTransactionRow> = rows_ref.iter().map(|r| (*r).clone()).collect();
+        if let Some(d) = infer_closing_day_from_pluggy(&owned) {
+            closing_days.insert(acct.clone(), d);
+        }
+    }
+
+    // Group by (account_id, bill_id).  Resolution order:
+    //   1. Account-level billing_closing_day (explicit or inferred) →
+    //      synthetic cycle bill_id (best, because it consolidates the
+    //      ~80% of Pluggy txs without a billId into the same bill as
+    //      the ~20% that do have one).
+    //   2. Pluggy's creditCardMetadata.billId (kept as a fallback for
+    //      accounts where we couldn't infer a closing day).
+    //   3. Calendar-month fallback (no-bill-YYYY-MM).
+    type BillKey = (String, String);
+    type BillBucket = Vec<CardClosedTransactionRow>;
+    let mut bills: BTreeMap<BillKey, BillBucket> = BTreeMap::new();
+    for row in &all_rows {
+        let bill_id = closing_days
+            .get(&row.account_id)
+            .map(|d| compute_bill_id(row.transaction_date, *d))
+            .or_else(|| extract_bill_id(&row.metadata_json))
+            .unwrap_or_else(|| format!("no-bill-{}", row.transaction_date.format("%Y-%m")));
+        bills
+            .entry((row.account_id.clone(), bill_id))
+            .or_default()
+            .push(row.clone());
+    }
+
+    // Per account, list of bill candidates with the date we'll use to order
+    // and classify them.
+    struct BillCandidate {
+        account_id: String,
+        /// Last transaction date seen in this bill. Used for display ("closed
+        /// on...") and as a fallback ordering key.
+        max_date: NaiveDate,
+        /// Authoritative cycle close date, derived from the synthetic
+        /// bill_id format `cycle-YYYY-MM-DD` when available. When None we
+        /// fall back to `max_date` for ordering.
+        derived_close_date: Option<NaiveDate>,
+        txs: Vec<CardClosedTransactionRow>,
+    }
+    /// Parse a synthetic bill_id of the form `cycle-YYYY-MM-DD` into the
+    /// underlying close date. Returns None for Pluggy-real billIds or the
+    /// no-bill fallback.
+    fn parse_synthetic_close_date(bill_id: &str) -> Option<NaiveDate> {
+        let rest = bill_id.strip_prefix("cycle-")?;
+        NaiveDate::parse_from_str(rest, "%Y-%m-%d").ok()
+    }
+    let candidates: Vec<BillCandidate> = bills
+        .into_iter()
+        .map(|((account_id, bill_id), txs)| {
+            let max_date = txs
+                .iter()
+                .map(|t| t.transaction_date)
+                .max()
+                .unwrap_or(today);
+            let derived_close_date = parse_synthetic_close_date(&bill_id);
+            BillCandidate {
+                account_id,
+                max_date,
+                derived_close_date,
+                txs,
+            }
+        })
+        .collect();
+
+    // Pick the right bill per card based on mode.
+    let mut per_account_unique: BTreeMap<String, Vec<&BillCandidate>> = BTreeMap::new();
+    for c in &candidates {
+        per_account_unique
+            .entry(c.account_id.clone())
+            .or_default()
+            .push(c);
+    }
+    let mut selected: Vec<&BillCandidate> = Vec::new();
+    for bills_for_account in per_account_unique.values() {
+        // Bills with a synthetic close_date split cleanly by today's date:
+        // close_date <= today → closed; close_date > today → open. This is
+        // the authoritative signal when `billing_closing_day` is set on the
+        // account. For accounts/bills without a synthetic close_date (e.g.
+        // Pluggy real billIds or the no-bill fallback) we fall back to
+        // max_date ordering as before.
+        let pick: Option<&BillCandidate> = match mode {
+            CardsMode::Closed => {
+                // Most recent bill whose close_date <= today.
+                let with_close: Vec<&&BillCandidate> = bills_for_account
+                    .iter()
+                    .filter(|b| b.derived_close_date.is_some_and(|d| d <= today))
+                    .collect();
+                if !with_close.is_empty() {
+                    with_close
+                        .into_iter()
+                        .max_by_key(|b| b.derived_close_date.unwrap_or(b.max_date))
+                        .copied()
+                } else {
+                    // Fallback: sort by max_date desc and skip the latest
+                    // (assumed to be the currently open cycle).
+                    let mut sorted: Vec<&BillCandidate> = bills_for_account.to_vec();
+                    sorted.sort_by_key(|b| std::cmp::Reverse(b.max_date));
+                    sorted.get(1).copied()
+                }
+            }
+            CardsMode::Next => {
+                // Most recent bill whose close_date > today (the cycle still
+                // accruing charges). Fall back to "bill with the latest
+                // max_date" if no synthetic close dates are available.
+                let with_close: Vec<&&BillCandidate> = bills_for_account
+                    .iter()
+                    .filter(|b| b.derived_close_date.is_some_and(|d| d > today))
+                    .collect();
+                if !with_close.is_empty() {
+                    with_close
+                        .into_iter()
+                        .min_by_key(|b| b.derived_close_date.unwrap_or(b.max_date))
+                        .copied()
+                } else {
+                    bills_for_account.iter().copied().max_by_key(|b| b.max_date)
+                }
+            }
+            CardsMode::Specific => {
+                // Pick the bill whose close_date (or max_date fallback) falls
+                // in the target month.
+                bills_for_account.iter().copied().find(|b| {
+                    let key = b.derived_close_date.unwrap_or(b.max_date);
+                    key.format("%Y-%m").to_string() == target_month
+                })
+            }
+        };
+        if let Some(b) = pick {
+            selected.push(b);
+        }
+    }
+
+    // Re-derive `target_month` from selected bills for display: use the
+    // most recent max_date among the selected.
+    let display_month = selected
+        .iter()
+        .map(|b| b.max_date)
+        .max()
+        .map(|d| d.format("%Y-%m").to_string())
+        .unwrap_or_else(|| target_month.clone());
+
+    // Collect rows from the selected bills for the per-category breakdown.
+    let rows: Vec<CardClosedTransactionRow> = selected
+        .iter()
+        .flat_map(|b| b.txs.iter().cloned())
+        .collect();
+
+    // Group rows by account_id for the visão geral section.
+    let mut by_account: BTreeMap<String, Vec<CardClosedTransactionRow>> = BTreeMap::new();
+    for row in &rows {
+        by_account
+            .entry(row.account_id.clone())
+            .or_default()
+            .push(row.clone());
+    }
+
+    // Map account_id → derived_close_date of the bill we selected for that
+    // account, so the status section can use the *real* cycle close date
+    // rather than approximating from the last-seen transaction.
+    let selected_close_dates: BTreeMap<String, Option<NaiveDate>> = selected
+        .iter()
+        .map(|b| (b.account_id.clone(), b.derived_close_date))
+        .collect();
+
+    // For payment inference: gather all checking-account debits classified
+    // as bill payments in a window covering the cycle close dates onward.
+    let pay_window_start = window_start;
+    let pay_window_end = today + Duration::days(20);
+    // Identify bill payments by either:
+    //  (a) category_id resembles `credit-card-payment` / `pagamento-fatura`, or
+    //  (b) description starts with "Pagamento de fatura" (Pluggy's canonical
+    //      text for an outgoing CC payment from checking). Many setups don't
+    //      classify these (category_id stays NULL), so description match is
+    //      the most robust signal.
+    let payment_candidates: Vec<TransactionRecord> = store
+        .transactions_in_date_range(None, pay_window_start, pay_window_end)
+        .await?
+        .into_iter()
+        .filter(|tx| {
+            if tx.amount >= Decimal::ZERO {
+                return false;
+            }
+            if tx.category_id.as_deref().is_some_and(|c| {
+                c.contains("credit-card-payment") || c.contains("pagamento-fatura")
+            }) {
+                return true;
+            }
+            let desc_lower = tx.description.to_lowercase();
+            desc_lower.contains("pagamento de fatura")
+                || desc_lower.contains("pagamento cart")
+                || desc_lower.contains("pagamento de cart")
+                || desc_lower.contains("nubank pagamento")
+        })
+        .collect();
+
+    // Build per-account report
+    let mut accounts_report = Vec::with_capacity(by_account.len());
+    let mut grand_total = Decimal::ZERO;
+    for (account_id, txs) in &by_account {
+        // Signed sum: debits are negative, statement credits (IOF reversals,
+        // merchant refunds) are positive. They net automatically, which is
+        // what shows up on the actual bill the user receives.
+        let net_spend: Decimal = txs.iter().map(|t| t.amount).sum();
+        // For display we keep using the absolute value of `net_spend` —
+        // the human output explicitly prefixes "-R$ ..." so showing the
+        // unsigned amount and letting the formatter add the sign is what
+        // matches the rest of the report styling.
+        let total: Decimal = net_spend.abs();
+        grand_total += total;
+
+        // Prefer the synthetic cycle close date when we have it (derived
+        // from the account's billing_closing_day). Otherwise fall back to
+        // max(transaction_date) — Pluggy stops adding new charges once the
+        // cycle ends, so the last-seen date is a tight upper bound.
+        let close_date = selected_close_dates
+            .get(account_id)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| {
+                txs.iter()
+                    .map(|t| t.transaction_date)
+                    .max()
+                    .unwrap_or(today)
+            });
+        // Due date approximated as close + 7 days (typical for Brazilian
+        // cards). Would refine further with `billing_due_day` metadata.
+        let due_date = close_date
+            .checked_add_signed(Duration::days(7))
+            .unwrap_or(close_date);
+
+        let status = if mode == CardsMode::Next {
+            // Open cycle (--next): the bill hasn't closed yet. We don't try
+            // to infer payment status — we just show how the cycle is
+            // forming up.
+            CardsBillStatus {
+                state: "partial",
+                close_date,
+                due_date,
+                paid_on: None,
+                total,
+            }
+        } else if today < close_date {
+            CardsBillStatus {
+                state: "open",
+                close_date,
+                due_date,
+                paid_on: None,
+                total,
+            }
+        } else {
+            // Bill closed — try to match a payment. We allow a generous 10%
+            // tolerance to absorb the gap between calendar-month totals and
+            // actual statement cycle totals (which include the previous
+            // month's tail and exclude the current month's tail). Description
+            // already filters to canonical "Pagamento de fatura" lines, so
+            // false positives are unlikely.
+            let tolerance = total * Decimal::new(10, 2);
+            let lower = total - tolerance;
+            let upper = total + tolerance;
+            let paid = payment_candidates
+                .iter()
+                .filter(|t| t.transaction_date >= close_date.saturating_sub_signed_unsafe())
+                .filter(|t| {
+                    let abs = t.amount.abs();
+                    abs >= lower && abs <= upper
+                })
+                .min_by_key(|t| (t.transaction_date - close_date).num_days().unsigned_abs());
+            match paid {
+                Some(tx) => CardsBillStatus {
+                    state: "paid",
+                    close_date,
+                    due_date,
+                    paid_on: Some(tx.transaction_date),
+                    total,
+                },
+                None if today > due_date => CardsBillStatus {
+                    state: "overdue",
+                    close_date,
+                    due_date,
+                    paid_on: None,
+                    total,
+                },
+                None => CardsBillStatus {
+                    state: "open",
+                    close_date,
+                    due_date,
+                    paid_on: None,
+                    total,
+                },
+            }
+        };
+
+        accounts_report.push(CardsAccountReport {
+            account_id: account_id.clone(),
+            transaction_count: txs.len(),
+            status,
+        });
+    }
+
+    let report = CardsReport {
+        month_ref: display_month.clone(),
+        accounts: accounts_report,
+        grand_total,
+    };
+
+    if args.structured_output() {
+        // Raw output: include both summary and the full transaction list so
+        // agents have everything they need.
+        let payload = serde_json::json!({
+            "summary": report,
+            "transactions": rows,
+            // Debug: expose every candidate bill so a tooling caller can
+            // verify the per-card grouping logic, not just the one we
+            // selected. Will be removed once the report is stable.
+            "all_candidates": candidates.iter().map(|b| {
+                serde_json::json!({
+                    "account_id": b.account_id,
+                    "min_date": b.txs.iter().map(|t| t.transaction_date).min().map(|d| d.to_string()),
+                    "max_date": b.max_date.to_string(),
+                    "derived_close_date": b.derived_close_date.map(|d| d.to_string()),
+                    "transaction_count": b.txs.len(),
+                    "total": b.txs.iter().map(|t| t.amount.abs()).sum::<Decimal>().to_string(),
+                    "bill_id_sample": b.txs.first().and_then(|t| extract_bill_id(&t.metadata_json)),
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    // ─── Human output ──────────────────────────────────────────────────────
+    let mode_suffix = match mode {
+        CardsMode::Closed => " (fechado)",
+        CardsMode::Next => " (em curso)",
+        CardsMode::Specific => "",
+    };
+    println!(
+        "💳 {}",
+        bold(&format!(
+            "Cartões · {}{}",
+            month_label(&display_month),
+            mode_suffix
+        ))
+    );
+    println!();
+
+    if rows.is_empty() {
+        println!("_(sem lançamentos de cartão no período)_");
+        return Ok(());
+    }
+
+    // Visão geral
+    println!("{}", subsection_header("Visão geral"));
+    for acct in &report.accounts {
+        let s = &acct.status;
+        let (emoji, status_text) = match s.state {
+            "paid" => (
+                "🟢",
+                format!(
+                    "pago {}",
+                    s.paid_on
+                        .map(human_format::short_date)
+                        .unwrap_or_else(|| "—".to_string())
+                ),
+            ),
+            "open" => (
+                "🟡",
+                format!("em aberto · vence {}", human_format::short_date(s.due_date)),
+            ),
+            "overdue" => (
+                "🔴",
+                format!("ATRASADO · vencia {}", human_format::short_date(s.due_date)),
+            ),
+            "partial" => {
+                let days_to_close = (s.close_date - today).num_days();
+                let when = if days_to_close > 0 {
+                    format!("fecha em ~{days_to_close}d")
+                } else {
+                    "fechando agora".to_string()
+                };
+                ("🟡", format!("em curso · {when}"))
+            }
+            _ => ("⚪", "status desconhecido".to_string()),
+        };
+        println!(
+            "{} {} · {} ({} lanç) · {}",
+            emoji,
+            bold(&acct.account_id),
+            human_format::brl_signed(-s.total),
+            acct.transaction_count,
+            status_text,
+        );
+    }
+    println!(
+        "{}: {}",
+        bold("Total"),
+        human_format::brl_signed(-report.grand_total)
+    );
+    println!();
+
+    // Gastos por categoria
+    println!("{}", subsection_header("Gastos por categoria"));
+    let mut by_family: BTreeMap<String, Vec<&CardClosedTransactionRow>> = BTreeMap::new();
+    for row in &rows {
+        let family = human_format::category_family(row.category_id.as_deref())
+            .unwrap_or_else(|| "sem-categoria".to_string());
+        by_family.entry(family).or_default().push(row);
+    }
+    let mut family_totals: Vec<(String, Decimal, Vec<&CardClosedTransactionRow>)> = by_family
+        .into_iter()
+        .map(|(f, list)| {
+            // Signed sum: refunds (positive) net against charges (negative)
+            // so the category total reflects the actual cost the user paid
+            // in that category for the cycle.
+            let net: Decimal = list.iter().map(|r| r.amount).sum();
+            (f, net, list)
+        })
+        .collect();
+    // Sort by absolute net descending — categories with the biggest
+    // movement (positive or negative) come first.
+    family_totals.sort_by_key(|(_, net, _)| std::cmp::Reverse(net.abs()));
+    for (family, family_net, list) in &family_totals {
+        // Pick a representative category_id for emoji
+        let repr_cat = list.first().and_then(|r| r.category_id.as_deref());
+        let emoji = human_format::category_emoji(repr_cat, Some(*family_net));
+        let label = human_format::family_label(family);
+        println!(
+            "{} {} · {} ({} lanç)",
+            emoji,
+            bold(&label),
+            human_format::brl_signed(*family_net),
+            list.len(),
+        );
+        let mut sorted_list: Vec<&&CardClosedTransactionRow> = list.iter().collect();
+        sorted_list.sort_by_key(|r| std::cmp::Reverse(r.amount.abs()));
+        for tx in sorted_list.iter().take(5) {
+            println!(
+                "  • {} · {} ({})",
+                human_format::short_description(&tx.description),
+                human_format::brl_signed(tx.amount),
+                human_format::short_date(tx.transaction_date),
+            );
+        }
+        if sorted_list.len() > 5 {
+            println!(
+                "  _… mais {} {}_",
+                sorted_list.len() - 5,
+                if sorted_list.len() - 5 == 1 {
+                    "lançamento"
+                } else {
+                    "lançamentos"
+                }
+            );
+        }
+        println!();
+    }
+
+    // Surface Pluggy-default classified transactions so the user can build
+    // rules for them. Heuristic: any category_id that doesn't contain `:`
+    // is a bare word that came from Pluggy's default classifier (the user's
+    // own rules consistently produce `family:subcategory` ids). They're
+    // already remapped onto PT families for display by `category_family`,
+    // but their volume is worth highlighting so the user can close the loop.
+    let pluggy_default: Vec<&CardClosedTransactionRow> = rows
+        .iter()
+        .filter(|r| {
+            r.category_id
+                .as_deref()
+                .is_some_and(|c| !c.is_empty() && !c.contains(':'))
+        })
+        .collect();
+    if !pluggy_default.is_empty() {
+        let pluggy_net: Decimal = pluggy_default.iter().map(|r| r.amount).sum();
+        println!(
+            "💡 {} lanç auto-classificados pela Pluggy ({}) — criar regra pra consolidar",
+            pluggy_default.len(),
+            human_format::brl_signed(pluggy_net)
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
+// Small helpers used only by report_cards.
+
+trait NaiveDateSat {
+    fn saturating_sub_signed_unsafe(self) -> NaiveDate;
+}
+impl NaiveDateSat for NaiveDate {
+    fn saturating_sub_signed_unsafe(self) -> NaiveDate {
+        // Subtract 7 days as a heuristic "start of payment-search window".
+        self.checked_sub_signed(Duration::days(7)).unwrap_or(self)
+    }
 }
 
 #[cfg(test)]

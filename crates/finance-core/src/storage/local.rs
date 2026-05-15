@@ -184,6 +184,41 @@ impl FinanceStore for LocalStore {
         Ok(rows.len())
     }
 
+    async fn get_accounts(&self) -> Result<Vec<AccountRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              account_id, owner, account_type, bank, label,
+              pluggy_account_id, pluggy_item_id, status, actor_id, idempotency_key,
+              metadata_json, created_at, updated_at
+            FROM accounts
+            ORDER BY account_id
+            ",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let metadata_str: String = row.get(10)?;
+            let created_at_str: String = row.get(11)?;
+            let updated_at_str: String = row.get(12)?;
+            Ok(AccountRecord {
+                account_id: row.get(0)?,
+                owner: row.get(1)?,
+                account_type: row.get(2)?,
+                bank: row.get(3)?,
+                label: row.get(4)?,
+                pluggy_account_id: row.get(5)?,
+                pluggy_item_id: row.get(6)?,
+                status: row.get(7)?,
+                actor_id: row.get(8)?,
+                idempotency_key: row.get(9)?,
+                metadata_json: serde_json::from_str(&metadata_str).unwrap_or_default(),
+                created_at: parse_datetime_or_now(Some(&created_at_str)),
+                updated_at: parse_datetime_or_now(Some(&updated_at_str)),
+            })
+        })?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
     async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -1261,15 +1296,14 @@ impl FinanceStore for LocalStore {
               t.transaction_date,
               t.display_label,
               t.description,
-              CAST(ABS(CAST(t.amount AS REAL)) AS TEXT) AS closed_amount,
+              CAST(t.amount AS TEXT) AS amount,
               t.category_id,
               t.payment_status,
               t.metadata_json
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND CAST(t.amount AS REAL) < 0
-              AND t.payment_status NOT IN ('pending', 'em_aberto', 'parcial')
+              AND NOT (CAST(t.amount AS REAL) > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
               AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
             ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC

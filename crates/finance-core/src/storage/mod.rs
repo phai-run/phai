@@ -49,6 +49,7 @@ pub trait FinanceStore {
     async fn record_migration(&self, version: &str) -> Result<()>;
 
     async fn upsert_accounts(&self, rows: &[AccountRecord]) -> Result<usize>;
+    async fn get_accounts(&self) -> Result<Vec<AccountRecord>>;
     async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize>;
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize>;
     async fn upsert_rules(&self, rows: &[RuleRecord]) -> Result<usize>;

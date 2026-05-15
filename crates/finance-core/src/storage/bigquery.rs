@@ -330,6 +330,26 @@ fn transaction_record_from_values(values: &[Option<String>]) -> Result<Transacti
     })
 }
 
+fn account_record_from_values(values: &[Option<String>]) -> Result<AccountRecord> {
+    let created_at = required_string(values, 11, "created_at")?;
+    let updated_at = required_string(values, 12, "updated_at")?;
+    Ok(AccountRecord {
+        account_id: required_string(values, 0, "account_id")?,
+        owner: required_string(values, 1, "owner")?,
+        account_type: required_string(values, 2, "account_type")?,
+        bank: required_string(values, 3, "bank")?,
+        label: required_string(values, 4, "label")?,
+        pluggy_account_id: optional_string(values, 5),
+        pluggy_item_id: optional_string(values, 6),
+        status: required_string(values, 7, "status")?,
+        actor_id: required_string(values, 8, "actor_id")?,
+        idempotency_key: required_string(values, 9, "idempotency_key")?,
+        metadata_json: optional_json(values, 10, "metadata_json")?.unwrap_or_else(|| json!({})),
+        created_at: parse_datetime_or_now(Some(&created_at)),
+        updated_at: parse_datetime_or_now(Some(&updated_at)),
+    })
+}
+
 fn split_record_from_values(values: &[Option<String>]) -> Result<TransactionSplitRecord> {
     let created_at = required_string(values, 8, "created_at")?;
     let updated_at = required_string(values, 9, "updated_at")?;
@@ -505,6 +525,28 @@ impl FinanceStore for BigQueryStore {
         );
         self.run_query(&sql).await?;
         Ok(rows.len())
+    }
+
+    async fn get_accounts(&self) -> Result<Vec<AccountRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              account_id, owner, account_type, bank, label,
+              pluggy_account_id, pluggy_item_id, status, actor_id, idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
+            FROM {}
+            ORDER BY account_id
+            ",
+            self.qualified_table("accounts")?,
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| account_record_from_values(&row_values(row)))
+            .collect()
     }
 
     async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize> {
@@ -1878,6 +1920,12 @@ impl FinanceStore for BigQueryStore {
                 )
             })
             .unwrap_or_default();
+        // Returns every charge AND statement credit (IOF reversals,
+        // merchant refunds, etc.) — credits net naturally against debits in
+        // the bill total. The one credit type we exclude is the bill
+        // payment itself ("Pagamento recebido"), which appears on the card
+        // side but mirrors a debit on checking and would double-count.
+        // Amounts are returned signed (debits negative, credits positive).
         let sql = format!(
             "
             SELECT
@@ -1887,7 +1935,7 @@ impl FinanceStore for BigQueryStore {
               CAST(t.transaction_date AS STRING),
               t.display_label,
               t.description,
-              CAST(ABS(t.amount) AS STRING),
+              CAST(t.amount AS STRING),
               t.category_id,
               t.payment_status,
               COALESCE(TO_JSON_STRING(t.metadata_json), '{{}}')
@@ -1895,8 +1943,7 @@ impl FinanceStore for BigQueryStore {
             JOIN {} a
               ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND t.amount < 0
-              AND t.payment_status NOT IN ('pending', 'em_aberto', 'parcial')
+              AND NOT (t.amount > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM {})
               {where_month}
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
