@@ -42,13 +42,15 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS-$ARCH" in
-  Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
+  Darwin-arm64)   TARGET="aarch64-apple-darwin" ;;
+  Darwin-x86_64)  TARGET="x86_64-apple-darwin" ;;
   *)
     cat <<EOF >&2
 finance-os: unsupported platform: $OS-$ARCH
 
 Currently supported targets:
-  Darwin-arm64 (macOS Apple Silicon)
+  Darwin-arm64   (macOS Apple Silicon)
+  Darwin-x86_64  (macOS Intel)
 
 Build from source: https://github.com/${REPO}#build-from-source
 EOF
