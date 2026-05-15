@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/feliperun/finance-os/compare/v0.7.0...v0.8.0) (2026-05-15)
+
+
+### Features
+
+* **reports:** subcategory breakdown + --all flag for report cards ([#15](https://github.com/feliperun/finance-os/issues/15)) ([274bb3d](https://github.com/feliperun/finance-os/commit/274bb3db3833dfe476b23f9212950c9d0f5b7865))
+
 ## [0.7.0](https://github.com/feliperun/finance-os/compare/v0.6.0...v0.7.0) (2026-05-15)
 
 
