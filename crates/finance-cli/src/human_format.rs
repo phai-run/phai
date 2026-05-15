@@ -85,16 +85,42 @@ fn month_pt_short(month: u32) -> &'static str {
 
 /// Extract the top-level family of a colon-delimited category id.
 /// `"alimentacao:restaurantes"` → `Some("alimentacao")`.
+///
+/// Also remaps known English categories that come from Pluggy's default
+/// classifier (when no user rule matched during sync) to their canonical
+/// Brazilian-Portuguese family. The underlying transaction keeps its raw
+/// category_id; this remapping is purely a display-time normalization so
+/// the report doesn't mix Portuguese and English category labels.
 pub fn category_family(category_id: Option<&str>) -> Option<String> {
     let raw = category_id?.trim();
     if raw.is_empty() {
         return None;
     }
     let normalized = raw.replace([':', '-', '>'], " ");
-    normalized
-        .split_whitespace()
-        .next()
-        .map(|part| part.to_string())
+    let first = normalized.split_whitespace().next()?;
+    // Pluggy's defaults arrive as bare lowercase tokens. Map them onto our
+    // PT family taxonomy. Anything we don't recognise is returned as-is so
+    // user-defined families keep working.
+    let mapped = match first.to_lowercase().as_str() {
+        "groceries" | "food" | "eating" | "restaurants" => "alimentacao",
+        "shopping" | "clothing" | "online" => "compras",
+        "services" => "servicos",
+        "leisure" | "entertainment" | "gambling" | "gaming" | "sports" | "kids" => "lazer",
+        "houseware" | "household" | "home" => "casa",
+        "transport" | "transportation" | "automotive" | "fuel" | "airport" | "parking"
+        | "vehicle" => "transporte",
+        "health" | "pharmacy" | "medical" | "hospital" => "saude",
+        "education" | "bookstore" => "educacao",
+        "subscriptions" => "assinaturas",
+        "personal" => "pessoal",
+        "utilities" | "telecommunications" => "moradia",
+        "travel" | "accomodation" => "lazer",
+        "pets" => "lazer",
+        "income" | "salary" => "receitas",
+        "bank" => "financeiro",
+        _ => first,
+    };
+    Some(mapped.to_string())
 }
 
 /// Emoji for a category family. Falls back to `💸` for unknown expense, `❓`
@@ -142,6 +168,9 @@ pub fn family_label(family: &str) -> String {
         "alimentacao" => "Alimentação".into(),
         "moradia" => "Moradia".into(),
         "casa" => "Casa".into(),
+        "compras" => "Compras".into(),
+        "pessoal" => "Pessoal".into(),
+        "servicos" => "Serviços".into(),
         "transporte" => "Transporte".into(),
         "mobilidade" => "Mobilidade".into(),
         "saude" => "Saúde".into(),

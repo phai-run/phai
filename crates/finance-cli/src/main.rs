@@ -35,7 +35,9 @@ mod self_cmd;
 mod update;
 mod update_state;
 
-use human_format::{bold, brl as hf_brl, month_label, progress_bar, subsection_header};
+use human_format::{
+    bold, brl as hf_brl, category_emoji, month_label, progress_bar, subsection_header,
+};
 
 const UPSERT_BATCH_SIZE: usize = 50;
 const AUDIT_BATCH_SIZE: usize = 25;
@@ -1379,52 +1381,6 @@ fn day_of_week_text(date: NaiveDate) -> String {
 
 fn normalize_inline_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn category_family(category_id: Option<&str>) -> Option<String> {
-    let raw = category_id?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let normalized = raw.replace([':', '-', '>'], " ");
-    normalized
-        .split_whitespace()
-        .next()
-        .map(|part| part.to_string())
-}
-
-fn category_emoji(category_id: Option<&str>, amount: Option<Decimal>) -> &'static str {
-    let family = category_family(category_id);
-    if family.as_deref() == Some("receitas")
-        || family.as_deref() == Some("salario")
-        || amount.is_some_and(|v| v > Decimal::ZERO)
-    {
-        "💰"
-    } else if family.as_deref().is_some_and(|f| f.starts_with("transfer")) {
-        "🔁"
-    } else if family.as_deref() == Some("assinaturas") {
-        "🔂"
-    } else if matches!(family.as_deref(), Some("moradia" | "casa")) {
-        "🏠"
-    } else if family.as_deref() == Some("alimentacao") {
-        "🍽️"
-    } else if family.as_deref() == Some("saude") {
-        "🩺"
-    } else if matches!(family.as_deref(), Some("transporte" | "mobilidade")) {
-        "🚗"
-    } else if family.as_deref() == Some("educacao") {
-        "📚"
-    } else if family.as_deref() == Some("lazer") {
-        "🎉"
-    } else if family.as_deref() == Some("investimentos") {
-        "📈"
-    } else if family.as_deref() == Some("financeiro") {
-        "🧾"
-    } else if family.is_none() {
-        "❓"
-    } else {
-        "💸"
-    }
 }
 
 fn category_display(category_id: Option<&str>, amount: Option<Decimal>) -> String {
@@ -5955,6 +5911,30 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
                 }
             );
         }
+        println!();
+    }
+
+    // Surface Pluggy-default classified transactions so the user can build
+    // rules for them. Heuristic: any category_id that doesn't contain `:`
+    // is a bare word that came from Pluggy's default classifier (the user's
+    // own rules consistently produce `family:subcategory` ids). They're
+    // already remapped onto PT families for display by `category_family`,
+    // but their volume is worth highlighting so the user can close the loop.
+    let pluggy_default: Vec<&CardClosedTransactionRow> = rows
+        .iter()
+        .filter(|r| {
+            r.category_id
+                .as_deref()
+                .is_some_and(|c| !c.is_empty() && !c.contains(':'))
+        })
+        .collect();
+    if !pluggy_default.is_empty() {
+        let pluggy_net: Decimal = pluggy_default.iter().map(|r| r.amount).sum();
+        println!(
+            "💡 {} lanç auto-classificados pela Pluggy ({}) — criar regra pra consolidar",
+            pluggy_default.len(),
+            human_format::brl_signed(pluggy_net)
+        );
         println!();
     }
 
