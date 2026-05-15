@@ -1276,6 +1276,10 @@ struct CardsArgs {
     /// Limit the report to a single credit-card account.
     #[arg(long)]
     account_id: Option<String>,
+    /// List every transaction in each category instead of truncating to the
+    /// top 5 by absolute amount.
+    #[arg(long)]
+    all: bool,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
     raw: bool,
@@ -5857,7 +5861,7 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
     );
     println!();
 
-    // Gastos por categoria
+    // Gastos por categoria — family → subcategory → transactions
     println!("{}", subsection_header("Gastos por categoria"));
     let mut by_family: BTreeMap<String, Vec<&CardClosedTransactionRow>> = BTreeMap::new();
     for row in &rows {
@@ -5878,8 +5882,10 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
     // Sort by absolute net descending — categories with the biggest
     // movement (positive or negative) come first.
     family_totals.sort_by_key(|(_, net, _)| std::cmp::Reverse(net.abs()));
+
+    const TX_LIMIT: usize = 5;
+
     for (family, family_net, list) in &family_totals {
-        // Pick a representative category_id for emoji
         let repr_cat = list.first().and_then(|r| r.category_id.as_deref());
         let emoji = human_format::category_emoji(repr_cat, Some(*family_net));
         let label = human_format::family_label(family);
@@ -5890,26 +5896,98 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
             human_format::brl_signed(*family_net),
             list.len(),
         );
-        let mut sorted_list: Vec<&&CardClosedTransactionRow> = list.iter().collect();
-        sorted_list.sort_by_key(|r| std::cmp::Reverse(r.amount.abs()));
-        for tx in sorted_list.iter().take(5) {
-            println!(
-                "  • {} · {} ({})",
-                human_format::short_description(&tx.description),
-                human_format::brl_signed(tx.amount),
-                human_format::short_date(tx.transaction_date),
-            );
+
+        // Group this family's rows by subcategory. Subcategory comes from
+        // the part after the first `:` in category_id. Pluggy-default ids
+        // (no `:`) bucket under "—".
+        let mut by_sub: BTreeMap<String, Vec<&&CardClosedTransactionRow>> = BTreeMap::new();
+        for row in list {
+            let sub = row
+                .category_id
+                .as_deref()
+                .and_then(|c| c.split_once(':').map(|(_, s)| s.to_string()))
+                .unwrap_or_else(|| "—".to_string());
+            by_sub.entry(sub).or_default().push(row);
         }
-        if sorted_list.len() > 5 {
-            println!(
-                "  _… mais {} {}_",
-                sorted_list.len() - 5,
-                if sorted_list.len() - 5 == 1 {
-                    "lançamento"
+
+        // If there's only one subcategory bucket (or only "—"), skip the
+        // intermediate header and list transactions directly under the
+        // family. Otherwise render each subcategory as a nested section.
+        let render_subs = by_sub.len() > 1 || !by_sub.contains_key("—");
+
+        if render_subs {
+            let mut sub_buckets: Vec<(String, Decimal, Vec<&&CardClosedTransactionRow>)> = by_sub
+                .into_iter()
+                .map(|(name, items)| {
+                    let net: Decimal = items.iter().map(|r| r.amount).sum();
+                    (name, net, items)
+                })
+                .collect();
+            sub_buckets.sort_by_key(|(_, net, _)| std::cmp::Reverse(net.abs()));
+
+            for (sub_name, sub_net, sub_items) in sub_buckets {
+                let sub_label = if sub_name == "—" {
+                    "sem subcategoria".to_string()
                 } else {
-                    "lançamentos"
+                    sub_name.replace('-', " ")
+                };
+                println!(
+                    "  ↳ {} · {} ({} lanç)",
+                    bold(&sub_label),
+                    human_format::brl_signed(sub_net),
+                    sub_items.len(),
+                );
+                let mut sorted_sub = sub_items.clone();
+                sorted_sub.sort_by_key(|r| std::cmp::Reverse(r.amount.abs()));
+                let take_n = if args.all { sorted_sub.len() } else { TX_LIMIT };
+                for tx in sorted_sub.iter().take(take_n) {
+                    println!(
+                        "      • {} · {} ({})",
+                        human_format::short_description(&tx.description),
+                        human_format::brl_signed(tx.amount),
+                        human_format::short_date(tx.transaction_date),
+                    );
                 }
-            );
+                if !args.all && sorted_sub.len() > TX_LIMIT {
+                    println!(
+                        "      _… mais {} {}_",
+                        sorted_sub.len() - TX_LIMIT,
+                        if sorted_sub.len() - TX_LIMIT == 1 {
+                            "lançamento"
+                        } else {
+                            "lançamentos"
+                        }
+                    );
+                }
+            }
+        } else {
+            // Single bucket (only "—") — list flat under family.
+            let mut sorted_list: Vec<&&CardClosedTransactionRow> = list.iter().collect();
+            sorted_list.sort_by_key(|r| std::cmp::Reverse(r.amount.abs()));
+            let take_n = if args.all {
+                sorted_list.len()
+            } else {
+                TX_LIMIT
+            };
+            for tx in sorted_list.iter().take(take_n) {
+                println!(
+                    "  • {} · {} ({})",
+                    human_format::short_description(&tx.description),
+                    human_format::brl_signed(tx.amount),
+                    human_format::short_date(tx.transaction_date),
+                );
+            }
+            if !args.all && sorted_list.len() > TX_LIMIT {
+                println!(
+                    "  _… mais {} {}_",
+                    sorted_list.len() - TX_LIMIT,
+                    if sorted_list.len() - TX_LIMIT == 1 {
+                        "lançamento"
+                    } else {
+                        "lançamentos"
+                    }
+                );
+            }
         }
         println!();
     }
