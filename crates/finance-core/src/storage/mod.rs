@@ -140,6 +140,28 @@ pub trait FinanceStore {
     async fn list_category_budgets(&self, month: Option<&str>)
         -> Result<Vec<CategoryBudgetRecord>>;
     async fn budget_status_for_month(&self, month: &str) -> Result<Vec<BudgetStatusRow>>;
+
+    /// Sibling transactions on the same day/account, ordered by Pluggy's
+    /// `raw.order` (NULLS LAST). Excludes `exclude_id` so callers don't
+    /// see the current transaction in the temporal context window.
+    async fn transactions_on_date(
+        &self,
+        date: NaiveDate,
+        account_id: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<crate::enrichment::types::ContextTx>>;
+
+    /// Transactions whose `description` contains `keyword`
+    /// (case-insensitive), excluding `exclude_id`. When
+    /// `only_uncategorized` is true, also filters to transactions whose
+    /// category is missing or came from a weak source ('unclassified',
+    /// 'fallback', 'pluggy').
+    async fn similar_transactions(
+        &self,
+        keyword: &str,
+        exclude_id: &str,
+        only_uncategorized: bool,
+    ) -> Result<Vec<TransactionRecord>>;
 }
 
 pub async fn open_store(config: &AppConfig) -> Result<Box<dyn FinanceStore>> {

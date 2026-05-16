@@ -310,6 +310,8 @@ fn optional_json(values: &[Option<String>], index: usize, field: &str) -> Result
 fn transaction_record_from_values(values: &[Option<String>]) -> Result<TransactionRecord> {
     let created_at = required_string(values, 14, "created_at")?;
     let updated_at = required_string(values, 15, "updated_at")?;
+    let enrichment_attempted_at = optional_string(values, 16)
+        .map(|raw| parse_datetime_or_now(Some(&raw)));
     Ok(TransactionRecord {
         transaction_id: required_string(values, 0, "transaction_id")?,
         account_id: optional_string(values, 1),
@@ -327,6 +329,7 @@ fn transaction_record_from_values(values: &[Option<String>]) -> Result<Transacti
         metadata_json: optional_json(values, 13, "metadata_json")?.unwrap_or_else(|| json!({})),
         created_at: parse_datetime_or_now(Some(&created_at)),
         updated_at: parse_datetime_or_now(Some(&updated_at)),
+        enrichment_attempted_at,
     })
 }
 
@@ -606,7 +609,8 @@ impl FinanceStore for BigQueryStore {
               tx_type, category_id, category_source, context, payment_status, source,
               actor_id, idempotency_key, TO_JSON_STRING(metadata_json),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
-              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
             FROM {}
             WHERE LOWER(description) LIKE {}
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
@@ -635,7 +639,8 @@ impl FinanceStore for BigQueryStore {
               tx_type, category_id, category_source, context, payment_status, source,
               actor_id, idempotency_key, TO_JSON_STRING(metadata_json),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
-              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
             FROM {}
             WHERE context IS NULL
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
@@ -1184,7 +1189,8 @@ impl FinanceStore for BigQueryStore {
               idempotency_key,
               COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
-              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
             FROM {}
             WHERE transaction_id = {}
             LIMIT 1
@@ -1756,7 +1762,8 @@ impl FinanceStore for BigQueryStore {
               idempotency_key,
               COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
               CAST(created_at AS STRING),
-              CAST(updated_at AS STRING)
+              CAST(updated_at AS STRING),
+              CAST(enrichment_attempted_at AS STRING)
             FROM {}
             WHERE transaction_date >= {}
               AND transaction_date <= {}
@@ -2354,5 +2361,87 @@ impl FinanceStore for BigQueryStore {
         }
         results.sort_by(|a, b| a.category_id.cmp(&b.category_id));
         Ok(results)
+    }
+
+    async fn transactions_on_date(
+        &self,
+        date: NaiveDate,
+        account_id: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<crate::enrichment::types::ContextTx>> {
+        let sql = format!(
+            "
+            SELECT
+              description,
+              CAST(amount AS STRING),
+              JSON_VALUE(metadata_json, '$.pluggy_category') AS pluggy_category,
+              SAFE_CAST(JSON_VALUE(metadata_json, '$.raw.order') AS INT64) AS pluggy_order
+            FROM {}
+            WHERE transaction_date = {}
+              AND account_id = {}
+              AND transaction_id != {}
+            ORDER BY pluggy_order IS NULL, pluggy_order ASC, description ASC
+            ",
+            self.qualified_table("transactions")?,
+            sql_date(date),
+            sql_string(account_id),
+            sql_string(exclude_id),
+        );
+        let response = self.run_query(&sql).await?;
+        let mut out = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let description = required_string(&values, 0, "description")?;
+            let amount = required_decimal(&values, 1, "amount")?;
+            let pluggy_category = optional_string(&values, 2);
+            let order = optional_string(&values, 3)
+                .and_then(|raw| raw.parse::<i64>().ok());
+            out.push(crate::enrichment::types::ContextTx {
+                description,
+                amount,
+                pluggy_category,
+                order,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn similar_transactions(
+        &self,
+        keyword: &str,
+        exclude_id: &str,
+        only_uncategorized: bool,
+    ) -> Result<Vec<TransactionRecord>> {
+        let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+        let category_filter = if only_uncategorized {
+            "AND (category_id IS NULL OR category_source IN ('unclassified', 'fallback', 'pluggy'))"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, CAST(transaction_date AS STRING), description, CAST(amount AS STRING),
+              tx_type, category_id, category_source, context, payment_status, source,
+              actor_id, idempotency_key, COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
+            FROM {}
+            WHERE LOWER(description) LIKE {}
+              AND transaction_id != {}
+              {category_filter}
+            ORDER BY transaction_date DESC, transaction_id ASC
+            ",
+            self.qualified_table("transactions")?,
+            sql_string(&pattern),
+            sql_string(exclude_id),
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
     }
 }

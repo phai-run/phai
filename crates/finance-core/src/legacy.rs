@@ -285,6 +285,7 @@ pub fn load_legacy_bundle(finance_root: &Path, actor_id: &str) -> Result<LegacyI
                     }),
                     created_at,
                     updated_at,
+                    enrichment_attempted_at: None,
                 });
             }
         }

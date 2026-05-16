@@ -61,6 +61,8 @@ pub struct TransactionRecord {
     pub metadata_json: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub enrichment_attempted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

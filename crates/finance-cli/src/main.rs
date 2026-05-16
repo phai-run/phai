@@ -4509,6 +4509,7 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
         metadata_json: json!({"origin": "finance-cli"}),
         created_at: now,
         updated_at: now,
+        enrichment_attempted_at: None,
     };
     ensure_transaction_idempotency(&mut tx);
     store.upsert_transactions(&[tx.clone()]).await?;
