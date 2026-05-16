@@ -438,6 +438,7 @@ mod tests {
             metadata_json: json!({}),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            enrichment_attempted_at: None,
         }
     }
 

@@ -29,6 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod enrich;
 mod human_format;
 mod review;
 mod self_cmd;
@@ -158,6 +159,11 @@ struct SyncPluggyArgs {
     json_summary: bool,
     #[arg(long)]
     notify_summary: bool,
+    /// Skip the automatic post-sync enrichment hook (Phase 5).
+    /// Useful in CI / batch jobs where the LLM is intentionally
+    /// unavailable. Defaults to false — enrichment runs by default.
+    #[arg(long)]
+    no_enrich: bool,
 }
 
 #[derive(Subcommand)]
@@ -985,6 +991,9 @@ enum TxCommand {
         #[command(subcommand)]
         command: TxSplitCommand,
     },
+    /// Run the LLM-driven enrichment pipeline over uncategorized
+    /// transactions. Supports human + machine (NDJSON) modes.
+    Enrich(enrich::EnrichArgs),
 }
 
 #[derive(Subcommand)]
@@ -2194,6 +2203,7 @@ async fn main() -> Result<()> {
                 TxSplitCommand::Show(args) => tx_split_show(args).await,
                 TxSplitCommand::Clear(args) => tx_split_clear(args).await,
             },
+            TxCommand::Enrich(args) => tx_enrich(args).await,
         },
         Commands::Forecast { command } => match command {
             ForecastCommand::Upsert(args) => forecast_upsert(args).await,
@@ -2622,6 +2632,36 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     println!("- categories: {}", categories.len());
     println!("- actor: {}", config.actor_id);
     println!("- backend: {:?}", config.effective_backend());
+
+    // Phase 5 — post-sync enrichment hook. Non-fatal: any failure
+    // inside `enrich_after_sync` is logged via eprintln and the sync
+    // result is preserved. The user can re-run `finance tx enrich`
+    // manually whenever the LLM is back up.
+    let new_tx_ids: Vec<String> = transactions
+        .iter()
+        .filter(|row| !existing_ids.contains(&row.transaction_id))
+        .map(|row| row.transaction_id.clone())
+        .collect();
+    println!(
+        "Sincronização concluída: {} transações novas",
+        new_tx_ids.len()
+    );
+
+    if args.no_enrich {
+        println!("Enrichment automático: pulado (--no-enrich).");
+    } else if new_tx_ids.is_empty() {
+        println!("Enrichment automático: sem transações novas para processar.");
+    } else {
+        // Non-TTY (CI, pipes, batch) → force auto_only so we never
+        // print Suggest/AskUser prompts to a non-interactive stdout.
+        let auto_only = !std::io::IsTerminal::is_terminal(&std::io::stdin());
+        let summary =
+            enrich::enrich_after_sync(&config, store.as_ref(), &new_tx_ids, auto_only).await;
+        println!("{}", summary.format_summary());
+        if summary.deferred > 0 {
+            println!("Para revisar as adiadas: finance tx enrich --days 7");
+        }
+    }
     Ok(())
 }
 
@@ -4509,6 +4549,7 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
         metadata_json: json!({"origin": "finance-cli"}),
         created_at: now,
         updated_at: now,
+        enrichment_attempted_at: None,
     };
     ensure_transaction_idempotency(&mut tx);
     store.upsert_transactions(&[tx.clone()]).await?;
@@ -4524,6 +4565,12 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
         .await?;
     println!("Transação manual salva: {}", tx.transaction_id);
     Ok(())
+}
+
+async fn tx_enrich(args: enrich::EnrichArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    enrich::run(args, &config, store.as_ref()).await
 }
 
 async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {

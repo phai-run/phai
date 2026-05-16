@@ -23,6 +23,14 @@ pub struct AppConfig {
     pub service_account_path: Option<PathBuf>,
     pub local_db_path: Option<PathBuf>,
     pub pluggy_start_date: Option<String>,
+    /// LLM provider for enrichment (Phase 2+): "anthropic", "openai",
+    /// "deepseek", "ollama". Defaults read at runtime — no logic in
+    /// Phase 1.
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+    /// LLM model override. Defaults vary per provider.
+    #[serde(default)]
+    pub llm_model: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -36,6 +44,8 @@ impl Default for AppConfig {
             service_account_path: None,
             local_db_path: None,
             pluggy_start_date: None,
+            llm_provider: None,
+            llm_model: None,
         }
     }
 }

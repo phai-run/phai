@@ -1,0 +1,9 @@
+{
+  "reasoning": "PIX para CPF (pessoa física) sem histórico de classificação prévia. Sem CNPJ não há base pública. Valor de R$50 num sábado pode ser tanto serviço pessoal quanto presente.",
+  "merchant_name": "Joice Antonia",
+  "category": "pessoal",
+  "subcategory": "servicos",
+  "confidence": 0.55,
+  "needs_user_input": true,
+  "user_prompt": "Você fez um PIX de R$50 para Joice Antonia num sábado. É serviço pessoal (manicure, cabelo) ou outra coisa?"
+}

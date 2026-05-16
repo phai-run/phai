@@ -605,6 +605,7 @@ impl FinanceStore for LocalStore {
                             .unwrap_or_else(|_| serde_json::json!({})),
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
+                        enrichment_attempted_at: None,
                     })
                 },
             )
@@ -694,6 +695,7 @@ impl FinanceStore for LocalStore {
                             .unwrap_or_else(|_| serde_json::json!({})),
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
+                        enrichment_attempted_at: None,
                     })
                 },
             )
@@ -745,6 +747,7 @@ impl FinanceStore for LocalStore {
                         metadata_json: parse_sql_json(metadata_json, 13)?,
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
+                        enrichment_attempted_at: None,
                     })
                 },
             )
@@ -1028,6 +1031,7 @@ impl FinanceStore for LocalStore {
                         metadata_json: parse_sql_json(metadata_json, 13)?,
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
+                        enrichment_attempted_at: None,
                     })
                 },
             )?
@@ -1094,6 +1098,7 @@ impl FinanceStore for LocalStore {
                         metadata_json: parse_sql_json(metadata_json, 13)?,
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
+                        enrichment_attempted_at: None,
                     })
                 },
             )?
@@ -1675,5 +1680,191 @@ impl FinanceStore for LocalStore {
         }
         results.sort_by(|a, b| a.category_id.cmp(&b.category_id));
         Ok(results)
+    }
+
+    async fn transactions_on_date(
+        &self,
+        date: NaiveDate,
+        account_id: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<crate::enrichment::types::ContextTx>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              description,
+              CAST(amount AS TEXT),
+              metadata_json,
+              CAST(json_extract(metadata_json, '$.raw.order') AS INTEGER) AS pluggy_order
+            FROM transactions
+            WHERE transaction_date = ?1
+              AND account_id = ?2
+              AND transaction_id != ?3
+            ORDER BY pluggy_order IS NULL, pluggy_order ASC, description ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![date.format("%Y-%m-%d").to_string(), account_id, exclude_id,],
+                |row| {
+                    let description: String = row.get(0)?;
+                    let amount: String = row.get(1)?;
+                    let metadata_json: String = row.get(2)?;
+                    let order: Option<i64> = row.get(3)?;
+                    Ok((description, amount, metadata_json, order))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (description, amount_text, metadata_text, order) in rows {
+            let amount = parse_decimal(amount_text)
+                .map_err(|err| anyhow::anyhow!("amount inválido em transactions_on_date: {err}"))?;
+            let metadata: Value = serde_json::from_str(&metadata_text).unwrap_or(Value::Null);
+            let pluggy_category = crate::enrichment::context::extract_pluggy_category(&metadata);
+            out.push(crate::enrichment::types::ContextTx {
+                description,
+                amount,
+                pluggy_category,
+                order,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn similar_transactions(
+        &self,
+        keyword: &str,
+        exclude_id: &str,
+        only_uncategorized: bool,
+    ) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+        let category_filter = if only_uncategorized {
+            "AND (category_id IS NULL OR category_source IN ('unclassified', 'fallback', 'pluggy'))"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, description, CAST(amount AS TEXT),
+              tx_type, category_id, category_source, context, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at
+            FROM transactions
+            WHERE LOWER(description) LIKE ?1
+              AND transaction_id != ?2
+              {category_filter}
+            ORDER BY transaction_date DESC, transaction_id ASC
+            "
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![pattern, exclude_id], |row| {
+                let transaction_date: String = row.get(2)?;
+                let amount: String = row.get(4)?;
+                let metadata_json: String = row.get(13)?;
+                let created_at: String = row.get(14)?;
+                let updated_at: String = row.get(15)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    transaction_date,
+                    row.get::<_, String>(3)?,
+                    amount,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    metadata_json,
+                    created_at,
+                    updated_at,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    transaction_id,
+                    account_id,
+                    transaction_date,
+                    description,
+                    amount,
+                    tx_type,
+                    category_id,
+                    category_source,
+                    context,
+                    payment_status,
+                    source,
+                    actor_id,
+                    idempotency_key,
+                    metadata_json,
+                    created_at,
+                    updated_at,
+                )| {
+                    Ok(TransactionRecord {
+                        transaction_id,
+                        account_id,
+                        transaction_date: parse_sql_date(transaction_date, 2)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?,
+                        description,
+                        amount: parse_decimal(amount).map_err(|e| anyhow::anyhow!("{e}"))?,
+                        tx_type,
+                        category_id,
+                        category_source,
+                        context,
+                        payment_status,
+                        source,
+                        actor_id,
+                        idempotency_key,
+                        metadata_json: serde_json::from_str(&metadata_json)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                        created_at: parse_datetime_or_now(Some(&created_at)),
+                        updated_at: parse_datetime_or_now(Some(&updated_at)),
+                        enrichment_attempted_at: None,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    async fn mark_enrichment_attempted(
+        &self,
+        transaction_id: &str,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        let now = Utc::now();
+        let affected = conn.execute(
+            "UPDATE transactions
+             SET enrichment_attempted_at = ?1
+             WHERE transaction_id = ?2",
+            params![now.to_rfc3339(), transaction_id],
+        )?;
+        if affected == 0 {
+            bail!("Transação {transaction_id} não encontrada");
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO audit_log (
+                event_id, entity_type, entity_id, action, actor_id,
+                event_timestamp, idempotency_key, diff_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                uuid::Uuid::now_v7().to_string(),
+                "transaction",
+                transaction_id,
+                "enrich_attempted",
+                actor_id,
+                now.to_rfc3339(),
+                idempotency_key,
+                serde_json::json!({"enrichment_attempted_at": now.to_rfc3339()}).to_string(),
+            ],
+        )?;
+        Ok(())
     }
 }
