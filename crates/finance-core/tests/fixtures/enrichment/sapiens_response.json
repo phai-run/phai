@@ -1,0 +1,9 @@
+{
+  "reasoning": "Transação ocorreu em um domingo no Sapiens Parque, com valor compatível com almoço. A categoria Pluggy 'Eating out' e o CNAE 5611 (restaurantes) reforçam a classificação como restaurante.",
+  "merchant_name": "Sapiens Parque",
+  "category": "alimentacao",
+  "subcategory": "restaurantes",
+  "confidence": 0.91,
+  "needs_user_input": false,
+  "user_prompt": null
+}
