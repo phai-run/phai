@@ -16,11 +16,13 @@
 
 pub mod cnpj;
 pub mod context;
+pub mod fuzzy;
 pub mod heuristics;
 pub mod llm;
 pub mod pipeline;
 pub mod pluggy_map;
 pub mod prompt;
+pub mod rule_gen;
 pub mod types;
 
 pub use types::{

@@ -15,12 +15,14 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::Args;
 use finance_core::config::AppConfig;
+use finance_core::enrichment::fuzzy::score_to_percent;
 use finance_core::enrichment::llm::LlmProvider;
 use finance_core::enrichment::pipeline::{mark_attempted, EnrichmentPipeline};
+use finance_core::enrichment::rule_gen::{build_rule_record, keyword_from_result};
 use finance_core::enrichment::types::{
     CnpjInfo, EnrichmentDecision, EnrichmentResult,
 };
-use finance_core::models::{AuditEvent, UncategorizedRow};
+use finance_core::models::{AuditEvent, RuleRecord, TransactionRecord, UncategorizedRow};
 use finance_core::storage::FinanceStore;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
@@ -30,6 +32,7 @@ use tokio::time::{timeout, Duration as TokioDuration};
 const DEFAULT_LIMIT: usize = 20;
 const DEFAULT_DAYS: i64 = 30;
 const DEFAULT_MACHINE_TIMEOUT: u64 = 60;
+const DEFAULT_RETROACTIVE_THRESHOLD: u8 = 80;
 
 #[derive(Args, Debug, Clone)]
 pub struct EnrichArgs {
@@ -74,6 +77,16 @@ pub struct EnrichArgs {
     /// days/limit filter).
     #[arg(long)]
     pub transaction_id: Option<String>,
+
+    /// Skip rule creation and retroactive matching after a successful
+    /// categorization.
+    #[arg(long)]
+    pub no_rule: bool,
+
+    /// Percentage (0..=100) used as the fuzzy threshold when scanning
+    /// past transactions for retroactive application.
+    #[arg(long, default_value_t = DEFAULT_RETROACTIVE_THRESHOLD)]
+    pub retroactive_threshold: u8,
 }
 
 #[derive(Debug, Default)]
@@ -83,6 +96,8 @@ struct RunCounters {
     confirmed: usize,
     skipped: usize,
     reviewed: usize,
+    rules_created: usize,
+    retroactive_applied: usize,
 }
 
 /// Entry point invoked from `TxCommand::Enrich`. Walks the candidate
@@ -145,6 +160,8 @@ pub async fn run(
         println!("Confirmed: {}", counters.confirmed);
         println!("Skipped: {}", counters.skipped);
         println!("Marked for review: {}", counters.reviewed);
+        println!("Rules created: {}", counters.rules_created);
+        println!("Retroactive applied: {}", counters.retroactive_applied);
     }
 
     Ok(())
@@ -247,17 +264,24 @@ async fn run_human(
                 if args.auto {
                     apply_decision(args, config, store, tx, &result, true).await?;
                     counters.auto_applied += 1;
+                    post_apply_rule_and_retroactive_human(
+                        args, config, store, pipeline, tx, &result, counters,
+                    )
+                    .await?;
                 } else {
-                    let _ = confirm_prompt(args, config, store, tx, &result, counters).await?;
+                    let _ = confirm_prompt(args, config, store, pipeline, tx, &result, counters)
+                        .await?;
                 }
             }
             EnrichmentDecision::Suggest { result } => {
                 print_suggestion(idx + 1, total, tx, &result, "Suggest");
-                let _ = confirm_prompt(args, config, store, tx, &result, counters).await?;
+                let _ =
+                    confirm_prompt(args, config, store, pipeline, tx, &result, counters).await?;
             }
             EnrichmentDecision::AskUser { result } => {
                 print_low_confidence(idx + 1, total, tx, &result);
-                let _ = free_text_prompt(args, config, store, tx, &result, counters).await?;
+                let _ =
+                    free_text_prompt(args, config, store, pipeline, tx, &result, counters).await?;
             }
         }
     }
@@ -324,6 +348,7 @@ async fn confirm_prompt(
     args: &EnrichArgs,
     config: &AppConfig,
     store: &dyn FinanceStore,
+    pipeline: &EnrichmentPipeline,
     tx: &UncategorizedRow,
     result: &EnrichmentResult,
     counters: &mut RunCounters,
@@ -337,6 +362,10 @@ async fn confirm_prompt(
         "" | "y" | "yes" => {
             apply_decision(args, config, store, tx, result, false).await?;
             counters.confirmed += 1;
+            post_apply_rule_and_retroactive_human(
+                args, config, store, pipeline, tx, result, counters,
+            )
+            .await?;
             Ok(true)
         }
         "n" | "no" => {
@@ -357,7 +386,8 @@ async fn confirm_prompt(
             let mut custom = String::new();
             std::io::stdin().read_line(&mut custom)?;
             let custom = custom.trim().to_string();
-            apply_custom_category(args, config, store, tx, result, &custom, counters).await
+            apply_custom_category(args, config, store, pipeline, tx, result, &custom, counters)
+                .await
         }
         _ => {
             counters.skipped += 1;
@@ -370,6 +400,7 @@ async fn free_text_prompt(
     args: &EnrichArgs,
     config: &AppConfig,
     store: &dyn FinanceStore,
+    pipeline: &EnrichmentPipeline,
     tx: &UncategorizedRow,
     result: &EnrichmentResult,
     counters: &mut RunCounters,
@@ -387,13 +418,15 @@ async fn free_text_prompt(
         println!("  ignored, mark for manual review");
         return Ok(false);
     }
-    apply_custom_category(args, config, store, tx, result, &answer, counters).await
+    apply_custom_category(args, config, store, pipeline, tx, result, &answer, counters).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_custom_category(
     args: &EnrichArgs,
     config: &AppConfig,
     store: &dyn FinanceStore,
+    pipeline: &EnrichmentPipeline,
     tx: &UncategorizedRow,
     result: &EnrichmentResult,
     custom: &str,
@@ -405,6 +438,10 @@ async fn apply_custom_category(
         r.subcategory = sub;
         apply_decision(args, config, store, tx, &r, false).await?;
         counters.confirmed += 1;
+        post_apply_rule_and_retroactive_human(
+            args, config, store, pipeline, tx, &r, counters,
+        )
+        .await?;
         Ok(true)
     } else {
         println!("  formato inválido (esperado cat:subcat); ignored, mark for manual review");
@@ -500,6 +537,14 @@ enum MachineOutput<'a> {
     },
     #[serde(rename = "timeout")]
     Timeout { transaction_id: &'a str },
+    #[serde(rename = "retroactive")]
+    Retroactive {
+        transaction_id: &'a str,
+        keyword: &'a str,
+        category: &'a str,
+        subcategory: &'a str,
+        matches: Vec<RetroactiveMatch<'a>>,
+    },
     #[serde(rename = "done")]
     Done {
         processed: usize,
@@ -508,6 +553,15 @@ enum MachineOutput<'a> {
         skipped: usize,
         reviewed: usize,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct RetroactiveMatch<'a> {
+    transaction_id: &'a str,
+    description: &'a str,
+    amount: String,
+    date: String,
+    score: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -615,7 +669,10 @@ async fn run_machine(
                 ));
             }
             MachineRead::Parsed(req) => {
-                handle_machine_action(args, config, store, tx, result, &req, counters).await?;
+                handle_machine_action(
+                    args, config, store, pipeline, &mut reader, tx, result, &req, counters,
+                )
+                .await?;
             }
         }
     }
@@ -665,10 +722,13 @@ async fn read_machine_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_machine_action(
     args: &EnrichArgs,
     config: &AppConfig,
     store: &dyn FinanceStore,
+    pipeline: &EnrichmentPipeline,
+    reader: &mut BufReader<tokio::io::Stdin>,
     tx: &UncategorizedRow,
     result: &EnrichmentResult,
     req: &MachineRequest,
@@ -686,6 +746,10 @@ async fn handle_machine_action(
         MachineAction::Confirm => {
             apply_decision(args, config, store, tx, result, false).await?;
             counters.confirmed += 1;
+            post_apply_rule_and_retroactive_machine(
+                args, config, store, pipeline, reader, tx, result, counters,
+            )
+            .await?;
         }
         MachineAction::Skip => {
             counters.skipped += 1;
@@ -702,9 +766,252 @@ async fn handle_machine_action(
             r.subcategory = subcategory.clone();
             apply_decision(args, config, store, tx, &r, false).await?;
             counters.confirmed += 1;
+            post_apply_rule_and_retroactive_machine(
+                args, config, store, pipeline, reader, tx, &r, counters,
+            )
+            .await?;
         }
     }
     Ok(())
+}
+
+// ── Rule creation + retroactive (Phase 4) ────────────────────────────
+
+/// Try to build a `RuleRecord` from the enrichment result and upsert it
+/// if no existing active rule already carries the same body. Returns
+/// `Some(keyword)` when callers should proceed with the retroactive
+/// search, or `None` if rule creation was skipped (duplicate, disabled,
+/// or invalid keyword).
+async fn ensure_rule(
+    args: &EnrichArgs,
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    _tx: &UncategorizedRow,
+    result: &EnrichmentResult,
+    counters: &mut RunCounters,
+) -> Result<Option<String>> {
+    if args.no_rule {
+        return Ok(None);
+    }
+    let rule: RuleRecord = match build_rule_record(result, &config.actor_id) {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("  (regra não gerada: {err})");
+            return Ok(None);
+        }
+    };
+    let keyword = keyword_from_result(result)?;
+    if !args.dry_run {
+        let existing = store
+            .active_rules()
+            .await
+            .context("falha ao carregar regras ativas")?;
+        if existing.iter().any(|r| r.body == rule.body) {
+            println!("  Regra equivalente já existe — pulando criação.");
+            return Ok(Some(keyword));
+        }
+        store
+            .upsert_rules(std::slice::from_ref(&rule))
+            .await
+            .context("falha ao gravar regra gerada")?;
+        counters.rules_created += 1;
+        println!("  Regra criada: {}", rule.body);
+    } else {
+        println!("  (dry-run) regra que seria criada: {}", rule.body);
+    }
+    Ok(Some(keyword))
+}
+
+/// Apply `category_id` to every retroactive `match` using
+/// `category_source = "enriched:retroactive"`. Emits one audit event per
+/// transaction.
+async fn apply_retroactive_batch(
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    matches: &[(TransactionRecord, u32)],
+    result: &EnrichmentResult,
+    counters: &mut RunCounters,
+) -> Result<usize> {
+    let category_id = format!("{}:{}", result.category, result.subcategory);
+    let mut applied = 0usize;
+    for (rec, score) in matches {
+        let idempotency_key = format!(
+            "enrich_retroactive:{}:{}",
+            rec.transaction_id,
+            uuid::Uuid::now_v7()
+        );
+        store
+            .annotate_transaction(
+                &rec.transaction_id,
+                Some(&category_id),
+                Some("enriched:retroactive"),
+                Some(&result.reasoning),
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await
+            .with_context(|| {
+                format!("annotate_transaction falhou para {}", rec.transaction_id)
+            })?;
+        store
+            .mark_enrichment_attempted(
+                &rec.transaction_id,
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await?;
+        let audit = AuditEvent::from_entity(
+            "transaction",
+            &rec.transaction_id,
+            "enrich_retroactive",
+            &config.actor_id,
+            &idempotency_key,
+            serde_json::json!({
+                "category_id": category_id,
+                "category_source": "enriched:retroactive",
+                "score": score,
+                "merchant_name": result.merchant_name,
+            }),
+        );
+        store.insert_audit_events(&[audit]).await?;
+        applied += 1;
+    }
+    counters.retroactive_applied += applied;
+    Ok(applied)
+}
+
+/// Human-mode: ensure rule then prompt the user to confirm retroactive
+/// application of any fuzzy-matched past transactions.
+async fn post_apply_rule_and_retroactive_human(
+    args: &EnrichArgs,
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    pipeline: &EnrichmentPipeline,
+    tx: &UncategorizedRow,
+    result: &EnrichmentResult,
+    counters: &mut RunCounters,
+) -> Result<()> {
+    let keyword = match ensure_rule(args, config, store, tx, result, counters).await? {
+        Some(k) => k,
+        None => return Ok(()),
+    };
+    let threshold = args.retroactive_threshold;
+    let matches = pipeline
+        .find_retroactive_matches(store, &keyword, &tx.transaction_id, threshold)
+        .await?;
+    if matches.is_empty() {
+        return Ok(());
+    }
+    println!(
+        "  Encontrei {} transações similares. Aplicar \"{}:{}\" a todas? [Y/n]",
+        matches.len(),
+        result.category,
+        result.subcategory
+    );
+    for (rec, score) in &matches {
+        println!(
+            "    {} | {} | R$ {} (score: {})",
+            rec.transaction_date,
+            rec.description.trim(),
+            rec.amount,
+            score_to_percent(*score)
+        );
+    }
+    print!("  > ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let answer = line.trim().to_lowercase();
+    let accept = matches!(answer.as_str(), "" | "y" | "yes");
+    if !accept {
+        println!("  Retroativo ignorado.");
+        return Ok(());
+    }
+    if args.dry_run {
+        println!("  (dry-run) seria(m) aplicada(s) {} transações.", matches.len());
+        return Ok(());
+    }
+    let applied = apply_retroactive_batch(config, store, &matches, result, counters).await?;
+    println!("  {applied} transações retroativas atualizadas.");
+    Ok(())
+}
+
+/// Machine-mode: emit a `retroactive` NDJSON line with the candidate
+/// list and wait for the agent's `confirm`/`skip` decision.
+#[allow(clippy::too_many_arguments)]
+async fn post_apply_rule_and_retroactive_machine(
+    args: &EnrichArgs,
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    pipeline: &EnrichmentPipeline,
+    reader: &mut BufReader<tokio::io::Stdin>,
+    tx: &UncategorizedRow,
+    result: &EnrichmentResult,
+    counters: &mut RunCounters,
+) -> Result<()> {
+    let keyword = match ensure_rule(args, config, store, tx, result, counters).await? {
+        Some(k) => k,
+        None => return Ok(()),
+    };
+    let threshold = args.retroactive_threshold;
+    let matches = pipeline
+        .find_retroactive_matches(store, &keyword, &tx.transaction_id, threshold)
+        .await?;
+    if matches.is_empty() {
+        return Ok(());
+    }
+    let payload_matches: Vec<RetroactiveMatch> = matches
+        .iter()
+        .map(|(rec, score)| RetroactiveMatch {
+            transaction_id: &rec.transaction_id,
+            description: &rec.description,
+            amount: format!("{}", rec.amount),
+            date: rec.transaction_date.to_string(),
+            score: *score,
+        })
+        .collect();
+    emit_ndjson_line(&MachineOutput::Retroactive {
+        transaction_id: &tx.transaction_id,
+        keyword: &keyword,
+        category: &result.category,
+        subcategory: &result.subcategory,
+        matches: payload_matches,
+    })?;
+    match read_machine_request(reader, args.machine_timeout).await? {
+        MachineRead::Eof => Ok(()),
+        MachineRead::Timeout => {
+            emit_ndjson_line(&MachineOutput::Timeout {
+                transaction_id: &tx.transaction_id,
+            })?;
+            Err(anyhow!(
+                "Timeout aguardando resposta retroativa para {}",
+                tx.transaction_id
+            ))
+        }
+        MachineRead::Parsed(req) => {
+            match req.action {
+                MachineAction::Confirm => {
+                    if !args.dry_run {
+                        apply_retroactive_batch(config, store, &matches, result, counters)
+                            .await?;
+                    }
+                }
+                MachineAction::Skip | MachineAction::MarkReviewed => {}
+                MachineAction::Custom { category, subcategory } => {
+                    // Agent overrode the category for the batch — apply
+                    // with the override.
+                    let mut overridden = result.clone();
+                    overridden.category = category;
+                    overridden.subcategory = subcategory;
+                    if !args.dry_run {
+                        apply_retroactive_batch(config, store, &matches, &overridden, counters)
+                            .await?;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Emit a single NDJSON line to stdout and flush. Returns an error if
@@ -837,6 +1144,33 @@ mod tests {
         let s = serde_json::to_string(&payload).unwrap();
         assert!(s.contains("\"type\":\"timeout\""));
         assert!(s.contains("\"transaction_id\":\"tx-9\""));
+    }
+
+    #[test]
+    fn test_machine_retroactive_serialization() {
+        let matches = vec![RetroactiveMatch {
+            transaction_id: "old-1",
+            description: "Sapiens Parque",
+            amount: "-18.50".into(),
+            date: "2026-03-12".into(),
+            score: 184,
+        }];
+        let payload = MachineOutput::Retroactive {
+            transaction_id: "tx-1",
+            keyword: "sapiens",
+            category: "alimentacao",
+            subcategory: "restaurantes",
+            matches,
+        };
+        let s = serde_json::to_string(&payload).unwrap();
+        assert!(s.contains("\"type\":\"retroactive\""));
+        assert!(s.contains("\"transaction_id\":\"tx-1\""));
+        assert!(s.contains("\"keyword\":\"sapiens\""));
+        assert!(s.contains("\"category\":\"alimentacao\""));
+        assert!(s.contains("\"subcategory\":\"restaurantes\""));
+        assert!(s.contains("\"matches\""));
+        assert!(s.contains("\"score\":184"));
+        assert!(s.contains("\"description\":\"Sapiens Parque\""));
     }
 
     // ensure metadata_json round-trips don't break our pointer reads

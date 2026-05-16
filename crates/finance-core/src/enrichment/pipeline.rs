@@ -18,6 +18,7 @@
 
 use crate::config::AppConfig;
 use crate::enrichment::cnpj::{extract_cnpj, lookup_cnpj};
+use crate::enrichment::fuzzy::fuzzy_filter;
 use crate::enrichment::heuristics::{base_heuristics, detect_recurring};
 use crate::enrichment::llm::{enrich as llm_enrich, LlmProvider};
 use crate::enrichment::pluggy_map::map_pluggy_category;
@@ -26,7 +27,7 @@ use crate::enrichment::types::{
     CategoryHint, CnpjInfo, ContextTx, EnrichmentDecision, EnrichmentResult, FewShotExample,
     Heuristics,
 };
-use crate::models::UncategorizedRow;
+use crate::models::{TransactionRecord, UncategorizedRow};
 use crate::storage::FinanceStore;
 use anyhow::{Context, Result};
 use chrono::{Datelike, Timelike};
@@ -135,6 +136,25 @@ impl EnrichmentPipeline {
             out.push((record.transaction_id, decision));
         }
         Ok(out)
+    }
+
+    /// Retroactive match search: SQL substring prefilter via
+    /// `similar_transactions`, then nucleo fuzzy re-scoring with a
+    /// percentage threshold. Returns `(record, score)` sorted by score
+    /// descending. Only uncategorized / weakly-categorized rows are
+    /// considered so we never overwrite a user's manual decision.
+    pub async fn find_retroactive_matches(
+        &self,
+        store: &dyn FinanceStore,
+        keyword: &str,
+        exclude_id: &str,
+        threshold_percent: u8,
+    ) -> Result<Vec<(TransactionRecord, u32)>> {
+        let candidates = store
+            .similar_transactions(keyword, exclude_id, true)
+            .await
+            .context("similar_transactions falhou no find_retroactive_matches")?;
+        Ok(fuzzy_filter(keyword, candidates, threshold_percent))
     }
 
     /// Pure-data signal gathering. Exposed for tests so the prompt
@@ -723,6 +743,38 @@ mod tests {
             derive_merchant_token("COMPRA NO DEBITO BRASIL BERRY").as_deref(),
             Some("brasil")
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_retroactive_matches_threshold_respected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipeline = build_pipeline(&tmp);
+        let store = MockStore {
+            similar: vec![
+                tx_record("near", "Sapiens Parque Loja", -1000, "unclassified"),
+                tx_record("far", "Posto Shell BR-101", -5000, "unclassified"),
+            ],
+            ..MockStore::default()
+        };
+        // High threshold filters out the unrelated row.
+        let matches = pipeline
+            .find_retroactive_matches(&store, "sapiens", "current", 60)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0.transaction_id, "near");
+
+        // Low threshold may keep both; in any case scores must be
+        // sorted descending and the "near" row must come first.
+        let matches = pipeline
+            .find_retroactive_matches(&store, "sapiens", "current", 0)
+            .await
+            .unwrap();
+        assert!(!matches.is_empty());
+        for w in matches.windows(2) {
+            assert!(w[0].1 >= w[1].1);
+        }
+        assert_eq!(matches[0].0.transaction_id, "near");
     }
 
     #[test]
