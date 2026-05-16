@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/feliperun/finance-os/compare/v0.9.0...v0.10.0) (2026-05-16)
+
+
+### Features
+
+* **enrichment:** LLM-driven transaction enrichment pipeline ([#19](https://github.com/feliperun/finance-os/issues/19)) ([d112a37](https://github.com/feliperun/finance-os/commit/d112a3770242550d37187e12d633c5099fd1aba7))
+
 ## [0.9.0](https://github.com/feliperun/finance-os/compare/v0.8.0...v0.9.0) (2026-05-15)
 
 
