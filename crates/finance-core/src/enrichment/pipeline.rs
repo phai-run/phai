@@ -60,8 +60,8 @@ impl EnrichmentPipeline {
     /// Construct a pipeline. The LLM provider is resolved from env +
     /// config via [`LlmProvider::from_env_or_config`].
     pub fn new(config: &AppConfig) -> Result<Self> {
-        let provider = LlmProvider::from_env_or_config(config)
-            .context("falha ao resolver provedor LLM")?;
+        let provider =
+            LlmProvider::from_env_or_config(config).context("falha ao resolver provedor LLM")?;
         Self::with_provider(config, provider)
     }
 
@@ -167,20 +167,15 @@ impl EnrichmentPipeline {
         // 1. CNPJ extraction + lookup.
         let cnpj_extracted = extract_cnpj(&tx.metadata_json);
         let cnpj_info = match &cnpj_extracted {
-            Some(cnpj) => match lookup_cnpj(
-                &self.http,
-                &self.moka_cache,
-                &self.sqlite_path,
-                cnpj,
-            )
-            .await
-            {
-                Ok(info) => info,
-                Err(err) => {
-                    eprintln!("aviso: cnpj lookup falhou ({err:#}); seguindo sem cnpj");
-                    None
+            Some(cnpj) => {
+                match lookup_cnpj(&self.http, &self.moka_cache, &self.sqlite_path, cnpj).await {
+                    Ok(info) => info,
+                    Err(err) => {
+                        eprintln!("aviso: cnpj lookup falhou ({err:#}); seguindo sem cnpj");
+                        None
+                    }
                 }
-            },
+            }
             None => None,
         };
 
@@ -250,9 +245,13 @@ impl EnrichmentPipeline {
         let hour = extract_hour(&tx.metadata_json);
         let weekday = tx.transaction_date.weekday();
         let mut heuristics = base_heuristics(tx.amount, hour, weekday);
-        heuristics.is_recurring =
-            detect_recurring(store, cnpj_extracted.as_deref(), tx.amount, &tx.transaction_id)
-                .await;
+        heuristics.is_recurring = detect_recurring(
+            store,
+            cnpj_extracted.as_deref(),
+            tx.amount,
+            &tx.transaction_id,
+        )
+        .await;
 
         // 6. Receiver name + document type for the prompt.
         let receiver_name = tx
@@ -326,8 +325,20 @@ fn apply_pluggy_boost(result: &mut EnrichmentResult, hint: &CategoryHint) {
 /// `similar_transactions` for few-shot mining.
 fn derive_merchant_token(description: &str) -> Option<String> {
     const NOISE: &[&str] = &[
-        "PIX", "TRANSFERENCIA", "TRANSFERÊNCIA", "PAGAMENTO", "COMPRA", "LTDA", "SA",
-        "DEBITO", "DÉBITO", "CREDITO", "CRÉDITO", "ENVIADA", "RECEBIDA", "TRANSF",
+        "PIX",
+        "TRANSFERENCIA",
+        "TRANSFERÊNCIA",
+        "PAGAMENTO",
+        "COMPRA",
+        "LTDA",
+        "SA",
+        "DEBITO",
+        "DÉBITO",
+        "CREDITO",
+        "CRÉDITO",
+        "ENVIADA",
+        "RECEBIDA",
+        "TRANSF",
     ];
     description
         .split(|c: char| !c.is_alphanumeric())
@@ -384,15 +395,15 @@ mod tests {
     use super::*;
     use crate::enrichment::types::{AUTO_THRESHOLD, SUGGEST_THRESHOLD};
     use crate::models::AuditEvent;
-    use crate::splits::{
-        ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
-        TransactionSplitLineRecord, TransactionSplitRecord,
-    };
     use crate::models::{
         AccountRecord, AccountSnapshotRecord, BudgetStatusRow, CardClosedTransactionRow,
         CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, DailyPulseItem,
         ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
         TransactionRecord, UncategorizedRow,
+    };
+    use crate::splits::{
+        ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
+        TransactionSplitLineRecord, TransactionSplitRecord,
     };
     use async_trait::async_trait;
     use chrono::NaiveDate;
@@ -414,23 +425,47 @@ mod tests {
 
     #[async_trait(?Send)]
     impl FinanceStore for MockStore {
-        async fn applied_migrations(&self) -> Result<BTreeSet<String>> { Ok(BTreeSet::new()) }
-        async fn apply_sql(&self, _sql: &str) -> Result<()> { Ok(()) }
-        async fn record_migration(&self, _v: &str) -> Result<()> { Ok(()) }
-        async fn upsert_accounts(&self, _: &[AccountRecord]) -> Result<usize> { Ok(0) }
-        async fn get_accounts(&self) -> Result<Vec<AccountRecord>> { Ok(vec![]) }
-        async fn insert_account_snapshots(&self, _: &[AccountSnapshotRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_transactions(&self, _: &[TransactionRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_rules(&self, _: &[RuleRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_categories(&self, _: &[CategoryRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> { Ok(0) }
+        async fn applied_migrations(&self) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
+        async fn apply_sql(&self, _sql: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn record_migration(&self, _v: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn upsert_accounts(&self, _: &[AccountRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn get_accounts(&self) -> Result<Vec<AccountRecord>> {
+            Ok(vec![])
+        }
+        async fn insert_account_snapshots(&self, _: &[AccountSnapshotRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_transactions(&self, _: &[TransactionRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_rules(&self, _: &[RuleRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_categories(&self, _: &[CategoryRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> {
+            Ok(0)
+        }
         async fn apply_transaction_split(
             &self,
             _split: &TransactionSplitRecord,
             _lines: &[TransactionSplitLineRecord],
             _items: &[ReceiptItemRecord],
-        ) -> Result<()> { Ok(()) }
-        async fn insert_audit_events(&self, _: &[AuditEvent]) -> Result<usize> { Ok(0) }
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn insert_audit_events(&self, _: &[AuditEvent]) -> Result<usize> {
+            Ok(0)
+        }
         async fn annotate_transaction(
             &self,
             transaction_id: &str,
@@ -447,35 +482,127 @@ mod tests {
             ));
             Ok(())
         }
-        async fn find_transactions_by_description(&self, _: &str, _: usize) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
-        async fn latest_uncategorized_transactions(&self, _: usize) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
-        async fn existing_transaction_ids(&self, _: &[String]) -> Result<BTreeSet<String>> { Ok(BTreeSet::new()) }
-        async fn transaction_by_id(&self, _: &str) -> Result<Option<TransactionRecord>> { Ok(None) }
-        async fn transaction_split_detail(&self, _: &str) -> Result<Option<TransactionSplitDetail>> { Ok(None) }
-        async fn clear_transaction_split(&self, _: &str, _: &str, _: &str, _: Option<&str>) -> Result<()> { Ok(()) }
-        async fn split_candidates(&self, _: NaiveDate) -> Result<Vec<SplitCandidateRow>> { Ok(vec![]) }
-        async fn item_prices(&self, _: &str, _: Option<NaiveDate>) -> Result<Vec<ItemPriceRow>> { Ok(vec![]) }
-        async fn all_rules(&self) -> Result<Vec<RuleRecord>> { Ok(vec![]) }
-        async fn active_rules(&self) -> Result<Vec<RuleRecord>> { Ok(vec![]) }
-        async fn internal_categories(&self) -> Result<BTreeSet<String>> { Ok(BTreeSet::new()) }
-        async fn transactions_with_context(&self, _: usize) -> Result<Vec<TransactionContextRow>> { Ok(vec![]) }
-        async fn count_transactions_with_context(&self) -> Result<i64> { Ok(0) }
-        async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> { Ok(None) }
-        async fn daily_pulse(&self, _: NaiveDate) -> Result<Vec<DailyPulseItem>> { Ok(vec![]) }
-        async fn effective_transactions_window(&self, _: NaiveDate, _: NaiveDate) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
-        async fn transactions_in_date_range(&self, _: Option<&str>, _: NaiveDate, _: NaiveDate) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
-        async fn monthly_spend(&self, _: Option<&str>) -> Result<Vec<MonthlySpendRow>> { Ok(vec![]) }
-        async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> { Ok(vec![]) }
-        async fn forecast_vs_actual(&self, _: Option<&str>) -> Result<Vec<ForecastVsActualRow>> { Ok(vec![]) }
-        async fn card_summary(&self, _: Option<&str>) -> Result<Vec<CardSummaryRow>> { Ok(vec![]) }
-        async fn card_closed_transactions(&self, _: Option<&str>) -> Result<Vec<CardClosedTransactionRow>> { Ok(vec![]) }
-        async fn card_reportable_transactions(&self, _: Option<&str>) -> Result<Vec<CardClosedTransactionRow>> { Ok(vec![]) }
-        async fn uncategorized(&self, _: usize) -> Result<Vec<UncategorizedRow>> { Ok(vec![]) }
-        async fn count_uncategorized(&self) -> Result<i64> { Ok(0) }
-        async fn count_rows(&self, _: &str) -> Result<i64> { Ok(0) }
-        async fn upsert_category_budget(&self, _: &CategoryBudgetRecord) -> Result<()> { Ok(()) }
-        async fn list_category_budgets(&self, _: Option<&str>) -> Result<Vec<CategoryBudgetRecord>> { Ok(vec![]) }
-        async fn budget_status_for_month(&self, _: &str) -> Result<Vec<BudgetStatusRow>> { Ok(vec![]) }
+        async fn find_transactions_by_description(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn latest_uncategorized_transactions(
+            &self,
+            _: usize,
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn existing_transaction_ids(&self, _: &[String]) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
+        async fn transaction_by_id(&self, _: &str) -> Result<Option<TransactionRecord>> {
+            Ok(None)
+        }
+        async fn transaction_split_detail(
+            &self,
+            _: &str,
+        ) -> Result<Option<TransactionSplitDetail>> {
+            Ok(None)
+        }
+        async fn clear_transaction_split(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn split_candidates(&self, _: NaiveDate) -> Result<Vec<SplitCandidateRow>> {
+            Ok(vec![])
+        }
+        async fn item_prices(&self, _: &str, _: Option<NaiveDate>) -> Result<Vec<ItemPriceRow>> {
+            Ok(vec![])
+        }
+        async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
+            Ok(vec![])
+        }
+        async fn active_rules(&self) -> Result<Vec<RuleRecord>> {
+            Ok(vec![])
+        }
+        async fn internal_categories(&self) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
+        async fn transactions_with_context(&self, _: usize) -> Result<Vec<TransactionContextRow>> {
+            Ok(vec![])
+        }
+        async fn count_transactions_with_context(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> {
+            Ok(None)
+        }
+        async fn daily_pulse(&self, _: NaiveDate) -> Result<Vec<DailyPulseItem>> {
+            Ok(vec![])
+        }
+        async fn effective_transactions_window(
+            &self,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn transactions_in_date_range(
+            &self,
+            _: Option<&str>,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn monthly_spend(&self, _: Option<&str>) -> Result<Vec<MonthlySpendRow>> {
+            Ok(vec![])
+        }
+        async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> {
+            Ok(vec![])
+        }
+        async fn forecast_vs_actual(&self, _: Option<&str>) -> Result<Vec<ForecastVsActualRow>> {
+            Ok(vec![])
+        }
+        async fn card_summary(&self, _: Option<&str>) -> Result<Vec<CardSummaryRow>> {
+            Ok(vec![])
+        }
+        async fn card_closed_transactions(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<CardClosedTransactionRow>> {
+            Ok(vec![])
+        }
+        async fn card_reportable_transactions(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<CardClosedTransactionRow>> {
+            Ok(vec![])
+        }
+        async fn uncategorized(&self, _: usize) -> Result<Vec<UncategorizedRow>> {
+            Ok(vec![])
+        }
+        async fn count_uncategorized(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn count_rows(&self, _: &str) -> Result<i64> {
+            Ok(0)
+        }
+        async fn upsert_category_budget(&self, _: &CategoryBudgetRecord) -> Result<()> {
+            Ok(())
+        }
+        async fn list_category_budgets(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<CategoryBudgetRecord>> {
+            Ok(vec![])
+        }
+        async fn budget_status_for_month(&self, _: &str) -> Result<Vec<BudgetStatusRow>> {
+            Ok(vec![])
+        }
         async fn transactions_on_date(
             &self,
             _: NaiveDate,
@@ -597,7 +724,10 @@ mod tests {
         let store = MockStore::default();
         let tx = cpf_tx();
         let signals = pipeline.gather_signals(&tx, &store).await;
-        assert!(signals.cnpj_info.is_none(), "CPF must not trigger BrasilAPI");
+        assert!(
+            signals.cnpj_info.is_none(),
+            "CPF must not trigger BrasilAPI"
+        );
         assert_eq!(signals.document_type.as_deref(), Some("CPF"));
         assert_eq!(signals.receiver_name.as_deref(), Some("JOICE ANTONIA"));
     }

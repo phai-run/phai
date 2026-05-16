@@ -7,7 +7,7 @@
 //!   - "is_recurring" is the most predictive signal we have for a
 //!     personal-spending model.
 
-use super::types::{HourBucket, Heuristics};
+use super::types::{Heuristics, HourBucket};
 use crate::storage::FinanceStore;
 use chrono::Weekday;
 use rust_decimal::Decimal;

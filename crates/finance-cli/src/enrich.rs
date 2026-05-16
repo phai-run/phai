@@ -19,9 +19,7 @@ use finance_core::enrichment::fuzzy::score_to_percent;
 use finance_core::enrichment::llm::LlmProvider;
 use finance_core::enrichment::pipeline::{mark_attempted, EnrichmentPipeline};
 use finance_core::enrichment::rule_gen::{build_rule_record, keyword_from_result};
-use finance_core::enrichment::types::{
-    CnpjInfo, EnrichmentDecision, EnrichmentResult,
-};
+use finance_core::enrichment::types::{CnpjInfo, EnrichmentDecision, EnrichmentResult};
 use finance_core::models::{AuditEvent, RuleRecord, TransactionRecord, UncategorizedRow};
 use finance_core::storage::FinanceStore;
 use serde::{Deserialize, Serialize};
@@ -103,11 +101,7 @@ struct RunCounters {
 /// Entry point invoked from `TxCommand::Enrich`. Walks the candidate
 /// list, runs the pipeline, and dispatches to either the human or the
 /// machine flow.
-pub async fn run(
-    args: EnrichArgs,
-    config: &AppConfig,
-    store: &dyn FinanceStore,
-) -> Result<()> {
+pub async fn run(args: EnrichArgs, config: &AppConfig, store: &dyn FinanceStore) -> Result<()> {
     // Provider/model overrides land as env vars so the pipeline picks
     // them up via `LlmProvider::from_env_or_config`.
     let mut overlay = config.clone();
@@ -322,11 +316,7 @@ async fn apply_auto_decision(
     result: &EnrichmentResult,
 ) -> Result<()> {
     let category_id = format!("{}:{}", result.category, result.subcategory);
-    let idempotency_key = format!(
-        "enrich_sync:{}:{}",
-        tx.transaction_id,
-        uuid::Uuid::now_v7()
-    );
+    let idempotency_key = format!("enrich_sync:{}:{}", tx.transaction_id, uuid::Uuid::now_v7());
     store
         .annotate_transaction(
             &tx.transaction_id,
@@ -369,10 +359,7 @@ async fn try_generate_rule(
         Ok(r) => r,
         Err(_) => return Ok(()), // keyword too short / stopword
     };
-    let existing = store
-        .active_rules()
-        .await
-        .context("active_rules falhou")?;
+    let existing = store.active_rules().await.context("active_rules falhou")?;
     if existing.iter().any(|r| r.body == rule.body) {
         return Ok(());
     }
@@ -395,9 +382,7 @@ async fn collect_candidates(
             .await?
             .ok_or_else(|| anyhow!("Transação {id} não encontrada"))?;
         if !args.retry && record.enrichment_attempted_at.is_some() {
-            bail!(
-                "Transação {id} já foi processada (use --retry para re-processar)"
-            );
+            bail!("Transação {id} já foi processada (use --retry para re-processar)");
         }
         return Ok(vec![UncategorizedRow {
             transaction_id: record.transaction_id,
@@ -464,12 +449,7 @@ async fn run_human(
         let decision = match pipeline.run_one(tx, store).await {
             Ok(d) => d,
             Err(err) => {
-                eprintln!(
-                    "[{}/{}] {} | erro: {err:#}",
-                    idx + 1,
-                    total,
-                    tx.description
-                );
+                eprintln!("[{}/{}] {} | erro: {err:#}", idx + 1, total, tx.description);
                 continue;
             }
         };
@@ -538,7 +518,12 @@ fn print_suggestion(
     }
 }
 
-fn print_low_confidence(idx: usize, total: usize, tx: &UncategorizedRow, result: &EnrichmentResult) {
+fn print_low_confidence(
+    idx: usize,
+    total: usize,
+    tx: &UncategorizedRow,
+    result: &EnrichmentResult,
+) {
     println!(
         "[{}/{}] {} | R$ {} | {}",
         idx,
@@ -654,10 +639,8 @@ async fn apply_custom_category(
         r.subcategory = sub;
         apply_decision(args, config, store, tx, &r, false).await?;
         counters.confirmed += 1;
-        post_apply_rule_and_retroactive_human(
-            args, config, store, pipeline, tx, &r, counters,
-        )
-        .await?;
+        post_apply_rule_and_retroactive_human(args, config, store, pipeline, tx, &r, counters)
+            .await?;
         Ok(true)
     } else {
         println!("  formato inválido (esperado cat:subcat); ignored, mark for manual review");
@@ -700,12 +683,12 @@ async fn apply_decision(
         return Ok(());
     }
     let category_id = format!("{}:{}", result.category, result.subcategory);
-    let source = if is_auto { "enriched:llm" } else { "enriched:user" };
-    let idempotency_key = format!(
-        "enrich:{}:{}",
-        tx.transaction_id,
-        uuid::Uuid::now_v7()
-    );
+    let source = if is_auto {
+        "enriched:llm"
+    } else {
+        "enriched:user"
+    };
+    let idempotency_key = format!("enrich:{}:{}", tx.transaction_id, uuid::Uuid::now_v7());
     store
         .annotate_transaction(
             &tx.transaction_id,
@@ -720,7 +703,11 @@ async fn apply_decision(
     let audit = AuditEvent::from_entity(
         "transaction",
         &tx.transaction_id,
-        if is_auto { "enrich_auto" } else { "enrich_confirmed" },
+        if is_auto {
+            "enrich_auto"
+        } else {
+            "enrich_confirmed"
+        },
         &config.actor_id,
         &idempotency_key,
         serde_json::json!({
@@ -826,10 +813,7 @@ async fn run_machine(
             Ok(d) => d,
             Err(err) => {
                 // Emit a "timeout"-shaped error line for the agent.
-                eprintln!(
-                    "warn: enrichment failed for {}: {err:#}",
-                    tx.transaction_id
-                );
+                eprintln!("warn: enrichment failed for {}: {err:#}", tx.transaction_id);
                 counters.skipped += 1;
                 continue;
             }
@@ -886,7 +870,15 @@ async fn run_machine(
             }
             MachineRead::Parsed(req) => {
                 handle_machine_action(
-                    args, config, store, pipeline, &mut reader, tx, result, &req, counters,
+                    args,
+                    config,
+                    store,
+                    pipeline,
+                    &mut reader,
+                    tx,
+                    result,
+                    &req,
+                    counters,
                 )
                 .await?;
             }
@@ -976,7 +968,10 @@ async fn handle_machine_action(
             }
             counters.reviewed += 1;
         }
-        MachineAction::Custom { category, subcategory } => {
+        MachineAction::Custom {
+            category,
+            subcategory,
+        } => {
             let mut r = result.clone();
             r.category = category.clone();
             r.subcategory = subcategory.clone();
@@ -1066,15 +1061,9 @@ async fn apply_retroactive_batch(
                 &idempotency_key,
             )
             .await
-            .with_context(|| {
-                format!("annotate_transaction falhou para {}", rec.transaction_id)
-            })?;
+            .with_context(|| format!("annotate_transaction falhou para {}", rec.transaction_id))?;
         store
-            .mark_enrichment_attempted(
-                &rec.transaction_id,
-                &config.actor_id,
-                &idempotency_key,
-            )
+            .mark_enrichment_attempted(&rec.transaction_id, &config.actor_id, &idempotency_key)
             .await?;
         let audit = AuditEvent::from_entity(
             "transaction",
@@ -1144,7 +1133,10 @@ async fn post_apply_rule_and_retroactive_human(
         return Ok(());
     }
     if args.dry_run {
-        println!("  (dry-run) seria(m) aplicada(s) {} transações.", matches.len());
+        println!(
+            "  (dry-run) seria(m) aplicada(s) {} transações.",
+            matches.len()
+        );
         return Ok(());
     }
     let applied = apply_retroactive_batch(config, store, &matches, result, counters).await?;
@@ -1208,12 +1200,14 @@ async fn post_apply_rule_and_retroactive_machine(
             match req.action {
                 MachineAction::Confirm => {
                     if !args.dry_run {
-                        apply_retroactive_batch(config, store, &matches, result, counters)
-                            .await?;
+                        apply_retroactive_batch(config, store, &matches, result, counters).await?;
                     }
                 }
                 MachineAction::Skip | MachineAction::MarkReviewed => {}
-                MachineAction::Custom { category, subcategory } => {
+                MachineAction::Custom {
+                    category,
+                    subcategory,
+                } => {
                     // Agent overrode the category for the batch — apply
                     // with the override.
                     let mut overridden = result.clone();
@@ -1311,7 +1305,10 @@ mod tests {
         let raw = r#"{"transaction_id":"abc","action":"custom","category":"alimentacao","subcategory":"restaurantes"}"#;
         let req: MachineRequest = serde_json::from_str(raw).unwrap();
         match req.action {
-            MachineAction::Custom { category, subcategory } => {
+            MachineAction::Custom {
+                category,
+                subcategory,
+            } => {
                 assert_eq!(category, "alimentacao");
                 assert_eq!(subcategory, "restaurantes");
             }
@@ -1454,7 +1451,10 @@ mod tests {
         let store = NoopStore::default();
         let ids = vec!["tx-a".to_string(), "tx-b".to_string(), "tx-c".to_string()];
         let summary = enrich_after_sync(&config, &store, &ids, true).await;
-        assert_eq!(summary.processed, 0, "pipeline init failure should short-circuit before per-tx loop");
+        assert_eq!(
+            summary.processed, 0,
+            "pipeline init failure should short-circuit before per-tx loop"
+        );
         assert_eq!(summary.auto_applied, 0);
         assert_eq!(summary.deferred, 0);
         assert_eq!(summary.failed, 3);
@@ -1516,23 +1516,47 @@ mod test_support {
 
     #[async_trait(?Send)]
     impl FinanceStore for NoopStore {
-        async fn applied_migrations(&self) -> Result<BTreeSet<String>> { Ok(BTreeSet::new()) }
-        async fn apply_sql(&self, _: &str) -> Result<()> { Ok(()) }
-        async fn record_migration(&self, _: &str) -> Result<()> { Ok(()) }
-        async fn upsert_accounts(&self, _: &[AccountRecord]) -> Result<usize> { Ok(0) }
-        async fn get_accounts(&self) -> Result<Vec<AccountRecord>> { Ok(vec![]) }
-        async fn insert_account_snapshots(&self, _: &[AccountSnapshotRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_transactions(&self, _: &[TransactionRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_rules(&self, _: &[RuleRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_categories(&self, _: &[CategoryRecord]) -> Result<usize> { Ok(0) }
-        async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> { Ok(0) }
+        async fn applied_migrations(&self) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
+        async fn apply_sql(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn record_migration(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn upsert_accounts(&self, _: &[AccountRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn get_accounts(&self) -> Result<Vec<AccountRecord>> {
+            Ok(vec![])
+        }
+        async fn insert_account_snapshots(&self, _: &[AccountSnapshotRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_transactions(&self, _: &[TransactionRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_rules(&self, _: &[RuleRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_categories(&self, _: &[CategoryRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> {
+            Ok(0)
+        }
         async fn apply_transaction_split(
             &self,
             _: &TransactionSplitRecord,
             _: &[TransactionSplitLineRecord],
             _: &[ReceiptItemRecord],
-        ) -> Result<()> { Ok(()) }
-        async fn insert_audit_events(&self, _: &[AuditEvent]) -> Result<usize> { Ok(0) }
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn insert_audit_events(&self, _: &[AuditEvent]) -> Result<usize> {
+            Ok(0)
+        }
         async fn annotate_transaction(
             &self,
             _: &str,
@@ -1541,16 +1565,22 @@ mod test_support {
             _: Option<&str>,
             _: &str,
             _: &str,
-        ) -> Result<()> { Ok(()) }
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn find_transactions_by_description(
             &self,
             _: &str,
             _: usize,
-        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
         async fn latest_uncategorized_transactions(
             &self,
             _: usize,
-        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
         async fn existing_transaction_ids(&self, _: &[String]) -> Result<BTreeSet<String>> {
             Ok(BTreeSet::new())
         }
@@ -1561,71 +1591,102 @@ mod test_support {
         async fn transaction_split_detail(
             &self,
             _: &str,
-        ) -> Result<Option<TransactionSplitDetail>> { Ok(None) }
+        ) -> Result<Option<TransactionSplitDetail>> {
+            Ok(None)
+        }
         async fn clear_transaction_split(
             &self,
             _: &str,
             _: &str,
             _: &str,
             _: Option<&str>,
-        ) -> Result<()> { Ok(()) }
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn split_candidates(&self, _: NaiveDate) -> Result<Vec<SplitCandidateRow>> {
             Ok(vec![])
         }
-        async fn item_prices(
-            &self,
-            _: &str,
-            _: Option<NaiveDate>,
-        ) -> Result<Vec<ItemPriceRow>> { Ok(vec![]) }
-        async fn all_rules(&self) -> Result<Vec<RuleRecord>> { Ok(vec![]) }
-        async fn active_rules(&self) -> Result<Vec<RuleRecord>> { Ok(vec![]) }
-        async fn internal_categories(&self) -> Result<BTreeSet<String>> { Ok(BTreeSet::new()) }
-        async fn transactions_with_context(
-            &self,
-            _: usize,
-        ) -> Result<Vec<TransactionContextRow>> { Ok(vec![]) }
-        async fn count_transactions_with_context(&self) -> Result<i64> { Ok(0) }
-        async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> { Ok(None) }
-        async fn daily_pulse(&self, _: NaiveDate) -> Result<Vec<DailyPulseItem>> { Ok(vec![]) }
+        async fn item_prices(&self, _: &str, _: Option<NaiveDate>) -> Result<Vec<ItemPriceRow>> {
+            Ok(vec![])
+        }
+        async fn all_rules(&self) -> Result<Vec<RuleRecord>> {
+            Ok(vec![])
+        }
+        async fn active_rules(&self) -> Result<Vec<RuleRecord>> {
+            Ok(vec![])
+        }
+        async fn internal_categories(&self) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
+        async fn transactions_with_context(&self, _: usize) -> Result<Vec<TransactionContextRow>> {
+            Ok(vec![])
+        }
+        async fn count_transactions_with_context(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> {
+            Ok(None)
+        }
+        async fn daily_pulse(&self, _: NaiveDate) -> Result<Vec<DailyPulseItem>> {
+            Ok(vec![])
+        }
         async fn effective_transactions_window(
             &self,
             _: NaiveDate,
             _: NaiveDate,
-        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
         async fn transactions_in_date_range(
             &self,
             _: Option<&str>,
             _: NaiveDate,
             _: NaiveDate,
-        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
         async fn monthly_spend(&self, _: Option<&str>) -> Result<Vec<MonthlySpendRow>> {
             Ok(vec![])
         }
-        async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> { Ok(vec![]) }
-        async fn forecast_vs_actual(
-            &self,
-            _: Option<&str>,
-        ) -> Result<Vec<ForecastVsActualRow>> { Ok(vec![]) }
-        async fn card_summary(
-            &self,
-            _: Option<&str>,
-        ) -> Result<Vec<CardSummaryRow>> { Ok(vec![]) }
+        async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> {
+            Ok(vec![])
+        }
+        async fn forecast_vs_actual(&self, _: Option<&str>) -> Result<Vec<ForecastVsActualRow>> {
+            Ok(vec![])
+        }
+        async fn card_summary(&self, _: Option<&str>) -> Result<Vec<CardSummaryRow>> {
+            Ok(vec![])
+        }
         async fn card_closed_transactions(
             &self,
             _: Option<&str>,
-        ) -> Result<Vec<CardClosedTransactionRow>> { Ok(vec![]) }
+        ) -> Result<Vec<CardClosedTransactionRow>> {
+            Ok(vec![])
+        }
         async fn card_reportable_transactions(
             &self,
             _: Option<&str>,
-        ) -> Result<Vec<CardClosedTransactionRow>> { Ok(vec![]) }
-        async fn uncategorized(&self, _: usize) -> Result<Vec<UncategorizedRow>> { Ok(vec![]) }
-        async fn count_uncategorized(&self) -> Result<i64> { Ok(0) }
-        async fn count_rows(&self, _: &str) -> Result<i64> { Ok(0) }
-        async fn upsert_category_budget(&self, _: &CategoryBudgetRecord) -> Result<()> { Ok(()) }
+        ) -> Result<Vec<CardClosedTransactionRow>> {
+            Ok(vec![])
+        }
+        async fn uncategorized(&self, _: usize) -> Result<Vec<UncategorizedRow>> {
+            Ok(vec![])
+        }
+        async fn count_uncategorized(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn count_rows(&self, _: &str) -> Result<i64> {
+            Ok(0)
+        }
+        async fn upsert_category_budget(&self, _: &CategoryBudgetRecord) -> Result<()> {
+            Ok(())
+        }
         async fn list_category_budgets(
             &self,
             _: Option<&str>,
-        ) -> Result<Vec<CategoryBudgetRecord>> { Ok(vec![]) }
+        ) -> Result<Vec<CategoryBudgetRecord>> {
+            Ok(vec![])
+        }
         async fn budget_status_for_month(&self, _: &str) -> Result<Vec<BudgetStatusRow>> {
             Ok(vec![])
         }
@@ -1634,18 +1695,19 @@ mod test_support {
             _: NaiveDate,
             _: &str,
             _: &str,
-        ) -> Result<Vec<ContextTx>> { Ok(vec![]) }
+        ) -> Result<Vec<ContextTx>> {
+            Ok(vec![])
+        }
         async fn similar_transactions(
             &self,
             _: &str,
             _: &str,
             _: bool,
-        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
-        async fn mark_enrichment_attempted(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-        ) -> Result<()> { Ok(()) }
+        ) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn mark_enrichment_attempted(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
     }
 }

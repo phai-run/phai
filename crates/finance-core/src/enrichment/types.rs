@@ -212,9 +212,7 @@ mod tests {
         };
         let serialized = serde_json::to_string(&value).unwrap();
         let reasoning_pos = serialized.find("\"reasoning\"").expect("has key");
-        let merchant_pos = serialized
-            .find("\"merchant_name\"")
-            .expect("has key");
+        let merchant_pos = serialized.find("\"merchant_name\"").expect("has key");
         assert!(
             reasoning_pos < merchant_pos,
             "reasoning must serialize before merchant_name (got {serialized})"

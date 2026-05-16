@@ -1705,11 +1705,7 @@ impl FinanceStore for LocalStore {
         )?;
         let rows = stmt
             .query_map(
-                params![
-                    date.format("%Y-%m-%d").to_string(),
-                    account_id,
-                    exclude_id,
-                ],
+                params![date.format("%Y-%m-%d").to_string(), account_id, exclude_id,],
                 |row| {
                     let description: String = row.get(0)?;
                     let amount: String = row.get(1)?;
@@ -1725,8 +1721,7 @@ impl FinanceStore for LocalStore {
             let amount = parse_decimal(amount_text)
                 .map_err(|err| anyhow::anyhow!("amount inválido em transactions_on_date: {err}"))?;
             let metadata: Value = serde_json::from_str(&metadata_text).unwrap_or(Value::Null);
-            let pluggy_category =
-                crate::enrichment::context::extract_pluggy_category(&metadata);
+            let pluggy_category = crate::enrichment::context::extract_pluggy_category(&metadata);
             out.push(crate::enrichment::types::ContextTx {
                 description,
                 amount,

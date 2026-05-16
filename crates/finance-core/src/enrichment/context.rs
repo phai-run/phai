@@ -57,7 +57,10 @@ mod tests {
     #[test]
     fn test_extract_pluggy_category() {
         let metadata = json!({ "pluggy_category": "Groceries" });
-        assert_eq!(extract_pluggy_category(&metadata).as_deref(), Some("Groceries"));
+        assert_eq!(
+            extract_pluggy_category(&metadata).as_deref(),
+            Some("Groceries")
+        );
 
         let missing = json!({});
         assert!(extract_pluggy_category(&missing).is_none());

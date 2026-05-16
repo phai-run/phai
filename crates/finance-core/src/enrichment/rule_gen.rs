@@ -77,9 +77,7 @@ pub fn generate_rule_body(result: &EnrichmentResult) -> Result<String> {
     let body = if sub.is_empty() {
         format!("if description contains \"{kw}\" then category {cat}")
     } else {
-        format!(
-            "if description contains \"{kw}\" then category {cat}:{sub}"
-        )
+        format!("if description contains \"{kw}\" then category {cat}:{sub}")
     };
     Ok(body)
 }
@@ -174,10 +172,16 @@ mod tests {
         // produce byte-identical bodies (regardless of timestamps).
         let a = sample("Sapiens", "alimentacao", "restaurantes");
         let b = sample("sapiens", "alimentacao", "restaurantes");
-        assert_eq!(generate_rule_body(&a).unwrap(), generate_rule_body(&b).unwrap());
+        assert_eq!(
+            generate_rule_body(&a).unwrap(),
+            generate_rule_body(&b).unwrap()
+        );
 
         let c = sample("Sapiens", "lazer", "passeio");
-        assert_ne!(generate_rule_body(&a).unwrap(), generate_rule_body(&c).unwrap());
+        assert_ne!(
+            generate_rule_body(&a).unwrap(),
+            generate_rule_body(&c).unwrap()
+        );
     }
 
     #[test]

@@ -27,5 +27,5 @@ pub mod types;
 
 pub use types::{
     CategoryHint, CnpjInfo, ContextTx, EnrichmentDecision, EnrichmentResult, FewShotExample,
-    HourBucket, Heuristics, AUTO_THRESHOLD, SUGGEST_THRESHOLD,
+    Heuristics, HourBucket, AUTO_THRESHOLD, SUGGEST_THRESHOLD,
 };

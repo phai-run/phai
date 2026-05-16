@@ -310,8 +310,8 @@ fn optional_json(values: &[Option<String>], index: usize, field: &str) -> Result
 fn transaction_record_from_values(values: &[Option<String>]) -> Result<TransactionRecord> {
     let created_at = required_string(values, 14, "created_at")?;
     let updated_at = required_string(values, 15, "updated_at")?;
-    let enrichment_attempted_at = optional_string(values, 16)
-        .map(|raw| parse_datetime_or_now(Some(&raw)));
+    let enrichment_attempted_at =
+        optional_string(values, 16).map(|raw| parse_datetime_or_now(Some(&raw)));
     Ok(TransactionRecord {
         transaction_id: required_string(values, 0, "transaction_id")?,
         account_id: optional_string(values, 1),
@@ -2394,8 +2394,7 @@ impl FinanceStore for BigQueryStore {
             let description = required_string(&values, 0, "description")?;
             let amount = required_decimal(&values, 1, "amount")?;
             let pluggy_category = optional_string(&values, 2);
-            let order = optional_string(&values, 3)
-                .and_then(|raw| raw.parse::<i64>().ok());
+            let order = optional_string(&values, 3).and_then(|raw| raw.parse::<i64>().ok());
             out.push(crate::enrichment::types::ContextTx {
                 description,
                 amount,

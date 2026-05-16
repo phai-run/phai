@@ -91,29 +91,25 @@ impl LlmProvider {
             "anthropic" => {
                 let api_key = std::env::var("ANTHROPIC_API_KEY")
                     .context("ANTHROPIC_API_KEY ausente para provedor anthropic")?;
-                let model = model_override
-                    .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string());
+                let model = model_override.unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string());
                 Ok(Self::Anthropic { api_key, model })
             }
             "openai" => {
                 let api_key = std::env::var("OPENAI_API_KEY")
                     .context("OPENAI_API_KEY ausente para provedor openai")?;
-                let model = model_override
-                    .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+                let model = model_override.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
                 Ok(Self::Openai { api_key, model })
             }
             "deepseek" => {
                 let api_key = std::env::var("DEEPSEEK_API_KEY")
                     .context("DEEPSEEK_API_KEY ausente para provedor deepseek")?;
-                let model = model_override
-                    .unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string());
+                let model = model_override.unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string());
                 Ok(Self::Deepseek { api_key, model })
             }
             "ollama" => {
                 let base_url = std::env::var("OLLAMA_BASE_URL")
                     .unwrap_or_else(|_| DEFAULT_OLLAMA_BASE_URL.to_string());
-                let model = model_override
-                    .unwrap_or_else(|| DEFAULT_OLLAMA_MODEL.to_string());
+                let model = model_override.unwrap_or_else(|| DEFAULT_OLLAMA_MODEL.to_string());
                 Ok(Self::Ollama { base_url, model })
             }
             other => Err(anyhow!("provedor LLM desconhecido: {other}")),
@@ -184,8 +180,7 @@ pub async fn enrich(provider: &LlmProvider, prompt: &str) -> Result<EnrichmentRe
                         .prompt(retry_prompt.as_str())
                         .await
                         .context("retry Ollama falhou")?;
-                    parse_json_lenient(&raw2)
-                        .context("Ollama retornou JSON inválido após retry")
+                    parse_json_lenient(&raw2).context("Ollama retornou JSON inválido após retry")
                 }
             }
         }
@@ -407,9 +402,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_lenient_handles_pure_json_fixture() {
-        let raw = include_str!(
-            "../../tests/fixtures/enrichment/sapiens_response.json"
-        );
+        let raw = include_str!("../../tests/fixtures/enrichment/sapiens_response.json");
         let parsed = parse_json_lenient(raw).unwrap();
         assert_eq!(parsed.category, "alimentacao");
         assert_eq!(parsed.subcategory, "restaurantes");
@@ -418,9 +411,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_lenient_handles_low_confidence_fixture() {
-        let raw = include_str!(
-            "../../tests/fixtures/enrichment/pix_pessoa_fisica_response.json"
-        );
+        let raw = include_str!("../../tests/fixtures/enrichment/pix_pessoa_fisica_response.json");
         let parsed = parse_json_lenient(raw).unwrap();
         assert!(parsed.needs_user_input);
         assert!(parsed.user_prompt.is_some());

@@ -176,9 +176,7 @@ pub async fn lookup_cnpj(
         FetchOutcome::Found(info) => {
             let value = Some(info);
             if let Err(err) = write_sqlite_cache(sqlite_path, &normalized, &value) {
-                eprintln!(
-                    "aviso: cnpj_cache sqlite write falhou para {normalized}: {err:#}"
-                );
+                eprintln!("aviso: cnpj_cache sqlite write falhou para {normalized}: {err:#}");
             }
             moka_cache.insert(normalized, value.clone()).await;
             Ok(value)
@@ -186,9 +184,7 @@ pub async fn lookup_cnpj(
         FetchOutcome::NotFound => {
             // Negative cache: avoid re-querying for 30 days.
             if let Err(err) = write_sqlite_cache(sqlite_path, &normalized, &None) {
-                eprintln!(
-                    "aviso: cnpj_cache sqlite write (404) falhou para {normalized}: {err:#}"
-                );
+                eprintln!("aviso: cnpj_cache sqlite write (404) falhou para {normalized}: {err:#}");
             }
             moka_cache.insert(normalized, None).await;
             Ok(None)

@@ -134,7 +134,11 @@ pub fn build_prompt(ctx: &PromptContext) -> String {
     if let Some(bucket) = ctx.heuristics.hour_bucket {
         let _ = writeln!(out, "- Hour bucket: {:?}", bucket);
     }
-    let _ = writeln!(out, "- Dia da semana: {}", weekday_pt(ctx.heuristics.weekday));
+    let _ = writeln!(
+        out,
+        "- Dia da semana: {}",
+        weekday_pt(ctx.heuristics.weekday)
+    );
     let _ = writeln!(
         out,
         "- Recorrente nos últimos 3 meses: {}",
@@ -155,13 +159,7 @@ pub fn build_prompt(ctx: &PromptContext) -> String {
                 .as_deref()
                 .map(|c| format!(" [{c}]"))
                 .unwrap_or_default();
-            let _ = writeln!(
-                out,
-                "- {} | R$ {}{}",
-                tx.description.trim(),
-                tx.amount,
-                cat
-            );
+            let _ = writeln!(out, "- {} | R$ {}{}", tx.description.trim(), tx.amount, cat);
         }
         out.push('\n');
     }
@@ -281,7 +279,7 @@ fn taxonomy_block() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enrichment::types::{CnpjInfo, ContextTx, HourBucket, Heuristics};
+    use crate::enrichment::types::{CnpjInfo, ContextTx, Heuristics, HourBucket};
     use chrono::NaiveDate;
     use rust_decimal::Decimal;
 
