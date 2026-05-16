@@ -167,6 +167,222 @@ pub async fn run(
     Ok(())
 }
 
+// ── Post-sync hook (Phase 5) ─────────────────────────────────────────
+
+/// Outcome of [`enrich_after_sync`]. All counters are non-negative and
+/// sum to `processed` (modulo decisions that failed both apply and
+/// mark-attempted in the same iteration — those are still counted as
+/// `failed` only).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct EnrichSummary {
+    /// Number of new transactions the hook tried to enrich.
+    pub processed: usize,
+    /// AutoApply decisions that were persisted.
+    pub auto_applied: usize,
+    /// Suggest / AskUser decisions — left for a later manual
+    /// `finance tx enrich` run. The transaction is marked as
+    /// `enrichment_attempted_at = now` so it won't be retried by default,
+    /// but its category is unchanged.
+    pub deferred: usize,
+    /// Errors (LLM down, BrasilAPI down, store failure). The hook keeps
+    /// going and never propagates these.
+    pub failed: usize,
+}
+
+impl EnrichSummary {
+    /// Render the canonical PT-BR summary line shown after sync. Splitting
+    /// into a helper keeps the format stable and easy to unit-test
+    /// without touching stdout.
+    pub fn format_summary(&self) -> String {
+        format!(
+            "Enrichment automático: {} categorizadas | {} adiadas para revisão | {} falhas",
+            self.auto_applied, self.deferred, self.failed
+        )
+    }
+}
+
+/// Hook invoked by `finance sync` after a successful Pluggy sync. Walks
+/// the newly upserted transaction IDs and runs the enrichment pipeline
+/// on each one. Designed to be **non-fatal**: any error inside the
+/// pipeline (LLM unavailable, BrasilAPI throttled, transient store
+/// failure) is logged via `eprintln!` and counted, but never returned.
+///
+/// `auto_only = true` is the right setting for unattended runs (no TTY,
+/// CI, batch jobs): only `EnrichmentDecision::AutoApply` is persisted;
+/// Suggest / AskUser decisions are merely `mark_enrichment_attempted` so
+/// the next interactive `finance tx enrich` picks them up.
+///
+/// `auto_only = false` behaves identically today — interactive
+/// confirmation during sync is out of scope; we always defer
+/// medium/low-confidence decisions.
+pub async fn enrich_after_sync(
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    new_tx_ids: &[String],
+    auto_only: bool,
+) -> EnrichSummary {
+    let _ = auto_only; // currently informational; we always defer non-AutoApply.
+    let mut summary = EnrichSummary::default();
+    if new_tx_ids.is_empty() {
+        return summary;
+    }
+
+    let pipeline = match EnrichmentPipeline::new(config) {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!(
+                "aviso: enrichment indisponível ({err:#}); rode `finance tx enrich` manualmente."
+            );
+            summary.failed = new_tx_ids.len();
+            return summary;
+        }
+    };
+
+    for id in new_tx_ids {
+        summary.processed += 1;
+        if let Err(err) = enrich_after_sync_one(config, store, &pipeline, id, &mut summary).await {
+            eprintln!("aviso: enrichment falhou para {id}: {err:#}");
+            summary.failed += 1;
+        }
+    }
+    summary
+}
+
+/// Helper that handles a single transaction inside [`enrich_after_sync`].
+/// Returning `Err` here just means the caller increments `failed` — the
+/// outer loop continues.
+async fn enrich_after_sync_one(
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    pipeline: &EnrichmentPipeline,
+    tx_id: &str,
+    summary: &mut EnrichSummary,
+) -> Result<()> {
+    let record = match store.transaction_by_id(tx_id).await? {
+        Some(r) => r,
+        None => return Ok(()), // disappeared between sync and enrich — nothing to do
+    };
+    // Skip transactions that already have a category from a strong source.
+    // The sync inserted them with whatever Pluggy reported; if the rule
+    // engine matched something, we don't want to overwrite. Sources we
+    // consider "weak" enough to enrich over: unclassified / fallback /
+    // pluggy / empty.
+    {
+        let source = record.category_source.as_str();
+        let weak = matches!(source, "unclassified" | "fallback" | "pluggy" | "");
+        if !weak && record.category_id.is_some() {
+            return Ok(());
+        }
+    }
+
+    let row = UncategorizedRow {
+        transaction_id: record.transaction_id.clone(),
+        transaction_date: record.transaction_date,
+        description: record.description.clone(),
+        amount: record.amount,
+        account_id: record.account_id.clone(),
+        account_label: None,
+        tx_type: record.tx_type.clone(),
+        category_source: record.category_source.clone(),
+        payment_status: record.payment_status.clone(),
+        source: record.source.clone(),
+        metadata_json: record.metadata_json.clone(),
+    };
+
+    let decision = pipeline.run_one(&row, store).await?;
+    match decision {
+        EnrichmentDecision::AutoApply { result } => {
+            apply_auto_decision(config, store, &row, &result).await?;
+            summary.auto_applied += 1;
+            // Best-effort rule generation; failures here don't roll back
+            // the annotation. Phase 5 intentionally keeps the hook quiet
+            // about rule creation status (no stdout chatter during sync).
+            if let Err(err) = try_generate_rule(config, store, &result).await {
+                eprintln!(
+                    "aviso: falha ao gerar regra para {}: {err:#}",
+                    row.transaction_id
+                );
+            }
+        }
+        EnrichmentDecision::Suggest { .. } | EnrichmentDecision::AskUser { .. } => {
+            mark_attempted(store, &row.transaction_id, &config.actor_id).await?;
+            summary.deferred += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Annotation + audit + mark-attempted for a high-confidence
+/// AutoApply during the sync hook. Mirrors [`apply_decision`] but is
+/// always non-dry-run and always uses `enriched:llm` as the source.
+async fn apply_auto_decision(
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    tx: &UncategorizedRow,
+    result: &EnrichmentResult,
+) -> Result<()> {
+    let category_id = format!("{}:{}", result.category, result.subcategory);
+    let idempotency_key = format!(
+        "enrich_sync:{}:{}",
+        tx.transaction_id,
+        uuid::Uuid::now_v7()
+    );
+    store
+        .annotate_transaction(
+            &tx.transaction_id,
+            Some(&category_id),
+            Some("enriched:llm"),
+            Some(&result.reasoning),
+            &config.actor_id,
+            &idempotency_key,
+        )
+        .await
+        .context("annotate_transaction falhou no enrich_after_sync")?;
+    mark_attempted(store, &tx.transaction_id, &config.actor_id).await?;
+    let audit = AuditEvent::from_entity(
+        "transaction",
+        &tx.transaction_id,
+        "enrich_auto_sync",
+        &config.actor_id,
+        &idempotency_key,
+        serde_json::json!({
+            "category_id": category_id,
+            "category_source": "enriched:llm",
+            "confidence": result.confidence,
+            "merchant_name": result.merchant_name,
+            "trigger": "post_sync",
+        }),
+    );
+    store.insert_audit_events(&[audit]).await?;
+    Ok(())
+}
+
+/// Idempotent rule creation invoked from the sync hook. Skips if a rule
+/// with the same body already exists. Returns `Ok(())` even when no
+/// rule is created (e.g. invalid keyword).
+async fn try_generate_rule(
+    config: &AppConfig,
+    store: &dyn FinanceStore,
+    result: &EnrichmentResult,
+) -> Result<()> {
+    let rule = match build_rule_record(result, &config.actor_id) {
+        Ok(r) => r,
+        Err(_) => return Ok(()), // keyword too short / stopword
+    };
+    let existing = store
+        .active_rules()
+        .await
+        .context("active_rules falhou")?;
+    if existing.iter().any(|r| r.body == rule.body) {
+        return Ok(());
+    }
+    store
+        .upsert_rules(std::slice::from_ref(&rule))
+        .await
+        .context("upsert_rules falhou")?;
+    Ok(())
+}
+
 /// Fetch the working set of transactions, applying `--days`, `--limit`,
 /// `--retry`, and `--transaction-id`.
 async fn collect_candidates(
@@ -1181,5 +1397,255 @@ mod tests {
             meta.pointer("/pluggy_category").and_then(|v| v.as_str()),
             Some("Eating out")
         );
+    }
+
+    // ── Phase 5 — post-sync hook tests ───────────────────────────────
+
+    #[test]
+    fn test_enrich_summary_format() {
+        let s = EnrichSummary {
+            processed: 42,
+            auto_applied: 18,
+            deferred: 22,
+            failed: 2,
+        };
+        assert_eq!(
+            s.format_summary(),
+            "Enrichment automático: 18 categorizadas | 22 adiadas para revisão | 2 falhas"
+        );
+    }
+
+    #[test]
+    fn test_enrich_summary_format_all_zero() {
+        let s = EnrichSummary::default();
+        assert_eq!(
+            s.format_summary(),
+            "Enrichment automático: 0 categorizadas | 0 adiadas para revisão | 0 falhas"
+        );
+    }
+
+    use crate::enrich::test_support::{clear_llm_env, NoopStore};
+    use finance_core::config::AppConfig;
+
+    #[tokio::test]
+    async fn test_enrich_after_sync_skips_when_no_ids() {
+        // Empty new_tx_ids → all counters zero, store never touched.
+        // Env vars don't matter because `EnrichmentPipeline::new` is not
+        // even invoked on the empty path.
+        let config = AppConfig::default();
+        let store = NoopStore::default();
+        let summary = enrich_after_sync(&config, &store, &[], false).await;
+        assert_eq!(summary, EnrichSummary::default());
+        assert_eq!(*store.transaction_by_id_calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_enrich_after_sync_non_fatal_on_pipeline_error() {
+        // Clear every LLM env var so `LlmProvider::from_env_or_config`
+        // fails. `enrich_after_sync` must catch the error, mark every id
+        // as `failed`, and still return a summary (never panic, never
+        // propagate). Without `#[serial]` this race-conditions against
+        // other tests that touch the same env vars.
+        clear_llm_env();
+        // local_db_path also None — even if LLM env did slip through,
+        // `with_provider` would still fail downstream. Belt and braces.
+        let config = AppConfig::default();
+        let store = NoopStore::default();
+        let ids = vec!["tx-a".to_string(), "tx-b".to_string(), "tx-c".to_string()];
+        let summary = enrich_after_sync(&config, &store, &ids, true).await;
+        assert_eq!(summary.processed, 0, "pipeline init failure should short-circuit before per-tx loop");
+        assert_eq!(summary.auto_applied, 0);
+        assert_eq!(summary.deferred, 0);
+        assert_eq!(summary.failed, 3);
+        // Store must NEVER be touched when pipeline init fails.
+        assert_eq!(*store.transaction_by_id_calls.lock().unwrap(), 0);
+    }
+}
+
+// ── Test support (only compiled under cfg(test)) ─────────────────────
+
+#[cfg(test)]
+mod test_support {
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use chrono::NaiveDate;
+    use finance_core::enrichment::types::ContextTx;
+    use finance_core::models::{
+        AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
+        CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord,
+        CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
+        RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    };
+    use finance_core::splits::{
+        ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
+        TransactionSplitLineRecord, TransactionSplitRecord,
+    };
+    use finance_core::storage::FinanceStore;
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    /// Clear every LLM-related env var. Mirrors the helper used in
+    /// `finance-core::enrichment::llm::tests`. Caller must hold the
+    /// `#[serial_test::serial]` lock.
+    pub fn clear_llm_env() {
+        const VARS: [&str; 6] = [
+            "FINANCE_LLM_PROVIDER",
+            "FINANCE_LLM_MODEL",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OLLAMA_BASE_URL",
+        ];
+        for v in VARS {
+            // SAFETY: caller serializes with #[serial].
+            unsafe {
+                std::env::remove_var(v);
+            }
+        }
+    }
+
+    /// Trivial `FinanceStore` that returns empty results for every read
+    /// and counts calls to `transaction_by_id`. Phase-5 tests only need
+    /// to assert that the hook doesn't reach the store when the
+    /// pipeline can't be built.
+    #[derive(Default)]
+    pub struct NoopStore {
+        pub transaction_by_id_calls: Mutex<usize>,
+    }
+
+    #[async_trait(?Send)]
+    impl FinanceStore for NoopStore {
+        async fn applied_migrations(&self) -> Result<BTreeSet<String>> { Ok(BTreeSet::new()) }
+        async fn apply_sql(&self, _: &str) -> Result<()> { Ok(()) }
+        async fn record_migration(&self, _: &str) -> Result<()> { Ok(()) }
+        async fn upsert_accounts(&self, _: &[AccountRecord]) -> Result<usize> { Ok(0) }
+        async fn get_accounts(&self) -> Result<Vec<AccountRecord>> { Ok(vec![]) }
+        async fn insert_account_snapshots(&self, _: &[AccountSnapshotRecord]) -> Result<usize> { Ok(0) }
+        async fn upsert_transactions(&self, _: &[TransactionRecord]) -> Result<usize> { Ok(0) }
+        async fn upsert_rules(&self, _: &[RuleRecord]) -> Result<usize> { Ok(0) }
+        async fn upsert_categories(&self, _: &[CategoryRecord]) -> Result<usize> { Ok(0) }
+        async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> { Ok(0) }
+        async fn apply_transaction_split(
+            &self,
+            _: &TransactionSplitRecord,
+            _: &[TransactionSplitLineRecord],
+            _: &[ReceiptItemRecord],
+        ) -> Result<()> { Ok(()) }
+        async fn insert_audit_events(&self, _: &[AuditEvent]) -> Result<usize> { Ok(0) }
+        async fn annotate_transaction(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+        ) -> Result<()> { Ok(()) }
+        async fn find_transactions_by_description(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        async fn latest_uncategorized_transactions(
+            &self,
+            _: usize,
+        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        async fn existing_transaction_ids(&self, _: &[String]) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
+        async fn transaction_by_id(&self, _: &str) -> Result<Option<TransactionRecord>> {
+            *self.transaction_by_id_calls.lock().unwrap() += 1;
+            Ok(None)
+        }
+        async fn transaction_split_detail(
+            &self,
+            _: &str,
+        ) -> Result<Option<TransactionSplitDetail>> { Ok(None) }
+        async fn clear_transaction_split(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<()> { Ok(()) }
+        async fn split_candidates(&self, _: NaiveDate) -> Result<Vec<SplitCandidateRow>> {
+            Ok(vec![])
+        }
+        async fn item_prices(
+            &self,
+            _: &str,
+            _: Option<NaiveDate>,
+        ) -> Result<Vec<ItemPriceRow>> { Ok(vec![]) }
+        async fn all_rules(&self) -> Result<Vec<RuleRecord>> { Ok(vec![]) }
+        async fn active_rules(&self) -> Result<Vec<RuleRecord>> { Ok(vec![]) }
+        async fn internal_categories(&self) -> Result<BTreeSet<String>> { Ok(BTreeSet::new()) }
+        async fn transactions_with_context(
+            &self,
+            _: usize,
+        ) -> Result<Vec<TransactionContextRow>> { Ok(vec![]) }
+        async fn count_transactions_with_context(&self) -> Result<i64> { Ok(0) }
+        async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>> { Ok(None) }
+        async fn daily_pulse(&self, _: NaiveDate) -> Result<Vec<DailyPulseItem>> { Ok(vec![]) }
+        async fn effective_transactions_window(
+            &self,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        async fn transactions_in_date_range(
+            &self,
+            _: Option<&str>,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        async fn monthly_spend(&self, _: Option<&str>) -> Result<Vec<MonthlySpendRow>> {
+            Ok(vec![])
+        }
+        async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> { Ok(vec![]) }
+        async fn forecast_vs_actual(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<ForecastVsActualRow>> { Ok(vec![]) }
+        async fn card_summary(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<CardSummaryRow>> { Ok(vec![]) }
+        async fn card_closed_transactions(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<CardClosedTransactionRow>> { Ok(vec![]) }
+        async fn card_reportable_transactions(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<CardClosedTransactionRow>> { Ok(vec![]) }
+        async fn uncategorized(&self, _: usize) -> Result<Vec<UncategorizedRow>> { Ok(vec![]) }
+        async fn count_uncategorized(&self) -> Result<i64> { Ok(0) }
+        async fn count_rows(&self, _: &str) -> Result<i64> { Ok(0) }
+        async fn upsert_category_budget(&self, _: &CategoryBudgetRecord) -> Result<()> { Ok(()) }
+        async fn list_category_budgets(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<CategoryBudgetRecord>> { Ok(vec![]) }
+        async fn budget_status_for_month(&self, _: &str) -> Result<Vec<BudgetStatusRow>> {
+            Ok(vec![])
+        }
+        async fn transactions_on_date(
+            &self,
+            _: NaiveDate,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<ContextTx>> { Ok(vec![]) }
+        async fn similar_transactions(
+            &self,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<Vec<TransactionRecord>> { Ok(vec![]) }
+        async fn mark_enrichment_attempted(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<()> { Ok(()) }
     }
 }

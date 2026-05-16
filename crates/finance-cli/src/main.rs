@@ -159,6 +159,11 @@ struct SyncPluggyArgs {
     json_summary: bool,
     #[arg(long)]
     notify_summary: bool,
+    /// Skip the automatic post-sync enrichment hook (Phase 5).
+    /// Useful in CI / batch jobs where the LLM is intentionally
+    /// unavailable. Defaults to false — enrichment runs by default.
+    #[arg(long)]
+    no_enrich: bool,
 }
 
 #[derive(Subcommand)]
@@ -2627,6 +2632,36 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     println!("- categories: {}", categories.len());
     println!("- actor: {}", config.actor_id);
     println!("- backend: {:?}", config.effective_backend());
+
+    // Phase 5 — post-sync enrichment hook. Non-fatal: any failure
+    // inside `enrich_after_sync` is logged via eprintln and the sync
+    // result is preserved. The user can re-run `finance tx enrich`
+    // manually whenever the LLM is back up.
+    let new_tx_ids: Vec<String> = transactions
+        .iter()
+        .filter(|row| !existing_ids.contains(&row.transaction_id))
+        .map(|row| row.transaction_id.clone())
+        .collect();
+    println!(
+        "Sincronização concluída: {} transações novas",
+        new_tx_ids.len()
+    );
+
+    if args.no_enrich {
+        println!("Enrichment automático: pulado (--no-enrich).");
+    } else if new_tx_ids.is_empty() {
+        println!("Enrichment automático: sem transações novas para processar.");
+    } else {
+        // Non-TTY (CI, pipes, batch) → force auto_only so we never
+        // print Suggest/AskUser prompts to a non-interactive stdout.
+        let auto_only = !std::io::IsTerminal::is_terminal(&std::io::stdin());
+        let summary =
+            enrich::enrich_after_sync(&config, store.as_ref(), &new_tx_ids, auto_only).await;
+        println!("{}", summary.format_summary());
+        if summary.deferred > 0 {
+            println!("Para revisar as adiadas: finance tx enrich --days 7");
+        }
+    }
     Ok(())
 }
 
