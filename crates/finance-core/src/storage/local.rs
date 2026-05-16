@@ -1836,4 +1836,40 @@ impl FinanceStore for LocalStore {
             )
             .collect()
     }
+
+    async fn mark_enrichment_attempted(
+        &self,
+        transaction_id: &str,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        let now = Utc::now();
+        let affected = conn.execute(
+            "UPDATE transactions
+             SET enrichment_attempted_at = ?1
+             WHERE transaction_id = ?2",
+            params![now.to_rfc3339(), transaction_id],
+        )?;
+        if affected == 0 {
+            bail!("Transação {transaction_id} não encontrada");
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO audit_log (
+                event_id, entity_type, entity_id, action, actor_id,
+                event_timestamp, idempotency_key, diff_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                uuid::Uuid::now_v7().to_string(),
+                "transaction",
+                transaction_id,
+                "enrich_attempted",
+                actor_id,
+                now.to_rfc3339(),
+                idempotency_key,
+                serde_json::json!({"enrichment_attempted_at": now.to_rfc3339()}).to_string(),
+            ],
+        )?;
+        Ok(())
+    }
 }

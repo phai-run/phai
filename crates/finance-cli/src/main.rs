@@ -29,6 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod enrich;
 mod human_format;
 mod review;
 mod self_cmd;
@@ -985,6 +986,9 @@ enum TxCommand {
         #[command(subcommand)]
         command: TxSplitCommand,
     },
+    /// Run the LLM-driven enrichment pipeline over uncategorized
+    /// transactions. Supports human + machine (NDJSON) modes.
+    Enrich(enrich::EnrichArgs),
 }
 
 #[derive(Subcommand)]
@@ -2194,6 +2198,7 @@ async fn main() -> Result<()> {
                 TxSplitCommand::Show(args) => tx_split_show(args).await,
                 TxSplitCommand::Clear(args) => tx_split_clear(args).await,
             },
+            TxCommand::Enrich(args) => tx_enrich(args).await,
         },
         Commands::Forecast { command } => match command {
             ForecastCommand::Upsert(args) => forecast_upsert(args).await,
@@ -4525,6 +4530,12 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
         .await?;
     println!("Transação manual salva: {}", tx.transaction_id);
     Ok(())
+}
+
+async fn tx_enrich(args: enrich::EnrichArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    enrich::run(args, &config, store.as_ref()).await
 }
 
 async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {

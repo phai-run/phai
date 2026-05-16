@@ -162,6 +162,16 @@ pub trait FinanceStore {
         exclude_id: &str,
         only_uncategorized: bool,
     ) -> Result<Vec<TransactionRecord>>;
+
+    /// Mark a transaction's `enrichment_attempted_at` to the current
+    /// timestamp so subsequent enrichment runs skip it (unless
+    /// `--retry` is passed). Inserts an `enrich_attempted` audit event.
+    async fn mark_enrichment_attempted(
+        &self,
+        transaction_id: &str,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()>;
 }
 
 pub async fn open_store(config: &AppConfig) -> Result<Box<dyn FinanceStore>> {

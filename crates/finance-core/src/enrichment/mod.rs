@@ -18,6 +18,7 @@ pub mod cnpj;
 pub mod context;
 pub mod heuristics;
 pub mod llm;
+pub mod pipeline;
 pub mod pluggy_map;
 pub mod prompt;
 pub mod types;

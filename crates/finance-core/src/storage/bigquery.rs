@@ -2444,4 +2444,28 @@ impl FinanceStore for BigQueryStore {
             .map(|row| transaction_record_from_values(&row_values(row)))
             .collect()
     }
+
+    async fn mark_enrichment_attempted(
+        &self,
+        transaction_id: &str,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let sql = format!(
+            "UPDATE {} SET enrichment_attempted_at = CURRENT_TIMESTAMP() WHERE transaction_id = {}",
+            self.qualified_table("transactions")?,
+            sql_string(transaction_id),
+        );
+        self.run_query(&sql).await?;
+        let audit = crate::models::AuditEvent::from_entity(
+            "transaction",
+            transaction_id,
+            "enrich_attempted",
+            actor_id,
+            idempotency_key,
+            serde_json::json!({"enrichment_attempted_at": "CURRENT_TIMESTAMP()"}),
+        );
+        self.insert_audit_events(&[audit]).await?;
+        Ok(())
+    }
 }
