@@ -400,6 +400,63 @@ pub async fn auto_check(data_dir: &Path) {
     }
 }
 
+/// Unconditional update check — bypasses the rate-limit state gate.
+/// Used before critical long-running commands (e.g. `sync pluggy`) to ensure
+/// we're always running the latest version. Never propagates errors.
+pub async fn force_check(data_dir: &Path) {
+    let result = force_check_inner(data_dir).await;
+    if let Err(ref e) = result {
+        eprintln!("Warning: verificação de atualização falhou: {e}");
+    }
+}
+
+async fn force_check_inner(data_dir: &Path) -> Result<()> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current = match parse_version(current_version) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    let client = http_client(5);
+    let release = match get_latest_release(&client).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Warning: não foi possível verificar atualizações: {e}");
+            return Ok(());
+        }
+    };
+
+    let latest_str = strip_tag_prefix(&release.tag_name);
+    let latest = match parse_version(latest_str) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    // Advance the last_check timestamp so the background auto-check skips
+    // the next invocation (we just checked).
+    let state_path = state_file_path(data_dir);
+    let exe_hash = compute_exe_path_hash().unwrap_or_default();
+    let mut state = UpdateState::read(&state_path);
+    state.mark_checked(latest_str, &exe_hash);
+    let _ = state.write_atomic(&state_path);
+
+    if !is_newer(&latest, &current) {
+        return Ok(());
+    }
+
+    eprintln!(
+        "finance-cli: atualização disponível: {current_version} → {latest_str}. \
+         Atualizando antes de sincronizar..."
+    );
+    match download_and_replace(&client, &release).await {
+        Ok(()) => {
+            exec_new_binary(latest_str);
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 async fn auto_check_inner(data_dir: &Path) -> Result<()> {
     let state_path = state_file_path(data_dir);
     let exe_hash = compute_exe_path_hash()?;
