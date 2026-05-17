@@ -128,6 +128,11 @@ impl LlmProvider {
     }
 }
 
+/// Reasonable upper bound for the JSON enrichment payload (plenty for a
+/// single `EnrichmentResult` object). The Anthropic API rejects requests
+/// that omit `max_tokens`, so every `AgentBuilder` call must set this.
+const ANTHROPIC_MAX_TOKENS: u64 = 1024;
+
 /// Call the LLM with `prompt` and return the parsed `EnrichmentResult`.
 ///
 /// Strategy:
@@ -137,6 +142,12 @@ impl LlmProvider {
 /// On JSON parse failure (Ollama path or extractor returning malformed
 /// JSON), retry once with the prompt + [`RETRY_SUFFIX`] using the
 /// plain-completion path. Both failures surface as `anyhow::Error`.
+///
+/// # Anthropic note
+/// The Anthropic API requires `max_tokens` on every request. The
+/// `Extractor` path handles this internally via rig; the completion
+/// fallback (`retry_via_completion_anthropic`) must set it explicitly
+/// via `.max_tokens(ANTHROPIC_MAX_TOKENS)` on the `AgentBuilder`.
 pub async fn enrich(provider: &LlmProvider, prompt: &str) -> Result<EnrichmentResult> {
     match provider {
         LlmProvider::Anthropic { api_key, model } => {
@@ -193,7 +204,9 @@ async fn retry_via_completion_anthropic(
     prompt: &str,
 ) -> Result<EnrichmentResult> {
     let retry_prompt = format!("{prompt}{RETRY_SUFFIX}");
-    let agent = client.agent(model).build();
+    // `max_tokens` is mandatory for the Anthropic API; omitting it causes a
+    // 400 "max_tokens must be set" error.
+    let agent = client.agent(model).max_tokens(ANTHROPIC_MAX_TOKENS).build();
     let raw = agent
         .prompt(retry_prompt.as_str())
         .await
