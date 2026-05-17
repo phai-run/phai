@@ -1289,6 +1289,10 @@ struct CardsArgs {
     /// top 5 by absolute amount.
     #[arg(long)]
     all: bool,
+    /// Show only installment (parcelada) transactions — hides one-off and
+    /// subscription charges so you can focus on multi-month commitments.
+    #[arg(long)]
+    installments_only: bool,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
     raw: bool,
@@ -5490,6 +5494,12 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
         all_rows.retain(|r| r.account_id == id);
     }
 
+    // Optional --installments-only filter: keep only rows that carry an
+    // installment marker in their label, description, or Pluggy metadata.
+    if args.installments_only {
+        all_rows.retain(|r| detect_installment_marker(r).is_some());
+    }
+
     // For each account that doesn't have a configured `billing_closing_day`
     // in metadata, infer one from the Pluggy billId clusters in the data.
     // This makes the report work out of the box on accounts that were never
@@ -5844,12 +5854,18 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
         CardsMode::Next => " (em curso)",
         CardsMode::Specific => "",
     };
+    let installments_suffix = if args.installments_only {
+        " · só parceladas"
+    } else {
+        ""
+    };
     println!(
         "💳 {}",
         bold(&format!(
-            "Cartões · {}{}",
+            "Cartões · {}{}{}",
             month_label(&display_month),
-            mode_suffix
+            mode_suffix,
+            installments_suffix
         ))
     );
     println!();
