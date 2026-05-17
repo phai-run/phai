@@ -2440,6 +2440,14 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         bail!("Use apenas uma saída de resumo: --json-summary ou --notify-summary");
     }
 
+    // Always run on the latest binary before touching external data.
+    // If FINANCE_OS_UPDATED is set, we just re-execed after an upgrade — skip.
+    if std::env::var_os("FINANCE_OS_UPDATED").is_none() {
+        if let Ok(paths) = ConfigPaths::discover() {
+            update::force_check(&paths.data_dir).await;
+        }
+    }
+
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
@@ -3108,7 +3116,7 @@ fn print_forecast_vs_actual_human(
             // variance > 0 means over budget (spent more than forecast)
             let indicator = if variance > Decimal::ZERO {
                 "🔻"
-            } else if actual > forecast * Decimal::from(80u32) / Decimal::from(100u32) {
+            } else if actual.abs() > forecast.abs() * Decimal::from(80u32) / Decimal::from(100u32) {
                 "⚠️"
             } else {
                 "✅"
@@ -5292,7 +5300,7 @@ async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
     let mut total_actual = Decimal::ZERO;
 
     for row in &sorted {
-        let usage_i64 = row.usage_pct.to_string().parse::<i64>().unwrap_or(0);
+        let usage_i64 = row.usage_pct.to_string().parse::<f64>().map(|v| v as i64).unwrap_or(0);
         let bar = progress_bar(usage_i64);
         let status_emoji = if row.actual_amount > row.budget_amount {
             "🔻"
@@ -5613,10 +5621,12 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
                         .copied()
                 } else {
                     // Fallback: sort by max_date desc and skip the latest
-                    // (assumed to be the currently open cycle).
+                    // (assumed to be the currently open cycle). If only one
+                    // bucket exists (e.g. a new card), use it rather than
+                    // silently omitting the account from the report.
                     let mut sorted: Vec<&BillCandidate> = bills_for_account.to_vec();
                     sorted.sort_by_key(|b| std::cmp::Reverse(b.max_date));
-                    sorted.get(1).copied()
+                    sorted.get(1).or_else(|| sorted.first()).copied()
                 }
             }
             CardsMode::Next => {
