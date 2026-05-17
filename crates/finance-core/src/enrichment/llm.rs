@@ -66,7 +66,9 @@ impl LlmProvider {
         }
 
         // No explicit choice — fall back to first env var found.
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        if std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+            || std::env::var("ANTHROPIC_API_KEY").is_ok()
+        {
             return Self::build("anthropic", model_override);
         }
         if std::env::var("OPENAI_API_KEY").is_ok() {
@@ -89,8 +91,14 @@ impl LlmProvider {
         let name_norm = name.trim().to_lowercase();
         match name_norm.as_str() {
             "anthropic" => {
-                let api_key = std::env::var("ANTHROPIC_API_KEY")
-                    .context("ANTHROPIC_API_KEY ausente para provedor anthropic")?;
+                // Accept ANTHROPIC_AUTH_TOKEN (Claude Code CLI convention)
+                // or the classic ANTHROPIC_API_KEY — whichever is set.
+                let api_key = std::env::var("ANTHROPIC_AUTH_TOKEN")
+                    .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                    .context(
+                        "nenhuma chave Anthropic encontrada: \
+                         defina ANTHROPIC_AUTH_TOKEN ou ANTHROPIC_API_KEY",
+                    )?;
                 let model = model_override.unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string());
                 Ok(Self::Anthropic { api_key, model })
             }
@@ -251,9 +259,10 @@ mod tests {
     use crate::config::AppConfig;
     use serial_test::serial;
 
-    const ENV_VARS: [&str; 6] = [
+    const ENV_VARS: [&str; 7] = [
         "FINANCE_LLM_PROVIDER",
         "FINANCE_LLM_MODEL",
+        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -285,6 +294,51 @@ mod tests {
         clear_env();
         set("FINANCE_LLM_PROVIDER", "anthropic");
         set("ANTHROPIC_API_KEY", "sk-anthropic");
+        let p = LlmProvider::from_env_or_config(&AppConfig::default()).unwrap();
+        assert!(matches!(p, LlmProvider::Anthropic { .. }));
+        clear_env();
+    }
+
+    /// ANTHROPIC_AUTH_TOKEN (Claude Code CLI convention) must be accepted as
+    /// an alias for ANTHROPIC_API_KEY.
+    #[test]
+    #[serial]
+    fn test_provider_selection_anthropic_auth_token() {
+        clear_env();
+        set("FINANCE_LLM_PROVIDER", "anthropic");
+        set("ANTHROPIC_AUTH_TOKEN", "sk-auth-token");
+        let p = LlmProvider::from_env_or_config(&AppConfig::default()).unwrap();
+        match p {
+            LlmProvider::Anthropic { api_key, .. } => assert_eq!(api_key, "sk-auth-token"),
+            other => panic!("expected Anthropic, got {other:?}"),
+        }
+        clear_env();
+    }
+
+    /// ANTHROPIC_AUTH_TOKEN takes precedence over ANTHROPIC_API_KEY when
+    /// both are set (mirrors Claude Code CLI behaviour).
+    #[test]
+    #[serial]
+    fn test_anthropic_auth_token_takes_precedence() {
+        clear_env();
+        set("FINANCE_LLM_PROVIDER", "anthropic");
+        set("ANTHROPIC_AUTH_TOKEN", "tok-priority");
+        set("ANTHROPIC_API_KEY", "sk-fallback");
+        let p = LlmProvider::from_env_or_config(&AppConfig::default()).unwrap();
+        match p {
+            LlmProvider::Anthropic { api_key, .. } => assert_eq!(api_key, "tok-priority"),
+            other => panic!("expected Anthropic, got {other:?}"),
+        }
+        clear_env();
+    }
+
+    /// Fallback auto-detection must trigger on ANTHROPIC_AUTH_TOKEN (no
+    /// explicit FINANCE_LLM_PROVIDER set).
+    #[test]
+    #[serial]
+    fn test_fallback_detects_anthropic_auth_token() {
+        clear_env();
+        set("ANTHROPIC_AUTH_TOKEN", "tok-autodetect");
         let p = LlmProvider::from_env_or_config(&AppConfig::default()).unwrap();
         assert!(matches!(p, LlmProvider::Anthropic { .. }));
         clear_env();
