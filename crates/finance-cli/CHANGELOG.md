@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.0](https://github.com/feliperun/finance-os/compare/v0.11.0...v1.0.0) (2026-05-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* `sync pluggy` now makes a GitHub Releases API call on every invocation. Pass FINANCE_OS_NO_AUTO_UPDATE=1 to opt out if needed.
+
+### Features
+
+* enforce latest version before pluggy sync ([c6a7bf2](https://github.com/feliperun/finance-os/commit/c6a7bf280d7239be15d9abe28f547c79d960c27a))
+
+
+### Bug Fixes
+
+* **reports:** correct three silent bugs in budget-status, forecast, and cards ([cb45863](https://github.com/feliperun/finance-os/commit/cb4586382152fc860ececf6b4d0e78d0e0e00f81))
+
 ## [0.11.0](https://github.com/feliperun/finance-os/compare/v0.10.0...v0.11.0) (2026-05-17)
 
 
