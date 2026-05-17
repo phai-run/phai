@@ -31,26 +31,36 @@ jobs:
         include:
           - runner: macos-14
             target: aarch64-apple-darwin
-          - runner: macos-13
+            cross: false
+          - runner: macos-14
             target: x86_64-apple-darwin
+            cross: true
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-please.outputs.finance-cli-tag }}
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --package finance-cli
+      - name: Add cross-compile target
+        if: matrix.cross == true
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --package finance-cli ${{ matrix.cross && format('--target {0}', matrix.target) || '' }}
       - name: Package and checksum
-        working-directory: target/release
         run: |
+          BIN_DIR=${{ matrix.cross && format('target/{0}/release', matrix.target) || 'target/release' }}
+          cd "$BIN_DIR"
           tar czf finance-cli-${{ matrix.target }}.tar.gz finance-cli
           shasum -a 256 finance-cli-${{ matrix.target }}.tar.gz \
             > finance-cli-${{ matrix.target }}.tar.gz.sha256
+          mv finance-cli-${{ matrix.target }}.tar.gz \
+             finance-cli-${{ matrix.target }}.tar.gz.sha256 \
+             "${GITHUB_WORKSPACE}/"
       - name: Upload to release
         run: |
           gh release upload "${{ needs.release-please.outputs.finance-cli-tag }}" \
-            target/release/finance-cli-${{ matrix.target }}.tar.gz \
-            target/release/finance-cli-${{ matrix.target }}.tar.gz.sha256 \
+            finance-cli-${{ matrix.target }}.tar.gz \
+            finance-cli-${{ matrix.target }}.tar.gz.sha256 \
             --clobber
         env:
           GH_TOKEN: ${{ github.token }}
