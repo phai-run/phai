@@ -520,9 +520,18 @@ pub fn render_pulse(data: &PulseData, plan: &ClosingPlan, days: i64) -> String {
                 .map(|a| (s, a))
         })
         .collect();
-    if !balances.is_empty() {
-        let _ = writeln!(out);
-        let _ = writeln!(out, "{}", bold("Saldo em conta"));
+    // Saldo em conta is part of every pulse — it's the headline number the
+    // user wants to know. When no checking account has a snapshot yet, we
+    // still render the heading with a fallback so the user notices the gap
+    // instead of the block being silently absent.
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{}", bold("Saldo em conta"));
+    if balances.is_empty() {
+        let _ = writeln!(
+            out,
+            "  _(nenhum snapshot disponível — rode `finance sync pluggy`)_"
+        );
+    } else {
         let mut total = Decimal::ZERO;
         for (snap, acc) in &balances {
             let label = if acc.label.is_empty() {

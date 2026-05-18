@@ -1343,11 +1343,13 @@ fn sync_notify_summary_outputs_human_readable_message() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("Novas transações detectadas (4):"))
-    .stdout(predicate::str::contains("🍽️ Supermercado Angeloni"))
-    .stdout(predicate::str::contains("🍽️ alimentacao mercado (pluggy)"))
-    .stdout(predicate::str::contains("Pendências de contexto (0):"))
-    .stdout(predicate::str::contains("Fonte: local | cli: finance"));
+    .stdout(predicate::str::contains("🔄 *Sync"))
+    .stdout(predicate::str::contains("*4 novas transações*"))
+    .stdout(predicate::str::contains("Supermercado Angeloni"))
+    .stdout(predicate::str::contains("*Saldo em conta*"))
+    .stdout(predicate::str::contains("Primary Checking"))
+    .stdout(predicate::str::contains("_finance"))
+    .stdout(predicate::str::contains("local"));
 }
 
 #[test]

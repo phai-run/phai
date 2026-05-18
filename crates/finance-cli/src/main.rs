@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Duration, NaiveDate, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Timelike, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use finance_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
@@ -1451,99 +1451,217 @@ fn normalize_inline_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn category_display(category_id: Option<&str>, amount: Option<Decimal>) -> String {
-    let emoji = category_emoji(category_id, amount);
-    let humanized = category_id
-        .map(|category| category.replace(':', " > ").replace('-', " "))
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "sem categoria".to_string());
-    format!("{emoji} {humanized}")
-}
-
-fn display_label(
-    description: &str,
-    context: Option<&str>,
-    category_id: Option<&str>,
-    amount: Option<Decimal>,
+/// Render the sync notify summary as a single phone-readable WhatsApp
+/// message. The legacy pipe-separated CLI-log format was unreadable on a
+/// phone — this replaces it with a five-block layout:
+///
+///   🔄 *Sync · seg 18/mai 21:34*
+///
+///   *N novas transações* · -R$ X,YZ
+///     <emoji> <descrição curta> · <valor> · <data>
+///     …
+///
+///   *Saldo em conta*   ← only when there were new transactions
+///     💰 <conta> · <saldo>
+///     *Total*: <total>
+///
+///   *N sem categoria* (responda 1..N para classificar)
+///     1. <descrição> · <valor> (id <transaction_id>)
+///
+///   ⚠️ <aviso>
+///
+///   _finance X.Y.Z · <backend> · <hora>_
+fn render_sync_notify_summary(
+    summary: &SyncSummaryOutput,
+    accounts: &[AccountRecord],
+    snapshots: &[finance_core::models::AccountSnapshotRecord],
 ) -> String {
-    let label = context
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(description);
-    format!(
-        "{} {}",
-        category_emoji(category_id, amount),
-        normalize_inline_text(label)
-    )
-}
+    use std::fmt::Write;
+    let mut out = String::new();
 
-fn render_sync_notify_summary(summary: &SyncSummaryOutput) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Novas transações detectadas ({}):",
-        summary.new_transactions_count
-    ));
-    for (idx, tx) in summary.new_transactions.iter().enumerate() {
-        let amount = decimal_from_str(&tx.amount).ok();
-        let category = category_display(tx.category_id.as_deref(), amount);
-        let label = display_label(
-            &tx.description,
-            tx.context.as_deref(),
-            tx.category_id.as_deref(),
-            amount,
+    // Header: weekday, day, month, HH:MM.
+    let now = Utc::now();
+    let local = now.naive_local();
+    let header_date = local.date();
+    let header_time = local.time();
+    let weekday = match header_date.weekday().num_days_from_monday() {
+        0 => "seg",
+        1 => "ter",
+        2 => "qua",
+        3 => "qui",
+        4 => "sex",
+        5 => "sáb",
+        _ => "dom",
+    };
+    let month = match header_date.month() {
+        1 => "jan",
+        2 => "fev",
+        3 => "mar",
+        4 => "abr",
+        5 => "mai",
+        6 => "jun",
+        7 => "jul",
+        8 => "ago",
+        9 => "set",
+        10 => "out",
+        11 => "nov",
+        _ => "dez",
+    };
+    let _ = writeln!(
+        out,
+        "🔄 *Sync · {weekday} {:02}/{month} {:02}:{:02}*",
+        header_date.day(),
+        header_time.hour(),
+        header_time.minute(),
+    );
+
+    let has_new = summary.new_transactions_count > 0;
+
+    // -------- Block 1: novas transações --------
+    let _ = writeln!(out);
+    if !has_new {
+        let _ = writeln!(out, "_sem novidades_");
+    } else {
+        let mut total = Decimal::ZERO;
+        for tx in &summary.new_transactions {
+            if let Ok(amount) = decimal_from_str(&tx.amount) {
+                total += amount;
+            }
+        }
+        let _ = writeln!(
+            out,
+            "*{} nova{} transaç{}* · {}",
+            summary.new_transactions_count,
+            if summary.new_transactions_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if summary.new_transactions_count == 1 {
+                "ão"
+            } else {
+                "ões"
+            },
+            brl_signed(total),
         );
-        lines.push(format!(
-            "{}. {} | {} | {} | {} ({}) | {}",
-            idx + 1,
-            tx.transaction_date,
-            tx.amount,
-            label,
-            category,
-            tx.category_source,
-            tx.transaction_id
-        ));
-    }
-
-    lines.push(String::new());
-    lines.push(format!(
-        "Pendências de contexto ({}){}:",
-        summary.needs_context_count,
-        if summary.needs_context_truncated {
-            " (lista parcial)"
-        } else {
-            ""
+        const MAX_TX: usize = 8;
+        let show = summary.new_transactions.iter().take(MAX_TX);
+        for tx in show {
+            let amount = decimal_from_str(&tx.amount).ok();
+            let emoji = human_format::category_emoji(tx.category_id.as_deref(), amount);
+            let date = NaiveDate::parse_from_str(&tx.transaction_date, "%Y-%m-%d")
+                .map(human_format::short_date)
+                .unwrap_or_else(|_| tx.transaction_date.clone());
+            let label = human_format::truncate_with_ellipsis(
+                &human_format::short_description(tx.context.as_deref().unwrap_or(&tx.description)),
+                34,
+            );
+            let amt_str = amount.map(brl_signed).unwrap_or_else(|| tx.amount.clone());
+            let _ = writeln!(out, "  {emoji} {label} · {amt_str} · {date}");
         }
-    ));
-    for (idx, tx) in summary.needs_context.iter().enumerate() {
-        let amount = decimal_from_str(&tx.amount).ok();
-        let label = display_label(&tx.description, None, None, amount);
-        lines.push(format!(
-            "{}. {} | {} | {} | {}",
-            idx + 1,
-            tx.transaction_date,
-            tx.amount,
-            label,
-            tx.transaction_id
-        ));
+        if summary.new_transactions.len() > MAX_TX {
+            let _ = writeln!(
+                out,
+                "  _… mais {} lançamento{}_",
+                summary.new_transactions.len() - MAX_TX,
+                if summary.new_transactions.len() - MAX_TX == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            );
+        }
+
+        // -------- Block 2: saldo em conta (only when there are new tx) --------
+        let checking_ids: BTreeSet<String> = accounts
+            .iter()
+            .filter(|a| a.account_type == "checking" && !a.account_id.is_empty())
+            .map(|a| a.account_id.clone())
+            .collect();
+        let balances: Vec<(&finance_core::models::AccountSnapshotRecord, &AccountRecord)> =
+            snapshots
+                .iter()
+                .filter(|s| checking_ids.contains(&s.account_id) && s.balance.is_some())
+                .filter_map(|s| {
+                    accounts
+                        .iter()
+                        .find(|a| a.account_id == s.account_id)
+                        .map(|a| (s, a))
+                })
+                .collect();
+        if !balances.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "*Saldo em conta*");
+            let mut total_bal = Decimal::ZERO;
+            for (snap, acc) in &balances {
+                let label = if acc.label.is_empty() {
+                    acc.account_id.clone()
+                } else {
+                    acc.label.clone()
+                };
+                let balance = snap.balance.unwrap_or(Decimal::ZERO);
+                total_bal += balance;
+                let _ = writeln!(out, "  💰 {} · {}", label, brl_signed(balance));
+            }
+            if balances.len() > 1 {
+                let _ = writeln!(out, "  *Total*: {}", brl_signed(total_bal));
+            }
+        }
     }
 
+    // -------- Block 3: pendências (sem categoria) --------
+    if summary.needs_context_count > 0 {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "*{} sem categoria*{} — responda 1..{} para classificar",
+            summary.needs_context_count,
+            if summary.needs_context_truncated {
+                " (parcial)"
+            } else {
+                ""
+            },
+            summary
+                .needs_context
+                .len()
+                .min(summary.needs_context_count as usize),
+        );
+        for (idx, tx) in summary.needs_context.iter().enumerate() {
+            let amount = decimal_from_str(&tx.amount).ok();
+            let label = human_format::truncate_with_ellipsis(
+                &human_format::short_description(&tx.description),
+                34,
+            );
+            let amt_str = amount.map(brl_signed).unwrap_or_else(|| tx.amount.clone());
+            // Show a short id suffix for reference.
+            let short_id = tx
+                .transaction_id
+                .split('-')
+                .next_back()
+                .unwrap_or(&tx.transaction_id);
+            let _ = writeln!(out, "  {}. {label} · {amt_str} (id …{short_id})", idx + 1);
+        }
+    }
+
+    // -------- Block 4: avisos --------
     if !summary.warnings.is_empty() {
-        lines.push(String::new());
-        lines.push("Avisos:".to_string());
+        let _ = writeln!(out);
         for warning in &summary.warnings {
-            lines.push(format!("- {}", normalize_inline_text(warning)));
+            let _ = writeln!(out, "⚠️ {}", normalize_inline_text(warning));
         }
     }
 
-    lines.push(String::new());
-    lines.push(format!(
-        "Fonte: {} | cli: finance {} | sync: {} | status: {}",
-        summary.backend,
+    // -------- Footer --------
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "_finance {} · {} · status {}_",
         env!("CARGO_PKG_VERSION"),
-        summary.generated_at,
+        summary.backend,
         summary.summary_status
-    ));
-    lines.join("\n")
+    );
+
+    out.trim_end().to_string()
 }
 
 /// Copy billing metadata keys from an existing account record into a freshly
@@ -2789,7 +2907,15 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         if args.json_summary {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
-            println!("{}", render_sync_notify_summary(&summary));
+            // The human-friendly notify-summary message folds in the
+            // current saldo per checking account so a phone-side reader
+            // immediately sees the balance impact of the new transactions.
+            let snapshots = store.latest_account_snapshots().await.unwrap_or_default();
+            let stored_accounts = store.get_accounts().await.unwrap_or_default();
+            println!(
+                "{}",
+                render_sync_notify_summary(&summary, &stored_accounts, &snapshots)
+            );
         }
         return Ok(());
     }
