@@ -465,6 +465,9 @@ mod tests {
         async fn cards_open_now(&self) -> Result<Vec<crate::models::CardSummaryRow>> {
             Ok(vec![])
         }
+        async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
+            Ok(vec![])
+        }
         async fn apply_transaction_split(
             &self,
             _split: &TransactionSplitRecord,

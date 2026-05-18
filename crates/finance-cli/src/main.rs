@@ -333,6 +333,27 @@ enum ReportCommand {
                       WhatsApp-friendly by default; pass --raw for JSON."
     )]
     Cards(CardsArgs),
+    #[command(
+        about = "saldo em conta por dono e total, do snapshot mais recente do Pluggy",
+        long_about = "Mostra o saldo em conta mais recente sincronizado do Pluggy para cada \
+                      conta corrente, agrupado por dono (owner) com subtotais e o total geral. \
+                      Cartões de crédito não aparecem aqui — para ver fatura em aberto, use \
+                      `report cards` ou o pulse. WhatsApp-friendly by default; pass --raw for JSON."
+    )]
+    Balances(BalancesArgs),
+}
+
+#[derive(Args)]
+struct BalancesArgs {
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
+    #[arg(long)]
+    raw: bool,
+}
+
+impl BalancesArgs {
+    fn structured_output(&self) -> bool {
+        self.raw
+    }
 }
 
 #[derive(Args)]
@@ -2266,6 +2287,7 @@ async fn main() -> Result<()> {
             ReportCommand::Review(args) => report_review(args).await,
             ReportCommand::BudgetStatus(args) => report_budget_status(args).await,
             ReportCommand::Cards(args) => report_cards(args).await,
+            ReportCommand::Balances(args) => report_balances(args).await,
         },
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
@@ -2860,6 +2882,113 @@ async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
     let plan = pulse::compute_closing_plan(&data);
     println!("{}", pulse::render_pulse(&data, &plan, args.days));
     Ok(())
+}
+
+async fn report_balances(args: BalancesArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let accounts = store.get_accounts().await?;
+    let snapshots = store.latest_account_snapshots().await?;
+
+    // Index account → owner + label.
+    let account_by_id: BTreeMap<&str, &AccountRecord> = accounts
+        .iter()
+        .filter(|a| !a.account_id.is_empty())
+        .map(|a| (a.account_id.as_str(), a))
+        .collect();
+
+    // Only checking accounts have a meaningful "saldo em conta". Credit
+    // cards expose debt via card_summary; mixing them here would mislead.
+    let rows: Vec<(&AccountRecord, &finance_core::models::AccountSnapshotRecord)> = snapshots
+        .iter()
+        .filter_map(|s| {
+            account_by_id
+                .get(s.account_id.as_str())
+                .filter(|a| a.account_type == "checking")
+                .map(|a| (*a, s))
+        })
+        .collect();
+
+    if args.structured_output() {
+        let payload: Vec<_> = rows
+            .iter()
+            .map(|(a, s)| {
+                serde_json::json!({
+                    "account_id": a.account_id,
+                    "owner": a.owner,
+                    "label": a.label,
+                    "balance": s.balance,
+                    "currency_code": s.currency_code,
+                    "snapshot_date": s.snapshot_date,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("{}", human_format::bold("Saldo em conta"));
+        println!("  _(nenhum snapshot disponível — rode `finance sync pluggy` para atualizar)_");
+        return Ok(());
+    }
+
+    // Group by owner so "Aline · Felipe · Total" reads naturally.
+    let mut by_owner: BTreeMap<
+        String,
+        Vec<(&AccountRecord, &finance_core::models::AccountSnapshotRecord)>,
+    > = BTreeMap::new();
+    for (acc, snap) in &rows {
+        by_owner
+            .entry(acc.owner.clone())
+            .or_default()
+            .push((acc, snap));
+    }
+
+    println!("{}", human_format::bold("Saldo em conta"));
+    let mut grand_total = Decimal::ZERO;
+    for (owner, items) in &by_owner {
+        let mut owner_total = Decimal::ZERO;
+        for (acc, snap) in items {
+            let balance = snap.balance.unwrap_or(Decimal::ZERO);
+            owner_total += balance;
+            grand_total += balance;
+            let label = if acc.label.is_empty() {
+                acc.account_id.clone()
+            } else {
+                acc.label.clone()
+            };
+            println!(
+                "  💰 {} · {} ({})",
+                label,
+                human_format::brl_signed(balance),
+                human_format::short_date(snap.snapshot_date),
+            );
+        }
+        if items.len() > 1 {
+            println!(
+                "  └ {}: {}",
+                human_format::bold(&capitalize(owner)),
+                human_format::brl_signed(owner_total),
+            );
+        }
+    }
+    println!(
+        "  {}: {}",
+        human_format::bold("Total"),
+        human_format::brl_signed(grand_total),
+    );
+    Ok(())
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {

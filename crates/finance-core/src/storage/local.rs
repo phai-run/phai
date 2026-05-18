@@ -253,6 +253,58 @@ impl FinanceStore for LocalStore {
         Ok(rows.len())
     }
 
+    async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
+        let conn = self.connection()?;
+        // For each account, pick the row with the greatest (snapshot_date,
+        // created_at) — guarantees at most one row per account and ties go
+        // to the most recently inserted snapshot.
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              snapshot_id, account_id, snapshot_date, balance, credit_limit,
+              currency_code, source, actor_id, idempotency_key, metadata_json,
+              created_at
+            FROM account_snapshots AS s
+            WHERE (s.snapshot_date, s.created_at) = (
+              SELECT s2.snapshot_date, MAX(s2.created_at)
+              FROM account_snapshots s2
+              WHERE s2.account_id = s.account_id
+              AND s2.snapshot_date = (
+                SELECT MAX(s3.snapshot_date)
+                FROM account_snapshots s3
+                WHERE s3.account_id = s.account_id
+              )
+              GROUP BY s2.snapshot_date
+            )
+            ORDER BY account_id
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let balance: Option<String> = row.get(3)?;
+                let credit_limit: Option<String> = row.get(4)?;
+                let metadata_str: String = row.get(9)?;
+                let created_str: String = row.get(10)?;
+                Ok(AccountSnapshotRecord {
+                    snapshot_id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    snapshot_date: parse_sql_date(row.get(2)?, 2)?,
+                    balance: balance.and_then(|s| parse_decimal(s).ok()),
+                    credit_limit: credit_limit.and_then(|s| parse_decimal(s).ok()),
+                    currency_code: row.get(5)?,
+                    source: row.get(6)?,
+                    actor_id: row.get(7)?,
+                    idempotency_key: row.get(8)?,
+                    metadata_json: parse_sql_json(metadata_str, 9)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);

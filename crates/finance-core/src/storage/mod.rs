@@ -51,6 +51,10 @@ pub trait FinanceStore {
     async fn upsert_accounts(&self, rows: &[AccountRecord]) -> Result<usize>;
     async fn get_accounts(&self) -> Result<Vec<AccountRecord>>;
     async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize>;
+    /// Latest snapshot per account, ordered by `account_id`. One row per
+    /// account that has ever been snapshotted; never duplicates. Used to
+    /// answer "what's the saldo em conta right now?".
+    async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>>;
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize>;
     async fn upsert_rules(&self, rows: &[RuleRecord]) -> Result<usize>;
     async fn upsert_categories(&self, rows: &[CategoryRecord]) -> Result<usize>;

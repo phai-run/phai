@@ -596,6 +596,60 @@ impl FinanceStore for BigQueryStore {
         Ok(rows.len())
     }
 
+    async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
+        let sql = format!(
+            "
+            WITH ranked AS (
+              SELECT
+                snapshot_id, account_id, snapshot_date,
+                CAST(balance AS STRING) AS balance_str,
+                CAST(credit_limit AS STRING) AS credit_limit_str,
+                currency_code, source, actor_id, idempotency_key,
+                TO_JSON_STRING(metadata_json) AS metadata_json,
+                FORMAT_TIMESTAMP('%FT%T%Ez', created_at) AS created_at_str,
+                ROW_NUMBER() OVER (
+                  PARTITION BY account_id
+                  ORDER BY snapshot_date DESC, created_at DESC
+                ) AS rn
+              FROM {}
+            )
+            SELECT snapshot_id, account_id, CAST(snapshot_date AS STRING),
+                   balance_str, credit_limit_str, currency_code, source,
+                   actor_id, idempotency_key, metadata_json, created_at_str
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY account_id
+            ",
+            self.qualified_table("account_snapshots")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let metadata_str = optional_string(&values, 9).unwrap_or_else(|| "{}".to_string());
+            let metadata_json: Value =
+                serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+            let created_str = required_string(&values, 10, "created_at")?;
+            items.push(AccountSnapshotRecord {
+                snapshot_id: required_string(&values, 0, "snapshot_id")?,
+                account_id: required_string(&values, 1, "account_id")?,
+                snapshot_date: optional_date(&values, 2, "snapshot_date")?
+                    .ok_or_else(|| anyhow!("snapshot_date is null"))?,
+                balance: optional_string(&values, 3).and_then(|s| Decimal::from_str(&s).ok()),
+                credit_limit: optional_string(&values, 4).and_then(|s| Decimal::from_str(&s).ok()),
+                currency_code: optional_string(&values, 5),
+                source: required_string(&values, 6, "source")?,
+                actor_id: required_string(&values, 7, "actor_id")?,
+                idempotency_key: required_string(&values, 8, "idempotency_key")?,
+                metadata_json,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            });
+        }
+        Ok(items)
+    }
+
     async fn find_transactions_by_description(
         &self,
         query: &str,

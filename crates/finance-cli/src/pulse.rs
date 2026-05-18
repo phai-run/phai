@@ -15,11 +15,12 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, NaiveDate};
 use finance_core::models::{
-    AccountRecord, BudgetStatusRow, CardSummaryRow, CashflowRow, ForecastRecord,
+    AccountRecord, AccountSnapshotRecord, BudgetStatusRow, CardSummaryRow, CashflowRow,
+    ForecastRecord,
 };
 use finance_core::storage::FinanceStore;
 use rust_decimal::Decimal;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::human_format::{
     bold, brl as hf_brl, brl_signed, category_emoji, category_family, family_label, month_pt_short,
@@ -46,6 +47,8 @@ pub struct PulseData {
     /// Card open balances for the current month_ref.
     pub cards: Vec<CardSummaryRow>,
     pub accounts: Vec<AccountRecord>,
+    /// Latest balance snapshot per account (checking and otherwise).
+    pub snapshots: Vec<AccountSnapshotRecord>,
     /// Budget envelopes that crossed their alert threshold.
     pub budget_alerts: Vec<BudgetStatusRow>,
     pub uncategorized_count: i64,
@@ -196,6 +199,7 @@ pub async fn gather_pulse_data(
     // *closed* cycle for cards whose closing day already passed this month.
     let cards = store.cards_open_now().await.unwrap_or_default();
     let accounts = store.get_accounts().await.unwrap_or_default();
+    let snapshots = store.latest_account_snapshots().await.unwrap_or_default();
 
     let budget_alerts = store
         .budget_status_for_month(&current_month)
@@ -218,6 +222,7 @@ pub async fn gather_pulse_data(
         upcoming_total,
         cards,
         accounts,
+        snapshots,
         budget_alerts,
         uncategorized_count,
     })
@@ -492,7 +497,55 @@ pub fn render_pulse(data: &PulseData, plan: &ClosingPlan, days: i64) -> String {
         }
     }
 
-    // -------- Block 4: Cartões em aberto --------
+    // -------- Block 4: Saldo em conta --------
+    // Pull the latest snapshot for each *checking* account (credit accounts
+    // are surfaced in the next block instead, where the "balance" is debt).
+    // Snapshots come from Pluggy on every sync; if a checking account has
+    // never been synced this block stays silent rather than printing a
+    // misleading R$ 0,00.
+    let checking_ids: BTreeSet<String> = data
+        .accounts
+        .iter()
+        .filter(|a| a.account_type == "checking" && !a.account_id.is_empty())
+        .map(|a| a.account_id.clone())
+        .collect();
+    let balances: Vec<(&AccountSnapshotRecord, &AccountRecord)> = data
+        .snapshots
+        .iter()
+        .filter(|s| checking_ids.contains(&s.account_id) && s.balance.is_some())
+        .filter_map(|s| {
+            data.accounts
+                .iter()
+                .find(|a| a.account_id == s.account_id)
+                .map(|a| (s, a))
+        })
+        .collect();
+    if !balances.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{}", bold("Saldo em conta"));
+        let mut total = Decimal::ZERO;
+        for (snap, acc) in &balances {
+            let label = if acc.label.is_empty() {
+                acc.account_id.clone()
+            } else {
+                acc.label.clone()
+            };
+            let balance = snap.balance.unwrap_or(Decimal::ZERO);
+            total += balance;
+            let _ = writeln!(
+                out,
+                "  💰 {} · {} ({})",
+                label,
+                brl_signed(balance),
+                short_date(snap.snapshot_date),
+            );
+        }
+        if balances.len() > 1 {
+            let _ = writeln!(out, "  {}: {}", bold("Total"), brl_signed(total));
+        }
+    }
+
+    // -------- Block 5: Cartões em aberto --------
     let cards_open: Vec<&CardSummaryRow> = data
         .cards
         .iter()
@@ -514,7 +567,7 @@ pub fn render_pulse(data: &PulseData, plan: &ClosingPlan, days: i64) -> String {
         }
     }
 
-    // -------- Block 5: Ações --------
+    // -------- Block 6: Ações --------
     let mut actions: Vec<String> = Vec::new();
     if data.uncategorized_count > 0 {
         actions.push(format!(
@@ -677,6 +730,7 @@ mod tests {
             upcoming_total: dec!(2000),
             cards: vec![],
             accounts: vec![],
+            snapshots: vec![],
             budget_alerts: vec![],
             uncategorized_count: 0,
         };
@@ -698,6 +752,7 @@ mod tests {
             upcoming_total: dec!(20000),
             cards: vec![],
             accounts: vec![],
+            snapshots: vec![],
             budget_alerts: vec![],
             uncategorized_count: 0,
         };
@@ -723,6 +778,7 @@ mod tests {
             upcoming_total: Decimal::ZERO,
             cards: vec![],
             accounts: vec![],
+            snapshots: vec![],
             budget_alerts: vec![],
             uncategorized_count: 0,
         };
@@ -755,6 +811,7 @@ mod tests {
             upcoming_total: Decimal::ZERO,
             cards: vec![],
             accounts: vec![],
+            snapshots: vec![],
             budget_alerts: vec![],
             uncategorized_count: 3,
         };
