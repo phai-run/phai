@@ -4,7 +4,7 @@ use anyhow::Result;
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 20] = [
+const SQLITE_MIGRATIONS: [Migration; 26] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -85,9 +85,33 @@ const SQLITE_MIGRATIONS: [Migration; 20] = [
         "020_card_open_now_fix",
         include_str!("../../../schema/sqlite/020_card_open_now_fix.sql"),
     ),
+    (
+        "021_normalize_payment_status",
+        include_str!("../../../schema/sqlite/021_normalize_payment_status.sql"),
+    ),
+    (
+        "022_consolidate_slug_dashes",
+        include_str!("../../../schema/sqlite/022_consolidate_slug_dashes.sql"),
+    ),
+    (
+        "023_revisar_fallback",
+        include_str!("../../../schema/sqlite/023_revisar_fallback.sql"),
+    ),
+    (
+        "024_streaming_to_assinaturas",
+        include_str!("../../../schema/sqlite/024_streaming_to_assinaturas.sql"),
+    ),
+    (
+        "025_cashback_as_expense_reduction",
+        include_str!("../../../schema/sqlite/025_cashback_as_expense_reduction.sql"),
+    ),
+    (
+        "026_drop_phantom_account",
+        include_str!("../../../schema/sqlite/026_drop_phantom_account.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 21] = [
+const BIGQUERY_MIGRATIONS: [Migration; 27] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -171,6 +195,30 @@ const BIGQUERY_MIGRATIONS: [Migration; 21] = [
     (
         "021_card_open_now_fix",
         include_str!("../../../schema/bigquery/021_card_open_now_fix.sql"),
+    ),
+    (
+        "022_normalize_payment_status",
+        include_str!("../../../schema/bigquery/022_normalize_payment_status.sql"),
+    ),
+    (
+        "023_consolidate_slug_dashes",
+        include_str!("../../../schema/bigquery/023_consolidate_slug_dashes.sql"),
+    ),
+    (
+        "024_revisar_fallback",
+        include_str!("../../../schema/bigquery/024_revisar_fallback.sql"),
+    ),
+    (
+        "025_streaming_to_assinaturas",
+        include_str!("../../../schema/bigquery/025_streaming_to_assinaturas.sql"),
+    ),
+    (
+        "026_cashback_as_expense_reduction",
+        include_str!("../../../schema/bigquery/026_cashback_as_expense_reduction.sql"),
+    ),
+    (
+        "027_drop_phantom_account",
+        include_str!("../../../schema/bigquery/027_drop_phantom_account.sql"),
     ),
 ];
 

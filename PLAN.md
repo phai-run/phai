@@ -31,135 +31,117 @@
 
 ## O que ficou para depois (ordenado por dependência)
 
-### 1. Normalização de `payment_status` ⚠️ desbloqueador
+### ✅ 1. Normalização de `payment_status` — feito
 
-**Problema.** A coluna usa 5 valores diferentes com semântica sobreposta:
-- `pago` / `posted` — duplicata PT/EN
-- `em_aberto` / `pending` — duplicata PT/EN
-- `parcial` — usado para parcelas futuras, semanticamente errado (sugere
-  "pagamento parcial")
+ADR-0011 + migrations 021 (sqlite) / 022 (bq). Vocabulário canônico:
+`posted` / `pending` / `installment`. `v_card_summary.open_amount` agora
+soma apenas `pending`; nova coluna `installments_future` surface parcelas
+separadamente. Pulse mostra `+R$X em parcelas` ao lado do "em aberto".
+Pluggy sync normaliza no ingestion via `normalize_payment_status()`.
+`is_open_card_payment_status` no CLI mantém compat com PT/legacy aliases
+para tolerar deployment rolling.
 
-**Impacto.** `v_card_summary.open_amount` faz
-`SUM(IF payment_status IN ('pending','em_aberto','parcial'), abs(amount), 0)`.
-Misturando `parcial` com `pending` infla a dívida atual com parcelas que
-ainda nem entraram em fatura.
+### ✅ 2. Consolidação de slugs `---` ↔ `-` — feito
 
-**Plano.**
-1. ADR documentando o vocabulário canônico: `posted` (já apareceu na
-   fatura), `pending` (cobrança futura, não-parcelada), `installment`
-   (parcela futura, parte de chain).
-2. Migração SQL que mapeia: `pago → posted`, `em_aberto → pending`,
-   `parcial → installment` (se tem marker de parcela no description ou
-   metadata) senão `pending`.
-3. Atualizar regras / enrichment que emitem esses valores.
-4. Atualizar views: `open_amount` agora soma só `pending`. Adicionar
-   coluna separada `installments_future` para parcelas.
-5. Atualizar pulse para mostrar `Felipe · R$ 5.643 em aberto + R$ 1.200 em parcelas futuras`.
+Migrations 022 (sqlite) / 023 (bq) fazem `REPLACE(category_id, '---', '-')`
+em transactions, forecast, category_budgets, internal_categories e
+categories (com lógica de consolidação para evitar conflito de PK quando
+ambos `x-y` e `x---y` existem). Slugifier atual já produz dash único —
+regression test em `idempotency.rs` garante que `Bar / Baz` etc. nunca
+voltam a gerar `---`.
 
-### 2. Consolidação de slugs `---` ↔ `-`
+### ✅ 3. `outros:geral` fallback dump → `_revisar` — feito
 
-**Problema.** Slugificador antigo produzia chaves duplicadas:
-`assinaturas:cloud-storage` AND `assinaturas:cloud---storage` (mesma
-categoria, duas chaves). 8 famílias afetadas (ver diagnóstico no
-histórico).
+Migrations 023 (sqlite) / 024 (bq) introduzem a categoria reservada
+`_revisar` e re-rotam rows fallback (`category_source='fallback'` AND
+`category_id='outros:geral'`) para ela. `_revisar` começa com `_` que o
+slugifier nunca produz (filtra `is_ascii_alphanumeric`), então não
+colide com slug de usuário. `v_uncategorized` continua catching ambos
+(via predicate em `category_source`).
 
-**Plano.**
-1. UPDATE em massa nas tabelas: `categories`, `transactions`, `forecast`,
-   `category_budgets`, `rules`.
-2. Corrigir o slugificador em `crates/finance-core/src/idempotency.rs`
-   (função `category_id`) — substituir " / " → "-" não " / " → "---".
-3. Migração idempotente em ambos backends.
-4. Teste regression no slugificador.
+Limitações: nenhum código emite `category_source='fallback'` hoje (o
+caso da auditoria veio de versão histórica). Se um futuro caminho de
+código tentar emitir fallback de novo, vale escrever direto em
+`_revisar` em vez de em `outros:geral`. Não há ADR específica aqui — o
+fix é puramente dado.
 
-### 3. Eliminar `outros:geral` como lixeira invisível
+### ✅ 4. Streaming taxonomy — feito
 
-**Problema.** `category_source = 'fallback'` aponta para `outros:geral`,
-então 68 transações ficam com `category_id != NULL` e somem de
-`v_uncategorized`. Usuário pensa que classificou tudo.
+Migrations 024 (sqlite) / 025 (bq) criam `assinaturas:streaming` e
+movem todas as transactions, forecasts e budgets de `moradia:streaming`
+para `assinaturas:streaming`. A categoria `moradia:streaming` é
+deletada após a migração.
 
-**Plano.**
-1. Introduzir categoria especial `_revisar` (com underscore prefixed para
-   ordenar no topo das views).
-2. Fallback agora aponta para `_revisar`.
-3. `v_uncategorized` pega tudo onde category_source IN ('fallback',
-   'unclassified') OR category_id = '_revisar' OR category_id IS NULL.
-4. Migração: UPDATE transactions SET category_id='_revisar' WHERE
-   category_source='fallback' AND category_id='outros:geral'.
-5. ADR sobre a semântica de category_source.
+Limitação: rules persistem o label humano ("Moradia" / "Streaming") e
+slugificam no apply, então rules que produzem `moradia:streaming` no
+caminho de sincronização vão continuar fazendo isso. O usuário precisa
+editar essas rules manualmente para mudar para `assinaturas:streaming`
+(via `finance rule upsert`).
 
-### 4. Streaming taxonomy
+### ✅ 5. Cashback como redução de despesa — feito
 
-**Problema.** Netflix, HBO, Disney, Prime, YouTube estão em
-`moradia:streaming` enquanto outras assinaturas (`assinaturas:apple`,
-`assinaturas:cloud-storage`) seguem o pattern `assinaturas:*`.
-Inconsistência conceitual.
+Migrations 025 (sqlite) / 026 (bq) redefinem `v_cashflow`: cashback
+(rows com `category_id='cashback'` e amount positivo) sai do bucket
+`income` e vai para uma coluna nova `expense_reduction`. `CashflowRow`
+ganha o campo; pulse renderiza "💸 cashback R$X · saídas líquidas R$Y"
+quando há cashback no mês. Income agora reflete só inflows reais
+(salário, transferências recebidas, etc.).
 
-**Plano.**
-1. Migração que cria `assinaturas:streaming` e UPDATE move forecasts +
-   transactions + rules de `moradia:streaming` para `assinaturas:streaming`.
-2. ADR opcional (depende — pode ir junto com consolidação de slugs).
+### ✅ 6. Dedup heurística secundária — feito
 
-### 5. Cashback como redução de despesa
+`sync pluggy` agora roda `dedup_pluggy_duplicates` antes do upsert.
+Fingerprint = `(date, account, signed_amount, normalize(description))`;
+match contra rows existentes em `transactions_in_date_range` no mesmo
+range de datas que o batch (only `source='pluggy'` para evitar falso
+positivo contra entradas manuais). Quando colide com um existente de
+ID diferente, a row nova é descartada e um `AuditEvent` `tx.dedup_skipped`
+é emitido com `skipped_transaction_id` / `matched_existing_id` /
+`fingerprint` no diff. Sem mudança de schema.
 
-**Problema.** Cashback (R$1857 em março) entra como `income` em
-`v_cashflow`. É redução de despesa, não receita; distorce taxa de poupança.
+Limitação conhecida: gastos legítimos repetidos no mesmo dia (e.g.
+duas tarifas idênticas de pedágio na mesma manhã) seriam suprimidos.
+Aceitável dado o ratio Pluggy-dupe vs legítimo observado. Se for
+problema, adicionar `--no-dedup` no CLI ou marcar manualmente como
+não-duplicata via metadata_json.
 
-**Plano.**
-1. Adicionar categoria `cashback` (já existe — está como categoria flat
-   EN) à tabela `internal_categories` OU criar um terceiro bucket no
-   `v_cashflow` (`expense_reduction`) e subtrair de `expenses`.
-2. Atualizar pulse para mostrar cashback como "redução" no MtD.
-3. Atualizar regras se houver pattern PT vs EN duplicado.
+### ✅ 7. Linha-fantasma de `accounts` — feito
 
-### 6. Dedup heurística secundária
+`load_account_registry` em `crates/finance-core/src/legacy.rs` agora
+ignora rows com `id` vazio (após trim). Migrations 026 (sqlite) / 027
+(bq) deletam a row fantasma existente (filtra por signature exata:
+account_id='' AND owner='' AND label='' AND source='legacy_accounts_csv')
+para não derrubar uma row legítima criada manualmente.
 
-**Problema.** Em 2026-02-06 Pluggy emitiu duas tx com transaction_ids
-diferentes mas mesma date+amount+account+description ("Pagamento recebido"
-R$7905.62 duplicado em aline_cartao). Idempotência por pluggy_id não pega.
+### 🟡 8. Decimal precision in views — parcial
 
-**Plano.**
-1. No `upsert_transactions`, ao receber um lote, hash secundário
-   `(transaction_date, amount, account_id, normalize(description))`.
-2. Se hash já existe e o existente também é `source='pluggy'`, marcar a
-   nova como `dedup_skipped` em audit_events em vez de inserir.
-3. Esquema: adicionar coluna `dedup_hash` em transactions (ou ficar em
-   metadata_json) com índice.
-4. ADR descrevendo a heurística e seu corner case (legítimas duplicatas
-   no mesmo dia/conta/valor — passar `--force` ou tag manual?).
+`cashflow` (SQLite) agora faz SUM em Rust com `rust_decimal` em vez de
+agregar pela view (que usa `CAST(amount AS REAL)`). É a view mais
+sensível porque alimenta o pulse direto. BigQuery permanece via view —
+o tipo NUMERIC nativo já é decimal-safe lá.
 
-### 7. Linha-fantasma de `accounts` (account_id vazio)
+**Ainda usando REAL no SQLite (follow-up):**
+- `v_monthly_spend`, `v_card_summary`, `v_card_open_now`,
+  `v_forecast_vs_actual`, `v_transactions_reportable`,
+  `v_uncategorized` (filter), `v_display_labels` (emoji predicate).
+- Total: ~92 ocorrências de `CAST(... AS REAL)` em `schema/sqlite/`.
 
-**Problema.** O importer legacy criou uma row em `accounts` com
-`account_id=''` (e todos os outros campos vazios), source =
-`legacy_accounts_csv`. Não tem transações ligadas mas suja
-`get_accounts()`.
+**Caminhos possíveis para o resto:**
+1. Mover SUM para Rust em cada storage method, espelhando o que
+   `cashflow` fez agora. Trabalhoso mas localizado — sem mudança de
+   schema, sem trigger.
+2. Adicionar coluna `amount_cents INTEGER` (gerada ou via trigger) em
+   `transactions`, reescrever views para SUM(amount_cents) e dividir
+   por 100 no SELECT final. Menos código Rust, mais SQL. Requer
+   SQLite >= 3.31 para STORED generated columns (rusqlite bundled
+   está OK).
+3. Aceitar f64 nas views de relatório. Erros de arredondamento ficam
+   no nível dos centavos e o `round_dp(2)` na borda os mascara para
+   amounts < ~R$10 bi. Documentar em ADR-0003 como compromise
+   consciente.
 
-**Plano.**
-1. Bug fix em `crates/finance-core/src/legacy.rs` (CSV importer):
-   skip rows where `id` é vazio.
-2. Migração one-shot:
-   `DELETE FROM accounts WHERE account_id='' AND NOT EXISTS (SELECT 1 FROM transactions WHERE account_id='accounts.account_id')`.
-3. Teste regression no importer com CSV malformado.
-
-### 8. Replace `CAST(amount AS REAL)` por SQL decimal-safe
-
-**Problema.** ADR-0003 promete Decimal end-to-end. Mas
-`v_monthly_spend`, `v_cashflow`, `v_card_summary`, `v_forecast_vs_actual`
-fazem `CAST(amount AS REAL)` em SUM/comparison. f64 contamina os relatórios.
-
-**Plano.**
-1. SQLite armazena Decimal como TEXT. Para somar precisamente sem REAL:
-   usar UDF `sqlite_decimal` ou armazenar centavos como INTEGER em uma
-   coluna shadow (`amount_cents`) computada por trigger. Trade-off: o
-   UDF não está disponível em `rusqlite` sem feature flag.
-2. Solução pragmática: continuar lendo TEXT, fazer agregação no
-   aplicativo Rust em `Decimal`. Refatorar as views para retornar TEXT
-   e mover SUM para o lado Rust.
-3. BigQuery: trocar `IF(amount < 0, ABS(amount), 0)` (que opera em
-   NUMERIC nativo — já é decimal-safe) — apenas o display string
-   coercion (`CAST(... AS STRING)`) está OK.
-4. ADR atualizando 0003 para refletir essa realidade.
-5. Trabalho significativo — provavelmente é o último.
+**Recomendação:** opção 2 (cents). Cleanest e mais simétrico com
+BigQuery. Mas é um PR sozinho — não dá pra colar com mais nada sem
+inflar o diff.
 
 ## Princípios operacionais ao continuar
 

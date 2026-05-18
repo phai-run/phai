@@ -219,8 +219,17 @@ pub struct MonthlySpendRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CashflowRow {
     pub month_ref: String,
+    /// Money actually entering the household: salary, transfers in, etc.
+    /// Excludes `category_id = 'cashback'` events (which are bucketed in
+    /// `expense_reduction`).
     pub income: Decimal,
+    /// Gross outflows. Use `expenses - expense_reduction` for the net
+    /// effective spend.
     pub expenses: Decimal,
+    /// Cashback / refund credits that conceptually offset prior spend
+    /// rather than represent new income. See ADR-0012.
+    #[serde(default)]
+    pub expense_reduction: Decimal,
     pub net: Decimal,
 }
 
@@ -243,7 +252,15 @@ pub struct CardSummaryRow {
     pub month_ref: String,
     pub account_id: String,
     pub total_charges: Decimal,
+    /// Sum of `payment_status = 'pending'` rows in the cycle — money owed on
+    /// the bill that has not yet been paid.
     pub open_amount: Decimal,
+    /// Sum of `payment_status = 'installment'` rows in the cycle — future
+    /// parcelas that don't belong to a bill yet. Surfaced separately from
+    /// `open_amount` so a card's "what I owe now" stays distinct from
+    /// "what I'm committed to in coming months".
+    #[serde(default)]
+    pub installments_future: Decimal,
     pub transaction_count: i64,
 }
 

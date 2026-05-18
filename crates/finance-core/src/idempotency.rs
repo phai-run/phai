@@ -201,6 +201,31 @@ mod tests {
     }
 
     #[test]
+    fn category_id_collapses_runs_of_non_alnum() {
+        // Regression: an older slugifier rendered " / " as three dashes and
+        // produced `assinaturas:cloud---storage`. The current implementation
+        // collapses any run of non-alphanumerics into a single dash, so any
+        // visible input like "IA / Produtividade" or "Cloud  /  Storage"
+        // converges on the same key.
+        for variant in [
+            "IA / Produtividade",
+            "IA/Produtividade",
+            "IA  /  Produtividade",
+            "IA - Produtividade",
+        ] {
+            assert_eq!(
+                category_id("Assinaturas", Some(variant)),
+                "assinaturas:ia-produtividade".to_string(),
+                "variant {variant:?} should slugify identically"
+            );
+        }
+        assert!(
+            !category_id("Foo", Some("Bar / Baz")).contains("---"),
+            "slugifier must never produce ---"
+        );
+    }
+
+    #[test]
     fn split_line_hash_is_deterministic() {
         let hash_a = split_line_hash(
             "tx-123",
