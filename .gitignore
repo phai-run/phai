@@ -21,8 +21,10 @@ config.toml
 /.private/
 /.local/
 
-# Local agent state (worktrees, locks, settings)
-.claude/
+# Local agent state (worktrees, locks, settings) — keep shared playbook bits tracked
+.claude/*
+!.claude/commands/
+!.claude/settings.json
 
 # Internal planning documents (not for public repo)
 entrega1-ajustes-pendentes.md
