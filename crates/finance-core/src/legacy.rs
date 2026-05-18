@@ -117,8 +117,20 @@ pub fn load_account_registry(
         return Ok(registry);
     }
     for row in read_csv_rows(accounts_csv)? {
+        let account_id = row
+            .get("id")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        // Skip blank-id rows. Previously the importer would create a row
+        // with `account_id=""` from a malformed line in the CSV, polluting
+        // every `get_accounts()` call. The bug bled an empty-string account
+        // into the production database; migration 026/027 cleans the
+        // existing artefact.
+        if account_id.is_empty() {
+            continue;
+        }
         let entry = AccountRegistryEntry {
-            account_id: row.get("id").cloned().unwrap_or_default(),
+            account_id,
             owner: row.get("owner").cloned().unwrap_or_default(),
             account_type: row.get("type").cloned().unwrap_or_default(),
             bank: row.get("bank").cloned().unwrap_or_default(),

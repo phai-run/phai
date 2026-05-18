@@ -104,19 +104,13 @@ Aceitável dado o ratio Pluggy-dupe vs legítimo observado. Se for
 problema, adicionar `--no-dedup` no CLI ou marcar manualmente como
 não-duplicata via metadata_json.
 
-### 7. Linha-fantasma de `accounts` (account_id vazio)
+### ✅ 7. Linha-fantasma de `accounts` — feito
 
-**Problema.** O importer legacy criou uma row em `accounts` com
-`account_id=''` (e todos os outros campos vazios), source =
-`legacy_accounts_csv`. Não tem transações ligadas mas suja
-`get_accounts()`.
-
-**Plano.**
-1. Bug fix em `crates/finance-core/src/legacy.rs` (CSV importer):
-   skip rows where `id` é vazio.
-2. Migração one-shot:
-   `DELETE FROM accounts WHERE account_id='' AND NOT EXISTS (SELECT 1 FROM transactions WHERE account_id='accounts.account_id')`.
-3. Teste regression no importer com CSV malformado.
+`load_account_registry` em `crates/finance-core/src/legacy.rs` agora
+ignora rows com `id` vazio (após trim). Migrations 026 (sqlite) / 027
+(bq) deletam a row fantasma existente (filtra por signature exata:
+account_id='' AND owner='' AND label='' AND source='legacy_accounts_csv')
+para não derrubar uma row legítima criada manualmente.
 
 ### 8. Replace `CAST(amount AS REAL)` por SQL decimal-safe
 
