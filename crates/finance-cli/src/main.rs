@@ -2261,6 +2261,94 @@ async fn upsert_transactions_chunked(
     Ok(total)
 }
 
+/// Fingerprint used to detect Pluggy emitting two distinct `transaction_id`s
+/// for what is logically the same posted event. We saw this in production on
+/// 2026-02-06: two "Pagamento recebido" rows at +R$7905,62 on `aline_cartao`
+/// with different UUIDs. The pluggy_id-based idempotency couldn't catch the
+/// pair because the upstream IDs were genuinely different.
+///
+/// Conservative on what counts as a match — date, account, signed amount and
+/// the description normalised to lowercase + trimmed. Anything more lenient
+/// risks merging legitimate same-day repeats (a user really did pay two
+/// R$50 parking fees the same morning).
+fn dedup_fingerprint(row: &TransactionRecord) -> String {
+    let desc = row
+        .description
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    format!(
+        "{date}|{account}|{amount}|{desc}",
+        date = row.transaction_date.format("%Y-%m-%d"),
+        account = row.account_id.as_deref().unwrap_or(""),
+        amount = decimal_text(row.amount),
+    )
+}
+
+/// Filter out rows whose fingerprint collides with an existing transaction
+/// (different `transaction_id`, both `source='pluggy'`). Returns the
+/// filtered list and an audit event for each skipped row.
+///
+/// The check pulls existing rows for the batch's date range × accounts via
+/// `transactions_in_date_range` and dedupes in-process. We don't go to the
+/// store per row.
+async fn dedup_pluggy_duplicates(
+    store: &dyn FinanceStore,
+    actor_id: &str,
+    incoming: Vec<TransactionRecord>,
+) -> Result<(Vec<TransactionRecord>, Vec<AuditEvent>)> {
+    if incoming.is_empty() {
+        return Ok((incoming, Vec::new()));
+    }
+    let date_min = incoming.iter().map(|t| t.transaction_date).min().unwrap();
+    let date_max = incoming.iter().map(|t| t.transaction_date).max().unwrap();
+    // Existing rows in the window. Per-account filtering happens in-Rust so
+    // we only need a single query.
+    let existing = store
+        .transactions_in_date_range(None, date_min, date_max)
+        .await
+        .unwrap_or_default();
+    let mut fingerprint_to_existing: BTreeMap<String, String> = BTreeMap::new();
+    for row in &existing {
+        if row.source == "pluggy" {
+            fingerprint_to_existing.insert(dedup_fingerprint(row), row.transaction_id.clone());
+        }
+    }
+    let mut kept = Vec::with_capacity(incoming.len());
+    let mut audit = Vec::new();
+    for row in incoming {
+        if row.source != "pluggy" {
+            kept.push(row);
+            continue;
+        }
+        let fp = dedup_fingerprint(&row);
+        match fingerprint_to_existing.get(&fp) {
+            Some(existing_id) if existing_id != &row.transaction_id => {
+                let diff = json!({
+                    "skipped_transaction_id": row.transaction_id,
+                    "matched_existing_id": existing_id,
+                    "fingerprint": fp,
+                });
+                audit.push(AuditEvent::from_entity(
+                    "transaction",
+                    &row.transaction_id,
+                    "dedup_skipped",
+                    actor_id,
+                    &format!("dedup:{}", row.transaction_id),
+                    diff,
+                ));
+                // No insert — leave the existing row alone.
+            }
+            _ => {
+                fingerprint_to_existing.insert(fp, row.transaction_id.clone());
+                kept.push(row);
+            }
+        }
+    }
+    Ok((kept, audit))
+}
+
 async fn upsert_rules_chunked(store: &dyn FinanceStore, rows: &[RuleRecord]) -> Result<usize> {
     let mut total = 0;
     for chunk in rows.chunks(UPSERT_BATCH_SIZE) {
@@ -2824,6 +2912,9 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     insert_snapshots_chunked(store.as_ref(), &snapshots).await?;
 
     upsert_categories_chunked(store.as_ref(), &categories).await?;
+    let (transactions, mut dedup_audit) =
+        dedup_pluggy_duplicates(store.as_ref(), &config.actor_id, transactions).await?;
+    audit.append(&mut dedup_audit);
     upsert_transactions_chunked(store.as_ref(), &transactions).await?;
 
     for rebind in &rebinds {

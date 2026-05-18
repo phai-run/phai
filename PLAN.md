@@ -87,21 +87,22 @@ ganha o campo; pulse renderiza "💸 cashback R$X · saídas líquidas R$Y"
 quando há cashback no mês. Income agora reflete só inflows reais
 (salário, transferências recebidas, etc.).
 
-### 6. Dedup heurística secundária
+### ✅ 6. Dedup heurística secundária — feito
 
-**Problema.** Em 2026-02-06 Pluggy emitiu duas tx com transaction_ids
-diferentes mas mesma date+amount+account+description ("Pagamento recebido"
-R$7905.62 duplicado em aline_cartao). Idempotência por pluggy_id não pega.
+`sync pluggy` agora roda `dedup_pluggy_duplicates` antes do upsert.
+Fingerprint = `(date, account, signed_amount, normalize(description))`;
+match contra rows existentes em `transactions_in_date_range` no mesmo
+range de datas que o batch (only `source='pluggy'` para evitar falso
+positivo contra entradas manuais). Quando colide com um existente de
+ID diferente, a row nova é descartada e um `AuditEvent` `tx.dedup_skipped`
+é emitido com `skipped_transaction_id` / `matched_existing_id` /
+`fingerprint` no diff. Sem mudança de schema.
 
-**Plano.**
-1. No `upsert_transactions`, ao receber um lote, hash secundário
-   `(transaction_date, amount, account_id, normalize(description))`.
-2. Se hash já existe e o existente também é `source='pluggy'`, marcar a
-   nova como `dedup_skipped` em audit_events em vez de inserir.
-3. Esquema: adicionar coluna `dedup_hash` em transactions (ou ficar em
-   metadata_json) com índice.
-4. ADR descrevendo a heurística e seu corner case (legítimas duplicatas
-   no mesmo dia/conta/valor — passar `--force` ou tag manual?).
+Limitação conhecida: gastos legítimos repetidos no mesmo dia (e.g.
+duas tarifas idênticas de pedágio na mesma manhã) seriam suprimidos.
+Aceitável dado o ratio Pluggy-dupe vs legítimo observado. Se for
+problema, adicionar `--no-dedup` no CLI ou marcar manualmente como
+não-duplicata via metadata_json.
 
 ### 7. Linha-fantasma de `accounts` (account_id vazio)
 
