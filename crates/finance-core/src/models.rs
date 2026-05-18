@@ -243,7 +243,15 @@ pub struct CardSummaryRow {
     pub month_ref: String,
     pub account_id: String,
     pub total_charges: Decimal,
+    /// Sum of `payment_status = 'pending'` rows in the cycle — money owed on
+    /// the bill that has not yet been paid.
     pub open_amount: Decimal,
+    /// Sum of `payment_status = 'installment'` rows in the cycle — future
+    /// parcelas that don't belong to a bill yet. Surfaced separately from
+    /// `open_amount` so a card's "what I owe now" stays distinct from
+    /// "what I'm committed to in coming months".
+    #[serde(default)]
+    pub installments_future: Decimal,
     pub transaction_count: i64,
 }
 

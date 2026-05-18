@@ -31,30 +31,15 @@
 
 ## O que ficou para depois (ordenado por dependência)
 
-### 1. Normalização de `payment_status` ⚠️ desbloqueador
+### ✅ 1. Normalização de `payment_status` — feito
 
-**Problema.** A coluna usa 5 valores diferentes com semântica sobreposta:
-- `pago` / `posted` — duplicata PT/EN
-- `em_aberto` / `pending` — duplicata PT/EN
-- `parcial` — usado para parcelas futuras, semanticamente errado (sugere
-  "pagamento parcial")
-
-**Impacto.** `v_card_summary.open_amount` faz
-`SUM(IF payment_status IN ('pending','em_aberto','parcial'), abs(amount), 0)`.
-Misturando `parcial` com `pending` infla a dívida atual com parcelas que
-ainda nem entraram em fatura.
-
-**Plano.**
-1. ADR documentando o vocabulário canônico: `posted` (já apareceu na
-   fatura), `pending` (cobrança futura, não-parcelada), `installment`
-   (parcela futura, parte de chain).
-2. Migração SQL que mapeia: `pago → posted`, `em_aberto → pending`,
-   `parcial → installment` (se tem marker de parcela no description ou
-   metadata) senão `pending`.
-3. Atualizar regras / enrichment que emitem esses valores.
-4. Atualizar views: `open_amount` agora soma só `pending`. Adicionar
-   coluna separada `installments_future` para parcelas.
-5. Atualizar pulse para mostrar `Felipe · R$ 5.643 em aberto + R$ 1.200 em parcelas futuras`.
+ADR-0011 + migrations 021 (sqlite) / 022 (bq). Vocabulário canônico:
+`posted` / `pending` / `installment`. `v_card_summary.open_amount` agora
+soma apenas `pending`; nova coluna `installments_future` surface parcelas
+separadamente. Pulse mostra `+R$X em parcelas` ao lado do "em aberto".
+Pluggy sync normaliza no ingestion via `normalize_payment_status()`.
+`is_open_card_payment_status` no CLI mantém compat com PT/legacy aliases
+para tolerar deployment rolling.
 
 ### 2. Consolidação de slugs `---` ↔ `-`
 

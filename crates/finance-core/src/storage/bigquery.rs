@@ -2010,6 +2010,7 @@ impl FinanceStore for BigQueryStore {
               account_id,
               CAST(total_charges AS STRING),
               CAST(open_amount AS STRING),
+              CAST(installments_future AS STRING),
               CAST(transaction_count AS STRING)
             FROM {}
             {where_clause}
@@ -2026,7 +2027,8 @@ impl FinanceStore for BigQueryStore {
                 account_id: required_string(&values, 1, "account_id")?,
                 total_charges: required_decimal(&values, 2, "total_charges")?,
                 open_amount: required_decimal(&values, 3, "open_amount")?,
-                transaction_count: required_i64(&values, 4, "transaction_count")?,
+                installments_future: required_decimal(&values, 4, "installments_future")?,
+                transaction_count: required_i64(&values, 5, "transaction_count")?,
             });
         }
         Ok(items)
@@ -2040,6 +2042,7 @@ impl FinanceStore for BigQueryStore {
               account_id,
               CAST(total_charges AS STRING),
               CAST(open_amount AS STRING),
+              CAST(installments_future AS STRING),
               CAST(transaction_count AS STRING)
             FROM {}
             ORDER BY account_id ASC
@@ -2055,7 +2058,8 @@ impl FinanceStore for BigQueryStore {
                 account_id: required_string(&values, 1, "account_id")?,
                 total_charges: required_decimal(&values, 2, "total_charges")?,
                 open_amount: required_decimal(&values, 3, "open_amount")?,
-                transaction_count: required_i64(&values, 4, "transaction_count")?,
+                installments_future: required_decimal(&values, 4, "installments_future")?,
+                transaction_count: required_i64(&values, 5, "transaction_count")?,
             });
         }
         Ok(items)

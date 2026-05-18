@@ -566,12 +566,18 @@ pub fn render_pulse(data: &PulseData, plan: &ClosingPlan, days: i64) -> String {
         for c in cards_open {
             let due_label = card_due_label(&data.accounts, &c.account_id, &c.month_ref, data.today);
             let acc_label = card_account_label(&data.accounts, &c.account_id);
+            let installments_hint = if c.installments_future > Decimal::ZERO {
+                format!(" · +{} em parcelas", hf_brl(c.installments_future))
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 out,
-                "  💳 {} · {}{}",
+                "  💳 {} · {}{}{}",
                 acc_label,
                 hf_brl(c.open_amount),
                 due_label.map(|s| format!(" ({s})")).unwrap_or_default(),
+                installments_hint,
             );
         }
     }

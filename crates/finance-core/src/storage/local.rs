@@ -1367,6 +1367,7 @@ impl FinanceStore for LocalStore {
               account_id,
               CAST(total_charges AS TEXT),
               CAST(open_amount AS TEXT),
+              CAST(installments_future AS TEXT),
               transaction_count
             FROM v_card_summary
             WHERE (?1 IS NULL OR month_ref = ?1)
@@ -1377,6 +1378,7 @@ impl FinanceStore for LocalStore {
             .query_map([month_ref], |row| {
                 let total_charges = row.get::<_, String>(2)?;
                 let open_amount = row.get::<_, String>(3)?;
+                let installments_future = row.get::<_, String>(4)?;
                 Ok(CardSummaryRow {
                     month_ref: row.get(0)?,
                     account_id: row.get(1)?,
@@ -1394,7 +1396,14 @@ impl FinanceStore for LocalStore {
                             Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
                         )
                     })?,
-                    transaction_count: row.get(4)?,
+                    installments_future: parse_decimal(installments_future).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    transaction_count: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1410,6 +1419,7 @@ impl FinanceStore for LocalStore {
               account_id,
               CAST(total_charges AS TEXT),
               CAST(open_amount AS TEXT),
+              CAST(installments_future AS TEXT),
               transaction_count
             FROM v_card_open_now
             ORDER BY account_id ASC
@@ -1419,6 +1429,7 @@ impl FinanceStore for LocalStore {
             .query_map([], |row| {
                 let total_charges = row.get::<_, String>(2)?;
                 let open_amount = row.get::<_, String>(3)?;
+                let installments_future = row.get::<_, String>(4)?;
                 Ok(CardSummaryRow {
                     month_ref: row.get(0)?,
                     account_id: row.get(1)?,
@@ -1436,7 +1447,14 @@ impl FinanceStore for LocalStore {
                             Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
                         )
                     })?,
-                    transaction_count: row.get(4)?,
+                    installments_future: parse_decimal(installments_future).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    transaction_count: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

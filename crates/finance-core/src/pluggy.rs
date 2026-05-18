@@ -200,6 +200,20 @@ fn account_type_from_payload(payload: &PluggyAccountPayload) -> String {
         .to_ascii_lowercase()
 }
 
+/// Canonicalise a raw `payment_status` token (from Pluggy or a legacy
+/// import) into the three values ADR-0011 picks: `posted`, `pending`,
+/// `installment`. Anything we don't recognise passes through unchanged
+/// (case-lowered) so we don't lose information on a new Pluggy code we
+/// haven't seen before — the migration logs would flag it.
+pub fn normalize_payment_status(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "pago" | "confirmed" | "posted" => "posted".to_string(),
+        "em_aberto" | "unconfirmed" | "pending" => "pending".to_string(),
+        "parcial" | "installment" => "installment".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn normalize_match_key(value: &str) -> String {
     value
         .chars()
@@ -572,11 +586,13 @@ fn build_transaction_record(
         category_id,
         category_source,
         context,
-        payment_status: payload
-            .status
-            .clone()
-            .unwrap_or_else(|| "posted".to_string())
-            .to_ascii_lowercase(),
+        payment_status: normalize_payment_status(
+            payload
+                .status
+                .clone()
+                .unwrap_or_else(|| "posted".to_string())
+                .as_str(),
+        ),
         source: "pluggy".to_string(),
         actor_id: actor_id.to_string(),
         idempotency_key: pluggy_transaction_idempotency(&payload.id),

@@ -1716,10 +1716,19 @@ fn default_closed_cards_month(today: NaiveDate) -> Result<String> {
     )?))
 }
 
+/// Whether a `payment_status` should be summed into a card's "open bill"
+/// total. ADR-0011 narrows this to the canonical `pending` value —
+/// `installment` rows are future parcelas and surface separately via the
+/// `installments_future` column.
+///
+/// The PT aliases (`em_aberto`, `parcial`) and the legacy `confirmed` /
+/// `unconfirmed` aliases are still accepted as input so reports stay correct
+/// against a database that hasn't yet been re-migrated (e.g. during a
+/// rolling deploy where the row migration in 021 hasn't finished).
 fn is_open_card_payment_status(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
-        "pending" | "em_aberto" | "parcial"
+        "pending" | "em_aberto" | "unconfirmed"
     )
 }
 
