@@ -78,17 +78,14 @@ caminho de sincronização vão continuar fazendo isso. O usuário precisa
 editar essas rules manualmente para mudar para `assinaturas:streaming`
 (via `finance rule upsert`).
 
-### 5. Cashback como redução de despesa
+### ✅ 5. Cashback como redução de despesa — feito
 
-**Problema.** Cashback (R$1857 em março) entra como `income` em
-`v_cashflow`. É redução de despesa, não receita; distorce taxa de poupança.
-
-**Plano.**
-1. Adicionar categoria `cashback` (já existe — está como categoria flat
-   EN) à tabela `internal_categories` OU criar um terceiro bucket no
-   `v_cashflow` (`expense_reduction`) e subtrair de `expenses`.
-2. Atualizar pulse para mostrar cashback como "redução" no MtD.
-3. Atualizar regras se houver pattern PT vs EN duplicado.
+Migrations 025 (sqlite) / 026 (bq) redefinem `v_cashflow`: cashback
+(rows com `category_id='cashback'` e amount positivo) sai do bucket
+`income` e vai para uma coluna nova `expense_reduction`. `CashflowRow`
+ganha o campo; pulse renderiza "💸 cashback R$X · saídas líquidas R$Y"
+quando há cashback no mês. Income agora reflete só inflows reais
+(salário, transferências recebidas, etc.).
 
 ### 6. Dedup heurística secundária
 

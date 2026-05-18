@@ -120,6 +120,7 @@ pub async fn gather_pulse_data(
             month_ref: current_month.clone(),
             income: Decimal::ZERO,
             expenses: Decimal::ZERO,
+            expense_reduction: Decimal::ZERO,
             net: Decimal::ZERO,
         });
     let closed: Vec<&CashflowRow> = cashflow
@@ -133,17 +134,20 @@ pub async fn gather_pulse_data(
             month_ref: "T3M".into(),
             income: Decimal::ZERO,
             expenses: Decimal::ZERO,
+            expense_reduction: Decimal::ZERO,
             net: Decimal::ZERO,
         }
     } else {
         let n = Decimal::from(closed.len() as i64);
         let income = closed.iter().map(|r| r.income).sum::<Decimal>() / n;
         let expenses = closed.iter().map(|r| r.expenses).sum::<Decimal>() / n;
+        let expense_reduction = closed.iter().map(|r| r.expense_reduction).sum::<Decimal>() / n;
         CashflowRow {
             month_ref: "T3M".into(),
             income,
             expenses,
-            net: income - expenses,
+            expense_reduction,
+            net: income - expenses + expense_reduction,
         }
     };
 
@@ -414,6 +418,14 @@ pub fn render_pulse(data: &PulseData, plan: &ClosingPlan, days: i64) -> String {
         hf_brl(data.mtd.expenses),
         brl_signed(net_mtd),
     );
+    if data.mtd.expense_reduction > Decimal::ZERO {
+        let _ = writeln!(
+            out,
+            "  💸 cashback {} · saídas líquidas {}",
+            hf_brl(data.mtd.expense_reduction),
+            hf_brl(data.mtd.expenses - data.mtd.expense_reduction),
+        );
+    }
     // Headline: closing plan.
     let _ = writeln!(out);
     match plan.status {
@@ -697,6 +709,7 @@ mod tests {
     fn cf(month: &str, income: Decimal, expenses: Decimal) -> CashflowRow {
         CashflowRow {
             month_ref: month.into(),
+            expense_reduction: Decimal::ZERO,
             income,
             expenses,
             net: income - expenses,

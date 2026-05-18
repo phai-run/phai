@@ -1255,7 +1255,11 @@ impl FinanceStore for LocalStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
-            SELECT month_ref, CAST(income AS TEXT), CAST(expenses AS TEXT), CAST(net AS TEXT)
+            SELECT month_ref,
+                   CAST(income AS TEXT),
+                   CAST(expenses AS TEXT),
+                   CAST(expense_reduction AS TEXT),
+                   CAST(net AS TEXT)
             FROM v_cashflow
             ORDER BY month_ref DESC
             LIMIT ?1
@@ -1265,30 +1269,22 @@ impl FinanceStore for LocalStore {
             .query_map([months as i64], |row| {
                 let income = row.get::<_, String>(1)?;
                 let expenses = row.get::<_, String>(2)?;
-                let net = row.get::<_, String>(3)?;
+                let expense_reduction = row.get::<_, String>(3)?;
+                let net = row.get::<_, String>(4)?;
+                let to_err = |idx: usize, err: rust_decimal::Error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        idx,
+                        rusqlite::types::Type::Text,
+                        Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                    )
+                };
                 Ok(CashflowRow {
                     month_ref: row.get(0)?,
-                    income: parse_decimal(income).map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
-                        )
-                    })?,
-                    expenses: parse_decimal(expenses).map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
-                        )
-                    })?,
-                    net: parse_decimal(net).map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Text,
-                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
-                        )
-                    })?,
+                    income: parse_decimal(income).map_err(|e| to_err(1, e))?,
+                    expenses: parse_decimal(expenses).map_err(|e| to_err(2, e))?,
+                    expense_reduction: parse_decimal(expense_reduction)
+                        .map_err(|e| to_err(3, e))?,
+                    net: parse_decimal(net).map_err(|e| to_err(4, e))?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

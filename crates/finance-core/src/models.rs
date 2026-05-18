@@ -219,8 +219,17 @@ pub struct MonthlySpendRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CashflowRow {
     pub month_ref: String,
+    /// Money actually entering the household: salary, transfers in, etc.
+    /// Excludes `category_id = 'cashback'` events (which are bucketed in
+    /// `expense_reduction`).
     pub income: Decimal,
+    /// Gross outflows. Use `expenses - expense_reduction` for the net
+    /// effective spend.
     pub expenses: Decimal,
+    /// Cashback / refund credits that conceptually offset prior spend
+    /// rather than represent new income. See ADR-0012.
+    #[serde(default)]
+    pub expense_reduction: Decimal,
     pub net: Decimal,
 }
 

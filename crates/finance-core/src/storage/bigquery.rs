@@ -1931,7 +1931,11 @@ impl FinanceStore for BigQueryStore {
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>> {
         let sql = format!(
             "
-            SELECT month_ref, CAST(income AS STRING), CAST(expenses AS STRING), CAST(net AS STRING)
+            SELECT month_ref,
+                   CAST(income AS STRING),
+                   CAST(expenses AS STRING),
+                   CAST(expense_reduction AS STRING),
+                   CAST(net AS STRING)
             FROM {}
             ORDER BY month_ref DESC
             LIMIT {}
@@ -1947,7 +1951,8 @@ impl FinanceStore for BigQueryStore {
                 month_ref: required_string(&values, 0, "month_ref")?,
                 income: required_decimal(&values, 1, "income")?,
                 expenses: required_decimal(&values, 2, "expenses")?,
-                net: required_decimal(&values, 3, "net")?,
+                expense_reduction: required_decimal(&values, 3, "expense_reduction")?,
+                net: required_decimal(&values, 4, "net")?,
             });
         }
         Ok(items)
