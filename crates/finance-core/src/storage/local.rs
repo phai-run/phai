@@ -16,7 +16,7 @@ use chrono::{Datelike, Days, NaiveDate, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -1252,43 +1252,61 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>> {
+        // ADR-0003 promises Decimal end-to-end. SQLite has no native
+        // DECIMAL, so the `v_cashflow` view aggregates `CAST(amount AS REAL)`
+        // — f64 math under the hood. For household-sized sums that's
+        // adequate in practice, but it does drift. To honour the ADR we
+        // read raw rows here and SUM in Rust with `rust_decimal`. BigQuery
+        // already uses native NUMERIC so its impl keeps the view path.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
-            SELECT month_ref,
-                   CAST(income AS TEXT),
-                   CAST(expenses AS TEXT),
-                   CAST(expense_reduction AS TEXT),
-                   CAST(net AS TEXT)
-            FROM v_cashflow
-            ORDER BY month_ref DESC
-            LIMIT ?1
+            SELECT strftime('%Y-%m', transaction_date) AS month_ref,
+                   amount,
+                   COALESCE(category_id, '') AS category_id
+            FROM transactions
+            WHERE COALESCE(category_id, '') NOT IN (
+              SELECT category_id FROM internal_categories
+            )
             ",
         )?;
-        let rows = stmt
-            .query_map([months as i64], |row| {
-                let income = row.get::<_, String>(1)?;
-                let expenses = row.get::<_, String>(2)?;
-                let expense_reduction = row.get::<_, String>(3)?;
-                let net = row.get::<_, String>(4)?;
-                let to_err = |idx: usize, err: rust_decimal::Error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        idx,
-                        rusqlite::types::Type::Text,
-                        Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
-                    )
-                };
-                Ok(CashflowRow {
-                    month_ref: row.get(0)?,
-                    income: parse_decimal(income).map_err(|e| to_err(1, e))?,
-                    expenses: parse_decimal(expenses).map_err(|e| to_err(2, e))?,
-                    expense_reduction: parse_decimal(expense_reduction)
-                        .map_err(|e| to_err(3, e))?,
-                    net: parse_decimal(net).map_err(|e| to_err(4, e))?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        let mut by_month: BTreeMap<String, (Decimal, Decimal, Decimal)> = BTreeMap::new();
+        let rows = stmt.query_map([], |row| {
+            let month_ref: String = row.get(0)?;
+            let amount_str: String = row.get(1)?;
+            let category_id: String = row.get(2)?;
+            Ok((month_ref, amount_str, category_id))
+        })?;
+        for row in rows {
+            let (month_ref, amount_str, category_id) = row?;
+            let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
+            let bucket =
+                by_month
+                    .entry(month_ref)
+                    .or_insert((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+            if amount.is_sign_negative() {
+                bucket.1 += amount.abs();
+            } else if category_id == "cashback" {
+                bucket.2 += amount;
+            } else {
+                bucket.0 += amount;
+            }
+        }
+        let mut out: Vec<CashflowRow> = by_month
+            .into_iter()
+            .map(
+                |(month_ref, (income, expenses, expense_reduction))| CashflowRow {
+                    month_ref,
+                    income,
+                    expenses,
+                    expense_reduction,
+                    net: income + expense_reduction - expenses,
+                },
+            )
+            .collect();
+        out.sort_by(|a, b| b.month_ref.cmp(&a.month_ref));
+        out.truncate(months);
+        Ok(out)
     }
 
     async fn forecast_vs_actual(

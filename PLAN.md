@@ -112,25 +112,36 @@ ignora rows com `id` vazio (após trim). Migrations 026 (sqlite) / 027
 account_id='' AND owner='' AND label='' AND source='legacy_accounts_csv')
 para não derrubar uma row legítima criada manualmente.
 
-### 8. Replace `CAST(amount AS REAL)` por SQL decimal-safe
+### 🟡 8. Decimal precision in views — parcial
 
-**Problema.** ADR-0003 promete Decimal end-to-end. Mas
-`v_monthly_spend`, `v_cashflow`, `v_card_summary`, `v_forecast_vs_actual`
-fazem `CAST(amount AS REAL)` em SUM/comparison. f64 contamina os relatórios.
+`cashflow` (SQLite) agora faz SUM em Rust com `rust_decimal` em vez de
+agregar pela view (que usa `CAST(amount AS REAL)`). É a view mais
+sensível porque alimenta o pulse direto. BigQuery permanece via view —
+o tipo NUMERIC nativo já é decimal-safe lá.
 
-**Plano.**
-1. SQLite armazena Decimal como TEXT. Para somar precisamente sem REAL:
-   usar UDF `sqlite_decimal` ou armazenar centavos como INTEGER em uma
-   coluna shadow (`amount_cents`) computada por trigger. Trade-off: o
-   UDF não está disponível em `rusqlite` sem feature flag.
-2. Solução pragmática: continuar lendo TEXT, fazer agregação no
-   aplicativo Rust em `Decimal`. Refatorar as views para retornar TEXT
-   e mover SUM para o lado Rust.
-3. BigQuery: trocar `IF(amount < 0, ABS(amount), 0)` (que opera em
-   NUMERIC nativo — já é decimal-safe) — apenas o display string
-   coercion (`CAST(... AS STRING)`) está OK.
-4. ADR atualizando 0003 para refletir essa realidade.
-5. Trabalho significativo — provavelmente é o último.
+**Ainda usando REAL no SQLite (follow-up):**
+- `v_monthly_spend`, `v_card_summary`, `v_card_open_now`,
+  `v_forecast_vs_actual`, `v_transactions_reportable`,
+  `v_uncategorized` (filter), `v_display_labels` (emoji predicate).
+- Total: ~92 ocorrências de `CAST(... AS REAL)` em `schema/sqlite/`.
+
+**Caminhos possíveis para o resto:**
+1. Mover SUM para Rust em cada storage method, espelhando o que
+   `cashflow` fez agora. Trabalhoso mas localizado — sem mudança de
+   schema, sem trigger.
+2. Adicionar coluna `amount_cents INTEGER` (gerada ou via trigger) em
+   `transactions`, reescrever views para SUM(amount_cents) e dividir
+   por 100 no SELECT final. Menos código Rust, mais SQL. Requer
+   SQLite >= 3.31 para STORED generated columns (rusqlite bundled
+   está OK).
+3. Aceitar f64 nas views de relatório. Erros de arredondamento ficam
+   no nível dos centavos e o `round_dp(2)` na borda os mascara para
+   amounts < ~R$10 bi. Documentar em ADR-0003 como compromise
+   consciente.
+
+**Recomendação:** opção 2 (cents). Cleanest e mais simétrico com
+BigQuery. Mas é um PR sozinho — não dá pra colar com mais nada sem
+inflar o diff.
 
 ## Princípios operacionais ao continuar
 
