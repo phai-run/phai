@@ -349,7 +349,7 @@ pub fn compute_closing_plan(data: &PulseData) -> ClosingPlan {
             }
         })
         .collect();
-    categories_to_brake.sort_by(|a, b| b.over.cmp(&a.over));
+    categories_to_brake.sort_by_key(|c| std::cmp::Reverse(c.over));
     categories_to_brake.truncate(3);
 
     ClosingPlan {
