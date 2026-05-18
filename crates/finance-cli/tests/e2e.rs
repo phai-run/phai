@@ -3015,3 +3015,192 @@ fn budget_explicit_month_takes_precedence_over_default() {
         "explicit month budget (999) should take precedence over default (200), got: {budget}"
     );
 }
+
+/// Regression test for installment detection with Pluggy-style data.
+///
+/// Real Pluggy responses often have a normalised `description` (no "X/Y") and
+/// store the installment number in `creditCardMetadata.installmentNumber` /
+/// `totalInstallments`, or in `descriptionRaw`.  The fix must surface those
+/// transactions in both `report installments` and `cards --installments-only`.
+#[test]
+fn installments_detected_from_pluggy_credit_card_metadata() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    // Pluggy fixture: two credit-card installment transactions.
+    //   tx-inst-meta: description is clean; installment info only in
+    //                 creditCardMetadata (most common Pluggy pattern).
+    //   tx-inst-raw:  description is clean; installment info in descriptionRaw.
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-04-01",
+  "accounts": [
+    { "id": "cc-test", "pluggyAccountId": "pluggy-cc-test" }
+  ]
+}"#,
+    );
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\ncc-test,primary,credit,fintech,Test Card,pluggy-cc-test,item-9,3,10\n",
+    );
+    let fixture = temp.path().join("inst_fixture.json");
+    write_file(
+        &fixture,
+        r#"{
+  "accounts": [
+    {
+      "id": "pluggy-cc-test",
+      "item_id": "item-9",
+      "name": "Test Card",
+      "type": "credit",
+      "status": "ACTIVE",
+      "balance": -500.00,
+      "currency_code": "BRL",
+      "updated_at": "2026-04-10T00:00:00Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "tx-inst-meta",
+      "accountId": "pluggy-cc-test",
+      "date": "2026-04-05",
+      "description": "Notebook Pro",
+      "amount": -450.00,
+      "type": "debit",
+      "status": "posted",
+      "created_at": "2026-04-05T00:00:00Z",
+      "updated_at": "2026-04-05T00:00:00Z",
+      "creditCardMetadata": {
+        "installmentNumber": 3,
+        "totalInstallments": 10,
+        "totalAmount": 4500.00
+      }
+    },
+    {
+      "id": "tx-inst-raw",
+      "accountId": "pluggy-cc-test",
+      "date": "2026-04-08",
+      "description": "Amazon Marketplace",
+      "amount": -200.00,
+      "type": "debit",
+      "status": "posted",
+      "created_at": "2026-04-08T00:00:00Z",
+      "updated_at": "2026-04-08T00:00:00Z",
+      "descriptionRaw": "Amazon Marketplace 2/6"
+    }
+  ]
+}"#,
+    );
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture)
+            .arg("--to")
+            .arg("2026-04-30"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // report installments must find both active chains.
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("installments")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let chains: Value = serde_json::from_slice(&output).expect("valid json");
+    let arr = chains.as_array().expect("chains array");
+    assert!(
+        !arr.is_empty(),
+        "report installments deve retornar parcelas ativas, mas retornou vazio\nchains json: {}",
+        String::from_utf8_lossy(&output)
+    );
+
+    // creditCardMetadata chain: current=3, total=10, remaining=7.
+    // The JSON uses camelCase keys (baseDescription, accountId, …).
+    let meta_chain = arr
+        .iter()
+        .find(|c| {
+            c["baseDescription"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("notebook")
+        })
+        .unwrap_or_else(|| panic!(
+            "cadeia 'Notebook Pro' não encontrada\ncadeias encontradas: {}",
+            serde_json::to_string_pretty(arr).unwrap()
+        ));
+    assert_eq!(meta_chain["total"], 10, "total deve ser 10");
+    assert_eq!(meta_chain["current"], 3, "current deve ser 3");
+    assert!(
+        meta_chain["remaining"].as_u64().unwrap_or(0) > 0,
+        "remaining deve ser > 0"
+    );
+
+    // descriptionRaw chain: current=2, total=6, remaining=4.
+    let raw_chain = arr
+        .iter()
+        .find(|c| {
+            c["baseDescription"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("amazon")
+        })
+        .expect("cadeia 'Amazon Marketplace' não encontrada");
+    assert_eq!(raw_chain["total"], 6, "total deve ser 6");
+    assert_eq!(raw_chain["current"], 2, "current deve ser 2");
+
+    // cards --installments-only must surface both transactions.
+    let card_output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cards")
+            .arg("--month")
+            .arg("2026-04")
+            .arg("--installments-only")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let card_json: Value = serde_json::from_slice(&card_output).expect("valid json");
+    let txs = card_json["transactions"]
+        .as_array()
+        .expect("transactions array");
+    assert_eq!(
+        txs.len(),
+        2,
+        "cards --installments-only deve retornar as 2 transações parceladas, obteve {}",
+        txs.len()
+    );
+}
