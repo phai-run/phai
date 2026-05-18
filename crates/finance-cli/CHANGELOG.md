@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.1](https://github.com/feliperun/finance-os/compare/v1.0.0...v1.0.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **installments:** detect Pluggy installment markers from metadata ([0078424](https://github.com/feliperun/finance-os/commit/0078424b4f3c5f563083e344625587a48a7c8c97))
+* **installments:** surface Pluggy metadata for data synced before the fix ([84030be](https://github.com/feliperun/finance-os/commit/84030be604aead51cd088f4aa071fad67632790c))
+* **pluggy:** correct sign for credit-card credits and FX amounts ([#26](https://github.com/feliperun/finance-os/issues/26)) ([64426e2](https://github.com/feliperun/finance-os/commit/64426e20a568f7e6dcec256f343945ba2c6d6e3c))
+
 ## [1.0.0](https://github.com/feliperun/finance-os/compare/v0.11.0...v1.0.0) (2026-05-17)
 
 
