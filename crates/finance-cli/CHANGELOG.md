@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0](https://github.com/feliperun/finance-os/compare/v1.1.0...v1.2.0) (2026-05-18)
+
+
+### Features
+
+* **payment-status:** canonicalise to posted/pending/installment ([0771140](https://github.com/feliperun/finance-os/commit/07711404f1b768765b2874459f0dd09a09f18cef))
+
+
+### Bug Fixes
+
+* **cashflow:** treat cashback as expense-reduction, not income ([e2c3ea3](https://github.com/feliperun/finance-os/commit/e2c3ea3f34d4c7ea1843ef1ef868d646e0e6f8fc))
+* data hygiene sweep — payment_status, slugs, fallback, streaming, cashback, dedup, phantom account, decimal ([cc1d28d](https://github.com/feliperun/finance-os/commit/cc1d28d4241eb3d8bfd21c7e23e63bee181b9dc2))
+
 ## [1.1.0](https://github.com/feliperun/finance-os/compare/v1.0.1...v1.1.0) (2026-05-18)
 
 
