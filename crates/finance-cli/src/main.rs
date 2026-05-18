@@ -1689,7 +1689,7 @@ fn detect_installment_marker(row: &CardClosedTransactionRow) -> Option<String> {
                 .get("raw")
                 .and_then(|r| r.get("descriptionRaw"))
                 .and_then(|v| v.as_str())
-                .and_then(|s| extract_installment_marker(s))
+                .and_then(extract_installment_marker)
         })
         .or_else(|| {
             metadata_contains_installment_signal(&row.metadata_json).then(|| "metadata".to_string())
@@ -3653,8 +3653,7 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
         .await?
         .into_iter()
         .map(|mut tx| {
-            tx.description =
-                enrich_description_from_metadata(&tx.description, &tx.metadata_json);
+            tx.description = enrich_description_from_metadata(&tx.description, &tx.metadata_json);
             tx
         })
         .collect();
@@ -5351,7 +5350,12 @@ async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
     let mut total_actual = Decimal::ZERO;
 
     for row in &sorted {
-        let usage_i64 = row.usage_pct.to_string().parse::<f64>().map(|v| v as i64).unwrap_or(0);
+        let usage_i64 = row
+            .usage_pct
+            .to_string()
+            .parse::<f64>()
+            .map(|v| v as i64)
+            .unwrap_or(0);
         let bar = progress_bar(usage_i64);
         let status_emoji = if row.actual_amount > row.budget_amount {
             "🔻"
