@@ -65,17 +65,18 @@ código tentar emitir fallback de novo, vale escrever direto em
 `_revisar` em vez de em `outros:geral`. Não há ADR específica aqui — o
 fix é puramente dado.
 
-### 4. Streaming taxonomy
+### ✅ 4. Streaming taxonomy — feito
 
-**Problema.** Netflix, HBO, Disney, Prime, YouTube estão em
-`moradia:streaming` enquanto outras assinaturas (`assinaturas:apple`,
-`assinaturas:cloud-storage`) seguem o pattern `assinaturas:*`.
-Inconsistência conceitual.
+Migrations 024 (sqlite) / 025 (bq) criam `assinaturas:streaming` e
+movem todas as transactions, forecasts e budgets de `moradia:streaming`
+para `assinaturas:streaming`. A categoria `moradia:streaming` é
+deletada após a migração.
 
-**Plano.**
-1. Migração que cria `assinaturas:streaming` e UPDATE move forecasts +
-   transactions + rules de `moradia:streaming` para `assinaturas:streaming`.
-2. ADR opcional (depende — pode ir junto com consolidação de slugs).
+Limitação: rules persistem o label humano ("Moradia" / "Streaming") e
+slugificam no apply, então rules que produzem `moradia:streaming` no
+caminho de sincronização vão continuar fazendo isso. O usuário precisa
+editar essas rules manualmente para mudar para `assinaturas:streaming`
+(via `finance rule upsert`).
 
 ### 5. Cashback como redução de despesa
 
