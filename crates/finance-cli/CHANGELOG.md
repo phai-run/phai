@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.0](https://github.com/feliperun/finance-os/compare/v1.0.1...v1.1.0) (2026-05-18)
+
+
+### Features
+
+* **cards:** group v_card_summary by billing cycle, add v_card_open_now ([6b11616](https://github.com/feliperun/finance-os/commit/6b11616f99213f4b06606156d1def62646985b2d))
+* **notify:** always-on saldo in pulse; phone-readable sync notify ([7c91a3c](https://github.com/feliperun/finance-os/commit/7c91a3c682d8d88685cd8cfa7b95574f35d6d8df))
+* proactive pulse, cycle-aware cards, saldo em conta, phone-friendly sync notify ([d48afd1](https://github.com/feliperun/finance-os/commit/d48afd1b18875d6349849690c919e8bf1be7af10))
+* **pulse:** proactive closing-plan WhatsApp message + notify webhook ([9a6d0a8](https://github.com/feliperun/finance-os/commit/9a6d0a887b8ece090373a1820dde2c908e0142a2))
+* **reports:** add saldo em conta — pulse block + `report balances` ([4d8c351](https://github.com/feliperun/finance-os/commit/4d8c351021862ec7b21b72a08599705dd731402a))
+
+
+### Bug Fixes
+
+* **pulse:** clippy unnecessary_sort_by on Rust 1.95 ([2a1aaec](https://github.com/feliperun/finance-os/commit/2a1aaecc7e5273594cd75ccf8ab6089e29d821fd))
+
 ## [1.0.1](https://github.com/feliperun/finance-os/compare/v1.0.0...v1.0.1) (2026-05-18)
 
 
