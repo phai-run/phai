@@ -15,6 +15,11 @@ fn cargo_bin() -> Command {
 fn envs<'a>(cmd: &'a mut Command, config_dir: &Path, data_dir: &Path) -> &'a mut Command {
     cmd.env("FINANCE_OS_CONFIG_DIR", config_dir)
         .env("FINANCE_OS_DATA_DIR", data_dir)
+        // Tests must never trigger the self-updater: it overwrites the
+        // very `target/debug/finance-cli` binary cargo just built, causing
+        // subsequent assertions to run against an old release artifact
+        // and producing false negatives.
+        .env("FINANCE_OS_NO_AUTO_UPDATE", "1")
 }
 
 fn write_file(path: &Path, content: &str) {
@@ -126,12 +131,31 @@ fn milestone_zero_local_sync_and_report() {
 
     seed_fixture_sync(&temp, &config_dir, &data_dir);
 
+    // The new pulse format is a proactive headline-driven summary; it
+    // does not list individual transactions in the body. The `--raw`
+    // variant below is what scripts/skills should consume for the
+    // backwards-compatible per-transaction view.
     envs(
         cargo_bin()
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
             .arg("120"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Pulso"))
+    .stdout(predicate::str::contains("Mês até dia"));
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("daily-pulse")
+            .arg("--days")
+            .arg("120")
+            .arg("--raw"),
         &config_dir,
         &data_dir,
     )
@@ -1319,11 +1343,13 @@ fn sync_notify_summary_outputs_human_readable_message() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("Novas transações detectadas (4):"))
-    .stdout(predicate::str::contains("🍽️ Supermercado Angeloni"))
-    .stdout(predicate::str::contains("🍽️ alimentacao mercado (pluggy)"))
-    .stdout(predicate::str::contains("Pendências de contexto (0):"))
-    .stdout(predicate::str::contains("Fonte: local | cli: finance"));
+    .stdout(predicate::str::contains("🔄 *Sync"))
+    .stdout(predicate::str::contains("*4 novas transações*"))
+    .stdout(predicate::str::contains("Supermercado Angeloni"))
+    .stdout(predicate::str::contains("*Saldo em conta*"))
+    .stdout(predicate::str::contains("Primary Checking"))
+    .stdout(predicate::str::contains("_finance"))
+    .stdout(predicate::str::contains("local"));
 }
 
 #[test]

@@ -51,10 +51,22 @@ pub trait FinanceStore {
     async fn upsert_accounts(&self, rows: &[AccountRecord]) -> Result<usize>;
     async fn get_accounts(&self) -> Result<Vec<AccountRecord>>;
     async fn insert_account_snapshots(&self, rows: &[AccountSnapshotRecord]) -> Result<usize>;
+    /// Latest snapshot per account, ordered by `account_id`. One row per
+    /// account that has ever been snapshotted; never duplicates. Used to
+    /// answer "what's the saldo em conta right now?".
+    async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>>;
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize>;
     async fn upsert_rules(&self, rows: &[RuleRecord]) -> Result<usize>;
     async fn upsert_categories(&self, rows: &[CategoryRecord]) -> Result<usize>;
     async fn upsert_forecasts(&self, rows: &[ForecastRecord]) -> Result<usize>;
+    /// Active forecasts whose `due_date` falls in `[from, until]` (inclusive).
+    /// Only `status = 'ativo'` rows are returned. Ordered by due_date ascending,
+    /// then by amount descending so the biggest commitments lead within a day.
+    async fn upcoming_forecasts(
+        &self,
+        from: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<ForecastRecord>>;
     async fn apply_transaction_split(
         &self,
         split: &TransactionSplitRecord,
@@ -124,6 +136,12 @@ pub trait FinanceStore {
     async fn forecast_vs_actual(&self, month_ref: Option<&str>)
         -> Result<Vec<ForecastVsActualRow>>;
     async fn card_summary(&self, month_ref: Option<&str>) -> Result<Vec<CardSummaryRow>>;
+    /// Cards' open bills as of "now". For each active credit account this
+    /// returns at most one row — the cycle whose closing day is in the
+    /// future (or today), determined per-account from
+    /// `accounts.metadata_json.billing_closing_day`. Cards without a
+    /// closing-day field fall back to the next calendar month.
+    async fn cards_open_now(&self) -> Result<Vec<CardSummaryRow>>;
     async fn card_closed_transactions(
         &self,
         month_ref: Option<&str>,

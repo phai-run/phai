@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Duration, NaiveDate, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Timelike, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use finance_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 mod enrich;
 mod human_format;
+mod pulse;
 mod review;
 mod self_cmd;
 mod update;
@@ -89,11 +90,40 @@ enum Commands {
         #[command(subcommand)]
         command: BudgetCommand,
     },
+    /// Push the daily pulse to an external channel (WhatsApp via webhook).
+    Notify {
+        #[command(subcommand)]
+        command: NotifyCommand,
+    },
     #[command(name = "self")]
     SelfCmd {
         #[command(subcommand)]
         command: SelfCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum NotifyCommand {
+    /// POST the rendered daily-pulse to a webhook (WhatsApp gateway).
+    ///
+    /// Reads `FINANCE_OS_WHATSAPP_WEBHOOK_URL` (required) and
+    /// `FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN` (optional, sent as
+    /// `Authorization: Bearer <token>`). Posts JSON `{ "text": "..." }`.
+    /// Designed for cron / scheduled tasks.
+    Whatsapp(NotifyWhatsappArgs),
+}
+
+#[derive(Args)]
+struct NotifyWhatsappArgs {
+    /// Window of the rendered pulse, same semantics as `report daily-pulse --days`.
+    #[arg(long, default_value_t = 1)]
+    days: i64,
+    /// Print the body to stdout in addition to posting. Useful for cron logs.
+    #[arg(long)]
+    echo: bool,
+    /// Don't post — just render and print. Used to preview without sending.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -303,6 +333,27 @@ enum ReportCommand {
                       WhatsApp-friendly by default; pass --raw for JSON."
     )]
     Cards(CardsArgs),
+    #[command(
+        about = "saldo em conta por dono e total, do snapshot mais recente do Pluggy",
+        long_about = "Mostra o saldo em conta mais recente sincronizado do Pluggy para cada \
+                      conta corrente, agrupado por dono (owner) com subtotais e o total geral. \
+                      Cartões de crédito não aparecem aqui — para ver fatura em aberto, use \
+                      `report cards` ou o pulse. WhatsApp-friendly by default; pass --raw for JSON."
+    )]
+    Balances(BalancesArgs),
+}
+
+#[derive(Args)]
+struct BalancesArgs {
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
+    #[arg(long)]
+    raw: bool,
+}
+
+impl BalancesArgs {
+    fn structured_output(&self) -> bool {
+        self.raw
+    }
 }
 
 #[derive(Args)]
@@ -1400,99 +1451,217 @@ fn normalize_inline_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn category_display(category_id: Option<&str>, amount: Option<Decimal>) -> String {
-    let emoji = category_emoji(category_id, amount);
-    let humanized = category_id
-        .map(|category| category.replace(':', " > ").replace('-', " "))
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "sem categoria".to_string());
-    format!("{emoji} {humanized}")
-}
-
-fn display_label(
-    description: &str,
-    context: Option<&str>,
-    category_id: Option<&str>,
-    amount: Option<Decimal>,
+/// Render the sync notify summary as a single phone-readable WhatsApp
+/// message. The legacy pipe-separated CLI-log format was unreadable on a
+/// phone — this replaces it with a five-block layout:
+///
+///   🔄 *Sync · seg 18/mai 21:34*
+///
+///   *N novas transações* · -R$ X,YZ
+///     <emoji> <descrição curta> · <valor> · <data>
+///     …
+///
+///   *Saldo em conta*   ← only when there were new transactions
+///     💰 <conta> · <saldo>
+///     *Total*: <total>
+///
+///   *N sem categoria* (responda 1..N para classificar)
+///     1. <descrição> · <valor> (id <transaction_id>)
+///
+///   ⚠️ <aviso>
+///
+///   _finance X.Y.Z · <backend> · <hora>_
+fn render_sync_notify_summary(
+    summary: &SyncSummaryOutput,
+    accounts: &[AccountRecord],
+    snapshots: &[finance_core::models::AccountSnapshotRecord],
 ) -> String {
-    let label = context
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(description);
-    format!(
-        "{} {}",
-        category_emoji(category_id, amount),
-        normalize_inline_text(label)
-    )
-}
+    use std::fmt::Write;
+    let mut out = String::new();
 
-fn render_sync_notify_summary(summary: &SyncSummaryOutput) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Novas transações detectadas ({}):",
-        summary.new_transactions_count
-    ));
-    for (idx, tx) in summary.new_transactions.iter().enumerate() {
-        let amount = decimal_from_str(&tx.amount).ok();
-        let category = category_display(tx.category_id.as_deref(), amount);
-        let label = display_label(
-            &tx.description,
-            tx.context.as_deref(),
-            tx.category_id.as_deref(),
-            amount,
+    // Header: weekday, day, month, HH:MM.
+    let now = Utc::now();
+    let local = now.naive_local();
+    let header_date = local.date();
+    let header_time = local.time();
+    let weekday = match header_date.weekday().num_days_from_monday() {
+        0 => "seg",
+        1 => "ter",
+        2 => "qua",
+        3 => "qui",
+        4 => "sex",
+        5 => "sáb",
+        _ => "dom",
+    };
+    let month = match header_date.month() {
+        1 => "jan",
+        2 => "fev",
+        3 => "mar",
+        4 => "abr",
+        5 => "mai",
+        6 => "jun",
+        7 => "jul",
+        8 => "ago",
+        9 => "set",
+        10 => "out",
+        11 => "nov",
+        _ => "dez",
+    };
+    let _ = writeln!(
+        out,
+        "🔄 *Sync · {weekday} {:02}/{month} {:02}:{:02}*",
+        header_date.day(),
+        header_time.hour(),
+        header_time.minute(),
+    );
+
+    let has_new = summary.new_transactions_count > 0;
+
+    // -------- Block 1: novas transações --------
+    let _ = writeln!(out);
+    if !has_new {
+        let _ = writeln!(out, "_sem novidades_");
+    } else {
+        let mut total = Decimal::ZERO;
+        for tx in &summary.new_transactions {
+            if let Ok(amount) = decimal_from_str(&tx.amount) {
+                total += amount;
+            }
+        }
+        let _ = writeln!(
+            out,
+            "*{} nova{} transaç{}* · {}",
+            summary.new_transactions_count,
+            if summary.new_transactions_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if summary.new_transactions_count == 1 {
+                "ão"
+            } else {
+                "ões"
+            },
+            brl_signed(total),
         );
-        lines.push(format!(
-            "{}. {} | {} | {} | {} ({}) | {}",
-            idx + 1,
-            tx.transaction_date,
-            tx.amount,
-            label,
-            category,
-            tx.category_source,
-            tx.transaction_id
-        ));
-    }
-
-    lines.push(String::new());
-    lines.push(format!(
-        "Pendências de contexto ({}){}:",
-        summary.needs_context_count,
-        if summary.needs_context_truncated {
-            " (lista parcial)"
-        } else {
-            ""
+        const MAX_TX: usize = 8;
+        let show = summary.new_transactions.iter().take(MAX_TX);
+        for tx in show {
+            let amount = decimal_from_str(&tx.amount).ok();
+            let emoji = human_format::category_emoji(tx.category_id.as_deref(), amount);
+            let date = NaiveDate::parse_from_str(&tx.transaction_date, "%Y-%m-%d")
+                .map(human_format::short_date)
+                .unwrap_or_else(|_| tx.transaction_date.clone());
+            let label = human_format::truncate_with_ellipsis(
+                &human_format::short_description(tx.context.as_deref().unwrap_or(&tx.description)),
+                34,
+            );
+            let amt_str = amount.map(brl_signed).unwrap_or_else(|| tx.amount.clone());
+            let _ = writeln!(out, "  {emoji} {label} · {amt_str} · {date}");
         }
-    ));
-    for (idx, tx) in summary.needs_context.iter().enumerate() {
-        let amount = decimal_from_str(&tx.amount).ok();
-        let label = display_label(&tx.description, None, None, amount);
-        lines.push(format!(
-            "{}. {} | {} | {} | {}",
-            idx + 1,
-            tx.transaction_date,
-            tx.amount,
-            label,
-            tx.transaction_id
-        ));
+        if summary.new_transactions.len() > MAX_TX {
+            let _ = writeln!(
+                out,
+                "  _… mais {} lançamento{}_",
+                summary.new_transactions.len() - MAX_TX,
+                if summary.new_transactions.len() - MAX_TX == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            );
+        }
+
+        // -------- Block 2: saldo em conta (only when there are new tx) --------
+        let checking_ids: BTreeSet<String> = accounts
+            .iter()
+            .filter(|a| a.account_type == "checking" && !a.account_id.is_empty())
+            .map(|a| a.account_id.clone())
+            .collect();
+        let balances: Vec<(&finance_core::models::AccountSnapshotRecord, &AccountRecord)> =
+            snapshots
+                .iter()
+                .filter(|s| checking_ids.contains(&s.account_id) && s.balance.is_some())
+                .filter_map(|s| {
+                    accounts
+                        .iter()
+                        .find(|a| a.account_id == s.account_id)
+                        .map(|a| (s, a))
+                })
+                .collect();
+        if !balances.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "*Saldo em conta*");
+            let mut total_bal = Decimal::ZERO;
+            for (snap, acc) in &balances {
+                let label = if acc.label.is_empty() {
+                    acc.account_id.clone()
+                } else {
+                    acc.label.clone()
+                };
+                let balance = snap.balance.unwrap_or(Decimal::ZERO);
+                total_bal += balance;
+                let _ = writeln!(out, "  💰 {} · {}", label, brl_signed(balance));
+            }
+            if balances.len() > 1 {
+                let _ = writeln!(out, "  *Total*: {}", brl_signed(total_bal));
+            }
+        }
     }
 
+    // -------- Block 3: pendências (sem categoria) --------
+    if summary.needs_context_count > 0 {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "*{} sem categoria*{} — responda 1..{} para classificar",
+            summary.needs_context_count,
+            if summary.needs_context_truncated {
+                " (parcial)"
+            } else {
+                ""
+            },
+            summary
+                .needs_context
+                .len()
+                .min(summary.needs_context_count as usize),
+        );
+        for (idx, tx) in summary.needs_context.iter().enumerate() {
+            let amount = decimal_from_str(&tx.amount).ok();
+            let label = human_format::truncate_with_ellipsis(
+                &human_format::short_description(&tx.description),
+                34,
+            );
+            let amt_str = amount.map(brl_signed).unwrap_or_else(|| tx.amount.clone());
+            // Show a short id suffix for reference.
+            let short_id = tx
+                .transaction_id
+                .split('-')
+                .next_back()
+                .unwrap_or(&tx.transaction_id);
+            let _ = writeln!(out, "  {}. {label} · {amt_str} (id …{short_id})", idx + 1);
+        }
+    }
+
+    // -------- Block 4: avisos --------
     if !summary.warnings.is_empty() {
-        lines.push(String::new());
-        lines.push("Avisos:".to_string());
+        let _ = writeln!(out);
         for warning in &summary.warnings {
-            lines.push(format!("- {}", normalize_inline_text(warning)));
+            let _ = writeln!(out, "⚠️ {}", normalize_inline_text(warning));
         }
     }
 
-    lines.push(String::new());
-    lines.push(format!(
-        "Fonte: {} | cli: finance {} | sync: {} | status: {}",
-        summary.backend,
+    // -------- Footer --------
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "_finance {} · {} · status {}_",
         env!("CARGO_PKG_VERSION"),
-        summary.generated_at,
+        summary.backend,
         summary.summary_status
-    ));
-    lines.join("\n")
+    );
+
+    out.trim_end().to_string()
 }
 
 /// Copy billing metadata keys from an existing account record into a freshly
@@ -2236,6 +2405,7 @@ async fn main() -> Result<()> {
             ReportCommand::Review(args) => report_review(args).await,
             ReportCommand::BudgetStatus(args) => report_budget_status(args).await,
             ReportCommand::Cards(args) => report_cards(args).await,
+            ReportCommand::Balances(args) => report_balances(args).await,
         },
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
@@ -2268,7 +2438,62 @@ async fn main() -> Result<()> {
             BudgetCommand::Upsert(args) => budget_upsert(args).await,
             BudgetCommand::List(args) => budget_list(args).await,
         },
+        Commands::Notify { command } => match command {
+            NotifyCommand::Whatsapp(args) => notify_whatsapp(args).await,
+        },
     }
+}
+
+const WHATSAPP_WEBHOOK_URL_ENV: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_URL";
+const WHATSAPP_WEBHOOK_TOKEN_ENV: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN";
+
+async fn notify_whatsapp(args: NotifyWhatsappArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let today = Utc::now().date_naive();
+    let data = pulse::gather_pulse_data(store.as_ref(), today, args.days).await?;
+    let plan = pulse::compute_closing_plan(&data);
+    let body = pulse::render_pulse(&data, &plan, args.days);
+
+    if args.echo || args.dry_run {
+        println!("{body}");
+    }
+
+    if args.dry_run {
+        return Ok(());
+    }
+
+    let url = std::env::var(WHATSAPP_WEBHOOK_URL_ENV).map_err(|_| {
+        anyhow::anyhow!(
+            "{WHATSAPP_WEBHOOK_URL_ENV} not set. Export the webhook URL or use --dry-run."
+        )
+    })?;
+    let token = std::env::var(WHATSAPP_WEBHOOK_TOKEN_ENV).ok();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .context("failed to build HTTP client")?;
+    let payload = json!({ "text": body });
+    let mut req = client.post(&url).json(&payload);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let response = req
+        .send()
+        .await
+        .with_context(|| format!("POST {url} failed"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("webhook returned {status}: {text}");
+    }
+    if args.echo {
+        eprintln!("notify whatsapp: {status}");
+    }
+    Ok(())
 }
 
 async fn auth_setup(args: AuthSetupArgs) -> Result<()> {
@@ -2485,8 +2710,13 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     }
 
     // Always run on the latest binary before touching external data.
-    // If FINANCE_OS_UPDATED is set, we just re-execed after an upgrade — skip.
-    if std::env::var_os("FINANCE_OS_UPDATED").is_none() {
+    // Skip when we just re-execed after an upgrade (FINANCE_OS_UPDATED) or
+    // when the user opted out of auto-update (FINANCE_OS_NO_AUTO_UPDATE) —
+    // CI and e2e tests rely on the latter to keep `target/debug/finance-cli`
+    // stable across subprocess invocations.
+    if std::env::var_os("FINANCE_OS_UPDATED").is_none()
+        && std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_none()
+    {
         if let Ok(paths) = ConfigPaths::discover() {
             update::force_check(&paths.data_dir).await;
         }
@@ -2677,7 +2907,15 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         if args.json_summary {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
-            println!("{}", render_sync_notify_summary(&summary));
+            // The human-friendly notify-summary message folds in the
+            // current saldo per checking account so a phone-side reader
+            // immediately sees the balance impact of the new transactions.
+            let snapshots = store.latest_account_snapshots().await.unwrap_or_default();
+            let stored_accounts = store.get_accounts().await.unwrap_or_default();
+            println!(
+                "{}",
+                render_sync_notify_summary(&summary, &stored_accounts, &snapshots)
+            );
         }
         return Ok(());
     }
@@ -2753,157 +2991,130 @@ async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
-    let since = Utc::now()
-        .date_naive()
-        .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
-        .context("Falha ao calcular janela do daily pulse")?;
-    let items = store.daily_pulse(since).await?;
 
     if args.structured_output() {
+        // Backwards-compat: --raw still emits the flat list of items.
+        let since = Utc::now()
+            .date_naive()
+            .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
+            .context("Falha ao calcular janela do daily pulse")?;
+        let items = store.daily_pulse(since).await?;
         println!("{}", serde_json::to_string_pretty(&items)?);
         return Ok(());
     }
 
-    let internal_categories = store.internal_categories().await?;
-    print_daily_pulse_human(&items, args.days, &internal_categories);
+    let today = Utc::now().date_naive();
+    let data = pulse::gather_pulse_data(store.as_ref(), today, args.days).await?;
+    let plan = pulse::compute_closing_plan(&data);
+    println!("{}", pulse::render_pulse(&data, &plan, args.days));
     Ok(())
 }
 
-/// Render daily-pulse items as a WhatsApp-friendly summary grouped by category family.
-///
-/// Layout:
-///   📊 *Pulse · últimos N dias*
-///
-///   🍽️ *Alimentação* · R$ 487,30
-///     • Mercado Angeloni · R$ 150,00 (13/mai)
-///     • iFood · R$ 87,30 (12/mai)
-///
-///   💰 *Entradas* · R$ 8.500,00
-///     • Salário · R$ 5.000,00 (12/mai)
-///
-///   *Saldo do período*: +R$ 6.012,70 ✅
-fn print_daily_pulse_human(
-    items: &[finance_core::models::DailyPulseItem],
-    days: i64,
-    internal_categories: &std::collections::BTreeSet<String>,
-) {
-    use std::collections::BTreeMap;
+async fn report_balances(args: BalancesArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
 
-    let is_internal = |cat: &Option<String>| {
-        cat.as_deref()
-            .is_some_and(|c| internal_categories.contains(c))
-    };
+    let accounts = store.get_accounts().await?;
+    let snapshots = store.latest_account_snapshots().await?;
 
-    let visible: Vec<&finance_core::models::DailyPulseItem> = items
+    // Index account → owner + label.
+    let account_by_id: BTreeMap<&str, &AccountRecord> = accounts
         .iter()
-        .filter(|it| !is_internal(&it.category_id))
+        .filter(|a| !a.account_id.is_empty())
+        .map(|a| (a.account_id.as_str(), a))
         .collect();
 
-    let income = visible
+    // Only checking accounts have a meaningful "saldo em conta". Credit
+    // cards expose debt via card_summary; mixing them here would mislead.
+    let rows: Vec<(&AccountRecord, &finance_core::models::AccountSnapshotRecord)> = snapshots
         .iter()
-        .filter(|it| !it.amount.is_sign_negative())
-        .fold(Decimal::ZERO, |acc, it| acc + it.amount);
-    let expenses = visible
-        .iter()
-        .filter(|it| it.amount.is_sign_negative())
-        .fold(Decimal::ZERO, |acc, it| acc + it.amount);
-
-    println!(
-        "📊 {}",
-        human_format::bold(&format!("Pulse · últimos {days} dias"))
-    );
-    println!();
-
-    if visible.is_empty() {
-        println!("_(sem transações na janela)_");
-        return;
-    }
-
-    // Group by category family. Family is the part before `:` (or the whole
-    // category if no `:`). `None` becomes the bucket "Sem categoria".
-    let mut groups: BTreeMap<Option<String>, Vec<&finance_core::models::DailyPulseItem>> =
-        BTreeMap::new();
-    for item in &visible {
-        let family = human_format::category_family(item.category_id.as_deref());
-        groups.entry(family).or_default().push(item);
-    }
-
-    // Order families by absolute subtotal descending so the biggest movement appears first.
-    let mut family_totals: Vec<(Option<String>, Decimal)> = groups
-        .iter()
-        .map(|(family, items)| {
-            let total = items.iter().fold(Decimal::ZERO, |acc, it| acc + it.amount);
-            (family.clone(), total)
+        .filter_map(|s| {
+            account_by_id
+                .get(s.account_id.as_str())
+                .filter(|a| a.account_type == "checking")
+                .map(|a| (*a, s))
         })
         .collect();
-    family_totals.sort_by_key(|x| std::cmp::Reverse(x.1.abs()));
 
-    const MAX_PER_GROUP: usize = 5;
-
-    for (family, subtotal) in &family_totals {
-        // Pick a representative category_id from the first item for emoji lookup.
-        let repr_category = groups
-            .get(family)
-            .and_then(|g| g.first())
-            .and_then(|it| it.category_id.clone());
-        let label = family
-            .as_deref()
-            .map(human_format::family_label)
-            .unwrap_or_else(|| "Sem categoria".into());
-        let emoji = human_format::category_emoji(repr_category.as_deref(), Some(*subtotal));
-        println!(
-            "{} {} · {}",
-            emoji,
-            human_format::bold(&label),
-            human_format::brl_signed(*subtotal)
-        );
-
-        // Show top N items in the group, biggest absolute amount first.
-        let mut group_items: Vec<&&finance_core::models::DailyPulseItem> =
-            groups[family].iter().collect();
-        group_items.sort_by_key(|x| std::cmp::Reverse(x.amount.abs()));
-        for item in group_items.iter().take(MAX_PER_GROUP) {
-            println!(
-                "  • {} · {} ({})",
-                human_format::short_description(&item.description),
-                human_format::brl_signed(item.amount),
-                human_format::short_date(item.transaction_date),
-            );
-        }
-        if group_items.len() > MAX_PER_GROUP {
-            println!(
-                "  _… mais {} {}_",
-                group_items.len() - MAX_PER_GROUP,
-                if group_items.len() - MAX_PER_GROUP == 1 {
-                    "lançamento"
-                } else {
-                    "lançamentos"
-                }
-            );
-        }
-        println!();
+    if args.structured_output() {
+        let payload: Vec<_> = rows
+            .iter()
+            .map(|(a, s)| {
+                serde_json::json!({
+                    "account_id": a.account_id,
+                    "owner": a.owner,
+                    "label": a.label,
+                    "balance": s.balance,
+                    "currency_code": s.currency_code,
+                    "snapshot_date": s.snapshot_date,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
     }
 
-    // Footer: saldo do período.
-    let net = income + expenses;
-    let net_emoji = if net.is_sign_negative() {
-        "🔻"
-    } else if net.is_zero() {
-        "⚖️"
-    } else {
-        "✅"
-    };
+    if rows.is_empty() {
+        println!("{}", human_format::bold("Saldo em conta"));
+        println!("  _(nenhum snapshot disponível — rode `finance sync pluggy` para atualizar)_");
+        return Ok(());
+    }
+
+    // Group by owner so "Aline · Felipe · Total" reads naturally.
+    let mut by_owner: BTreeMap<
+        String,
+        Vec<(&AccountRecord, &finance_core::models::AccountSnapshotRecord)>,
+    > = BTreeMap::new();
+    for (acc, snap) in &rows {
+        by_owner
+            .entry(acc.owner.clone())
+            .or_default()
+            .push((acc, snap));
+    }
+
+    println!("{}", human_format::bold("Saldo em conta"));
+    let mut grand_total = Decimal::ZERO;
+    for (owner, items) in &by_owner {
+        let mut owner_total = Decimal::ZERO;
+        for (acc, snap) in items {
+            let balance = snap.balance.unwrap_or(Decimal::ZERO);
+            owner_total += balance;
+            grand_total += balance;
+            let label = if acc.label.is_empty() {
+                acc.account_id.clone()
+            } else {
+                acc.label.clone()
+            };
+            println!(
+                "  💰 {} · {} ({})",
+                label,
+                human_format::brl_signed(balance),
+                human_format::short_date(snap.snapshot_date),
+            );
+        }
+        if items.len() > 1 {
+            println!(
+                "  └ {}: {}",
+                human_format::bold(&capitalize(owner)),
+                human_format::brl_signed(owner_total),
+            );
+        }
+    }
     println!(
-        "{} {}: {}",
-        net_emoji,
-        human_format::bold("Saldo do período"),
-        human_format::brl_signed(net)
+        "  {}: {}",
+        human_format::bold("Total"),
+        human_format::brl_signed(grand_total),
     );
-    println!(
-        "  entradas: {} · saídas: {}",
-        human_format::brl_signed(income),
-        human_format::brl_signed(expenses)
-    );
+    Ok(())
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {

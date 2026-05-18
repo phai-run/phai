@@ -455,6 +455,19 @@ mod tests {
         async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> {
             Ok(0)
         }
+        async fn upcoming_forecasts(
+            &self,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<ForecastRecord>> {
+            Ok(vec![])
+        }
+        async fn cards_open_now(&self) -> Result<Vec<crate::models::CardSummaryRow>> {
+            Ok(vec![])
+        }
+        async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
+            Ok(vec![])
+        }
         async fn apply_transaction_split(
             &self,
             _split: &TransactionSplitRecord,

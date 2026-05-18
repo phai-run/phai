@@ -596,6 +596,60 @@ impl FinanceStore for BigQueryStore {
         Ok(rows.len())
     }
 
+    async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
+        let sql = format!(
+            "
+            WITH ranked AS (
+              SELECT
+                snapshot_id, account_id, snapshot_date,
+                CAST(balance AS STRING) AS balance_str,
+                CAST(credit_limit AS STRING) AS credit_limit_str,
+                currency_code, source, actor_id, idempotency_key,
+                TO_JSON_STRING(metadata_json) AS metadata_json,
+                FORMAT_TIMESTAMP('%FT%T%Ez', created_at) AS created_at_str,
+                ROW_NUMBER() OVER (
+                  PARTITION BY account_id
+                  ORDER BY snapshot_date DESC, created_at DESC
+                ) AS rn
+              FROM {}
+            )
+            SELECT snapshot_id, account_id, CAST(snapshot_date AS STRING),
+                   balance_str, credit_limit_str, currency_code, source,
+                   actor_id, idempotency_key, metadata_json, created_at_str
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY account_id
+            ",
+            self.qualified_table("account_snapshots")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let metadata_str = optional_string(&values, 9).unwrap_or_else(|| "{}".to_string());
+            let metadata_json: Value =
+                serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+            let created_str = required_string(&values, 10, "created_at")?;
+            items.push(AccountSnapshotRecord {
+                snapshot_id: required_string(&values, 0, "snapshot_id")?,
+                account_id: required_string(&values, 1, "account_id")?,
+                snapshot_date: optional_date(&values, 2, "snapshot_date")?
+                    .ok_or_else(|| anyhow!("snapshot_date is null"))?,
+                balance: optional_string(&values, 3).and_then(|s| Decimal::from_str(&s).ok()),
+                credit_limit: optional_string(&values, 4).and_then(|s| Decimal::from_str(&s).ok()),
+                currency_code: optional_string(&values, 5),
+                source: required_string(&values, 6, "source")?,
+                actor_id: required_string(&values, 7, "actor_id")?,
+                idempotency_key: required_string(&values, 8, "idempotency_key")?,
+                metadata_json,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            });
+        }
+        Ok(items)
+    }
+
     async fn find_transactions_by_description(
         &self,
         query: &str,
@@ -863,6 +917,69 @@ impl FinanceStore for BigQueryStore {
         );
         self.run_query(&sql).await?;
         Ok(rows.len())
+    }
+
+    async fn upcoming_forecasts(
+        &self,
+        from: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<ForecastRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              forecast_id,
+              CAST(due_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              category_id,
+              account_id,
+              status,
+              recurrence,
+              actor_id,
+              idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            WHERE status = 'ativo'
+              AND due_date IS NOT NULL
+              AND due_date BETWEEN DATE {} AND DATE {}
+            ORDER BY due_date ASC, amount DESC
+            ",
+            self.qualified_table("forecast")?,
+            sql_string(&from.format("%Y-%m-%d").to_string()),
+            sql_string(&until.format("%Y-%m-%d").to_string()),
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let metadata_str = optional_string(&values, 10).unwrap_or_else(|| "{}".to_string());
+            let metadata_json: Value =
+                serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+            let created_str = required_string(&values, 11, "created_at")?;
+            let updated_str = required_string(&values, 12, "updated_at")?;
+            items.push(ForecastRecord {
+                forecast_id: required_string(&values, 0, "forecast_id")?,
+                due_date: optional_date(&values, 1, "due_date")?,
+                description: required_string(&values, 2, "description")?,
+                amount: required_decimal(&values, 3, "amount")?,
+                category_id: optional_string(&values, 4),
+                account_id: optional_string(&values, 5),
+                status: required_string(&values, 6, "status")?,
+                recurrence: optional_string(&values, 7),
+                actor_id: required_string(&values, 8, "actor_id")?,
+                idempotency_key: required_string(&values, 9, "idempotency_key")?,
+                metadata_json,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            });
+        }
+        Ok(items)
     }
 
     async fn apply_transaction_split(
@@ -1899,6 +2016,35 @@ impl FinanceStore for BigQueryStore {
             ORDER BY month_ref DESC, total_charges DESC, account_id ASC
             ",
             self.qualified_table("v_card_summary")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(CardSummaryRow {
+                month_ref: required_string(&values, 0, "month_ref")?,
+                account_id: required_string(&values, 1, "account_id")?,
+                total_charges: required_decimal(&values, 2, "total_charges")?,
+                open_amount: required_decimal(&values, 3, "open_amount")?,
+                transaction_count: required_i64(&values, 4, "transaction_count")?,
+            });
+        }
+        Ok(items)
+    }
+
+    async fn cards_open_now(&self) -> Result<Vec<CardSummaryRow>> {
+        let sql = format!(
+            "
+            SELECT
+              month_ref,
+              account_id,
+              CAST(total_charges AS STRING),
+              CAST(open_amount AS STRING),
+              CAST(transaction_count AS STRING)
+            FROM {}
+            ORDER BY account_id ASC
+            ",
+            self.qualified_table("v_card_open_now")?,
         );
         let response = self.run_query(&sql).await?;
         let mut items = Vec::with_capacity(response.rows.len());

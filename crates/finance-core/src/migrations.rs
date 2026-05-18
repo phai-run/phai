@@ -4,7 +4,7 @@ use anyhow::Result;
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 18] = [
+const SQLITE_MIGRATIONS: [Migration; 20] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -77,9 +77,17 @@ const SQLITE_MIGRATIONS: [Migration; 18] = [
         "018_enrichment",
         include_str!("../../../schema/sqlite/018_enrichment.sql"),
     ),
+    (
+        "019_card_billing_cycle",
+        include_str!("../../../schema/sqlite/019_card_billing_cycle.sql"),
+    ),
+    (
+        "020_card_open_now_fix",
+        include_str!("../../../schema/sqlite/020_card_open_now_fix.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 19] = [
+const BIGQUERY_MIGRATIONS: [Migration; 21] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -155,6 +163,14 @@ const BIGQUERY_MIGRATIONS: [Migration; 19] = [
     (
         "019_enrichment",
         include_str!("../../../schema/bigquery/019_enrichment.sql"),
+    ),
+    (
+        "020_card_billing_cycle",
+        include_str!("../../../schema/bigquery/020_card_billing_cycle.sql"),
+    ),
+    (
+        "021_card_open_now_fix",
+        include_str!("../../../schema/bigquery/021_card_open_now_fix.sql"),
     ),
 ];
 

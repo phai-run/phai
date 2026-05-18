@@ -253,6 +253,58 @@ impl FinanceStore for LocalStore {
         Ok(rows.len())
     }
 
+    async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
+        let conn = self.connection()?;
+        // For each account, pick the row with the greatest (snapshot_date,
+        // created_at) — guarantees at most one row per account and ties go
+        // to the most recently inserted snapshot.
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              snapshot_id, account_id, snapshot_date, balance, credit_limit,
+              currency_code, source, actor_id, idempotency_key, metadata_json,
+              created_at
+            FROM account_snapshots AS s
+            WHERE (s.snapshot_date, s.created_at) = (
+              SELECT s2.snapshot_date, MAX(s2.created_at)
+              FROM account_snapshots s2
+              WHERE s2.account_id = s.account_id
+              AND s2.snapshot_date = (
+                SELECT MAX(s3.snapshot_date)
+                FROM account_snapshots s3
+                WHERE s3.account_id = s.account_id
+              )
+              GROUP BY s2.snapshot_date
+            )
+            ORDER BY account_id
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let balance: Option<String> = row.get(3)?;
+                let credit_limit: Option<String> = row.get(4)?;
+                let metadata_str: String = row.get(9)?;
+                let created_str: String = row.get(10)?;
+                Ok(AccountSnapshotRecord {
+                    snapshot_id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    snapshot_date: parse_sql_date(row.get(2)?, 2)?,
+                    balance: balance.and_then(|s| parse_decimal(s).ok()),
+                    credit_limit: credit_limit.and_then(|s| parse_decimal(s).ok()),
+                    currency_code: row.get(5)?,
+                    source: row.get(6)?,
+                    actor_id: row.get(7)?,
+                    idempotency_key: row.get(8)?,
+                    metadata_json: parse_sql_json(metadata_str, 9)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -424,6 +476,68 @@ impl FinanceStore for LocalStore {
         drop(stmt);
         tx.commit()?;
         Ok(rows.len())
+    }
+
+    async fn upcoming_forecasts(
+        &self,
+        from: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<ForecastRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT forecast_id, due_date, description, amount, category_id, account_id,
+                   status, recurrence, actor_id, idempotency_key, metadata_json,
+                   created_at, updated_at
+            FROM forecast
+            WHERE status = 'ativo'
+              AND due_date IS NOT NULL
+              AND date(due_date) BETWEEN date(?1) AND date(?2)
+            ORDER BY date(due_date) ASC, CAST(amount AS REAL) DESC
+            ",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                from.format("%Y-%m-%d").to_string(),
+                until.format("%Y-%m-%d").to_string()
+            ],
+            |row| {
+                let due_str: Option<String> = row.get(1)?;
+                let due_date = due_str
+                    .as_deref()
+                    .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+                let amount_str: String = row.get(3)?;
+                let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
+                let metadata_str: String = row.get(10)?;
+                let metadata_json = parse_sql_json(metadata_str, 10)?;
+                let created_str: String = row.get(11)?;
+                let updated_str: String = row.get(12)?;
+                Ok(ForecastRecord {
+                    forecast_id: row.get(0)?,
+                    due_date,
+                    description: row.get(2)?,
+                    amount,
+                    category_id: row.get(4)?,
+                    account_id: row.get(5)?,
+                    status: row.get(6)?,
+                    recurrence: row.get(7)?,
+                    actor_id: row.get(8)?,
+                    idempotency_key: row.get(9)?,
+                    metadata_json,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     async fn apply_transaction_split(
@@ -1261,6 +1375,48 @@ impl FinanceStore for LocalStore {
         )?;
         let rows = stmt
             .query_map([month_ref], |row| {
+                let total_charges = row.get::<_, String>(2)?;
+                let open_amount = row.get::<_, String>(3)?;
+                Ok(CardSummaryRow {
+                    month_ref: row.get(0)?,
+                    account_id: row.get(1)?,
+                    total_charges: parse_decimal(total_charges).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    open_amount: parse_decimal(open_amount).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    transaction_count: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn cards_open_now(&self) -> Result<Vec<CardSummaryRow>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              month_ref,
+              account_id,
+              CAST(total_charges AS TEXT),
+              CAST(open_amount AS TEXT),
+              transaction_count
+            FROM v_card_open_now
+            ORDER BY account_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
                 let total_charges = row.get::<_, String>(2)?;
                 let open_amount = row.get::<_, String>(3)?;
                 Ok(CardSummaryRow {
