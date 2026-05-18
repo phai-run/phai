@@ -41,20 +41,14 @@ Pluggy sync normaliza no ingestion via `normalize_payment_status()`.
 `is_open_card_payment_status` no CLI mantém compat com PT/legacy aliases
 para tolerar deployment rolling.
 
-### 2. Consolidação de slugs `---` ↔ `-`
+### ✅ 2. Consolidação de slugs `---` ↔ `-` — feito
 
-**Problema.** Slugificador antigo produzia chaves duplicadas:
-`assinaturas:cloud-storage` AND `assinaturas:cloud---storage` (mesma
-categoria, duas chaves). 8 famílias afetadas (ver diagnóstico no
-histórico).
-
-**Plano.**
-1. UPDATE em massa nas tabelas: `categories`, `transactions`, `forecast`,
-   `category_budgets`, `rules`.
-2. Corrigir o slugificador em `crates/finance-core/src/idempotency.rs`
-   (função `category_id`) — substituir " / " → "-" não " / " → "---".
-3. Migração idempotente em ambos backends.
-4. Teste regression no slugificador.
+Migrations 022 (sqlite) / 023 (bq) fazem `REPLACE(category_id, '---', '-')`
+em transactions, forecast, category_budgets, internal_categories e
+categories (com lógica de consolidação para evitar conflito de PK quando
+ambos `x-y` e `x---y` existem). Slugifier atual já produz dash único —
+regression test em `idempotency.rs` garante que `Bar / Baz` etc. nunca
+voltam a gerar `---`.
 
 ### 3. Eliminar `outros:geral` como lixeira invisível
 
