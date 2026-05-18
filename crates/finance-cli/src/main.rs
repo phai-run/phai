@@ -4923,6 +4923,7 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
         created_at: now,
         updated_at: now,
         enrichment_attempted_at: None,
+        amount_cents: None,
     };
     ensure_transaction_idempotency(&mut tx);
     store.upsert_transactions(&[tx.clone()]).await?;

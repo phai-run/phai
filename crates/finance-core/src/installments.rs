@@ -439,6 +439,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             enrichment_attempted_at: None,
+            amount_cents: None,
         }
     }
 

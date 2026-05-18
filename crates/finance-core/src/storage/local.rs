@@ -720,6 +720,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )
@@ -810,6 +811,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )
@@ -862,6 +864,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )
@@ -1146,6 +1149,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )?
@@ -1213,6 +1217,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )?
@@ -2014,6 +2019,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )

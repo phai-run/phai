@@ -50,6 +50,8 @@ pub struct TransactionRecord {
     pub transaction_date: NaiveDate,
     pub description: String,
     pub amount: Decimal,
+    #[serde(default)]
+    pub amount_cents: Option<i64>,
     pub tx_type: String,
     pub category_id: Option<String>,
     pub category_source: String,
