@@ -50,21 +50,20 @@ ambos `x-y` e `x---y` existem). Slugifier atual já produz dash único —
 regression test em `idempotency.rs` garante que `Bar / Baz` etc. nunca
 voltam a gerar `---`.
 
-### 3. Eliminar `outros:geral` como lixeira invisível
+### ✅ 3. `outros:geral` fallback dump → `_revisar` — feito
 
-**Problema.** `category_source = 'fallback'` aponta para `outros:geral`,
-então 68 transações ficam com `category_id != NULL` e somem de
-`v_uncategorized`. Usuário pensa que classificou tudo.
+Migrations 023 (sqlite) / 024 (bq) introduzem a categoria reservada
+`_revisar` e re-rotam rows fallback (`category_source='fallback'` AND
+`category_id='outros:geral'`) para ela. `_revisar` começa com `_` que o
+slugifier nunca produz (filtra `is_ascii_alphanumeric`), então não
+colide com slug de usuário. `v_uncategorized` continua catching ambos
+(via predicate em `category_source`).
 
-**Plano.**
-1. Introduzir categoria especial `_revisar` (com underscore prefixed para
-   ordenar no topo das views).
-2. Fallback agora aponta para `_revisar`.
-3. `v_uncategorized` pega tudo onde category_source IN ('fallback',
-   'unclassified') OR category_id = '_revisar' OR category_id IS NULL.
-4. Migração: UPDATE transactions SET category_id='_revisar' WHERE
-   category_source='fallback' AND category_id='outros:geral'.
-5. ADR sobre a semântica de category_source.
+Limitações: nenhum código emite `category_source='fallback'` hoje (o
+caso da auditoria veio de versão histórica). Se um futuro caminho de
+código tentar emitir fallback de novo, vale escrever direto em
+`_revisar` em vez de em `outros:geral`. Não há ADR específica aqui — o
+fix é puramente dado.
 
 ### 4. Streaming taxonomy
 
