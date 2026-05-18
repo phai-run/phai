@@ -1684,8 +1684,52 @@ fn detect_installment_marker(row: &CardClosedTransactionRow) -> Option<String> {
     extract_installment_marker(&row.label)
         .or_else(|| extract_installment_marker(&row.description))
         .or_else(|| {
+            // Also try descriptionRaw stored by Pluggy sync in metadata.
+            row.metadata_json
+                .get("raw")
+                .and_then(|r| r.get("descriptionRaw"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| extract_installment_marker(s))
+        })
+        .or_else(|| {
             metadata_contains_installment_signal(&row.metadata_json).then(|| "metadata".to_string())
         })
+}
+
+/// Returns the description enriched with an installment marker sourced from
+/// Pluggy metadata when the stored description text lacks one. Used to make
+/// `report installments` work with data synced before the Pluggy fix landed.
+fn enrich_description_from_metadata(description: &str, metadata: &Value) -> String {
+    if finance_core::installments::parse_installment_description(description).is_some() {
+        return description.to_string();
+    }
+    // Try descriptionRaw first.
+    if let Some(raw) = metadata
+        .get("raw")
+        .and_then(|r| r.get("descriptionRaw"))
+        .and_then(|v| v.as_str())
+        .filter(|s| finance_core::installments::parse_installment_description(s).is_some())
+    {
+        return raw.to_string();
+    }
+    // Fall back to creditCardMetadata structured fields.
+    if let (Some(current), Some(total)) = (
+        metadata
+            .get("raw")
+            .and_then(|r| r.get("creditCardMetadata"))
+            .and_then(|m| m.get("installmentNumber"))
+            .and_then(|v| v.as_u64()),
+        metadata
+            .get("raw")
+            .and_then(|r| r.get("creditCardMetadata"))
+            .and_then(|m| m.get("totalInstallments"))
+            .and_then(|v| v.as_u64()),
+    ) {
+        if current > 0 && total > 0 && current <= total && total <= 99 {
+            return format!("{} {}/{}", description.trim(), current, total);
+        }
+    }
+    description.to_string()
 }
 
 fn is_subscription_row(row: &CardClosedTransactionRow) -> bool {
@@ -3604,9 +3648,16 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
     )?;
     let to = today;
 
-    let transactions = store
+    let transactions: Vec<_> = store
         .transactions_in_date_range(args.account_id.as_deref(), from, to)
-        .await?;
+        .await?
+        .into_iter()
+        .map(|mut tx| {
+            tx.description =
+                enrich_description_from_metadata(&tx.description, &tx.metadata_json);
+            tx
+        })
+        .collect();
 
     let all_chains = group_into_chains(&transactions);
     // Report only active chains (remaining > 0)
