@@ -179,12 +179,21 @@ Enrichment proposes; the `rules` table persists. The pipeline does not write cat
 
 ## Splits
 
-A single bank transaction can be split into N categorized lines. `splits.rs` and `split_payload.rs` define:
+A single bank transaction can be split into N categorized lines (groceries → food + cleaning + pets). `splits.rs` and `split_payload.rs` define:
 
 - `TransactionSplitPayload` — the user's intent (target tx + list of (amount, category, context)).
 - Validation: line amounts sum to the parent transaction's signed amount, exactly, in `Decimal`.
+- Receipt-item analytics: optional `receipt_items` rows enable `report item-prices` (historical prices for a specific item across receipts).
 - `apply_transaction_split` (on `FinanceStore`) — writes the split rows + emits an audit event.
 - Views treat split children as the reportable rows when present; the parent is excluded.
+
+### Backend support (current state)
+
+**Splits are BigQuery-only today.** The schema lives in `schema/bigquery/014_transaction_splits.sql` (4 tables: `transaction_splits`, `transaction_split_lines`, `receipt_items`, `split_review_policies`). The full implementation is in `storage/bigquery.rs`. The SQLite implementation in `storage/local.rs` returns `split_bigquery_only_error()` for every split-related method.
+
+This is the one place where the dual-backend parity promised by [ADR-0002](adr/0002-financestore-trait-dual-backend.md) is currently broken. It's documented in [tx-splits-cli-test-plan.md](tx-splits-cli-test-plan.md) and tracked as known parity debt — porting requires a SQLite split migration, `MERGE`→`UPSERT` translation in 5 trait methods, and (the sharpest edge) reproducing `item_prices` text search without BigQuery's analytics layer (likely via FTS5).
+
+Until ported, the CLI surfaces a clear unsupported-backend error on local for: `tx split preview/apply/show/clear`, `report split-candidates`, `report item-prices`.
 
 ## Installments (parcelas)
 

@@ -199,6 +199,14 @@ When adding a new method:
 - If the implementation needs a new view, add a migration to both `schema/sqlite/` and `schema/bigquery/`.
 - E2E test against SQLite (`tempfile` + `serial_test`); the BigQuery path is exercised by parity review and by smoke tests in the author's environment.
 
+### Known backend-divergence
+
+The dual-backend principle is a promise, not an invariant — there is one place where it is currently broken:
+
+- **Splits and receipt-item analytics are BigQuery-only.** The schema (`schema/bigquery/014_transaction_splits.sql`) and the implementation in `storage/bigquery.rs` cover `tx split preview/apply/show/clear`, `report split-candidates`, and `report item-prices`. The SQLite impl returns `split_bigquery_only_error()` on each. The CLI surfaces this clearly. Tracked as parity debt — see [docs/ABSTRACTIONS.md §Splits](ABSTRACTIONS.md#splits) and [docs/tx-splits-cli-test-plan.md](tx-splits-cli-test-plan.md).
+
+New backend-divergence should be a deliberate choice with a documented reason in the migration file header and a tracking note here, not a silent drift.
+
 ## CI & Release
 
 `.github/workflows/ci.yml`:
