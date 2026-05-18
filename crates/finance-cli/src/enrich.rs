@@ -1553,6 +1553,9 @@ mod test_support {
         ) -> Result<Vec<ForecastRecord>> {
             Ok(vec![])
         }
+        async fn cards_open_now(&self) -> Result<Vec<finance_core::models::CardSummaryRow>> {
+            Ok(vec![])
+        }
         async fn apply_transaction_split(
             &self,
             _: &TransactionSplitRecord,

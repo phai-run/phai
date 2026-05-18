@@ -1978,6 +1978,35 @@ impl FinanceStore for BigQueryStore {
         Ok(items)
     }
 
+    async fn cards_open_now(&self) -> Result<Vec<CardSummaryRow>> {
+        let sql = format!(
+            "
+            SELECT
+              month_ref,
+              account_id,
+              CAST(total_charges AS STRING),
+              CAST(open_amount AS STRING),
+              CAST(transaction_count AS STRING)
+            FROM {}
+            ORDER BY account_id ASC
+            ",
+            self.qualified_table("v_card_open_now")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(CardSummaryRow {
+                month_ref: required_string(&values, 0, "month_ref")?,
+                account_id: required_string(&values, 1, "account_id")?,
+                total_charges: required_decimal(&values, 2, "total_charges")?,
+                open_amount: required_decimal(&values, 3, "open_amount")?,
+                transaction_count: required_i64(&values, 4, "transaction_count")?,
+            });
+        }
+        Ok(items)
+    }
+
     async fn card_closed_transactions(
         &self,
         month_ref: Option<&str>,

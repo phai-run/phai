@@ -1349,6 +1349,48 @@ impl FinanceStore for LocalStore {
         Ok(rows)
     }
 
+    async fn cards_open_now(&self) -> Result<Vec<CardSummaryRow>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              month_ref,
+              account_id,
+              CAST(total_charges AS TEXT),
+              CAST(open_amount AS TEXT),
+              transaction_count
+            FROM v_card_open_now
+            ORDER BY account_id ASC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let total_charges = row.get::<_, String>(2)?;
+                let open_amount = row.get::<_, String>(3)?;
+                Ok(CardSummaryRow {
+                    month_ref: row.get(0)?,
+                    account_id: row.get(1)?,
+                    total_charges: parse_decimal(total_charges).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    open_amount: parse_decimal(open_amount).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?,
+                    transaction_count: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn card_closed_transactions(
         &self,
         month_ref: Option<&str>,

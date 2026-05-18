@@ -30,9 +30,10 @@ When answering users about recent transactions or daily finance activity:
 
 For card-bill requests, disambiguate intent before answering:
 
-- If user asks about "fatura em aberto", "em andamento", or "fatura atual", prioritize open balance (`open_amount`) for the requested month.
-- If user asks "como fecharam os cartões", "fatura fechada", or "última fatura", prioritize closed bills and default to the last fully closed month when month is omitted.
-- If user writes "esse mês" together with "fecharam/fatura fechada", answer with the inferred closed month and state that month explicitly in `YYYY-MM`.
+- `v_card_summary.month_ref` is the **billing cycle** the bill closes in (driven by `accounts.metadata_json.billing_closing_day`), **not** the calendar month a transaction was posted. A purchase on Mar 28 with closing-day 3 lives in the cycle that closes Apr 3 (`month_ref = 2026-04`).
+- If user asks about "fatura em aberto", "em andamento", or "fatura atual", prioritize the most-recent open balance per card from `v_card_open_now` (or `cards_open_now()` on the trait). That view returns at most one row per card — the cycle that is closed and still has open balance.
+- If user asks "como fecharam os cartões", "fatura fechada", or "última fatura", prioritize closed bills and default to the last fully closed cycle when month is omitted.
+- If user writes "esse mês" together with "fecharam/fatura fechada", answer with the inferred closed cycle and state that month explicitly in `YYYY-MM`.
 - In closed-bill answers, report `total fechado = total_charges - open_amount` first; mention `open_amount` only as secondary context.
 - If user asks a custom closed-bill view (categories, recorrentes, assinaturas, parcelados), provide the custom view over CLI-backed data and clearly label any unavailable slice.
 

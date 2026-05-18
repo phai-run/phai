@@ -132,6 +132,12 @@ pub trait FinanceStore {
     async fn forecast_vs_actual(&self, month_ref: Option<&str>)
         -> Result<Vec<ForecastVsActualRow>>;
     async fn card_summary(&self, month_ref: Option<&str>) -> Result<Vec<CardSummaryRow>>;
+    /// Cards' open bills as of "now". For each active credit account this
+    /// returns at most one row — the cycle whose closing day is in the
+    /// future (or today), determined per-account from
+    /// `accounts.metadata_json.billing_closing_day`. Cards without a
+    /// closing-day field fall back to the next calendar month.
+    async fn cards_open_now(&self) -> Result<Vec<CardSummaryRow>>;
     async fn card_closed_transactions(
         &self,
         month_ref: Option<&str>,

@@ -190,10 +190,11 @@ pub async fn gather_pulse_data(
     };
     let upcoming_total = upcoming.iter().map(|f| f.amount.abs()).sum();
 
-    let cards = store
-        .card_summary(Some(&current_month))
-        .await
-        .unwrap_or_default();
+    // `cards_open_now` returns the bill that's actually open RIGHT NOW per
+    // card (i.e. the cycle whose closing day is in the future). Using
+    // `card_summary(current_calendar_month)` would silently return a
+    // *closed* cycle for cards whose closing day already passed this month.
+    let cards = store.cards_open_now().await.unwrap_or_default();
     let accounts = store.get_accounts().await.unwrap_or_default();
 
     let budget_alerts = store
@@ -501,16 +502,14 @@ pub fn render_pulse(data: &PulseData, plan: &ClosingPlan, days: i64) -> String {
         let _ = writeln!(out);
         let _ = writeln!(out, "{}", bold("Cartões em aberto"));
         for c in cards_open {
-            let due_label = card_due_label(&data.accounts, &c.account_id, data.today);
+            let due_label = card_due_label(&data.accounts, &c.account_id, &c.month_ref, data.today);
             let acc_label = card_account_label(&data.accounts, &c.account_id);
             let _ = writeln!(
                 out,
                 "  💳 {} · {}{}",
                 acc_label,
                 hf_brl(c.open_amount),
-                due_label
-                    .map(|s| format!(" (vence {})", s))
-                    .unwrap_or_default(),
+                due_label.map(|s| format!(" ({s})")).unwrap_or_default(),
             );
         }
     }
@@ -580,10 +579,14 @@ fn pretty_category_label(category_id: &str) -> String {
     }
 }
 
-/// Card "vence DD/mmm" derived from `accounts.metadata_json.billing_due_day`.
+/// Card due-date label derived from `accounts.metadata_json.billing_due_day`
+/// and the cycle's `month_ref`. Returns `"vence DD/mmm"` for upcoming due
+/// dates and `"venceu DD/mmm"` for past-due bills so the message surfaces
+/// overdue cycles instead of silently rolling them forward.
 fn card_due_label(
     accounts: &[AccountRecord],
     account_id: &str,
+    cycle_ref: &str,
     today: NaiveDate,
 ) -> Option<String> {
     let acc = accounts.iter().find(|a| a.account_id == account_id)?;
@@ -592,17 +595,16 @@ fn card_due_label(
     if !(1..=31).contains(&day) {
         return None;
     }
-    // Next due: this month if day >= today, else next month.
-    let (y, m) = if day >= today.day() {
-        (today.year(), today.month())
-    } else if today.month() == 12 {
-        (today.year() + 1, 1)
-    } else {
-        (today.year(), today.month() + 1)
-    };
+    let parts: Vec<&str> = cycle_ref.split('-').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let y: i32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
     let last = days_in_month(NaiveDate::from_ymd_opt(y, m, 1)?);
     let due = NaiveDate::from_ymd_opt(y, m, day.min(last))?;
-    Some(short_date(due))
+    let verb = if due < today { "venceu" } else { "vence" };
+    Some(format!("{verb} {}", short_date(due)))
 }
 
 fn card_account_label(accounts: &[AccountRecord], account_id: &str) -> String {

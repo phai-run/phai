@@ -61,6 +61,7 @@ proposed → active → superseded
 | [0007](0007-atomic-self-update.md) | Atomic self-update with SHA-256 verification | active |
 | [0008](0008-privacy-no-personal-data-in-shared-source.md) | Privacy: no personal data in shared source | active |
 | [0009](0009-proactive-pulse-and-closing-plan.md) | Pulse as a proactive closing-plan, not a retrospective transaction list | active |
+| [0010](0010-card-billing-cycle.md) | `v_card_summary` groups by billing cycle, not calendar month | active |
 
 ---
 
