@@ -649,7 +649,7 @@ impl FinanceStore for LocalStore {
               actor_id, idempotency_key, metadata_json, created_at, updated_at
             FROM transactions
             WHERE LOWER(description) LIKE ?1
-            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             LIMIT ?2
             ",
         )?;
@@ -740,7 +740,7 @@ impl FinanceStore for LocalStore {
               actor_id, idempotency_key, metadata_json, created_at, updated_at
             FROM transactions
             WHERE context IS NULL
-            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             LIMIT ?1
             ",
         )?;
@@ -1107,7 +1107,7 @@ impl FinanceStore for LocalStore {
             FROM v_transactions_reportable
             WHERE transaction_date >= ?1
               AND transaction_date <= ?2
-            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             ",
         )?;
         let rows = stmt
@@ -1501,10 +1501,10 @@ impl FinanceStore for LocalStore {
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND NOT (CAST(t.amount AS REAL) > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
+              AND NOT (t.amount_cents > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
               AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
-            ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC
+            ORDER BY t.transaction_date DESC, ABS(t.amount_cents) DESC, t.transaction_id ASC
             ",
         )?;
         let rows = stmt
@@ -1549,17 +1549,17 @@ impl FinanceStore for LocalStore {
               t.transaction_date,
               t.display_label,
               t.description,
-              CAST(ABS(CAST(t.amount AS REAL)) AS TEXT) AS amount,
+              CAST(ABS(t.amount_cents) / 100.0 AS TEXT) AS amount,
               t.category_id,
               t.payment_status,
               t.metadata_json
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND CAST(t.amount AS REAL) < 0
+              AND t.amount_cents < 0
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
               AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
-            ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC
+            ORDER BY t.transaction_date DESC, ABS(t.amount_cents) DESC, t.transaction_id ASC
             ",
         )?;
         let rows = stmt
