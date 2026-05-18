@@ -1257,17 +1257,15 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>> {
-        // ADR-0003 promises Decimal end-to-end. SQLite has no native
-        // DECIMAL, so the `v_cashflow` view aggregates `CAST(amount AS REAL)`
-        // — f64 math under the hood. For household-sized sums that's
-        // adequate in practice, but it does drift. To honour the ADR we
-        // read raw rows here and SUM in Rust with `rust_decimal`. BigQuery
-        // already uses native NUMERIC so its impl keeps the view path.
+        // ADR-0003: exact integer-cent SUM via amount_cents, then convert
+        // to Decimal at the end. This avoids both REAL accumulation and
+        // the overhead of Decimal parsing + addition per row. BigQuery
+        // uses native NUMERIC via the view path.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
             SELECT strftime('%Y-%m', transaction_date) AS month_ref,
-                   amount,
+                   amount_cents,
                    COALESCE(category_id, '') AS category_id
             FROM transactions
             WHERE COALESCE(category_id, '') NOT IN (
@@ -1275,39 +1273,33 @@ impl FinanceStore for LocalStore {
             )
             ",
         )?;
-        let mut by_month: BTreeMap<String, (Decimal, Decimal, Decimal)> = BTreeMap::new();
+        let mut by_month: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
         let rows = stmt.query_map([], |row| {
             let month_ref: String = row.get(0)?;
-            let amount_str: String = row.get(1)?;
+            let cents: i64 = row.get(1)?;
             let category_id: String = row.get(2)?;
-            Ok((month_ref, amount_str, category_id))
+            Ok((month_ref, cents, category_id))
         })?;
         for row in rows {
-            let (month_ref, amount_str, category_id) = row?;
-            let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
-            let bucket =
-                by_month
-                    .entry(month_ref)
-                    .or_insert((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
-            if amount.is_sign_negative() {
-                bucket.1 += amount.abs();
+            let (month_ref, cents, category_id) = row?;
+            let bucket = by_month.entry(month_ref).or_insert((0, 0, 0));
+            if cents < 0 {
+                bucket.1 += cents.abs();
             } else if category_id == "cashback" {
-                bucket.2 += amount;
+                bucket.2 += cents;
             } else {
-                bucket.0 += amount;
+                bucket.0 += cents;
             }
         }
         let mut out: Vec<CashflowRow> = by_month
             .into_iter()
-            .map(
-                |(month_ref, (income, expenses, expense_reduction))| CashflowRow {
-                    month_ref,
-                    income,
-                    expenses,
-                    expense_reduction,
-                    net: income + expense_reduction - expenses,
-                },
-            )
+            .map(|(month_ref, (inc, exp, er))| CashflowRow {
+                month_ref,
+                income: Decimal::new(inc, 2),
+                expenses: Decimal::new(exp, 2),
+                expense_reduction: Decimal::new(er, 2),
+                net: Decimal::new(inc + er - exp, 2),
+            })
             .collect();
         out.sort_by(|a, b| b.month_ref.cmp(&a.month_ref));
         out.truncate(months);

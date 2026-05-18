@@ -3229,3 +3229,136 @@ fn installments_detected_from_pluggy_credit_card_metadata() {
         txs.len()
     );
 }
+
+#[test]
+fn amount_cents_exact_integer_sum_regression() {
+    // ADR-0003: verify that amount_cents produces exact integer sums
+    // and that views no longer exhibit floating-point drift.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Insert transactions with edge-case cent values that would expose
+    // floating-point drift under CAST(amount AS REAL) aggregation.
+    let txs = [
+        ("prec-001", "2026-05-01", "Um centavo", "-0.01"),
+        ("prec-002", "2026-05-02", "Dois centavos", "-0.02"),
+        ("prec-003", "2026-05-03", "Tres centavos", "-0.03"),
+        ("prec-004", "2026-05-04", "Mil duzentos", "-1234.56"),
+        ("prec-005", "2026-05-05", "Salario", "5000.00"),
+        ("prec-006", "2026-05-06", "Cashback troco", "1.99"),
+    ];
+
+    for (id, date, desc, amount) in &txs {
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(id)
+                .arg("--date")
+                .arg(date)
+                .arg("--description")
+                .arg(desc)
+                .arg(format!("--amount={amount}")),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    // Verify amount_cents column directly via SQLite.
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+
+    // Every row must have a non-NULL amount_cents that matches ROUND(amount * 100).
+    let mismatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transactions
+             WHERE amount_cents IS NULL
+                OR amount_cents != CAST(ROUND(CAST(amount AS REAL) * 100) AS INTEGER)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count mismatches");
+    assert_eq!(mismatch_count, 0, "amount_cents mismatch detected");
+
+    // Verify exact view aggregation: v_cashflow income.
+    let cashflow_json = envs(
+        cargo_bin().arg("report").arg("cashflow").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    // Cashflow report returns a JSON array of month objects.
+    let cf: Value = serde_json::from_slice(&cashflow_json).expect("valid cashflow json");
+    let months = cf.as_array().expect("cashflow is an array");
+    let may = months
+        .iter()
+        .find(|m| m["month_ref"].as_str() == Some("2026-05"))
+        .expect("May 2026 in cashflow");
+
+    // Income: salary 5000.00 + uncategorized credit 1.99 = 5001.99.
+    // JSON serialization of Decimal uses exact string representation.
+    assert_eq!(
+        may["income"].as_str().expect("income string"),
+        "5001.99",
+        "income deve ser exato, sem drift de ponto flutuante"
+    );
+
+    // Expenses: 0.01 + 0.02 + 0.03 + 1234.56 = 1234.62 (exact).
+    assert_eq!(
+        may["expenses"].as_str().expect("expenses string"),
+        "1234.62",
+        "expenses deve ser exato, sem drift de ponto flutuante"
+    );
+
+    // Net = income - expenses = 5001.99 - 1234.62 = 3767.37
+    assert_eq!(
+        may["net"].as_str().expect("net string"),
+        "3767.37",
+        "net deve ser exato"
+    );
+
+    // Also verify the v_cashflow view via direct SQLite query:
+    // SUM(amount_cents) / 100.0 should match exactly.
+    let (view_income, view_expenses, view_net): (String, String, String) = conn
+        .query_row(
+            "SELECT income, expenses, net FROM v_cashflow WHERE month_ref = '2026-05'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("v_cashflow query");
+
+    assert_eq!(view_income, "5001.99", "v_cashflow income exato");
+    assert_eq!(view_expenses, "1234.62", "v_cashflow expenses exato");
+    assert_eq!(view_net, "3767.37", "v_cashflow net exato");
+}
