@@ -3118,10 +3118,7 @@ fn installments_detected_from_pluggy_credit_card_metadata() {
 
     // report installments must find both active chains.
     let output = envs(
-        cargo_bin()
-            .arg("report")
-            .arg("installments")
-            .arg("--raw"),
+        cargo_bin().arg("report").arg("installments").arg("--raw"),
         &config_dir,
         &data_dir,
     )
@@ -3150,10 +3147,12 @@ fn installments_detected_from_pluggy_credit_card_metadata() {
                 .to_ascii_lowercase()
                 .contains("notebook")
         })
-        .unwrap_or_else(|| panic!(
-            "cadeia 'Notebook Pro' não encontrada\ncadeias encontradas: {}",
-            serde_json::to_string_pretty(arr).unwrap()
-        ));
+        .unwrap_or_else(|| {
+            panic!(
+                "cadeia 'Notebook Pro' não encontrada\ncadeias encontradas: {}",
+                serde_json::to_string_pretty(arr).unwrap()
+            )
+        });
     assert_eq!(meta_chain["total"], 10, "total deve ser 10");
     assert_eq!(meta_chain["current"], 3, "current deve ser 3");
     assert!(

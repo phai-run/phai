@@ -139,6 +139,52 @@ struct PaginatedResponse<T> {
     total_pages: Option<u32>,
 }
 
+/// Read a `Decimal` from a JSON value that may be a number or numeric string —
+/// mirrors `deserialize_decimal` so the `extra` flatten field is parsed the
+/// same way as typed fields.
+fn decimal_from_value(value: &Value) -> Option<Decimal> {
+    match value {
+        Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
+        Value::String(s) => Decimal::from_str(s.trim()).ok(),
+        _ => None,
+    }
+}
+
+/// Resolve the BRL-equivalent amount for a Pluggy transaction.
+///
+/// For international card charges Pluggy returns the **original-currency**
+/// magnitude in `amount` (e.g. `22.40` USD) and the BRL value in
+/// `amountInAccountCurrency` (e.g. `114.24`). Storing `amount` directly
+/// produces totals that don't match the cardholder's statement. When the
+/// transaction currency differs from BRL and an account-currency value is
+/// present, we swap the magnitude while preserving the original sign — the
+/// downstream credit-card normalization still owns sign decisions.
+fn resolve_account_currency_amount(payload: &PluggyTransactionPayload) -> Decimal {
+    let currency_code = payload
+        .extra
+        .get("currencyCode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let account_amount = payload
+        .extra
+        .get("amountInAccountCurrency")
+        .and_then(decimal_from_value);
+    match (currency_code, account_amount) {
+        (Some(cc), Some(account_amt))
+            if !cc.eq_ignore_ascii_case("BRL") && !account_amt.is_zero() =>
+        {
+            let magnitude = account_amt.abs();
+            if payload.amount.is_sign_negative() {
+                -magnitude
+            } else {
+                magnitude
+            }
+        }
+        _ => payload.amount,
+    }
+}
+
 fn parse_date(value: &str) -> Result<NaiveDate> {
     let raw = value.get(0..10).unwrap_or(value);
     NaiveDate::parse_from_str(raw, "%Y-%m-%d")
@@ -406,9 +452,12 @@ fn build_transaction_record(
         .as_deref()
         .filter(|value| !value.trim().is_empty());
     let category_key = category_name.map(|value| category_id(value, None));
+    // For foreign-currency charges, work in BRL from the start so rule matchers
+    // that key on amount see the value the user sees on the statement.
+    let account_amount = resolve_account_currency_amount(&payload);
     let rule_application = apply_rules_with_facts(
         &payload.description,
-        Some(payload.amount),
+        Some(account_amount),
         Some(payload.id.as_str()),
         category_key,
         payload.category.is_some(),
@@ -423,7 +472,7 @@ fn build_transaction_record(
         .tx_type
         .clone()
         .unwrap_or_else(|| {
-            if payload.amount.is_sign_negative() {
+            if account_amount.is_sign_negative() {
                 "debit".to_string()
             } else {
                 "credit".to_string()
@@ -442,10 +491,10 @@ fn build_transaction_record(
         .as_deref()
         .is_some_and(|c| matches!(c, "cashback" | "refund") || internal_categories.contains(c));
     let (mut amount, mut tx_type) =
-        if is_credit_account && payload.amount.is_sign_positive() && !is_genuine_credit {
-            (-payload.amount, "debit".to_string())
+        if is_credit_account && account_amount.is_sign_positive() && !is_genuine_credit {
+            (-account_amount, "debit".to_string())
         } else {
-            (payload.amount, tx_type)
+            (account_amount, tx_type)
         };
     match rule_application.amount_sign {
         Some(AmountSign::Positive) => {
@@ -457,6 +506,17 @@ fn build_transaction_record(
             tx_type = "debit".to_string();
         }
         None => {}
+    }
+
+    // Final invariant: `amount` sign agrees with `tx_type`. Pluggy occasionally
+    // returns credit-card payments / refunds as negative amounts with `type =
+    // CREDIT` (e.g. "Pagamento recebido", "Crédito de ...", reversal entries),
+    // which used to leak through as negative credits and double-count against
+    // bill totals.
+    match tx_type.as_str() {
+        "credit" => amount = amount.abs(),
+        "debit" => amount = -amount.abs(),
+        _ => {}
     }
 
     let created_at = parse_datetime_or_now(payload.created_at.as_deref());
@@ -1247,5 +1307,171 @@ mod tests {
             "description deve conter '2/6', obteve: {:?}",
             tx.description
         );
+    }
+
+    #[test]
+    fn foreign_currency_purchase_uses_brl_account_amount() {
+        // Pluggy returns the foreign-currency value in `amount` and the BRL
+        // value in `amountInAccountCurrency`. We must persist the BRL value
+        // so card totals match the bank statement.
+        let raw = json!({
+            "id": "tx-usd-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-05-07",
+            "description": "Claude.Ai Subscription",
+            "amount": 22.40,
+            "amountInAccountCurrency": 114.24,
+            "currencyCode": "USD",
+            "type": "DEBIT",
+            "status": "POSTED"
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.amount, Decimal::new(-11424, 2));
+        assert_eq!(tx.tx_type, "debit");
+    }
+
+    #[test]
+    fn foreign_currency_falls_back_to_amount_when_account_value_missing() {
+        let raw = json!({
+            "id": "tx-usd-fallback",
+            "accountId": "pluggy-cc",
+            "date": "2026-05-07",
+            "description": "Foreign merchant",
+            "amount": 22.40,
+            "currencyCode": "USD",
+            "type": "DEBIT"
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        // No amountInAccountCurrency -> keep the original magnitude. Credit-card
+        // normalization still flips to a debit.
+        assert_eq!(tx.amount, Decimal::new(-2240, 2));
+        assert_eq!(tx.tx_type, "debit");
+    }
+
+    #[test]
+    fn credit_type_with_negative_amount_is_flipped_positive() {
+        // Pluggy reports credit-card "Pagamento recebido" as a negative amount
+        // tagged `type = CREDIT`. The stored amount must agree with the type
+        // (positive credit) so it reduces, rather than inflates, expense totals.
+        let raw = json!({
+            "id": "tx-payment-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-05-11",
+            "description": "Pagamento recebido",
+            "amount": -7206.77,
+            "currencyCode": "BRL",
+            "type": "CREDIT",
+            "status": "POSTED"
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.amount, Decimal::new(720677, 2));
+        assert_eq!(tx.tx_type, "credit");
+    }
+
+    #[test]
+    fn credit_type_with_negative_amount_for_reversal_is_flipped() {
+        // "Crédito de ..." / "Estorno de ..." entries arrive as type=CREDIT
+        // with negative amounts on the credit-card statement.
+        let raw = json!({
+            "id": "tx-refund-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-04-28",
+            "description": "Crédito de \"Mercado*10produtos\"",
+            "amount": -60.90,
+            "currencyCode": "BRL",
+            "type": "CREDIT"
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.amount, Decimal::new(6090, 2));
+        assert_eq!(tx.tx_type, "credit");
+    }
+
+    #[test]
+    fn credit_card_purchase_still_negative() {
+        // Regression guard: ordinary credit-card purchases (Pluggy positive,
+        // type=DEBIT) must remain stored as negative debits after the new
+        // sign-invariant enforcement.
+        let raw = json!({
+            "id": "tx-purchase-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-05-02",
+            "description": "Bistek-Supermercados",
+            "amount": 1055.59,
+            "currencyCode": "BRL",
+            "type": "DEBIT"
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.amount, Decimal::new(-105559, 2));
+        assert_eq!(tx.tx_type, "debit");
     }
 }
