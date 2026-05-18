@@ -1,4 +1,5 @@
 use crate::idempotency::{account_idempotency, category_id, pluggy_transaction_idempotency};
+use crate::installments::parse_installment_description;
 use crate::legacy::{load_account_registry, AccountRegistryEntry};
 use crate::models::{
     json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
@@ -460,13 +461,52 @@ fn build_transaction_record(
 
     let created_at = parse_datetime_or_now(payload.created_at.as_deref());
     let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
+
+    // Pluggy often normalises credit-card descriptions (e.g. "AMAZON PRIME"
+    // instead of "AMAZON PRIME 1/4"). Fall back to descriptionRaw when it
+    // carries an installment marker that the clean description lacks; if
+    // neither text field has a marker but creditCardMetadata has structured
+    // installment numbers, append "N/T" so every downstream parser sees it.
+    let description = {
+        let base = payload.description.as_str();
+        if parse_installment_description(base).is_some() {
+            base.to_string()
+        } else if let Some(raw) = payload
+            .extra
+            .get("descriptionRaw")
+            .and_then(|v| v.as_str())
+            .filter(|s| parse_installment_description(s).is_some())
+        {
+            raw.to_string()
+        } else if let (Some(current), Some(total)) = (
+            payload
+                .extra
+                .get("creditCardMetadata")
+                .and_then(|m| m.get("installmentNumber"))
+                .and_then(|v| v.as_u64()),
+            payload
+                .extra
+                .get("creditCardMetadata")
+                .and_then(|m| m.get("totalInstallments"))
+                .and_then(|v| v.as_u64()),
+        ) {
+            if current > 0 && total > 0 && current <= total && total <= 99 {
+                format!("{} {}/{}", base.trim(), current, total)
+            } else {
+                base.to_string()
+            }
+        } else {
+            base.to_string()
+        }
+    };
+
     Ok(TransactionRecord {
         transaction_id: payload.id.clone(),
         account_id: registry
             .map(|entry| entry.account_id.clone())
             .or_else(|| Some(binding.id.clone())),
         transaction_date,
-        description: payload.description.clone(),
+        description,
         amount,
         tx_type,
         category_id,
@@ -1114,6 +1154,98 @@ mod tests {
         assert_eq!(
             tx.category_id.as_deref(),
             Some("receitas:cashback-beneficios")
+        );
+    }
+
+    #[test]
+    fn description_enriched_from_credit_card_metadata() {
+        let raw = json!({
+            "id": "tx-inst-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-04-05",
+            "description": "Notebook Pro",
+            "amount": 450.00,
+            "type": "debit",
+            "status": "posted",
+            "createdAt": "2026-04-05T00:00:00Z",
+            "updatedAt": "2026-04-05T00:00:00Z",
+            "creditCardMetadata": {
+                "installmentNumber": 3,
+                "totalInstallments": 10,
+                "billId": "bill-apr"
+            }
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+
+        // Verify flatten captured creditCardMetadata.
+        assert_eq!(
+            payload
+                .extra
+                .get("creditCardMetadata")
+                .and_then(|m| m.get("installmentNumber"))
+                .and_then(|v| v.as_u64()),
+            Some(3),
+            "creditCardMetadata.installmentNumber deve estar em extra"
+        );
+
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(
+            tx.description.ends_with("3/10"),
+            "description deve terminar com '3/10', obteve: {:?}",
+            tx.description
+        );
+        assert!(
+            crate::installments::parse_installment_description(&tx.description).is_some(),
+            "description enriquecida deve ser parseável, obteve: {:?}",
+            tx.description
+        );
+    }
+
+    #[test]
+    fn description_enriched_from_description_raw() {
+        let raw = json!({
+            "id": "tx-inst-2",
+            "accountId": "pluggy-cc",
+            "date": "2026-04-08",
+            "description": "Amazon Marketplace",
+            "descriptionRaw": "Amazon Marketplace 2/6",
+            "amount": 200.00,
+            "type": "debit",
+            "status": "posted",
+            "createdAt": "2026-04-08T00:00:00Z",
+            "updatedAt": "2026-04-08T00:00:00Z"
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(
+            tx.description.contains("2/6"),
+            "description deve conter '2/6', obteve: {:?}",
+            tx.description
         );
     }
 }
