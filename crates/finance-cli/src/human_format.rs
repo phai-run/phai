@@ -65,7 +65,7 @@ pub fn short_date(date: NaiveDate) -> String {
     }
 }
 
-fn month_pt_short(month: u32) -> &'static str {
+pub fn month_pt_short(month: u32) -> &'static str {
     match month {
         1 => "jan",
         2 => "fev",

@@ -1546,6 +1546,13 @@ mod test_support {
         async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> {
             Ok(0)
         }
+        async fn upcoming_forecasts(
+            &self,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<ForecastRecord>> {
+            Ok(vec![])
+        }
         async fn apply_transaction_split(
             &self,
             _: &TransactionSplitRecord,

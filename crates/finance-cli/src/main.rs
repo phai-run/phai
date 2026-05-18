@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 mod enrich;
 mod human_format;
+mod pulse;
 mod review;
 mod self_cmd;
 mod update;
@@ -89,11 +90,40 @@ enum Commands {
         #[command(subcommand)]
         command: BudgetCommand,
     },
+    /// Push the daily pulse to an external channel (WhatsApp via webhook).
+    Notify {
+        #[command(subcommand)]
+        command: NotifyCommand,
+    },
     #[command(name = "self")]
     SelfCmd {
         #[command(subcommand)]
         command: SelfCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum NotifyCommand {
+    /// POST the rendered daily-pulse to a webhook (WhatsApp gateway).
+    ///
+    /// Reads `FINANCE_OS_WHATSAPP_WEBHOOK_URL` (required) and
+    /// `FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN` (optional, sent as
+    /// `Authorization: Bearer <token>`). Posts JSON `{ "text": "..." }`.
+    /// Designed for cron / scheduled tasks.
+    Whatsapp(NotifyWhatsappArgs),
+}
+
+#[derive(Args)]
+struct NotifyWhatsappArgs {
+    /// Window of the rendered pulse, same semantics as `report daily-pulse --days`.
+    #[arg(long, default_value_t = 1)]
+    days: i64,
+    /// Print the body to stdout in addition to posting. Useful for cron logs.
+    #[arg(long)]
+    echo: bool,
+    /// Don't post — just render and print. Used to preview without sending.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -1689,7 +1719,7 @@ fn detect_installment_marker(row: &CardClosedTransactionRow) -> Option<String> {
                 .get("raw")
                 .and_then(|r| r.get("descriptionRaw"))
                 .and_then(|v| v.as_str())
-                .and_then(|s| extract_installment_marker(s))
+                .and_then(extract_installment_marker)
         })
         .or_else(|| {
             metadata_contains_installment_signal(&row.metadata_json).then(|| "metadata".to_string())
@@ -2268,7 +2298,62 @@ async fn main() -> Result<()> {
             BudgetCommand::Upsert(args) => budget_upsert(args).await,
             BudgetCommand::List(args) => budget_list(args).await,
         },
+        Commands::Notify { command } => match command {
+            NotifyCommand::Whatsapp(args) => notify_whatsapp(args).await,
+        },
     }
+}
+
+const WHATSAPP_WEBHOOK_URL_ENV: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_URL";
+const WHATSAPP_WEBHOOK_TOKEN_ENV: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN";
+
+async fn notify_whatsapp(args: NotifyWhatsappArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let today = Utc::now().date_naive();
+    let data = pulse::gather_pulse_data(store.as_ref(), today, args.days).await?;
+    let plan = pulse::compute_closing_plan(&data);
+    let body = pulse::render_pulse(&data, &plan, args.days);
+
+    if args.echo || args.dry_run {
+        println!("{body}");
+    }
+
+    if args.dry_run {
+        return Ok(());
+    }
+
+    let url = std::env::var(WHATSAPP_WEBHOOK_URL_ENV).map_err(|_| {
+        anyhow::anyhow!(
+            "{WHATSAPP_WEBHOOK_URL_ENV} not set. Export the webhook URL or use --dry-run."
+        )
+    })?;
+    let token = std::env::var(WHATSAPP_WEBHOOK_TOKEN_ENV).ok();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .context("failed to build HTTP client")?;
+    let payload = json!({ "text": body });
+    let mut req = client.post(&url).json(&payload);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let response = req
+        .send()
+        .await
+        .with_context(|| format!("POST {url} failed"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("webhook returned {status}: {text}");
+    }
+    if args.echo {
+        eprintln!("notify whatsapp: {status}");
+    }
+    Ok(())
 }
 
 async fn auth_setup(args: AuthSetupArgs) -> Result<()> {
@@ -2485,8 +2570,13 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     }
 
     // Always run on the latest binary before touching external data.
-    // If FINANCE_OS_UPDATED is set, we just re-execed after an upgrade — skip.
-    if std::env::var_os("FINANCE_OS_UPDATED").is_none() {
+    // Skip when we just re-execed after an upgrade (FINANCE_OS_UPDATED) or
+    // when the user opted out of auto-update (FINANCE_OS_NO_AUTO_UPDATE) —
+    // CI and e2e tests rely on the latter to keep `target/debug/finance-cli`
+    // stable across subprocess invocations.
+    if std::env::var_os("FINANCE_OS_UPDATED").is_none()
+        && std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_none()
+    {
         if let Ok(paths) = ConfigPaths::discover() {
             update::force_check(&paths.data_dir).await;
         }
@@ -2753,157 +2843,23 @@ async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
-    let since = Utc::now()
-        .date_naive()
-        .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
-        .context("Falha ao calcular janela do daily pulse")?;
-    let items = store.daily_pulse(since).await?;
 
     if args.structured_output() {
+        // Backwards-compat: --raw still emits the flat list of items.
+        let since = Utc::now()
+            .date_naive()
+            .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
+            .context("Falha ao calcular janela do daily pulse")?;
+        let items = store.daily_pulse(since).await?;
         println!("{}", serde_json::to_string_pretty(&items)?);
         return Ok(());
     }
 
-    let internal_categories = store.internal_categories().await?;
-    print_daily_pulse_human(&items, args.days, &internal_categories);
+    let today = Utc::now().date_naive();
+    let data = pulse::gather_pulse_data(store.as_ref(), today, args.days).await?;
+    let plan = pulse::compute_closing_plan(&data);
+    println!("{}", pulse::render_pulse(&data, &plan, args.days));
     Ok(())
-}
-
-/// Render daily-pulse items as a WhatsApp-friendly summary grouped by category family.
-///
-/// Layout:
-///   📊 *Pulse · últimos N dias*
-///
-///   🍽️ *Alimentação* · R$ 487,30
-///     • Mercado Angeloni · R$ 150,00 (13/mai)
-///     • iFood · R$ 87,30 (12/mai)
-///
-///   💰 *Entradas* · R$ 8.500,00
-///     • Salário · R$ 5.000,00 (12/mai)
-///
-///   *Saldo do período*: +R$ 6.012,70 ✅
-fn print_daily_pulse_human(
-    items: &[finance_core::models::DailyPulseItem],
-    days: i64,
-    internal_categories: &std::collections::BTreeSet<String>,
-) {
-    use std::collections::BTreeMap;
-
-    let is_internal = |cat: &Option<String>| {
-        cat.as_deref()
-            .is_some_and(|c| internal_categories.contains(c))
-    };
-
-    let visible: Vec<&finance_core::models::DailyPulseItem> = items
-        .iter()
-        .filter(|it| !is_internal(&it.category_id))
-        .collect();
-
-    let income = visible
-        .iter()
-        .filter(|it| !it.amount.is_sign_negative())
-        .fold(Decimal::ZERO, |acc, it| acc + it.amount);
-    let expenses = visible
-        .iter()
-        .filter(|it| it.amount.is_sign_negative())
-        .fold(Decimal::ZERO, |acc, it| acc + it.amount);
-
-    println!(
-        "📊 {}",
-        human_format::bold(&format!("Pulse · últimos {days} dias"))
-    );
-    println!();
-
-    if visible.is_empty() {
-        println!("_(sem transações na janela)_");
-        return;
-    }
-
-    // Group by category family. Family is the part before `:` (or the whole
-    // category if no `:`). `None` becomes the bucket "Sem categoria".
-    let mut groups: BTreeMap<Option<String>, Vec<&finance_core::models::DailyPulseItem>> =
-        BTreeMap::new();
-    for item in &visible {
-        let family = human_format::category_family(item.category_id.as_deref());
-        groups.entry(family).or_default().push(item);
-    }
-
-    // Order families by absolute subtotal descending so the biggest movement appears first.
-    let mut family_totals: Vec<(Option<String>, Decimal)> = groups
-        .iter()
-        .map(|(family, items)| {
-            let total = items.iter().fold(Decimal::ZERO, |acc, it| acc + it.amount);
-            (family.clone(), total)
-        })
-        .collect();
-    family_totals.sort_by_key(|x| std::cmp::Reverse(x.1.abs()));
-
-    const MAX_PER_GROUP: usize = 5;
-
-    for (family, subtotal) in &family_totals {
-        // Pick a representative category_id from the first item for emoji lookup.
-        let repr_category = groups
-            .get(family)
-            .and_then(|g| g.first())
-            .and_then(|it| it.category_id.clone());
-        let label = family
-            .as_deref()
-            .map(human_format::family_label)
-            .unwrap_or_else(|| "Sem categoria".into());
-        let emoji = human_format::category_emoji(repr_category.as_deref(), Some(*subtotal));
-        println!(
-            "{} {} · {}",
-            emoji,
-            human_format::bold(&label),
-            human_format::brl_signed(*subtotal)
-        );
-
-        // Show top N items in the group, biggest absolute amount first.
-        let mut group_items: Vec<&&finance_core::models::DailyPulseItem> =
-            groups[family].iter().collect();
-        group_items.sort_by_key(|x| std::cmp::Reverse(x.amount.abs()));
-        for item in group_items.iter().take(MAX_PER_GROUP) {
-            println!(
-                "  • {} · {} ({})",
-                human_format::short_description(&item.description),
-                human_format::brl_signed(item.amount),
-                human_format::short_date(item.transaction_date),
-            );
-        }
-        if group_items.len() > MAX_PER_GROUP {
-            println!(
-                "  _… mais {} {}_",
-                group_items.len() - MAX_PER_GROUP,
-                if group_items.len() - MAX_PER_GROUP == 1 {
-                    "lançamento"
-                } else {
-                    "lançamentos"
-                }
-            );
-        }
-        println!();
-    }
-
-    // Footer: saldo do período.
-    let net = income + expenses;
-    let net_emoji = if net.is_sign_negative() {
-        "🔻"
-    } else if net.is_zero() {
-        "⚖️"
-    } else {
-        "✅"
-    };
-    println!(
-        "{} {}: {}",
-        net_emoji,
-        human_format::bold("Saldo do período"),
-        human_format::brl_signed(net)
-    );
-    println!(
-        "  entradas: {} · saídas: {}",
-        human_format::brl_signed(income),
-        human_format::brl_signed(expenses)
-    );
 }
 
 async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {
@@ -3653,8 +3609,7 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
         .await?
         .into_iter()
         .map(|mut tx| {
-            tx.description =
-                enrich_description_from_metadata(&tx.description, &tx.metadata_json);
+            tx.description = enrich_description_from_metadata(&tx.description, &tx.metadata_json);
             tx
         })
         .collect();
@@ -5351,7 +5306,12 @@ async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
     let mut total_actual = Decimal::ZERO;
 
     for row in &sorted {
-        let usage_i64 = row.usage_pct.to_string().parse::<f64>().map(|v| v as i64).unwrap_or(0);
+        let usage_i64 = row
+            .usage_pct
+            .to_string()
+            .parse::<f64>()
+            .map(|v| v as i64)
+            .unwrap_or(0);
         let bar = progress_bar(usage_i64);
         let status_emoji = if row.actual_amount > row.budget_amount {
             "🔻"

@@ -865,6 +865,69 @@ impl FinanceStore for BigQueryStore {
         Ok(rows.len())
     }
 
+    async fn upcoming_forecasts(
+        &self,
+        from: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<ForecastRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              forecast_id,
+              CAST(due_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              category_id,
+              account_id,
+              status,
+              recurrence,
+              actor_id,
+              idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            WHERE status = 'ativo'
+              AND due_date IS NOT NULL
+              AND due_date BETWEEN DATE {} AND DATE {}
+            ORDER BY due_date ASC, amount DESC
+            ",
+            self.qualified_table("forecast")?,
+            sql_string(&from.format("%Y-%m-%d").to_string()),
+            sql_string(&until.format("%Y-%m-%d").to_string()),
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let metadata_str = optional_string(&values, 10).unwrap_or_else(|| "{}".to_string());
+            let metadata_json: Value =
+                serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+            let created_str = required_string(&values, 11, "created_at")?;
+            let updated_str = required_string(&values, 12, "updated_at")?;
+            items.push(ForecastRecord {
+                forecast_id: required_string(&values, 0, "forecast_id")?,
+                due_date: optional_date(&values, 1, "due_date")?,
+                description: required_string(&values, 2, "description")?,
+                amount: required_decimal(&values, 3, "amount")?,
+                category_id: optional_string(&values, 4),
+                account_id: optional_string(&values, 5),
+                status: required_string(&values, 6, "status")?,
+                recurrence: optional_string(&values, 7),
+                actor_id: required_string(&values, 8, "actor_id")?,
+                idempotency_key: required_string(&values, 9, "idempotency_key")?,
+                metadata_json,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            });
+        }
+        Ok(items)
+    }
+
     async fn apply_transaction_split(
         &self,
         split: &TransactionSplitRecord,

@@ -55,6 +55,14 @@ pub trait FinanceStore {
     async fn upsert_rules(&self, rows: &[RuleRecord]) -> Result<usize>;
     async fn upsert_categories(&self, rows: &[CategoryRecord]) -> Result<usize>;
     async fn upsert_forecasts(&self, rows: &[ForecastRecord]) -> Result<usize>;
+    /// Active forecasts whose `due_date` falls in `[from, until]` (inclusive).
+    /// Only `status = 'ativo'` rows are returned. Ordered by due_date ascending,
+    /// then by amount descending so the biggest commitments lead within a day.
+    async fn upcoming_forecasts(
+        &self,
+        from: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<ForecastRecord>>;
     async fn apply_transaction_split(
         &self,
         split: &TransactionSplitRecord,

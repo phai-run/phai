@@ -15,6 +15,11 @@ fn cargo_bin() -> Command {
 fn envs<'a>(cmd: &'a mut Command, config_dir: &Path, data_dir: &Path) -> &'a mut Command {
     cmd.env("FINANCE_OS_CONFIG_DIR", config_dir)
         .env("FINANCE_OS_DATA_DIR", data_dir)
+        // Tests must never trigger the self-updater: it overwrites the
+        // very `target/debug/finance-cli` binary cargo just built, causing
+        // subsequent assertions to run against an old release artifact
+        // and producing false negatives.
+        .env("FINANCE_OS_NO_AUTO_UPDATE", "1")
 }
 
 fn write_file(path: &Path, content: &str) {
@@ -126,12 +131,31 @@ fn milestone_zero_local_sync_and_report() {
 
     seed_fixture_sync(&temp, &config_dir, &data_dir);
 
+    // The new pulse format is a proactive headline-driven summary; it
+    // does not list individual transactions in the body. The `--raw`
+    // variant below is what scripts/skills should consume for the
+    // backwards-compatible per-transaction view.
     envs(
         cargo_bin()
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
             .arg("120"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Pulso"))
+    .stdout(predicate::str::contains("Mês até dia"));
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("daily-pulse")
+            .arg("--days")
+            .arg("120")
+            .arg("--raw"),
         &config_dir,
         &data_dir,
     )
@@ -3118,10 +3142,7 @@ fn installments_detected_from_pluggy_credit_card_metadata() {
 
     // report installments must find both active chains.
     let output = envs(
-        cargo_bin()
-            .arg("report")
-            .arg("installments")
-            .arg("--raw"),
+        cargo_bin().arg("report").arg("installments").arg("--raw"),
         &config_dir,
         &data_dir,
     )
@@ -3150,10 +3171,12 @@ fn installments_detected_from_pluggy_credit_card_metadata() {
                 .to_ascii_lowercase()
                 .contains("notebook")
         })
-        .unwrap_or_else(|| panic!(
-            "cadeia 'Notebook Pro' não encontrada\ncadeias encontradas: {}",
-            serde_json::to_string_pretty(arr).unwrap()
-        ));
+        .unwrap_or_else(|| {
+            panic!(
+                "cadeia 'Notebook Pro' não encontrada\ncadeias encontradas: {}",
+                serde_json::to_string_pretty(arr).unwrap()
+            )
+        });
     assert_eq!(meta_chain["total"], 10, "total deve ser 10");
     assert_eq!(meta_chain["current"], 3, "current deve ser 3");
     assert!(

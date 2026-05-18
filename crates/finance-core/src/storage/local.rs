@@ -426,6 +426,68 @@ impl FinanceStore for LocalStore {
         Ok(rows.len())
     }
 
+    async fn upcoming_forecasts(
+        &self,
+        from: NaiveDate,
+        until: NaiveDate,
+    ) -> Result<Vec<ForecastRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT forecast_id, due_date, description, amount, category_id, account_id,
+                   status, recurrence, actor_id, idempotency_key, metadata_json,
+                   created_at, updated_at
+            FROM forecast
+            WHERE status = 'ativo'
+              AND due_date IS NOT NULL
+              AND date(due_date) BETWEEN date(?1) AND date(?2)
+            ORDER BY date(due_date) ASC, CAST(amount AS REAL) DESC
+            ",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                from.format("%Y-%m-%d").to_string(),
+                until.format("%Y-%m-%d").to_string()
+            ],
+            |row| {
+                let due_str: Option<String> = row.get(1)?;
+                let due_date = due_str
+                    .as_deref()
+                    .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+                let amount_str: String = row.get(3)?;
+                let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
+                let metadata_str: String = row.get(10)?;
+                let metadata_json = parse_sql_json(metadata_str, 10)?;
+                let created_str: String = row.get(11)?;
+                let updated_str: String = row.get(12)?;
+                Ok(ForecastRecord {
+                    forecast_id: row.get(0)?,
+                    due_date,
+                    description: row.get(2)?,
+                    amount,
+                    category_id: row.get(4)?,
+                    account_id: row.get(5)?,
+                    status: row.get(6)?,
+                    recurrence: row.get(7)?,
+                    actor_id: row.get(8)?,
+                    idempotency_key: row.get(9)?,
+                    metadata_json,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     async fn apply_transaction_split(
         &self,
         _split: &TransactionSplitRecord,
