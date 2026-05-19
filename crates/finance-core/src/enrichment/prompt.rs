@@ -12,7 +12,9 @@
 //! The system prompt expects the model to return JSON matching
 //! `crate::enrichment::types::EnrichmentResult` and nothing else.
 
-use crate::enrichment::types::{CategoryHint, CnpjInfo, ContextTx, FewShotExample, Heuristics, HourBucket};
+use crate::enrichment::types::{
+    CategoryHint, CnpjInfo, ContextTx, FewShotExample, Heuristics, HourBucket,
+};
 use chrono::{Datelike, NaiveDate, Weekday};
 use rust_decimal::Decimal;
 use std::fmt::Write as _;
@@ -140,9 +142,7 @@ pub fn build_prompt(ctx: &PromptContext) -> String {
     let weekday = ctx.heuristics.weekday;
     let _ = writeln!(out, "- Dia da semana: {}", weekday_pt(weekday));
     if matches!(weekday, Weekday::Sat | Weekday::Sun) {
-        out.push_str(
-            "  ↳ FIM DE SEMANA — maior probabilidade de lazer, restaurantes e passeios\n",
-        );
+        out.push_str("  ↳ FIM DE SEMANA — maior probabilidade de lazer, restaurantes e passeios\n");
     }
     let _ = writeln!(
         out,

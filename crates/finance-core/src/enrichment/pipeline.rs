@@ -23,11 +23,11 @@ use crate::enrichment::heuristics::{base_heuristics, detect_recurring};
 use crate::enrichment::llm::{enrich as llm_enrich, LlmProvider};
 use crate::enrichment::pluggy_map::map_pluggy_category;
 use crate::enrichment::prompt::{build_prompt, clean_description, PromptContext};
-use crate::enrichment::web_search::ddg_merchant_context;
 use crate::enrichment::types::{
     CategoryHint, CnpjInfo, ContextTx, EnrichmentDecision, EnrichmentResult, FewShotExample,
     Heuristics,
 };
+use crate::enrichment::web_search::ddg_merchant_context;
 use crate::models::{TransactionRecord, UncategorizedRow};
 use crate::storage::FinanceStore;
 use anyhow::{Context, Result};
