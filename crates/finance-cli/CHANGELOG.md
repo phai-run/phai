@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/feliperun/finance-os/compare/v1.3.0...v1.3.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* **bigquery:** add migration 031 to fix amount_cents views for v1.3.0 users ([6ebaf61](https://github.com/feliperun/finance-os/commit/6ebaf6139f3def37ab39ba36a26410bcd7fb2a51))
+
 ## [1.3.0](https://github.com/feliperun/finance-os/compare/v1.2.0...v1.3.0) (2026-05-19)
 
 
