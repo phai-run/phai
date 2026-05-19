@@ -22,7 +22,8 @@ use crate::enrichment::fuzzy::fuzzy_filter;
 use crate::enrichment::heuristics::{base_heuristics, detect_recurring};
 use crate::enrichment::llm::{enrich as llm_enrich, LlmProvider};
 use crate::enrichment::pluggy_map::map_pluggy_category;
-use crate::enrichment::prompt::{build_prompt, PromptContext};
+use crate::enrichment::prompt::{build_prompt, clean_description, PromptContext};
+use crate::enrichment::web_search::ddg_merchant_context;
 use crate::enrichment::types::{
     CategoryHint, CnpjInfo, ContextTx, EnrichmentDecision, EnrichmentResult, FewShotExample,
     Heuristics,
@@ -265,6 +266,19 @@ impl EnrichmentPipeline {
             .and_then(Value::as_str)
             .map(str::to_string);
 
+        // 7. Web search for unknown merchants (skipped when CNPJ info is
+        //    already available — CNPJ lookup is authoritative and faster).
+        let web_context = if cnpj_info.is_none() {
+            let query = clean_description(&tx.description);
+            if query.trim().len() >= 4 {
+                ddg_merchant_context(&self.http, &query).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         GatheredSignals {
             pluggy_category,
             pluggy_hint,
@@ -275,6 +289,7 @@ impl EnrichmentPipeline {
             temporal_context,
             few_shot,
             hour,
+            web_context,
         }
     }
 }
@@ -290,6 +305,9 @@ pub(crate) struct GatheredSignals {
     pub temporal_context: Vec<ContextTx>,
     pub few_shot: Vec<FewShotExample>,
     pub hour: Option<u32>,
+    /// DuckDuckGo instant-answer snippet for unknown merchants (None when
+    /// CNPJ info is already available or DDG returns nothing).
+    pub web_context: Option<String>,
 }
 
 fn build_prompt_from_signals(tx: &UncategorizedRow, s: &GatheredSignals) -> String {
@@ -306,6 +324,7 @@ fn build_prompt_from_signals(tx: &UncategorizedRow, s: &GatheredSignals) -> Stri
         heuristics: &s.heuristics,
         temporal_context: &s.temporal_context,
         few_shot_examples: &s.few_shot,
+        web_context: s.web_context.as_deref(),
     };
     build_prompt(&ctx)
 }
@@ -365,11 +384,14 @@ fn split_category_id(category_id: Option<&str>) -> (String, String) {
     }
 }
 
-/// Best-effort hour extraction from `metadata_json.raw.date` (ISO 8601)
-/// — falls back to `metadata_json.raw.createdAt`.
+/// Best-effort hour extraction from transaction metadata (ISO 8601).
+///
+/// Priority: `creditCardMetadata.purchaseDate` (most precise — actual
+/// purchase time) → `raw.date` → `raw.createdAt`.
 fn extract_hour(metadata: &Value) -> Option<u32> {
     let raw = metadata
-        .pointer("/raw/date")
+        .pointer("/raw/creditCardMetadata/purchaseDate")
+        .or_else(|| metadata.pointer("/raw/date"))
         .or_else(|| metadata.pointer("/raw/createdAt"))
         .and_then(Value::as_str)?;
     let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
