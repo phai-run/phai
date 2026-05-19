@@ -45,6 +45,9 @@ struct QueryResponse {
     job_reference: Option<JobReference>,
     #[serde(default)]
     rows: Vec<QueryRow>,
+    /// Populated for DML statements (UPDATE/INSERT/DELETE).
+    #[serde(default)]
+    num_dml_affected_rows: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -756,9 +759,9 @@ impl FinanceStore for BigQueryStore {
               amount = source.amount,
               amount_cents = source.amount_cents,
               tx_type = source.tx_type,
-              category_id = source.category_id,
-              category_source = source.category_source,
-              context = source.context,
+              category_id = IF(target.category_source = 'manual', target.category_id, source.category_id),
+              category_source = IF(target.category_source = 'manual', target.category_source, source.category_source),
+              context = IF(target.category_source = 'manual', target.context, source.context),
               payment_status = source.payment_status,
               source = source.source,
               actor_id = source.actor_id,
@@ -1261,7 +1264,16 @@ impl FinanceStore for BigQueryStore {
             sql_string(idempotency_key),
             sql_string(transaction_id),
         );
-        self.run_query(&sql).await?;
+        let resp = self.run_query(&sql).await?;
+        let affected: i64 = resp
+            .num_dml_affected_rows
+            .as_deref()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        if affected == 0 {
+            anyhow::bail!("Transação {transaction_id} não encontrada");
+        }
         Ok(())
     }
 
