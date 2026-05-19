@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/feliperun/finance-os/compare/v1.3.1...v1.3.2) (2026-05-19)
+
+
+### Bug Fixes
+
+* **reports:** zero-variance sign, forecast emoji, Pluggy EN→PT category normalization ([1945f5c](https://github.com/feliperun/finance-os/commit/1945f5c14c9ad63ce50b1218d22518cebaae7206))
+
 ## [1.3.1](https://github.com/feliperun/finance-os/compare/v1.3.0...v1.3.1) (2026-05-19)
 
 
