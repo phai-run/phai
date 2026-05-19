@@ -245,7 +245,7 @@ WHERE NOT (
     FROM `{{project_id}}.{{dataset_id}}.v_transactions_effective` p
     WHERE p.source = 'pluggy'
       AND p.account_id = t.account_id
-      AND p.amount_cents = t.amount_cents
+      AND p.amount = t.amount
       AND p.transaction_date BETWEEN DATE_SUB(t.transaction_date, INTERVAL 7 DAY)
       AND DATE_ADD(t.transaction_date, INTERVAL 7 DAY)
   )
