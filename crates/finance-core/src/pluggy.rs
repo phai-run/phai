@@ -1482,6 +1482,59 @@ mod tests {
     }
 
     #[test]
+    fn estorno_rule_with_amount_sign_positive_flips_negative_amount() {
+        // Regression: "Estorno de Uber - NuPay" and similar reversal entries
+        // arrive from Pluggy WITHOUT a `type` field and with a NEGATIVE amount.
+        // The `financeiro_estorno` rule must carry `amount_sign: "positive"` so
+        // the pipeline stores the amount as a positive credit.
+        // Historical bug: the rule lacked amount_sign, so the stored amount was
+        // -R$25.99 with tx_type="credit" — an inconsistent state that caused
+        // estornos to inflate expense totals rather than reduce them.
+        let raw = json!({
+            "id": "tx-estorno-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-04-13",
+            "description": "Estorno de Uber - NuPay",
+            "amount": -25.99,
+            "currencyCode": "BRL"
+            // No "type" field — Pluggy omits it for some reversal entries.
+        });
+        let payload: PluggyTransactionPayload =
+            serde_json::from_value(raw).expect("deserialise payload");
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+        let now = chrono::Utc::now();
+        let rules = vec![crate::models::RuleRecord {
+            rule_id: "financeiro_estorno".to_string(),
+            body: r#"{"id":"financeiro_estorno","match":{"contains_any":["estorno","ajuste a credito","credito de"]},"set":{"category":"Financeiro","is_expense":false,"subcategory":"Estorno","amount_sign":"positive"}}"#.to_string(),
+            status: "active".to_string(),
+            actor_id: "test-actor".to_string(),
+            idempotency_key: "rule:financeiro_estorno".to_string(),
+            created_at: now,
+            updated_at: now,
+        }];
+        let compiled = crate::rules::compile_rules(&rules).unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &compiled,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            tx.amount,
+            Decimal::new(2599, 2),
+            "estorno deve ser armazenado como crédito positivo (+R$25.99)"
+        );
+        assert_eq!(tx.tx_type, "credit");
+        assert_eq!(tx.category_id.as_deref(), Some("financeiro:estorno"));
+    }
+
+    #[test]
     fn credit_card_purchase_still_negative() {
         // Regression guard: ordinary credit-card purchases (Pluggy positive,
         // type=DEBIT) must remain stored as negative debits after the new
