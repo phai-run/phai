@@ -5693,6 +5693,152 @@ fn infer_closing_day_from_pluggy(rows: &[CardClosedTransactionRow]) -> Option<u3
         .map(|(day, _)| day)
 }
 
+fn group_card_rows_by_account(
+    rows: &[CardClosedTransactionRow],
+) -> BTreeMap<String, Vec<CardClosedTransactionRow>> {
+    let mut grouped = BTreeMap::new();
+    for row in rows {
+        grouped
+            .entry(row.account_id.clone())
+            .or_insert_with(Vec::new)
+            .push(row.clone());
+    }
+    grouped
+}
+
+fn card_close_date(
+    selected_close_dates: &BTreeMap<String, Option<NaiveDate>>,
+    account_id: &str,
+    txs: &[CardClosedTransactionRow],
+    today: NaiveDate,
+) -> NaiveDate {
+    selected_close_dates
+        .get(account_id)
+        .copied()
+        .flatten()
+        .unwrap_or_else(|| {
+            txs.iter()
+                .map(|t| t.transaction_date)
+                .max()
+                .unwrap_or(today)
+        })
+}
+
+fn matched_card_payment(
+    payment_candidates: &[TransactionRecord],
+    close_date: NaiveDate,
+    full_total: Decimal,
+) -> Option<&TransactionRecord> {
+    let tolerance = full_total * Decimal::new(10, 2);
+    let lower = full_total - tolerance;
+    let upper = full_total + tolerance;
+    payment_candidates
+        .iter()
+        .filter(|t| t.transaction_date >= close_date.saturating_sub_signed_unsafe())
+        .filter(|t| {
+            let abs = t.amount.abs();
+            abs >= lower && abs <= upper
+        })
+        .min_by_key(|t| (t.transaction_date - close_date).num_days().unsigned_abs())
+}
+
+fn card_bill_status(
+    mode: CardsMode,
+    today: NaiveDate,
+    close_date: NaiveDate,
+    total: Decimal,
+    full_total: Decimal,
+    payment_candidates: &[TransactionRecord],
+) -> CardsBillStatus {
+    let due_date = close_date
+        .checked_add_signed(Duration::days(7))
+        .unwrap_or(close_date);
+
+    if mode == CardsMode::Next {
+        return CardsBillStatus {
+            state: "partial",
+            close_date,
+            due_date,
+            paid_on: None,
+            total,
+        };
+    }
+    if today < close_date {
+        return CardsBillStatus {
+            state: "open",
+            close_date,
+            due_date,
+            paid_on: None,
+            total,
+        };
+    }
+    match matched_card_payment(payment_candidates, close_date, full_total) {
+        Some(tx) => CardsBillStatus {
+            state: "paid",
+            close_date,
+            due_date,
+            paid_on: Some(tx.transaction_date),
+            total,
+        },
+        None if today > due_date => CardsBillStatus {
+            state: "overdue",
+            close_date,
+            due_date,
+            paid_on: None,
+            total,
+        },
+        None => CardsBillStatus {
+            state: "open",
+            close_date,
+            due_date,
+            paid_on: None,
+            total,
+        },
+    }
+}
+
+fn build_cards_account_reports(
+    by_account_full: &BTreeMap<String, Vec<CardClosedTransactionRow>>,
+    by_account_display: &BTreeMap<String, Vec<CardClosedTransactionRow>>,
+    selected_close_dates: &BTreeMap<String, Option<NaiveDate>>,
+    payment_candidates: &[TransactionRecord],
+    mode: CardsMode,
+    today: NaiveDate,
+    installments_only: bool,
+) -> (Vec<CardsAccountReport>, Decimal) {
+    let mut accounts_report = Vec::with_capacity(by_account_full.len());
+    let mut grand_total = Decimal::ZERO;
+    for (account_id, full_txs) in by_account_full {
+        let display_txs = by_account_display
+            .get(account_id)
+            .map_or(&[][..], Vec::as_slice);
+        if installments_only && display_txs.is_empty() {
+            continue;
+        }
+
+        let full_total: Decimal = full_txs.iter().map(|t| t.amount).sum::<Decimal>().abs();
+        let total: Decimal = display_txs.iter().map(|t| t.amount).sum::<Decimal>().abs();
+        grand_total += total;
+
+        let close_date = card_close_date(selected_close_dates, account_id, full_txs, today);
+        let status = card_bill_status(
+            mode,
+            today,
+            close_date,
+            total,
+            full_total,
+            payment_candidates,
+        );
+
+        accounts_report.push(CardsAccountReport {
+            account_id: account_id.clone(),
+            transaction_count: display_txs.len(),
+            status,
+        });
+    }
+    (accounts_report, grand_total)
+}
+
 async fn report_cards(args: CardsArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
@@ -5928,20 +6074,8 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
 
     // Group rows by account_id for the visão geral section. Status uses the
     // full bill; counts/totals reflect the displayed (possibly filtered) set.
-    let mut by_account_full: BTreeMap<String, Vec<CardClosedTransactionRow>> = BTreeMap::new();
-    for row in &full_rows {
-        by_account_full
-            .entry(row.account_id.clone())
-            .or_default()
-            .push(row.clone());
-    }
-    let mut by_account: BTreeMap<String, Vec<CardClosedTransactionRow>> = BTreeMap::new();
-    for row in &rows {
-        by_account
-            .entry(row.account_id.clone())
-            .or_default()
-            .push(row.clone());
-    }
+    let by_account_full = group_card_rows_by_account(&full_rows);
+    let by_account = group_card_rows_by_account(&rows);
 
     // Map account_id → derived_close_date of the bill we selected for that
     // account, so the status section can use the *real* cycle close date
@@ -5986,119 +6120,15 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
     // status (paid/open/overdue) reflects the real bill — even when the
     // user passed `--installments-only`, which only shrinks the displayed
     // totals, not the underlying bill.
-    let mut accounts_report = Vec::with_capacity(by_account_full.len());
-    let mut grand_total = Decimal::ZERO;
-    for (account_id, full_txs) in &by_account_full {
-        // `full_total` drives payment matching against the bill that the
-        // user actually owes / paid. `display_total` is what we surface
-        // to the user, narrowed to installments when filtered.
-        let full_net: Decimal = full_txs.iter().map(|t| t.amount).sum();
-        let full_total: Decimal = full_net.abs();
-        let empty_vec: Vec<CardClosedTransactionRow> = Vec::new();
-        let display_txs: &Vec<CardClosedTransactionRow> =
-            by_account.get(account_id).unwrap_or(&empty_vec);
-        // When --installments-only filters this card down to zero rows,
-        // skip it entirely from the visão geral instead of reporting an
-        // empty entry with the full-bill status attached.
-        if args.installments_only && display_txs.is_empty() {
-            continue;
-        }
-        let display_net: Decimal = display_txs.iter().map(|t| t.amount).sum();
-        let total: Decimal = display_net.abs();
-        grand_total += total;
-
-        // Prefer the synthetic cycle close date when we have it (derived
-        // from the account's billing_closing_day). Otherwise fall back to
-        // max(transaction_date) — Pluggy stops adding new charges once the
-        // cycle ends, so the last-seen date is a tight upper bound.
-        let close_date = selected_close_dates
-            .get(account_id)
-            .copied()
-            .flatten()
-            .unwrap_or_else(|| {
-                full_txs
-                    .iter()
-                    .map(|t| t.transaction_date)
-                    .max()
-                    .unwrap_or(today)
-            });
-        // Due date approximated as close + 7 days (typical for Brazilian
-        // cards). Would refine further with `billing_due_day` metadata.
-        let due_date = close_date
-            .checked_add_signed(Duration::days(7))
-            .unwrap_or(close_date);
-
-        let status = if mode == CardsMode::Next {
-            // Open cycle (--next): the bill hasn't closed yet. We don't try
-            // to infer payment status — we just show how the cycle is
-            // forming up.
-            CardsBillStatus {
-                state: "partial",
-                close_date,
-                due_date,
-                paid_on: None,
-                total,
-            }
-        } else if today < close_date {
-            CardsBillStatus {
-                state: "open",
-                close_date,
-                due_date,
-                paid_on: None,
-                total,
-            }
-        } else {
-            // Bill closed — try to match a payment. We allow a generous 10%
-            // tolerance to absorb the gap between calendar-month totals and
-            // actual statement cycle totals (which include the previous
-            // month's tail and exclude the current month's tail). Description
-            // already filters to canonical "Pagamento de fatura" lines, so
-            // false positives are unlikely.
-            // Match against the FULL bill, not the (possibly filtered)
-            // display total — checking-account "Pagamento de fatura" lines
-            // settle the whole bill, never just an installment slice.
-            let tolerance = full_total * Decimal::new(10, 2);
-            let lower = full_total - tolerance;
-            let upper = full_total + tolerance;
-            let paid = payment_candidates
-                .iter()
-                .filter(|t| t.transaction_date >= close_date.saturating_sub_signed_unsafe())
-                .filter(|t| {
-                    let abs = t.amount.abs();
-                    abs >= lower && abs <= upper
-                })
-                .min_by_key(|t| (t.transaction_date - close_date).num_days().unsigned_abs());
-            match paid {
-                Some(tx) => CardsBillStatus {
-                    state: "paid",
-                    close_date,
-                    due_date,
-                    paid_on: Some(tx.transaction_date),
-                    total,
-                },
-                None if today > due_date => CardsBillStatus {
-                    state: "overdue",
-                    close_date,
-                    due_date,
-                    paid_on: None,
-                    total,
-                },
-                None => CardsBillStatus {
-                    state: "open",
-                    close_date,
-                    due_date,
-                    paid_on: None,
-                    total,
-                },
-            }
-        };
-
-        accounts_report.push(CardsAccountReport {
-            account_id: account_id.clone(),
-            transaction_count: display_txs.len(),
-            status,
-        });
-    }
+    let (accounts_report, grand_total) = build_cards_account_reports(
+        &by_account_full,
+        &by_account,
+        &selected_close_dates,
+        &payment_candidates,
+        mode,
+        today,
+        args.installments_only,
+    );
 
     let report = CardsReport {
         month_ref: display_month.clone(),

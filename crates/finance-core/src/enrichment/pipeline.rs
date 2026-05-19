@@ -266,18 +266,11 @@ impl EnrichmentPipeline {
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // 7. Web search for unknown merchants (skipped when CNPJ info is
-        //    already available — CNPJ lookup is authoritative and faster).
-        let web_context = if cnpj_info.is_none() {
-            let query = clean_description(&tx.description);
-            if query.trim().len() >= 4 {
-                ddg_merchant_context(&self.http, &query).await
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // 7. Web search for unknown merchants. CNPJ lookup is authoritative
+        // and faster, so DDG is only used when CNPJ has no answer.
+        let web_context =
+            web_context_for_unknown_merchant(&self.http, &tx.description, cnpj_info.is_some())
+                .await;
 
         GatheredSignals {
             pluggy_category,
@@ -292,6 +285,21 @@ impl EnrichmentPipeline {
             web_context,
         }
     }
+}
+
+async fn web_context_for_unknown_merchant(
+    http: &reqwest::Client,
+    description: &str,
+    has_cnpj_info: bool,
+) -> Option<String> {
+    if has_cnpj_info {
+        return None;
+    }
+    let query = clean_description(description);
+    if query.trim().len() < 4 {
+        return None;
+    }
+    ddg_merchant_context(http, &query).await
 }
 
 /// Output of [`EnrichmentPipeline::gather_signals`].
