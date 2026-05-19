@@ -927,6 +927,128 @@ fn report_views_exclude_legacy_manual_statement_when_pluggy_match_exists() {
 }
 
 #[test]
+fn cashflow_and_card_summary_exclude_legacy_manual_shadow() {
+    // Regression: v_cashflow and v_card_summary must honour the same
+    // legacy/manual ↔ pluggy dedup filter applied by v_transactions_reportable.
+    // A previous refactor pointed these aggregates directly at `transactions`,
+    // which caused shadowed manual statement rows to be counted twice.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    envs(
+        cargo_bin()
+            .arg("auth")
+            .arg("setup")
+            .arg("--backend")
+            .arg("local")
+            .arg("--actor-id")
+            .arg("test-actor"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin().arg("admin").arg("migrate"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("manual_statement_cashflow_dup")
+            .arg("--account-id")
+            .arg("shared_credit")
+            .arg("--date")
+            .arg("2026-03-26")
+            .arg("--description")
+            .arg("Posto de Gasolina")
+            .arg("--amount=-150.00")
+            .arg("--payment-status")
+            .arg("posted"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute(
+        "UPDATE transactions SET source = 'legacy' WHERE transaction_id = 'manual_statement_cashflow_dup'",
+        [],
+    )
+    .expect("set manual source as legacy");
+
+    // ── cashflow ──
+    // Fixture March-2026 expenses without the dup: 152.30 + 150.00 = 302.30.
+    // Double-counting the shadowed -150.00 manual row would yield 452.30.
+    let cashflow_json = envs(
+        cargo_bin().arg("report").arg("cashflow").arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("cashflow json output");
+    assert!(cashflow_json.status.success());
+    let cashflow: Value =
+        serde_json::from_slice(&cashflow_json.stdout).expect("valid cashflow json");
+    let march = cashflow
+        .as_array()
+        .expect("cashflow array")
+        .iter()
+        .find(|m| m["month_ref"].as_str() == Some("2026-03"))
+        .expect("March 2026 row");
+    assert_eq!(
+        march["expenses"].as_str().expect("expenses string"),
+        "302.30",
+        "cashflow must ignore deduped manual statement row"
+    );
+
+    // ── card summary (credit card only) ──
+    // Only the Pluggy -150.00 charge belongs to shared_credit; with dedup the
+    // legacy shadow drops, so total_charges must remain 150.00 (not 300.00).
+    let card_json = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("card-summary")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("card-summary raw output");
+    assert!(card_json.status.success());
+    let cards: Value = serde_json::from_slice(&card_json.stdout).expect("valid cards json");
+    let card_row = cards
+        .as_array()
+        .expect("cards array")
+        .iter()
+        .find(|c| c["account_id"].as_str() == Some("shared_credit"))
+        .expect("shared_credit row in card-summary");
+    let total_charges: f64 = card_row["total_charges"]
+        .as_str()
+        .expect("total_charges decimal string")
+        .parse()
+        .expect("decimal parse");
+    assert!(
+        (total_charges - 150.0).abs() < 0.01,
+        "card-summary must ignore deduped manual statement row; got {total_charges}"
+    );
+}
+
+#[test]
 fn report_ofx_consistency_compares_transactions_row_by_row() {
     let temp = TempDir::new().expect("tempdir");
     let config_dir = temp.path().join("config");

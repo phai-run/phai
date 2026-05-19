@@ -1258,16 +1258,16 @@ impl FinanceStore for LocalStore {
 
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>> {
         // ADR-0003: exact integer-cent SUM via amount_cents, then convert
-        // to Decimal at the end. This avoids both REAL accumulation and
-        // the overhead of Decimal parsing + addition per row. BigQuery
-        // uses native NUMERIC via the view path.
+        // to Decimal at the end. Source is v_transactions_reportable so the
+        // legacy/manual ↔ Pluggy dedup predicate is honoured — querying
+        // `transactions` directly would double-count shadowed manual rows.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
             SELECT strftime('%Y-%m', transaction_date) AS month_ref,
                    amount_cents,
                    COALESCE(category_id, '') AS category_id
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE COALESCE(category_id, '') NOT IN (
               SELECT category_id FROM internal_categories
             )
