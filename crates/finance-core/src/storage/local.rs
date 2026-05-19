@@ -649,7 +649,7 @@ impl FinanceStore for LocalStore {
               actor_id, idempotency_key, metadata_json, created_at, updated_at
             FROM transactions
             WHERE LOWER(description) LIKE ?1
-            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             LIMIT ?2
             ",
         )?;
@@ -720,6 +720,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )
@@ -739,7 +740,7 @@ impl FinanceStore for LocalStore {
               actor_id, idempotency_key, metadata_json, created_at, updated_at
             FROM transactions
             WHERE context IS NULL
-            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             LIMIT ?1
             ",
         )?;
@@ -810,6 +811,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )
@@ -862,6 +864,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )
@@ -1104,7 +1107,7 @@ impl FinanceStore for LocalStore {
             FROM v_transactions_reportable
             WHERE transaction_date >= ?1
               AND transaction_date <= ?2
-            ORDER BY transaction_date DESC, ABS(CAST(amount AS REAL)) DESC, transaction_id ASC
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             ",
         )?;
         let rows = stmt
@@ -1146,6 +1149,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )?
@@ -1213,6 +1217,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )?
@@ -1252,57 +1257,49 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>> {
-        // ADR-0003 promises Decimal end-to-end. SQLite has no native
-        // DECIMAL, so the `v_cashflow` view aggregates `CAST(amount AS REAL)`
-        // — f64 math under the hood. For household-sized sums that's
-        // adequate in practice, but it does drift. To honour the ADR we
-        // read raw rows here and SUM in Rust with `rust_decimal`. BigQuery
-        // already uses native NUMERIC so its impl keeps the view path.
+        // ADR-0003: exact integer-cent SUM via amount_cents, then convert
+        // to Decimal at the end. Source is v_transactions_reportable so the
+        // legacy/manual ↔ Pluggy dedup predicate is honoured — querying
+        // `transactions` directly would double-count shadowed manual rows.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
             SELECT strftime('%Y-%m', transaction_date) AS month_ref,
-                   amount,
+                   amount_cents,
                    COALESCE(category_id, '') AS category_id
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE COALESCE(category_id, '') NOT IN (
               SELECT category_id FROM internal_categories
             )
             ",
         )?;
-        let mut by_month: BTreeMap<String, (Decimal, Decimal, Decimal)> = BTreeMap::new();
+        let mut by_month: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
         let rows = stmt.query_map([], |row| {
             let month_ref: String = row.get(0)?;
-            let amount_str: String = row.get(1)?;
+            let cents: i64 = row.get(1)?;
             let category_id: String = row.get(2)?;
-            Ok((month_ref, amount_str, category_id))
+            Ok((month_ref, cents, category_id))
         })?;
         for row in rows {
-            let (month_ref, amount_str, category_id) = row?;
-            let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
-            let bucket =
-                by_month
-                    .entry(month_ref)
-                    .or_insert((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
-            if amount.is_sign_negative() {
-                bucket.1 += amount.abs();
+            let (month_ref, cents, category_id) = row?;
+            let bucket = by_month.entry(month_ref).or_insert((0, 0, 0));
+            if cents < 0 {
+                bucket.1 += cents.abs();
             } else if category_id == "cashback" {
-                bucket.2 += amount;
+                bucket.2 += cents;
             } else {
-                bucket.0 += amount;
+                bucket.0 += cents;
             }
         }
         let mut out: Vec<CashflowRow> = by_month
             .into_iter()
-            .map(
-                |(month_ref, (income, expenses, expense_reduction))| CashflowRow {
-                    month_ref,
-                    income,
-                    expenses,
-                    expense_reduction,
-                    net: income + expense_reduction - expenses,
-                },
-            )
+            .map(|(month_ref, (inc, exp, er))| CashflowRow {
+                month_ref,
+                income: Decimal::new(inc, 2),
+                expenses: Decimal::new(exp, 2),
+                expense_reduction: Decimal::new(er, 2),
+                net: Decimal::new(inc + er - exp, 2),
+            })
             .collect();
         out.sort_by(|a, b| b.month_ref.cmp(&a.month_ref));
         out.truncate(months);
@@ -1496,10 +1493,10 @@ impl FinanceStore for LocalStore {
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND NOT (CAST(t.amount AS REAL) > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
+              AND NOT (t.amount_cents > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
               AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
-            ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC
+            ORDER BY t.transaction_date DESC, ABS(t.amount_cents) DESC, t.transaction_id ASC
             ",
         )?;
         let rows = stmt
@@ -1544,17 +1541,17 @@ impl FinanceStore for LocalStore {
               t.transaction_date,
               t.display_label,
               t.description,
-              CAST(ABS(CAST(t.amount AS REAL)) AS TEXT) AS amount,
+              CAST(ABS(t.amount_cents) / 100.0 AS TEXT) AS amount,
               t.category_id,
               t.payment_status,
               t.metadata_json
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND CAST(t.amount AS REAL) < 0
+              AND t.amount_cents < 0
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM internal_categories)
               AND (?1 IS NULL OR strftime('%Y-%m', t.transaction_date) = ?1)
-            ORDER BY t.transaction_date DESC, ABS(CAST(t.amount AS REAL)) DESC, t.transaction_id ASC
+            ORDER BY t.transaction_date DESC, ABS(t.amount_cents) DESC, t.transaction_id ASC
             ",
         )?;
         let rows = stmt
@@ -2014,6 +2011,7 @@ impl FinanceStore for LocalStore {
                         created_at: parse_datetime_or_now(Some(&created_at)),
                         updated_at: parse_datetime_or_now(Some(&updated_at)),
                         enrichment_attempted_at: None,
+                        amount_cents: None,
                     })
                 },
             )

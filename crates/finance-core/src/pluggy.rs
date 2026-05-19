@@ -604,6 +604,7 @@ fn build_transaction_record(
         created_at,
         updated_at,
         enrichment_attempted_at: None,
+        amount_cents: None,
     })
 }
 

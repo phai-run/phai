@@ -14,6 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::{Datelike, Days, NaiveDate, Utc};
 use reqwest::Client;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -330,6 +331,7 @@ fn transaction_record_from_values(values: &[Option<String>]) -> Result<Transacti
         created_at: parse_datetime_or_now(Some(&created_at)),
         updated_at: parse_datetime_or_now(Some(&updated_at)),
         enrichment_attempted_at,
+        amount_cents: None,
     })
 }
 
@@ -719,12 +721,13 @@ impl FinanceStore for BigQueryStore {
             .iter()
             .map(|row| {
                 format!(
-                    "SELECT {} AS transaction_id, {} AS account_id, {} AS transaction_date, {} AS description, {} AS amount, {} AS tx_type, {} AS category_id, {} AS category_source, {} AS context, {} AS payment_status, {} AS source, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
+                    "SELECT {} AS transaction_id, {} AS account_id, {} AS transaction_date, {} AS description, {} AS amount, {} AS amount_cents, {} AS tx_type, {} AS category_id, {} AS category_source, {} AS context, {} AS payment_status, {} AS source, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
                     sql_string(&row.transaction_id),
                     sql_optional_string(row.account_id.as_deref()),
                     sql_date(row.transaction_date),
                     sql_string(&row.description),
                     sql_decimal(&row.amount),
+                    (row.amount * Decimal::from(100_i64)).round().to_i64().unwrap_or(0),
                     sql_string(&row.tx_type),
                     sql_optional_string(row.category_id.as_deref()),
                     sql_string(&row.category_source),
@@ -751,6 +754,7 @@ impl FinanceStore for BigQueryStore {
               transaction_date = source.transaction_date,
               description = source.description,
               amount = source.amount,
+              amount_cents = source.amount_cents,
               tx_type = source.tx_type,
               category_id = source.category_id,
               category_source = source.category_source,
@@ -762,11 +766,11 @@ impl FinanceStore for BigQueryStore {
               metadata_json = source.metadata_json,
               updated_at = source.updated_at
             WHEN NOT MATCHED THEN INSERT (
-              transaction_id, account_id, transaction_date, description, amount, tx_type,
+              transaction_id, account_id, transaction_date, description, amount, amount_cents, tx_type,
               category_id, category_source, context, payment_status, source, actor_id,
               idempotency_key, metadata_json, created_at, updated_at
             ) VALUES (
-              source.transaction_id, source.account_id, source.transaction_date, source.description, source.amount, source.tx_type,
+              source.transaction_id, source.account_id, source.transaction_date, source.description, source.amount, source.amount_cents, source.tx_type,
               source.category_id, source.category_source, source.context, source.payment_status, source.source, source.actor_id,
               source.idempotency_key, source.metadata_json, source.created_at, source.updated_at
             )

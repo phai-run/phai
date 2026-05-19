@@ -1,0 +1,12 @@
+-- Migration 029: amount_cents view parity (BigQuery no-op).
+--
+-- Mirror of schema/sqlite/028_amount_cents_views.sql. BigQuery's `amount`
+-- is NUMERIC (decimal-safe by construction), so the CAST(amount AS REAL)
+-- problem solved in SQLite does not exist here. The views already aggregate
+-- exact NUMERIC values with ROUND(..., 2).
+--
+-- The `amount_cents` column was added in migration 028 for cross-backend
+-- query compatibility. Future code may choose to use it in BigQuery views,
+-- but for now no rewrite is needed — NUMERIC SUM is already exact.
+
+-- (no-op)

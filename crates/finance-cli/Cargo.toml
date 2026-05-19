@@ -21,6 +21,7 @@ tar = "0.4"
 tempfile = { workspace = true }
 tokio.workspace = true
 uuid.workspace = true
+hostname = "0.4.2"
 
 [dev-dependencies]
 assert_cmd.workspace = true

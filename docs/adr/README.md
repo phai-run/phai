@@ -63,6 +63,8 @@ proposed → active → superseded
 | [0009](0009-proactive-pulse-and-closing-plan.md) | Pulse as a proactive closing-plan, not a retrospective transaction list | active |
 | [0010](0010-card-billing-cycle.md) | `v_card_summary` groups by billing cycle, not calendar month | active |
 | [0011](0011-canonical-payment-status.md) | Canonical `payment_status` vocabulary (`posted`/`pending`/`installment`) | active |
+| [0012](0012-amount-cents-exact-aggregation.md) | Exact decimal aggregation via `amount_cents` companion column | active |
+| [0013](0013-auto-migrate-on-every-command.md) | Auto-apply pending migrations on every command invocation | active |
 
 ---
 

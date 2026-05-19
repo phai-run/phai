@@ -107,6 +107,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             enrichment_attempted_at: None,
+            amount_cents: None,
         }
     }
 
