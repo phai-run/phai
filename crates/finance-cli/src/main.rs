@@ -3323,9 +3323,14 @@ fn print_forecast_vs_actual_human(
             let actual = -row.actual_amount;
             let variance = -row.variance;
 
-            // variance > 0 means over budget (spent more than forecast)
-            let indicator = if variance > Decimal::ZERO {
+            // variance > 0 means over budget (spent more than forecast).
+            // Treat |variance| < 0.01 as exact match regardless of sign — tiny
+            // rounding deltas from BigQuery should not produce ⚠️ or -R$ 0,00.
+            let near_zero = variance.abs() < Decimal::new(1, 2);
+            let indicator = if !near_zero && variance > Decimal::ZERO {
                 "🔻"
+            } else if near_zero {
+                "✅"
             } else if actual.abs() > forecast.abs() * Decimal::from(80u32) / Decimal::from(100u32) {
                 "⚠️"
             } else {
@@ -5734,11 +5739,13 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
         all_rows.retain(|r| r.account_id == id);
     }
 
-    // Optional --installments-only filter: keep only rows that carry an
-    // installment marker in their label, description, or Pluggy metadata.
-    if args.installments_only {
-        all_rows.retain(|r| detect_installment_marker(r).is_some());
-    }
+    // Note: `--installments-only` is intentionally NOT applied here.
+    // Filtering at this stage would shrink the per-bill totals and break
+    // payment matching downstream (the matcher compares the *full* bill
+    // total against checking-account "Pagamento de fatura" debits within
+    // a ±10% tolerance). Instead, status is computed from the full bill
+    // and the filter is applied later to the displayed transactions,
+    // counts, and totals only.
 
     // For each account that doesn't have a configured `billing_closing_day`
     // in metadata, infer one from the Pluggy billId clusters in the data.
@@ -5901,13 +5908,33 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
         .map(|d| d.format("%Y-%m").to_string())
         .unwrap_or_else(|| target_month.clone());
 
-    // Collect rows from the selected bills for the per-category breakdown.
-    let rows: Vec<CardClosedTransactionRow> = selected
+    // Collect rows from the selected bills. `full_rows` is the unfiltered
+    // bill content used for payment matching and status inference; `rows`
+    // is what we actually display (filtered to installments when the user
+    // passed `--installments-only`).
+    let full_rows: Vec<CardClosedTransactionRow> = selected
         .iter()
         .flat_map(|b| b.txs.iter().cloned())
         .collect();
+    let rows: Vec<CardClosedTransactionRow> = if args.installments_only {
+        full_rows
+            .iter()
+            .filter(|r| detect_installment_marker(r).is_some())
+            .cloned()
+            .collect()
+    } else {
+        full_rows.clone()
+    };
 
-    // Group rows by account_id for the visão geral section.
+    // Group rows by account_id for the visão geral section. Status uses the
+    // full bill; counts/totals reflect the displayed (possibly filtered) set.
+    let mut by_account_full: BTreeMap<String, Vec<CardClosedTransactionRow>> = BTreeMap::new();
+    for row in &full_rows {
+        by_account_full
+            .entry(row.account_id.clone())
+            .or_default()
+            .push(row.clone());
+    }
     let mut by_account: BTreeMap<String, Vec<CardClosedTransactionRow>> = BTreeMap::new();
     for row in &rows {
         by_account
@@ -5955,19 +5982,29 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
         })
         .collect();
 
-    // Build per-account report
-    let mut accounts_report = Vec::with_capacity(by_account.len());
+    // Build per-account report. We iterate `by_account_full` so that the
+    // status (paid/open/overdue) reflects the real bill — even when the
+    // user passed `--installments-only`, which only shrinks the displayed
+    // totals, not the underlying bill.
+    let mut accounts_report = Vec::with_capacity(by_account_full.len());
     let mut grand_total = Decimal::ZERO;
-    for (account_id, txs) in &by_account {
-        // Signed sum: debits are negative, statement credits (IOF reversals,
-        // merchant refunds) are positive. They net automatically, which is
-        // what shows up on the actual bill the user receives.
-        let net_spend: Decimal = txs.iter().map(|t| t.amount).sum();
-        // For display we keep using the absolute value of `net_spend` —
-        // the human output explicitly prefixes "-R$ ..." so showing the
-        // unsigned amount and letting the formatter add the sign is what
-        // matches the rest of the report styling.
-        let total: Decimal = net_spend.abs();
+    for (account_id, full_txs) in &by_account_full {
+        // `full_total` drives payment matching against the bill that the
+        // user actually owes / paid. `display_total` is what we surface
+        // to the user, narrowed to installments when filtered.
+        let full_net: Decimal = full_txs.iter().map(|t| t.amount).sum();
+        let full_total: Decimal = full_net.abs();
+        let empty_vec: Vec<CardClosedTransactionRow> = Vec::new();
+        let display_txs: &Vec<CardClosedTransactionRow> =
+            by_account.get(account_id).unwrap_or(&empty_vec);
+        // When --installments-only filters this card down to zero rows,
+        // skip it entirely from the visão geral instead of reporting an
+        // empty entry with the full-bill status attached.
+        if args.installments_only && display_txs.is_empty() {
+            continue;
+        }
+        let display_net: Decimal = display_txs.iter().map(|t| t.amount).sum();
+        let total: Decimal = display_net.abs();
         grand_total += total;
 
         // Prefer the synthetic cycle close date when we have it (derived
@@ -5979,7 +6016,8 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
             .copied()
             .flatten()
             .unwrap_or_else(|| {
-                txs.iter()
+                full_txs
+                    .iter()
                     .map(|t| t.transaction_date)
                     .max()
                     .unwrap_or(today)
@@ -6016,9 +6054,12 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
             // month's tail and exclude the current month's tail). Description
             // already filters to canonical "Pagamento de fatura" lines, so
             // false positives are unlikely.
-            let tolerance = total * Decimal::new(10, 2);
-            let lower = total - tolerance;
-            let upper = total + tolerance;
+            // Match against the FULL bill, not the (possibly filtered)
+            // display total — checking-account "Pagamento de fatura" lines
+            // settle the whole bill, never just an installment slice.
+            let tolerance = full_total * Decimal::new(10, 2);
+            let lower = full_total - tolerance;
+            let upper = full_total + tolerance;
             let paid = payment_candidates
                 .iter()
                 .filter(|t| t.transaction_date >= close_date.saturating_sub_signed_unsafe())
@@ -6054,7 +6095,7 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
 
         accounts_report.push(CardsAccountReport {
             account_id: account_id.clone(),
-            transaction_count: txs.len(),
+            transaction_count: display_txs.len(),
             status,
         });
     }

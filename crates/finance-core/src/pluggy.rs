@@ -453,6 +453,25 @@ fn build_account_record(
     }
 }
 
+/// Map Pluggy's English category slugs to the internal Portuguese hierarchy.
+/// Pluggy classifies with coarse English labels; we normalise at ingestion so
+/// reports group correctly without a display-layer hack.
+fn normalize_pluggy_category(slug: &str) -> &str {
+    match slug {
+        "groceries" | "supermarket" => "alimentacao:mercado",
+        "eating-out" | "restaurants" | "food-and-drinks" => "alimentacao:restaurantes",
+        "food-delivery" => "alimentacao:delivery",
+        "clothing" | "fashion" | "apparel" => "compras:vestuario",
+        "shopping" | "retail" | "e-commerce" => "compras",
+        "parking" => "transporte:estacionamento",
+        "sports-goods" => "lazer:esportes",
+        "hospital-clinics-and-labs" => "saude:consulta",
+        "services" => "servicos",
+        "transfers" | "transfer-pix" => "transferencias",
+        other => other,
+    }
+}
+
 fn build_transaction_record(
     payload: PluggyTransactionPayload,
     binding: &PluggyBindingConfig,
@@ -465,7 +484,10 @@ fn build_transaction_record(
         .category
         .as_deref()
         .filter(|value| !value.trim().is_empty());
-    let category_key = category_name.map(|value| category_id(value, None));
+    let category_key = category_name.map(|value| {
+        let slug = category_id(value, None);
+        normalize_pluggy_category(&slug).to_string()
+    });
     // For foreign-currency charges, work in BRL from the start so rule matchers
     // that key on amount see the value the user sees on the statement.
     let account_amount = resolve_account_currency_amount(&payload);
