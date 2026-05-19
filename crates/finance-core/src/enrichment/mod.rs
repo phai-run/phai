@@ -24,6 +24,7 @@ pub mod pluggy_map;
 pub mod prompt;
 pub mod rule_gen;
 pub mod types;
+pub mod web_search;
 
 pub use types::{
     CategoryHint, CnpjInfo, ContextTx, EnrichmentDecision, EnrichmentResult, FewShotExample,

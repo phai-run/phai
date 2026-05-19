@@ -3351,6 +3351,215 @@ fn installments_detected_from_pluggy_credit_card_metadata() {
     );
 }
 
+/// Regression test: `cards --installments-only` must preserve the underlying
+/// bill's payment status. The filter narrows the *displayed* transactions
+/// (totals/counts/category breakdown), but should NOT shrink the total used
+/// for matching against checking-account bill payments — otherwise a bill
+/// that was actually paid in full would be reported as "em aberto" /
+/// "ATRASADO" simply because the installment-only subtotal doesn't match
+/// any payment line.
+#[test]
+fn cards_installments_only_preserves_paid_status() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    // closing_day=3 → April transactions on/after the 3rd belong to the
+    // bill that closes 2026-05-03; close_date < today (2026-05-19+) so the
+    // bill is treated as closed and payment matching kicks in.
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-15",
+  "accounts": [
+    { "id": "chk", "pluggyAccountId": "pluggy-chk" },
+    { "id": "cc", "pluggyAccountId": "pluggy-cc" }
+  ]
+}"#,
+    );
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nchk,primary,checking,fintech,Checking,pluggy-chk,item-chk,,\ncc,primary,credit,fintech,Card,pluggy-cc,item-cc,3,10\n",
+    );
+    let fixture = temp.path().join("paid_with_installments.json");
+    write_file(
+        &fixture,
+        r#"{
+  "accounts": [
+    {
+      "id": "pluggy-chk",
+      "item_id": "item-chk",
+      "name": "Checking",
+      "type": "checking",
+      "status": "ACTIVE",
+      "balance": 5000.00,
+      "currency_code": "BRL",
+      "updated_at": "2026-05-10T00:00:00Z"
+    },
+    {
+      "id": "pluggy-cc",
+      "item_id": "item-cc",
+      "name": "Card",
+      "type": "credit",
+      "status": "ACTIVE",
+      "balance": -1000.00,
+      "currency_code": "BRL",
+      "updated_at": "2026-05-10T00:00:00Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "cc-inst-1",
+      "accountId": "pluggy-cc",
+      "date": "2026-04-05",
+      "description": "Notebook",
+      "amount": -200.00,
+      "type": "debit",
+      "status": "posted",
+      "created_at": "2026-04-05T00:00:00Z",
+      "updated_at": "2026-04-05T00:00:00Z",
+      "creditCardMetadata": { "installmentNumber": 1, "totalInstallments": 5, "totalAmount": 1000.00 }
+    },
+    {
+      "id": "cc-inst-2",
+      "accountId": "pluggy-cc",
+      "date": "2026-04-08",
+      "description": "Geladeira",
+      "amount": -200.00,
+      "type": "debit",
+      "status": "posted",
+      "created_at": "2026-04-08T00:00:00Z",
+      "updated_at": "2026-04-08T00:00:00Z",
+      "creditCardMetadata": { "installmentNumber": 2, "totalInstallments": 10, "totalAmount": 2000.00 }
+    },
+    {
+      "id": "cc-plain",
+      "accountId": "pluggy-cc",
+      "date": "2026-04-15",
+      "description": "Supermercado",
+      "amount": -600.00,
+      "type": "debit",
+      "status": "posted",
+      "created_at": "2026-04-15T00:00:00Z",
+      "updated_at": "2026-04-15T00:00:00Z"
+    },
+    {
+      "id": "pay-1",
+      "accountId": "pluggy-chk",
+      "date": "2026-05-10",
+      "description": "Pagamento de fatura cartao",
+      "amount": -1000.00,
+      "type": "debit",
+      "status": "posted",
+      "created_at": "2026-05-10T00:00:00Z",
+      "updated_at": "2026-05-10T00:00:00Z"
+    }
+  ]
+}"#,
+    );
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture)
+            .arg("--to")
+            .arg("2026-05-15"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Pluggy sync rebuilds account metadata from the API payload and only
+    // *preserves* an existing billing_closing_day across re-syncs — it does
+    // not import the value from the accounts CSV on first sync. Inject it
+    // directly so the bill clustering uses the synthetic close date that
+    // makes target_month=2026-05 resolve to a closed bill with a payment.
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    conn.execute(
+        "UPDATE accounts SET metadata_json = json_set(metadata_json, '$.billing_closing_day', '3') WHERE account_id = 'cc'",
+        [],
+    )
+    .expect("inject billing_closing_day");
+    drop(conn);
+
+    // Baseline: without the filter, the bill should be flagged as paid.
+    let baseline = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cards")
+            .arg("--month")
+            .arg("2026-05")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let baseline_json: Value = serde_json::from_slice(&baseline).expect("valid json");
+    let acct = &baseline_json["summary"]["accounts"][0];
+    assert_eq!(
+        acct["status"]["state"],
+        "paid",
+        "baseline (sem filtro) deve mostrar a fatura como paga, summary: {}",
+        serde_json::to_string_pretty(&baseline_json["summary"]).unwrap()
+    );
+
+    // With --installments-only: the displayed totals shrink, but the
+    // status must still come from the full bill — so "paid" not "open".
+    let filtered = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cards")
+            .arg("--month")
+            .arg("2026-05")
+            .arg("--installments-only")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let filtered_json: Value = serde_json::from_slice(&filtered).expect("valid json");
+    let acct = &filtered_json["summary"]["accounts"][0];
+    assert_eq!(
+        acct["status"]["state"], "paid",
+        "fatura paga não deve aparecer como 'open'/'overdue' só porque o filtro reduziu o total exibido, summary: {}",
+        serde_json::to_string_pretty(&filtered_json["summary"]).unwrap()
+    );
+    assert_eq!(
+        acct["transaction_count"], 2,
+        "transaction_count deve refletir só as parceladas, obteve {}",
+        acct["transaction_count"]
+    );
+    let txs = filtered_json["transactions"]
+        .as_array()
+        .expect("transactions array");
+    assert_eq!(
+        txs.len(),
+        2,
+        "transactions deve conter só as 2 parceladas, obteve {}",
+        txs.len()
+    );
+}
+
 #[test]
 fn amount_cents_exact_integer_sum_regression() {
     // ADR-0003: verify that amount_cents produces exact integer sums

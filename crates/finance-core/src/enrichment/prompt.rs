@@ -12,7 +12,9 @@
 //! The system prompt expects the model to return JSON matching
 //! `crate::enrichment::types::EnrichmentResult` and nothing else.
 
-use crate::enrichment::types::{CategoryHint, CnpjInfo, ContextTx, FewShotExample, Heuristics};
+use crate::enrichment::types::{
+    CategoryHint, CnpjInfo, ContextTx, FewShotExample, Heuristics, HourBucket,
+};
 use chrono::{Datelike, NaiveDate, Weekday};
 use rust_decimal::Decimal;
 use std::fmt::Write as _;
@@ -34,6 +36,9 @@ pub struct PromptContext<'a> {
     pub heuristics: &'a Heuristics,
     pub temporal_context: &'a [ContextTx],
     pub few_shot_examples: &'a [FewShotExample],
+    /// Short DuckDuckGo instant-answer snippet for the merchant (None
+    /// when CNPJ info is already available or DDG found nothing).
+    pub web_context: Option<&'a str>,
 }
 
 /// Build the full prompt string ready to send to the LLM.
@@ -132,13 +137,13 @@ pub fn build_prompt(ctx: &PromptContext) -> String {
         }
     );
     if let Some(bucket) = ctx.heuristics.hour_bucket {
-        let _ = writeln!(out, "- Hour bucket: {:?}", bucket);
+        let _ = writeln!(out, "- Período do dia: {}", hour_bucket_pt(bucket));
     }
-    let _ = writeln!(
-        out,
-        "- Dia da semana: {}",
-        weekday_pt(ctx.heuristics.weekday)
-    );
+    let weekday = ctx.heuristics.weekday;
+    let _ = writeln!(out, "- Dia da semana: {}", weekday_pt(weekday));
+    if matches!(weekday, Weekday::Sat | Weekday::Sun) {
+        out.push_str("  ↳ FIM DE SEMANA — maior probabilidade de lazer, restaurantes e passeios\n");
+    }
     let _ = writeln!(
         out,
         "- Recorrente nos últimos 3 meses: {}",
@@ -180,7 +185,14 @@ pub fn build_prompt(ctx: &PromptContext) -> String {
         out.push('\n');
     }
 
-    // 8. Final instruction.
+    // 8. Web context (DuckDuckGo snippet for unknown merchants).
+    if let Some(web) = ctx.web_context {
+        out.push_str("## Contexto web (busca automática)\n");
+        let _ = writeln!(out, "{web}");
+        out.push('\n');
+    }
+
+    // 9. Final instruction.
     out.push_str(
         "## Instrução final\n\
          Responda APENAS com JSON do schema EnrichmentResult, sem texto adicional.\n\
@@ -249,6 +261,15 @@ fn extra_noise() -> &'static std::collections::HashSet<&'static str> {
     })
 }
 
+fn hour_bucket_pt(b: HourBucket) -> &'static str {
+    match b {
+        HourBucket::Madrugada => "madrugada (0h–5h) — possível delivery noturno",
+        HourBucket::Manha => "manhã (6h–11h) — café, padaria, mercado",
+        HourBucket::Tarde => "tarde (12h–17h) — almoço, compras, saída do trabalho",
+        HourBucket::Noite => "noite (18h–23h) — jantar, lazer, delivery",
+    }
+}
+
 fn weekday_pt(w: Weekday) -> &'static str {
     match w {
         Weekday::Mon => "segunda-feira",
@@ -313,6 +334,7 @@ mod tests {
             heuristics,
             temporal_context: ctx_txs,
             few_shot_examples: examples,
+            web_context: None,
         }
     }
 
@@ -412,6 +434,49 @@ mod tests {
         assert!(prompt.contains("5620104"));
         assert!(prompt.contains("5612100"));
         assert!(prompt.contains("Fornecimento de alimentos preparados"));
+    }
+
+    #[test]
+    fn test_hour_bucket_pt_labels() {
+        assert!(hour_bucket_pt(HourBucket::Madrugada).contains("madrugada"));
+        assert!(hour_bucket_pt(HourBucket::Manha).contains("manhã"));
+        assert!(hour_bucket_pt(HourBucket::Tarde).contains("tarde"));
+        assert!(hour_bucket_pt(HourBucket::Noite).contains("noite"));
+    }
+
+    #[test]
+    fn test_weekend_emphasis_in_prompt() {
+        let mut h = base_heuristics();
+        h.weekday = Weekday::Sun;
+        let prompt = build_prompt(&ctx_with(None, None, None, &[], &[], &h));
+        assert!(prompt.contains("FIM DE SEMANA"));
+        assert!(prompt.contains("domingo"));
+    }
+
+    #[test]
+    fn test_no_weekend_emphasis_on_weekday() {
+        let mut h = base_heuristics();
+        h.weekday = Weekday::Wed;
+        let prompt = build_prompt(&ctx_with(None, None, None, &[], &[], &h));
+        assert!(!prompt.contains("FIM DE SEMANA"));
+    }
+
+    #[test]
+    fn test_web_context_included_in_prompt() {
+        let h = base_heuristics();
+        let cnpj = sample_cnpj();
+        let mut ctx = ctx_with(Some(&cnpj), None, Some("CNPJ"), &[], &[], &h);
+        ctx.web_context = Some("iFood: plataforma de delivery de alimentos brasileira.");
+        let prompt = build_prompt(&ctx);
+        assert!(prompt.contains("Contexto web"));
+        assert!(prompt.contains("iFood"));
+    }
+
+    #[test]
+    fn test_no_web_context_section_when_none() {
+        let h = base_heuristics();
+        let prompt = build_prompt(&ctx_with(None, None, None, &[], &[], &h));
+        assert!(!prompt.contains("Contexto web"));
     }
 
     #[test]

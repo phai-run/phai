@@ -14,10 +14,16 @@ use chrono::{Datelike, NaiveDate, Utc};
 use rust_decimal::Decimal;
 
 /// Format an amount as Brazilian Real with grouping and 2 decimals.
-/// `+R$ 1.234,56` for positive, `-R$ 1.234,56` for negative.
+/// `+R$ 1.234,56` for positive, `-R$ 1.234,56` for negative, `R$ 0,00`
+/// for values that round to zero (suppresses the spurious sign).
 pub fn brl_signed(value: Decimal) -> String {
+    let formatted = format_brl_number(value.abs());
+    let is_display_zero = formatted.chars().all(|c| matches!(c, '0' | ',' | '.'));
+    if is_display_zero {
+        return format!("R$ {formatted}");
+    }
     let sign = if value.is_sign_negative() { "-" } else { "+" };
-    format!("{sign}R$ {}", format_brl_number(value.abs()))
+    format!("{sign}R$ {formatted}")
 }
 
 /// Format an unsigned amount as Brazilian Real (no leading sign).
