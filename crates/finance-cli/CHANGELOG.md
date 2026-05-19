@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/feliperun/finance-os/compare/v1.2.0...v1.3.0) (2026-05-19)
+
+
+### Features
+
+* decimal precision — amount_cents column and view rewrite (ADR-0003) ([#31](https://github.com/feliperun/finance-os/issues/31)) ([704114a](https://github.com/feliperun/finance-os/commit/704114af136ae78b9d35298c7375e4f189bcee4a))
+
 ## [1.2.0](https://github.com/feliperun/finance-os/compare/v1.1.0...v1.2.0) (2026-05-18)
 
 
