@@ -287,11 +287,12 @@ pub async fn run_migrations(store: &dyn FinanceStore, config: &AppConfig) -> Res
             continue;
         }
         let sql = render_sql(config, raw_sql)?;
-        eprintln!("[migration] applying {version} ({len} bytes)", len = sql.len());
+        eprintln!(
+            "[migration] applying {version} ({len} bytes)",
+            len = sql.len()
+        );
         if let Err(ref e) = store.apply_sql(&sql).await {
-            eprintln!(
-                "[migration] FAILED {version}: {e}\n--- SQL ---\n{sql}\n--- END SQL ---",
-            );
+            eprintln!("[migration] FAILED {version}: {e}\n--- SQL ---\n{sql}\n--- END SQL ---",);
             bail!("{e}");
         }
         store.record_migration(version).await?;
