@@ -4836,6 +4836,7 @@ async fn report_scenario(args: ScenarioArgs) -> Result<()> {
 async fn report_review(args: ReviewArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
 
     let cashflow = store.cashflow(args.months).await?;
     let monthly_spend = store.monthly_spend(None).await?;
@@ -4944,12 +4945,14 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
 async fn tx_enrich(args: enrich::EnrichArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     enrich::run(args, &config, store.as_ref()).await
 }
 
 async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let category_key = category_id(&args.category, args.subcategory.as_deref());
     let idempotency_key = format!("annotate:{}:{}", args.transaction_id, Uuid::now_v7());
     store
@@ -4981,6 +4984,7 @@ async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {
 async fn tx_set_context(args: SetContextArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let idempotency_key = format!("context:{}:{}", args.transaction_id, Uuid::now_v7());
     store
         .annotate_transaction(
@@ -5008,6 +5012,7 @@ async fn tx_set_context(args: SetContextArgs) -> Result<()> {
 async fn tx_list_context(args: ListContextArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store.transactions_with_context(args.limit).await?;
 
     if args.json {
@@ -5057,6 +5062,7 @@ fn print_transaction_row(row: &TransactionRecord) {
 async fn tx_find(args: TxFindArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store
         .find_transactions_by_description(&args.query, args.limit)
         .await?;
@@ -5078,6 +5084,7 @@ async fn tx_find(args: TxFindArgs) -> Result<()> {
 async fn tx_pending(args: TxPendingArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store.latest_uncategorized_transactions(args.limit).await?;
 
     if args.json {
@@ -5106,6 +5113,7 @@ struct SetContextByDescResult {
 async fn tx_set_context_by_desc(args: SetContextByDescArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store
         .find_transactions_by_description(&args.query, 100)
         .await?;
@@ -5445,6 +5453,7 @@ fn rule_matches_status(rule: &RuleRecord, status: RuleStatusFilter) -> bool {
 async fn rule_list(args: RuleListArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let rows = store
         .all_rules()
         .await?
@@ -5476,6 +5485,7 @@ async fn rule_list(args: RuleListArgs) -> Result<()> {
 async fn rule_inspect(args: RuleInspectArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
     let row = store
         .all_rules()
         .await?
