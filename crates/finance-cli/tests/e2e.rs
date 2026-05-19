@@ -1465,13 +1465,12 @@ fn sync_notify_summary_outputs_human_readable_message() {
     )
     .assert()
     .success()
-    .stdout(predicate::str::contains("🔄 *Sync"))
-    .stdout(predicate::str::contains("*4 novas transações*"))
+    .stdout(predicate::str::contains("💰 *4 novas transações*"))
     .stdout(predicate::str::contains("Supermercado Angeloni"))
-    .stdout(predicate::str::contains("*Saldo em conta*"))
-    .stdout(predicate::str::contains("Primary Checking"))
-    .stdout(predicate::str::contains("_finance"))
-    .stdout(predicate::str::contains("local"));
+    .stdout(predicate::str::contains("Saldo em conta"))
+    .stdout(predicate::str::contains("Despesa real nova"))
+    .stdout(predicate::str::contains("Pluggy sincronizado"))
+    .stdout(predicate::str::contains("*Top categorias*"));
 }
 
 #[test]

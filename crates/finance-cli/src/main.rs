@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Duration, NaiveDate, Timelike, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use finance_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
@@ -34,6 +34,7 @@ mod human_format;
 mod pulse;
 mod review;
 mod self_cmd;
+mod sync_notify;
 mod update;
 mod update_state;
 
@@ -1451,217 +1452,71 @@ fn normalize_inline_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Render the sync notify summary as a single phone-readable WhatsApp
-/// message. The legacy pipe-separated CLI-log format was unreadable on a
-/// phone — this replaces it with a five-block layout:
-///
-///   🔄 *Sync · seg 18/mai 21:34*
-///
-///   *N novas transações* · -R$ X,YZ
-///     <emoji> <descrição curta> · <valor> · <data>
-///     …
-///
-///   *Saldo em conta*   ← only when there were new transactions
-///     💰 <conta> · <saldo>
-///     *Total*: <total>
-///
-///   *N sem categoria* (responda 1..N para classificar)
-///     1. <descrição> · <valor> (id <transaction_id>)
-///
-///   ⚠️ <aviso>
-///
-///   _finance X.Y.Z · <backend> · <hora>_
+/// Render the sync notify summary as a phone-readable WhatsApp message.
+/// Delegates to the structured `sync_notify::render_sync_message` formatter.
 fn render_sync_notify_summary(
     summary: &SyncSummaryOutput,
     accounts: &[AccountRecord],
     snapshots: &[finance_core::models::AccountSnapshotRecord],
 ) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-
-    // Header: weekday, day, month, HH:MM.
-    let now = Utc::now();
-    let local = now.naive_local();
-    let header_date = local.date();
-    let header_time = local.time();
-    let weekday = match header_date.weekday().num_days_from_monday() {
-        0 => "seg",
-        1 => "ter",
-        2 => "qua",
-        3 => "qui",
-        4 => "sex",
-        5 => "sáb",
-        _ => "dom",
-    };
-    let month = match header_date.month() {
-        1 => "jan",
-        2 => "fev",
-        3 => "mar",
-        4 => "abr",
-        5 => "mai",
-        6 => "jun",
-        7 => "jul",
-        8 => "ago",
-        9 => "set",
-        10 => "out",
-        11 => "nov",
-        _ => "dez",
-    };
-    let _ = writeln!(
-        out,
-        "🔄 *Sync · {weekday} {:02}/{month} {:02}:{:02}*",
-        header_date.day(),
-        header_time.hour(),
-        header_time.minute(),
-    );
-
-    let has_new = summary.new_transactions_count > 0;
-
-    // -------- Block 1: novas transações --------
-    let _ = writeln!(out);
-    if !has_new {
-        let _ = writeln!(out, "_sem novidades_");
-    } else {
-        let mut total = Decimal::ZERO;
-        for tx in &summary.new_transactions {
-            if let Ok(amount) = decimal_from_str(&tx.amount) {
-                total += amount;
-            }
-        }
-        let _ = writeln!(
-            out,
-            "*{} nova{} transaç{}* · {}",
-            summary.new_transactions_count,
-            if summary.new_transactions_count == 1 {
-                ""
-            } else {
-                "s"
-            },
-            if summary.new_transactions_count == 1 {
-                "ão"
-            } else {
-                "ões"
-            },
-            brl_signed(total),
-        );
-        const MAX_TX: usize = 8;
-        let show = summary.new_transactions.iter().take(MAX_TX);
-        for tx in show {
-            let amount = decimal_from_str(&tx.amount).ok();
-            let emoji = human_format::category_emoji(tx.category_id.as_deref(), amount);
-            let date = NaiveDate::parse_from_str(&tx.transaction_date, "%Y-%m-%d")
-                .map(human_format::short_date)
-                .unwrap_or_else(|_| tx.transaction_date.clone());
-            let label = human_format::truncate_with_ellipsis(
-                &human_format::short_description(tx.context.as_deref().unwrap_or(&tx.description)),
-                34,
-            );
-            let amt_str = amount.map(brl_signed).unwrap_or_else(|| tx.amount.clone());
-            let _ = writeln!(out, "  {emoji} {label} · {amt_str} · {date}");
-        }
-        if summary.new_transactions.len() > MAX_TX {
-            let _ = writeln!(
-                out,
-                "  _… mais {} lançamento{}_",
-                summary.new_transactions.len() - MAX_TX,
-                if summary.new_transactions.len() - MAX_TX == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            );
-        }
-
-        // -------- Block 2: saldo em conta (only when there are new tx) --------
-        let checking_ids: BTreeSet<String> = accounts
+    // Compute total checking balance from snapshots.
+    let checking_ids: BTreeSet<String> = accounts
+        .iter()
+        .filter(|a| a.account_type == "checking" && !a.account_id.is_empty())
+        .map(|a| a.account_id.clone())
+        .collect();
+    let balance: Option<Decimal> = {
+        let total: Decimal = snapshots
             .iter()
-            .filter(|a| a.account_type == "checking" && !a.account_id.is_empty())
-            .map(|a| a.account_id.clone())
-            .collect();
-        let balances: Vec<(&finance_core::models::AccountSnapshotRecord, &AccountRecord)> =
-            snapshots
-                .iter()
-                .filter(|s| checking_ids.contains(&s.account_id) && s.balance.is_some())
-                .filter_map(|s| {
-                    accounts
-                        .iter()
-                        .find(|a| a.account_id == s.account_id)
-                        .map(|a| (s, a))
-                })
-                .collect();
-        if !balances.is_empty() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "*Saldo em conta*");
-            let mut total_bal = Decimal::ZERO;
-            for (snap, acc) in &balances {
-                let label = if acc.label.is_empty() {
-                    acc.account_id.clone()
-                } else {
-                    acc.label.clone()
-                };
-                let balance = snap.balance.unwrap_or(Decimal::ZERO);
-                total_bal += balance;
-                let _ = writeln!(out, "  💰 {} · {}", label, brl_signed(balance));
-            }
-            if balances.len() > 1 {
-                let _ = writeln!(out, "  *Total*: {}", brl_signed(total_bal));
-            }
+            .filter(|s| checking_ids.contains(&s.account_id) && s.balance.is_some())
+            .filter_map(|s| s.balance)
+            .sum();
+        if total == Decimal::ZERO && snapshots.iter().all(|s| s.balance.is_none()) {
+            None
+        } else {
+            Some(total)
         }
-    }
+    };
 
-    // -------- Block 3: pendências (sem categoria) --------
-    if summary.needs_context_count > 0 {
-        let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "*{} sem categoria*{} — responda 1..{} para classificar",
-            summary.needs_context_count,
-            if summary.needs_context_truncated {
-                " (parcial)"
-            } else {
-                ""
-            },
-            summary
-                .needs_context
-                .len()
-                .min(summary.needs_context_count as usize),
-        );
-        for (idx, tx) in summary.needs_context.iter().enumerate() {
-            let amount = decimal_from_str(&tx.amount).ok();
-            let label = human_format::truncate_with_ellipsis(
-                &human_format::short_description(&tx.description),
-                34,
-            );
-            let amt_str = amount.map(brl_signed).unwrap_or_else(|| tx.amount.clone());
-            // Show a short id suffix for reference.
-            let short_id = tx
-                .transaction_id
-                .split('-')
-                .next_back()
-                .unwrap_or(&tx.transaction_id);
-            let _ = writeln!(out, "  {}. {label} · {amt_str} (id …{short_id})", idx + 1);
-        }
-    }
+    // Convert transactions to the formatter's type.
+    let txs: Vec<sync_notify::SyncSummaryTransaction> = summary
+        .new_transactions
+        .iter()
+        .map(|tx| sync_notify::SyncSummaryTransaction {
+            transaction_id: tx.transaction_id.clone(),
+            transaction_date: tx.transaction_date.clone(),
+            description: tx.description.clone(),
+            amount: tx.amount.clone(),
+            tx_type: tx.tx_type.clone(),
+            category_id: tx.category_id.clone(),
+            category_source: tx.category_source.clone(),
+            context: tx.context.clone(),
+            account_id: tx.account_id.clone(),
+            account_label: tx.account_label.clone(),
+            payment_status: tx.payment_status.clone(),
+            source: tx.source.clone(),
+            metadata_json: tx.metadata_json.clone(),
+        })
+        .collect();
 
-    // -------- Block 4: avisos --------
-    if !summary.warnings.is_empty() {
-        let _ = writeln!(out);
-        for warning in &summary.warnings {
-            let _ = writeln!(out, "⚠️ {}", normalize_inline_text(warning));
-        }
-    }
+    let review_items = sync_notify::build_review_items(&txs);
 
-    // -------- Footer --------
-    let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "_finance {} · {} · status {}_",
-        env!("CARGO_PKG_VERSION"),
-        summary.backend,
-        summary.summary_status
-    );
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
 
-    out.trim_end().to_string()
+    let input = sync_notify::SyncMessageInput {
+        new_transactions: txs,
+        accounts: accounts.to_vec(),
+        snapshots: snapshots.to_vec(),
+        review_items,
+        balance,
+        sync_time: Utc::now(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        hostname,
+    };
+
+    sync_notify::render_sync_message(&input)
 }
 
 /// Copy billing metadata keys from an existing account record into a freshly
