@@ -50,6 +50,11 @@ pub struct TransactionRecord {
     pub transaction_date: NaiveDate,
     pub description: String,
     pub amount: Decimal,
+    /// Exact integer cents (`amount * 100`). Populated on the write path
+    /// for BigQuery upserts (NUMERIC parity) and derived automatically by
+    /// SQLite's VIRTUAL generated column. Read paths leave this `None` —
+    /// callers that need cents should query the SQL view directly via
+    /// `amount_cents` rather than going through this field. See ADR-0012.
     #[serde(default)]
     pub amount_cents: Option<i64>,
     pub tx_type: String,

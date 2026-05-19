@@ -245,6 +245,14 @@ GROUP BY 1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 6. v_forecast_vs_actual — exact actual_total from cents
+--
+-- Note on variance: `forecast.amount` is stored as TEXT and has no
+-- amount_cents companion column (forecast is a small, manually curated
+-- table, not a high-volume aggregate input). The `variance` expression
+-- therefore still goes through CAST AS REAL. Drift is bounded to the row
+-- count of `forecast` (typically << 100), so the cents strategy from
+-- ADR-0003 is intentionally not extended here. If forecast ever grows
+-- into a hot aggregation path, add forecast.amount_cents in a follow-up.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE VIEW v_forecast_vs_actual AS
