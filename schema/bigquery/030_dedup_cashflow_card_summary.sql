@@ -6,4 +6,4 @@
 -- legacy/manual ↔ Pluggy dedup filter is already enforced. No rewrite is
 -- needed; this file exists for cross-backend numbering parity.
 
--- (no-op)
+SELECT 1;

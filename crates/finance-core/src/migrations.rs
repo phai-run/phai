@@ -1,6 +1,6 @@
 use crate::config::{AppConfig, BackendKind};
 use crate::storage::FinanceStore;
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 type Migration = (&'static str, &'static str);
 
@@ -279,7 +279,13 @@ pub async fn run_migrations(store: &dyn FinanceStore, config: &AppConfig) -> Res
             continue;
         }
         let sql = render_sql(config, raw_sql)?;
-        store.apply_sql(&sql).await?;
+        eprintln!("[migration] applying {version} ({len} bytes)", len = sql.len());
+        if let Err(ref e) = store.apply_sql(&sql).await {
+            eprintln!(
+                "[migration] FAILED {version}: {e}\n--- SQL ---\n{sql}\n--- END SQL ---",
+            );
+            bail!("{e}");
+        }
         store.record_migration(version).await?;
         executed.push((*version).to_string());
     }
