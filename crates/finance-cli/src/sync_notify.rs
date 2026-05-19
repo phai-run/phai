@@ -30,51 +30,67 @@ use crate::human_format::{
 /// Renders the WhatsApp sync notification message.
 pub fn render_sync_message(input: &SyncMessageInput) -> String {
     let mut out = String::new();
-
-    // Header
     let local = input.sync_time.naive_local();
 
     if input.new_transactions.is_empty() {
-        let _ = writeln!(
-            out,
-            "💰 *Sync · {:02}/{} {:02}:{:02}*",
-            local.date().day(),
-            month_pt_short(local.date().month()),
-            local.time().hour(),
-            local.time().minute(),
-        );
-        let _ = writeln!(out);
-        let _ = writeln!(out, "_sem novidades_");
-        let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "_{version} · {hostname} · Pluggy sincronizado_",
-            version = input.version,
-            hostname = input.hostname,
-        );
+        render_empty_message(&mut out, &local, &input.version, &input.hostname);
         return out.trim_end().to_string();
     }
 
     let real = compute_real_expenses(&input.new_transactions, &input.accounts);
-    let header_date = local.date();
-    let header_time = local.time();
-    let weekday = weekday_pt(header_date.weekday().num_days_from_monday());
-    let month = month_pt_short(header_date.month());
     let count = input.new_transactions.len();
 
+    // Header
     let _ = writeln!(
         out,
         "💰 *{count} nova{plural} transaç{plural_ao}* · {weekday} {:02}/{month} {:02}:{:02}",
-        header_date.day(),
-        header_time.hour(),
-        header_time.minute(),
+        local.date().day(),
+        local.time().hour(),
+        local.time().minute(),
+        weekday = weekday_pt(local.date().weekday().num_days_from_monday()),
+        month = month_pt_short(local.date().month()),
         plural = if count == 1 { "" } else { "s" },
         plural_ao = if count == 1 { "ão" } else { "ões" },
     );
     let _ = writeln!(out);
 
-    // Snapshot block
-    if let Some(balance) = input.balance {
+    render_financial_snapshot(&mut out, input.balance, &real, input.review_items.len());
+    render_top_categories(&mut out, &real);
+    render_card_payment_note(&mut out, &real);
+    render_date_groups(&mut out, &input.new_transactions, &real);
+    render_review_block(&mut out, &input.review_items);
+    render_footer(&mut out, &input.version, &input.hostname);
+
+    out.trim_end().to_string()
+}
+
+fn render_empty_message(
+    out: &mut String,
+    local: &chrono::NaiveDateTime,
+    version: &str,
+    hostname: &str,
+) {
+    let _ = writeln!(
+        out,
+        "💰 *Sync · {:02}/{} {:02}:{:02}*",
+        local.date().day(),
+        month_pt_short(local.date().month()),
+        local.time().hour(),
+        local.time().minute(),
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "_sem novidades_");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "_{version} · {hostname} · Pluggy sincronizado_",);
+}
+
+fn render_financial_snapshot(
+    out: &mut String,
+    balance: Option<Decimal>,
+    real: &RealExpenseCalc,
+    review_count: usize,
+) {
+    if let Some(balance) = balance {
         let _ = writeln!(out, "🏦 Saldo em conta: *{}*", brl(balance));
     }
     if real.card_payment_total > Decimal::ZERO && real.card_payment_compensated {
@@ -89,8 +105,6 @@ pub fn render_sync_message(input: &SyncMessageInput) -> String {
         "🧾 Despesa real nova: *{}*",
         brl(real.real_expense_total)
     );
-
-    let review_count = input.review_items.len();
     if review_count > 0 {
         let _ = writeln!(
             out,
@@ -99,45 +113,48 @@ pub fn render_sync_message(input: &SyncMessageInput) -> String {
         );
     }
     let _ = writeln!(out);
+}
 
-    // Top categories
-    if !real.categories.is_empty() {
-        let _ = writeln!(out, "*Top categorias*");
-        let mut sorted: Vec<(&String, &Decimal)> = real.categories.iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(a.1));
-        const MAX_CATS: usize = 5;
-        let show = sorted.iter().take(MAX_CATS);
-        let mut shown_total = Decimal::ZERO;
-        for (family, total) in show {
-            let pct = real.category_pct.get(*family).copied().unwrap_or(0);
-            let emoji = category_emoji(Some(family), Some(**total));
-            let label = family_label(family);
+fn render_top_categories(out: &mut String, real: &RealExpenseCalc) {
+    if real.categories.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "*Top categorias*");
+    let mut sorted: Vec<(&String, &Decimal)> = real.categories.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(a.1));
+    const MAX_CATS: usize = 5;
+    let show = sorted.iter().take(MAX_CATS);
+    let mut shown_total = Decimal::ZERO;
+    for (family, total) in show {
+        let pct = real.category_pct.get(*family).copied().unwrap_or(0);
+        let emoji = category_emoji(Some(family), Some(**total));
+        let label = family_label(family);
+        let _ = writeln!(
+            out,
+            "{emoji} {label}: *{total_brl}* · *{pct}%*",
+            total_brl = brl(**total)
+        );
+        shown_total += **total;
+    }
+    if sorted.len() > MAX_CATS {
+        let other_total = real.real_expense_total - shown_total;
+        if other_total > Decimal::ZERO {
+            let other_pct = real
+                .category_pct
+                .get("_other")
+                .copied()
+                .unwrap_or_else(|| pct_of(other_total, real.real_expense_total));
             let _ = writeln!(
                 out,
-                "{emoji} {label}: *{total_brl}* · *{pct}%*",
-                total_brl = brl(**total)
+                "• Outras: *{other_brl}* · *{other_pct}%*",
+                other_brl = brl(other_total)
             );
-            shown_total += **total;
         }
-        if sorted.len() > MAX_CATS {
-            let other_total = real.real_expense_total - shown_total;
-            if other_total > Decimal::ZERO {
-                let other_pct = real
-                    .category_pct
-                    .get("_other")
-                    .copied()
-                    .unwrap_or_else(|| pct_of(other_total, real.real_expense_total));
-                let _ = writeln!(
-                    out,
-                    "• Outras: *{other_brl}* · *{other_pct}%*",
-                    other_brl = brl(other_total)
-                );
-            }
-        }
-        let _ = writeln!(out);
     }
+    let _ = writeln!(out);
+}
 
-    // Card payment note
+fn render_card_payment_note(out: &mut String, real: &RealExpenseCalc) {
     if real.card_payment_total > Decimal::ZERO && real.card_payment_compensated {
         let _ = writeln!(
             out,
@@ -145,9 +162,14 @@ pub fn render_sync_message(input: &SyncMessageInput) -> String {
         );
         let _ = writeln!(out);
     }
+}
 
-    // Grouped transactions by date
-    let date_groups = group_transactions(&input.new_transactions, &real);
+fn render_date_groups(
+    out: &mut String,
+    transactions: &[SyncSummaryTransaction],
+    real: &RealExpenseCalc,
+) {
+    let date_groups = group_transactions(transactions, real);
     const MAX_DAYS: usize = 2;
     let show_days = date_groups.iter().take(MAX_DAYS);
     for dg in show_days {
@@ -156,11 +178,9 @@ pub fn render_sync_message(input: &SyncMessageInput) -> String {
         for cg in &dg.categories {
             let _ = writeln!(out, "{} *{}*", cg.emoji, family_label(&cg.category_family));
             for tx in &cg.transactions {
+                let _ = writeln!(out, "• {} · *{}*", tx.description, brl(tx.amount));
                 if tx.is_card_payment {
-                    let _ = writeln!(out, "• {} · *{}*", tx.description, brl(tx.amount));
                     let _ = writeln!(out, "  Status: compensado, não conta como despesa real");
-                } else {
-                    let _ = writeln!(out, "• {} · *{}*", tx.description, brl(tx.amount));
                 }
             }
             let _ = writeln!(out);
@@ -175,66 +195,59 @@ pub fn render_sync_message(input: &SyncMessageInput) -> String {
         );
         let _ = writeln!(out);
     }
+}
 
-    // Review block
-    if !input.review_items.is_empty() {
-        let _ = writeln!(out, "*Preciso da sua ajuda*");
-        let _ = writeln!(out);
+fn render_review_block(out: &mut String, review_items: &[ReviewItem]) {
+    if review_items.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "*Preciso da sua ajuda*");
+    let _ = writeln!(out);
 
-        const MAX_REVIEW: usize = 5;
-        let show = input.review_items.iter().take(MAX_REVIEW);
-        for item in show {
-            let _ = writeln!(out, "*{}) {}*", item.index, item.description);
-            let _ = writeln!(out, "Valor: *{}*", brl(item.amount));
+    const MAX_REVIEW: usize = 5;
+    let show = review_items.iter().take(MAX_REVIEW);
+    for item in show {
+        let _ = writeln!(out, "*{}) {}*", item.index, item.description);
+        let _ = writeln!(out, "Valor: *{}*", brl(item.amount));
 
-            if let Some(ref cats) = item.suggested_category {
-                let sub = item
-                    .suggested_subcategory
-                    .as_deref()
-                    .map(|s| format!(" > {s}"))
-                    .unwrap_or_default();
-                let _ = writeln!(out, "Sugestão: *{cats}{sub}*");
-            }
-
-            if let Some(ref name) = item.suggested_name {
-                let _ = writeln!(out, "Nome sugerido: *{name}*");
-            }
-
-            if let Some(ref rec) = item.is_recurring {
-                let _ = writeln!(out, "Recorrente: {rec}");
-            }
-            let _ = writeln!(out);
+        if let Some(ref cats) = item.suggested_category {
+            let sub = item
+                .suggested_subcategory
+                .as_deref()
+                .map(|s| format!(" > {s}"))
+                .unwrap_or_default();
+            let _ = writeln!(out, "Sugestão: *{cats}{sub}*");
         }
-
-        if input.review_items.len() > MAX_REVIEW {
-            let remaining = input.review_items.len() - MAX_REVIEW;
-            let _ = writeln!(
-                out,
-                "_… e mais {remaining} transaç{plural} para revisar_",
-                plural = if remaining == 1 { "ão" } else { "ões" }
-            );
-            let _ = writeln!(out);
+        if let Some(ref name) = item.suggested_name {
+            let _ = writeln!(out, "Nome sugerido: *{name}*");
         }
-
-        // Response instructions
-        let _ = writeln!(out, "*Responda*");
-        let _ = writeln!(out, "`1 ok` para aceitar a sugestão");
-        let _ = writeln!(out, "`2 mercado` para definir categoria");
-        let _ = writeln!(out, "`3 mercado recorrente` para marcar como recorrente");
-        let _ = writeln!(out, "`2 nome: Empório Pantanal` para corrigir o nome");
-        let _ = writeln!(out, "`todos ok` para aceitar tudo");
+        if let Some(ref rec) = item.is_recurring {
+            let _ = writeln!(out, "Recorrente: {rec}");
+        }
         let _ = writeln!(out);
     }
 
-    // Footer
-    let _ = writeln!(
-        out,
-        "_{version} · {hostname} · Pluggy sincronizado_",
-        version = input.version,
-        hostname = input.hostname,
-    );
+    if review_items.len() > MAX_REVIEW {
+        let remaining = review_items.len() - MAX_REVIEW;
+        let _ = writeln!(
+            out,
+            "_… e mais {remaining} transaç{plural} para revisar_",
+            plural = if remaining == 1 { "ão" } else { "ões" }
+        );
+        let _ = writeln!(out);
+    }
 
-    out.trim_end().to_string()
+    let _ = writeln!(out, "*Responda*");
+    let _ = writeln!(out, "`1 ok` para aceitar a sugestão");
+    let _ = writeln!(out, "`2 mercado` para definir categoria");
+    let _ = writeln!(out, "`3 mercado recorrente` para marcar como recorrente");
+    let _ = writeln!(out, "`2 nome: Empório Pantanal` para corrigir o nome");
+    let _ = writeln!(out, "`todos ok` para aceitar tudo");
+    let _ = writeln!(out);
+}
+
+fn render_footer(out: &mut String, version: &str, hostname: &str) {
+    let _ = writeln!(out, "_{version} · {hostname} · Pluggy sincronizado_",);
 }
 
 /// Renders a WhatsApp-friendly release notes message.
@@ -516,27 +529,74 @@ fn split_first_token(input: &str) -> Option<(&str, &str)> {
 // ---------------------------------------------------------------------------
 
 /// Resolve a user-facing category alias to `(category, subcategory)`.
+/// These are generic Brazilian-Portuguese terms — no personal patterns.
 pub fn resolve_category_alias(alias: &str) -> Option<(&'static str, &'static str)> {
     match alias.to_lowercase().trim() {
-        "mercado" | "supermercado" => Some(("Alimentação", "Mercado")),
-        "restaurante" => Some(("Alimentação", "Restaurante")),
-        "delivery" => Some(("Alimentação", "Delivery")),
-        "farmacia" | "farmácia" => Some(("Saúde", "Farmácia")),
-        "combustivel" | "combustível" => Some(("Transporte", "Combustível")),
-        "uber" | "99" => Some(("Transporte", "Aplicativo")),
+        // Alimentação
+        "mercado" | "supermercado" | "feira" => Some(("Alimentação", "Mercado")),
+        "restaurante" | "bar" | "lanchonete" | "padaria" => Some(("Alimentação", "Restaurante")),
+        "delivery" | "ifood" => Some(("Alimentação", "Delivery")),
+        "acougue" | "açougue" => Some(("Alimentação", "Açougue")),
+
+        // Saúde
+        "farmacia" | "farmácia" | "drogaria" => Some(("Saúde", "Farmácia")),
+        "medico" | "médico" | "consulta" => Some(("Saúde", "Consulta")),
+        "academia" | "fitness" => Some(("Saúde", "Fitness")),
+        "exame" | "laboratorio" | "laboratório" => Some(("Saúde", "Exames")),
+
+        // Transporte
+        "combustivel" | "combustível" | "gasolina" | "posto" => {
+            Some(("Transporte", "Combustível"))
+        }
+        "uber" | "99" | "cabify" => Some(("Transporte", "Aplicativo")),
+        "estacionamento" => Some(("Transporte", "Estacionamento")),
+        "onibus" | "ônibus" | "metro" | "metrô" | "trem" => Some(("Transporte", "Público")),
+
+        // Casa
         "casa" => Some(("Casa", "")),
         "limpeza" => Some(("Casa", "Limpeza")),
-        "educacao" | "educação" => Some(("Educação", "")),
+        "aluguel" => Some(("Moradia", "Aluguel")),
+        "condominio" | "condomínio" => Some(("Moradia", "Condomínio")),
+        "conta" | "contas" | "agua" | "água" | "luz" | "gas" | "gás" | "internet" => {
+            Some(("Moradia", "Contas"))
+        }
+
+        // Educação
+        "educacao" | "educação" | "escola" | "faculdade" | "curso" => Some(("Educação", "")),
+        "livro" | "livraria" => Some(("Educação", "Livros")),
+
+        // Assinaturas
         "assinaturas" | "assinatura" => Some(("Assinaturas", "")),
-        "streaming" => Some(("Assinaturas", "Streaming")),
+        "streaming" | "netflix" | "spotify" => Some(("Assinaturas", "Streaming")),
+
+        // Lazer
         "lazer" => Some(("Lazer", "")),
+        "cinema" | "teatro" | "show" => Some(("Lazer", "Entretenimento")),
+        "viagem" | "hotel" | "passagem" => Some(("Lazer", "Viagem")),
+
+        // Compras
+        "compras" => Some(("Compras", "")),
+        "roupa" | "vestuario" | "vestuário" | "calcado" | "calçado" => {
+            Some(("Compras", "Vestuário"))
+        }
+        "eletronico" | "eletrônico" | "eletrodomestico" | "eletrodoméstico" => {
+            Some(("Compras", "Eletrônicos"))
+        }
+
+        // Serviços
+        "servicos" | "serviços" => Some(("Serviços", "")),
+        "manutencao" | "manutenção" | "reparo" | "conserto" => Some(("Serviços", "Manutenção")),
+
+        // Outros
+        "pessoal" | "cabeleireiro" | "barbearia" | "estetica" | "estética" => {
+            Some(("Pessoal", ""))
+        }
+        "pet" | "veterinario" | "veterinário" => Some(("Lazer", "Pet")),
+        "investimentos" | "investimento" => Some(("Investimentos", "")),
         "saude" | "saúde" => Some(("Saúde", "")),
         "transporte" => Some(("Transporte", "")),
         "moradia" => Some(("Moradia", "")),
-        "compras" => Some(("Compras", "")),
-        "servicos" | "serviços" => Some(("Serviços", "")),
-        "pessoal" => Some(("Pessoal", "")),
-        "investimentos" | "investimento" => Some(("Investimentos", "")),
+
         _ => None,
     }
 }
@@ -969,70 +1029,106 @@ fn is_truncated_description(desc: &str) -> bool {
     !last_few.contains(' ')
 }
 
-/// Suggest a category based on Pluggy mapping or heuristics.
+/// Suggest a category based on what's already known about the transaction.
+///
+/// Does NOT embed merchant-specific keywords — user patterns live in the
+/// `rules` table, not in shared code (AGENTS.md privacy rule).
 fn suggest_category(tx: &SyncSummaryTransaction) -> (Option<String>, Option<String>) {
-    // If transaction already has a category from rules, use that
+    // If transaction already has a category from rules or Pluggy, surface it.
     if let Some(ref cat_id) = tx.category_id {
         let family = category_family(Some(cat_id));
         let sub = cat_id.split(':').nth(1).map(|s| s.to_string());
         return (family, sub);
     }
 
-    // Default: hint from description
+    // Generic keyword hints from the description — only category-level signals,
+    // never specific merchant names.
     let desc = tx.description.to_lowercase();
-    let (cat, sub) = if desc.contains("mercado")
-        || desc.contains("supermercado")
-        || desc.contains("gimpel")
-        || desc.contains("imperat")
-        || desc.contains("emporio")
-    {
-        (Some("Alimentação".to_string()), Some("Mercado".to_string()))
+    if desc.contains("farmacia") || desc.contains("farmácia") || desc.contains("drogaria") {
+        (Some("Saúde".to_string()), Some("Farmácia".to_string()))
     } else if desc.contains("restaurante")
-        || desc.contains("madero")
         || desc.contains("lanchonete")
         || desc.contains("padaria")
+        || desc.contains("pizzaria")
     {
         (
             Some("Alimentação".to_string()),
             Some("Restaurante".to_string()),
         )
-    } else if desc.contains("uber") || desc.contains("99 ") {
+    } else if desc.contains("mercado") || desc.contains("supermercado") {
+        (Some("Alimentação".to_string()), Some("Mercado".to_string()))
+    } else if desc.contains("combustivel") || desc.contains("combustível") || desc.contains("posto")
+    {
+        (
+            Some("Transporte".to_string()),
+            Some("Combustível".to_string()),
+        )
+    } else if desc.contains("uber") || desc.contains("99 ") || desc.contains("cabify") {
         (
             Some("Transporte".to_string()),
             Some("Aplicativo".to_string()),
         )
-    } else if desc.contains("farmacia") || desc.contains("farmácia") || desc.contains("drogaria") {
-        (Some("Saúde".to_string()), Some("Farmácia".to_string()))
+    } else if desc.contains("academia") || desc.contains("gym") {
+        (Some("Saúde".to_string()), Some("Fitness".to_string()))
+    } else if desc.contains("streaming")
+        || desc.contains("netflix")
+        || desc.contains("spotify")
+        || desc.contains("prime video")
+    {
+        (
+            Some("Assinaturas".to_string()),
+            Some("Streaming".to_string()),
+        )
     } else {
         (None, None)
-    };
-
-    (cat, sub)
+    }
 }
 
 /// Attempt to clean up a merchant name.
 fn suggest_name(description: &str) -> Option<String> {
     let cleaned = description.trim();
 
-    // Strip known prefixes
+    // Strip known acquirer/gateway prefixes (Brazilian market).
+    // These are generic infrastructure identifiers, not personal data.
     let prefixes = [
         "Mp *",
         "Mp*",
+        "MP *",
+        "MP*",
         "Mercadopago",
         "MercadoPago",
         "Mercado Pago",
         "Pag*",
         "Pag *",
+        "PagSeguro",
+        "Pag Seguro",
         "Pagamento",
+        "Pagamento de",
         "Stone",
+        "Stone *",
         "Cielo",
+        "Cielo *",
         "Rede",
+        "Rede *",
         "PicPay",
         "Pic Pay",
         "SumUp",
         "Sum Up",
         "Getnet",
+        "GetNet",
         "Ton",
+        "TON",
+        "Ton *",
+        "Pix *",
+        "PIX *",
+        "Ifood *",
+        "iFood *",
+        "Uber *",
+        "Uber",
+        "99 *",
+        "99Pop",
+        "Rappi",
+        "Rappi *",
     ];
     let mut name = cleaned.to_string();
     for prefix in &prefixes {

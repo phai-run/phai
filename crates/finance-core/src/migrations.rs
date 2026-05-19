@@ -4,7 +4,7 @@ use anyhow::Result;
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 29] = [
+const SQLITE_MIGRATIONS: [Migration; 30] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -121,9 +121,13 @@ const SQLITE_MIGRATIONS: [Migration; 29] = [
         "029_dedup_cashflow_card_summary",
         include_str!("../../../schema/sqlite/029_dedup_cashflow_card_summary.sql"),
     ),
+    (
+        "031_amount_cents_views_fix",
+        include_str!("../../../schema/sqlite/031_amount_cents_views_fix.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 30] = [
+const BIGQUERY_MIGRATIONS: [Migration; 31] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -243,6 +247,10 @@ const BIGQUERY_MIGRATIONS: [Migration; 30] = [
     (
         "030_dedup_cashflow_card_summary",
         include_str!("../../../schema/bigquery/030_dedup_cashflow_card_summary.sql"),
+    ),
+    (
+        "031_amount_cents_views_fix",
+        include_str!("../../../schema/bigquery/031_amount_cents_views_fix.sql"),
     ),
 ];
 
