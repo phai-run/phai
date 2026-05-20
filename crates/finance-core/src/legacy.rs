@@ -255,6 +255,27 @@ pub fn load_legacy_bundle(finance_root: &Path, actor_id: &str) -> Result<LegacyI
                             "credit".to_string()
                         }
                     });
+                let raw_description = row
+                    .get("descricao_raw")
+                    .or_else(|| row.get("descricao"))
+                    .cloned()
+                    .unwrap_or_default();
+                let description = row
+                    .get("descricao_canonica")
+                    .cloned()
+                    .filter(|value| !value.trim().is_empty());
+                let merchant_name = row
+                    .get("merchant_name")
+                    .cloned()
+                    .filter(|value| !value.trim().is_empty());
+                let purpose = row
+                    .get("contexto_finalidade")
+                    .cloned()
+                    .filter(|value| !value.trim().is_empty());
+                let classifier_trace = row
+                    .get("classificacao_regra")
+                    .cloned()
+                    .filter(|value| !value.trim().is_empty());
                 bundle.transactions.push(TransactionRecord {
                     transaction_id: transaction_id.clone(),
                     account_id: row
@@ -262,7 +283,10 @@ pub fn load_legacy_bundle(finance_root: &Path, actor_id: &str) -> Result<LegacyI
                         .cloned()
                         .filter(|value| !value.trim().is_empty()),
                     transaction_date,
-                    description: row.get("descricao").cloned().unwrap_or_default(),
+                    raw_description,
+                    description,
+                    merchant_name,
+                    purpose,
                     amount,
                     tx_type,
                     category_id: category.map(|value| category_id(value, subcategory)),
@@ -271,10 +295,8 @@ pub fn load_legacy_bundle(finance_root: &Path, actor_id: &str) -> Result<LegacyI
                         .cloned()
                         .filter(|value| !value.trim().is_empty())
                         .unwrap_or_else(|| "legacy".to_string()),
-                    context: row
-                        .get("contexto_finalidade")
-                        .cloned()
-                        .filter(|value| !value.trim().is_empty()),
+                    context: None,
+                    classifier_trace,
                     payment_status: row
                         .get("status_pagamento")
                         .cloned()

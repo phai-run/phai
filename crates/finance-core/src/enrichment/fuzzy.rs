@@ -61,7 +61,7 @@ pub fn fuzzy_filter(
         .into_iter()
         .filter_map(|rec| {
             let mut buf = Vec::new();
-            let haystack = Utf32Str::new(&rec.description, &mut buf);
+            let haystack = Utf32Str::new(&rec.raw_description, &mut buf);
             let score = atom.score(haystack, &mut matcher)? as u32;
             if score >= threshold {
                 Some((rec, score))
@@ -93,12 +93,16 @@ mod tests {
             transaction_id: id.to_string(),
             account_id: None,
             transaction_date: NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
-            description: desc.to_string(),
+            raw_description: desc.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
             amount: Decimal::new(-1000, 2),
             tx_type: "debit".to_string(),
             category_id: None,
             category_source: "unclassified".to_string(),
             context: None,
+            classifier_trace: None,
             payment_status: "confirmed".to_string(),
             source: "pluggy".to_string(),
             actor_id: "u".to_string(),

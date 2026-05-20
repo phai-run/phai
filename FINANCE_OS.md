@@ -15,8 +15,9 @@ Repository-level guidance for any agent (OpenClaw, Claude, ChatGPT, Codex, etc.)
 
 - Never invent categories.
 - Category assignment must come from Finance OS rules and effective overrides in the runtime database/view layer.
-- User-facing transaction naming must prioritize effective context:
-  - `display_label = context when present; otherwise original description`
+- User-facing transaction naming must prioritize the human anatomy fields:
+  - `display_label = description when present; otherwise merchant_name; otherwise raw_description`
+- `classifier_trace` is technical/debug output and must not appear in normal family-facing reports.
 - Transaction names should appear with an emoji prefix from Finance OS display rules.
 
 ## Interaction Consistency
@@ -26,7 +27,7 @@ When answering users about recent transactions or daily finance activity:
 1. Use CLI output as primary evidence.
 2. Preserve Finance OS display labels and category display strings.
 3. Do not replace Finance OS labels with raw institution text unless asked.
-4. If data is ambiguous, ask for transaction ID and then persist context/category through CLI commands.
+4. If data is ambiguous, ask for transaction ID and then persist description/merchant/purpose/category through CLI commands.
 
 For card-bill requests, disambiguate intent before answering:
 

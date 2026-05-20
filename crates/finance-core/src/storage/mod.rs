@@ -12,10 +12,19 @@ use crate::splits::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use std::collections::BTreeSet;
 
 pub mod bigquery;
 pub mod local;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TransactionAnatomyPatch<'a> {
+    pub description: Option<&'a str>,
+    pub merchant_name: Option<&'a str>,
+    pub purpose: Option<&'a str>,
+    pub classifier_trace: Option<&'a str>,
+}
 
 const ALLOWED_TABLES: &[&str] = &[
     "schema_versions",
@@ -80,7 +89,15 @@ pub trait FinanceStore {
         transaction_id: &str,
         category_id: Option<&str>,
         category_source: Option<&str>,
-        context: Option<&str>,
+        classifier_trace: Option<&str>,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()>;
+
+    async fn update_transaction_anatomy(
+        &self,
+        transaction_id: &str,
+        patch: TransactionAnatomyPatch<'_>,
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()>;
@@ -94,6 +111,16 @@ pub trait FinanceStore {
         &self,
         limit: usize,
     ) -> Result<Vec<TransactionRecord>>;
+    async fn pending_human_descriptions(&self, limit: usize) -> Result<Vec<TransactionRecord>>;
+    async fn pending_merchants(&self, limit: usize) -> Result<Vec<TransactionRecord>>;
+    async fn pending_purposes(
+        &self,
+        min_abs_amount: Decimal,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>>;
+    async fn count_pending_human_descriptions(&self) -> Result<i64>;
+    async fn count_pending_merchants(&self) -> Result<i64>;
+    async fn count_pending_purposes(&self, min_abs_amount: Decimal) -> Result<i64>;
 
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>>;
     async fn transaction_by_id(&self, transaction_id: &str) -> Result<Option<TransactionRecord>>;

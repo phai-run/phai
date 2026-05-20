@@ -1,5 +1,4 @@
 use crate::idempotency::{account_idempotency, category_id, pluggy_transaction_idempotency};
-use crate::installments::parse_installment_description;
 use crate::legacy::{load_account_registry, AccountRegistryEntry};
 use crate::models::{
     json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
@@ -488,11 +487,18 @@ fn build_transaction_record(
         let slug = category_id(value, None);
         normalize_pluggy_category(&slug).to_string()
     });
+    let raw_description = payload
+        .extra
+        .get("descriptionRaw")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(payload.description.as_str())
+        .to_string();
     // For foreign-currency charges, work in BRL from the start so rule matchers
     // that key on amount see the value the user sees on the statement.
     let account_amount = resolve_account_currency_amount(&payload);
     let rule_application = apply_rules_with_facts(
-        &payload.description,
+        &raw_description,
         Some(account_amount),
         Some(payload.id.as_str()),
         category_key,
@@ -526,12 +532,15 @@ fn build_transaction_record(
     let is_genuine_credit = category_id
         .as_deref()
         .is_some_and(|c| matches!(c, "cashback" | "refund") || internal_categories.contains(c));
-    let (mut amount, mut tx_type) =
-        if is_credit_account && account_amount.is_sign_positive() && !is_genuine_credit {
-            (-account_amount, "debit".to_string())
-        } else {
-            (account_amount, tx_type)
-        };
+    let (mut amount, mut tx_type) = if is_credit_account
+        && account_amount.is_sign_positive()
+        && tx_type != "credit"
+        && !is_genuine_credit
+    {
+        (-account_amount, "debit".to_string())
+    } else {
+        (account_amount, tx_type)
+    };
     match rule_application.amount_sign {
         Some(AmountSign::Positive) => {
             amount = amount.abs();
@@ -558,56 +567,22 @@ fn build_transaction_record(
     let created_at = parse_datetime_or_now(payload.created_at.as_deref());
     let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
 
-    // Pluggy often normalises credit-card descriptions (e.g. "AMAZON PRIME"
-    // instead of "AMAZON PRIME 1/4"). Fall back to descriptionRaw when it
-    // carries an installment marker that the clean description lacks; if
-    // neither text field has a marker but creditCardMetadata has structured
-    // installment numbers, append "N/T" so every downstream parser sees it.
-    let description = {
-        let base = payload.description.as_str();
-        if parse_installment_description(base).is_some() {
-            base.to_string()
-        } else if let Some(raw) = payload
-            .extra
-            .get("descriptionRaw")
-            .and_then(|v| v.as_str())
-            .filter(|s| parse_installment_description(s).is_some())
-        {
-            raw.to_string()
-        } else if let (Some(current), Some(total)) = (
-            payload
-                .extra
-                .get("creditCardMetadata")
-                .and_then(|m| m.get("installmentNumber"))
-                .and_then(|v| v.as_u64()),
-            payload
-                .extra
-                .get("creditCardMetadata")
-                .and_then(|m| m.get("totalInstallments"))
-                .and_then(|v| v.as_u64()),
-        ) {
-            if current > 0 && total > 0 && current <= total && total <= 99 {
-                format!("{} {}/{}", base.trim(), current, total)
-            } else {
-                base.to_string()
-            }
-        } else {
-            base.to_string()
-        }
-    };
-
     Ok(TransactionRecord {
         transaction_id: payload.id.clone(),
         account_id: registry
             .map(|entry| entry.account_id.clone())
             .or_else(|| Some(binding.id.clone())),
         transaction_date,
-        description,
+        raw_description,
+        description: None,
+        merchant_name: None,
+        purpose: None,
         amount,
         tx_type,
         category_id,
         category_source,
-        context,
+        context: None,
+        classifier_trace: context,
         payment_status: normalize_payment_status(
             payload
                 .status
@@ -1301,14 +1276,9 @@ mod tests {
         .unwrap();
 
         assert!(
-            tx.description.ends_with("3/10"),
-            "description deve terminar com '3/10', obteve: {:?}",
-            tx.description
-        );
-        assert!(
-            crate::installments::parse_installment_description(&tx.description).is_some(),
-            "description enriquecida deve ser parseável, obteve: {:?}",
-            tx.description
+            tx.raw_description.contains("Notebook Pro"),
+            "raw_description deve preservar texto Pluggy, obteve: {:?}",
+            tx.raw_description
         );
     }
 
@@ -1342,9 +1312,9 @@ mod tests {
         .unwrap();
 
         assert!(
-            tx.description.contains("2/6"),
-            "description deve conter '2/6', obteve: {:?}",
-            tx.description
+            tx.raw_description.contains("2/6"),
+            "raw_description deve conter '2/6', obteve: {:?}",
+            tx.raw_description
         );
     }
 

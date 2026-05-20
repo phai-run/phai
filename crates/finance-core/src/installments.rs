@@ -217,7 +217,7 @@ pub fn group_into_chains(transactions: &[TransactionRecord]) -> Vec<InstallmentC
     let mut groups: BTreeMap<Key, Vec<TransactionRecord>> = BTreeMap::new();
 
     for tx in transactions {
-        let marker = match parse_installment_description(&tx.description) {
+        let marker = match parse_installment_description(&tx.raw_description) {
             Some(m) => m,
             None => continue,
         };
@@ -239,7 +239,7 @@ pub fn group_into_chains(transactions: &[TransactionRecord]) -> Vec<InstallmentC
                 let current = installments
                     .iter()
                     .filter_map(|tx| {
-                        parse_installment_description(&tx.description).map(|m| m.current)
+                        parse_installment_description(&tx.raw_description).map(|m| m.current)
                     })
                     .max()
                     .unwrap_or(0);
@@ -425,12 +425,16 @@ mod tests {
             transaction_id: id.to_string(),
             account_id: Some(account_id.to_string()),
             transaction_date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
-            description: description.to_string(),
+            raw_description: description.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
             amount: Decimal::from_str("-100.00").unwrap(),
             tx_type: "DEBIT".to_string(),
             category_id: None,
             category_source: "manual".to_string(),
             context: None,
+            classifier_trace: None,
             payment_status: "posted".to_string(),
             source: "manual".to_string(),
             actor_id: "test".to_string(),

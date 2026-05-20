@@ -87,9 +87,13 @@ Key fields (non-exhaustive):
 | `account_id` | `String` | FK to `AccountRecord` |
 | `posted_at` | `DateTime<Utc>` | Effective transaction date |
 | `amount` | `Decimal` | Signed; expenses negative, income positive. Credit-card sign normalization happens in views, not at write time |
-| `description` | `String` | Raw bank text. The user-facing label is computed by the `display_labels` view |
+| `raw_description` | `String` | Original bank/Pluggy text used for rules, audit, technical search, and debugging |
+| `description` | `Option<String>` | Short human description of what was bought; user-facing views fall back to merchant/raw text when empty |
+| `merchant_name` | `Option<String>` | Clean establishment name for grouping and enrichment suggestions |
+| `purpose` | `Option<String>` | Optional human intent/reason for the purchase |
 | `category` | `Option<String>` | Effective category from rules + overrides; views resolve precedence |
-| `context` | `Option<String>` | Free-form annotation set by `tx set-context` |
+| `classifier_trace` | `Option<String>` | Technical rule/enrichment trace; not shown in normal reports |
+| `context` | `Option<String>` | Deprecated compatibility column; use the explicit anatomy fields instead |
 | `metadata` | `Value` (JSON) | Aggregator-specific payload — Pluggy installment markers, MCC, original currency, etc. |
 
 ### `AuditEvent`
@@ -138,7 +142,7 @@ Reports do not read raw tables. They read **views** that encode the business mea
 | View | What it bakes in | Migration |
 |---|---|---|
 | `effective_transactions` | Internal-transfer exclusion, rule-based category, override precedence | `012_effective_transactions_view.sql` |
-| `display_labels` | User-facing label: `context ?? description`, emoji prefix from display rules | `013_display_labels_view.sql` |
+| `display_labels` | User-facing label: `description ?? merchant_name ?? raw_description`, emoji prefix from display rules | `033_transaction_anatomy.sql` |
 | `reportable_transactions` | What appears in user-facing reports (post-exclusion, post-categorization) | `015_reportable_transactions_view.sql` (sqlite) / `014_…` (bigquery) |
 
 Adding a new report:
@@ -151,7 +155,7 @@ Adding a new report:
 
 ## Rules Engine
 
-`rules.rs` defines `RuleRecord` and the matching algorithm: ordered, first-match-wins, with conditions on description regex, account, amount range, and date range. Rules are runtime data, not code — the only path to add personal classification logic.
+`rules.rs` defines `RuleRecord` and the matching algorithm: ordered, first-match-wins, with conditions on `raw_description`, account, amount range, and date range. Rules are runtime data, not code — the only path to add personal classification logic.
 
 **Never** hardcode a counterparty pattern in `enrichment/heuristics.rs` or in a migration. If it's specific to one user's bank statement, it goes in the `rules` table on that user's machine.
 

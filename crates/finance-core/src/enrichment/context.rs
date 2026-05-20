@@ -27,7 +27,7 @@ pub fn extract_pluggy_category(metadata: &Value) -> Option<String> {
 /// Build a context row from a stored transaction.
 pub fn build_context_tx(record: &TransactionRecord) -> ContextTx {
     ContextTx {
-        description: record.description.clone(),
+        description: record.raw_description.clone(),
         amount: record.amount,
         pluggy_category: extract_pluggy_category(&record.metadata_json),
         order: extract_order(&record.metadata_json),

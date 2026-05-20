@@ -1,4 +1,4 @@
-use super::FinanceStore;
+use super::{FinanceStore, TransactionAnatomyPatch};
 use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
@@ -312,25 +312,33 @@ fn optional_json(values: &[Option<String>], index: usize, field: &str) -> Result
 }
 
 fn transaction_record_from_values(values: &[Option<String>]) -> Result<TransactionRecord> {
-    let created_at = required_string(values, 14, "created_at")?;
-    let updated_at = required_string(values, 15, "updated_at")?;
+    let created_at = required_string(values, 18, "created_at")?;
+    let updated_at = required_string(values, 19, "updated_at")?;
     let enrichment_attempted_at =
-        optional_string(values, 16).map(|raw| parse_datetime_or_now(Some(&raw)));
+        optional_string(values, 20).map(|raw| parse_datetime_or_now(Some(&raw)));
+    let description = optional_string(values, 4);
+    let raw_description = optional_string(values, 3)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| description.clone().unwrap_or_default());
     Ok(TransactionRecord {
         transaction_id: required_string(values, 0, "transaction_id")?,
         account_id: optional_string(values, 1),
         transaction_date: required_date(values, 2, "transaction_date")?,
-        description: required_string(values, 3, "description")?,
-        amount: required_decimal(values, 4, "amount")?,
-        tx_type: required_string(values, 5, "tx_type")?,
-        category_id: optional_string(values, 6),
-        category_source: required_string(values, 7, "category_source")?,
-        context: optional_string(values, 8),
-        payment_status: required_string(values, 9, "payment_status")?,
-        source: required_string(values, 10, "source")?,
-        actor_id: required_string(values, 11, "actor_id")?,
-        idempotency_key: required_string(values, 12, "idempotency_key")?,
-        metadata_json: optional_json(values, 13, "metadata_json")?.unwrap_or_else(|| json!({})),
+        raw_description,
+        description,
+        merchant_name: optional_string(values, 5),
+        purpose: optional_string(values, 6),
+        amount: required_decimal(values, 7, "amount")?,
+        tx_type: required_string(values, 8, "tx_type")?,
+        category_id: optional_string(values, 9),
+        category_source: required_string(values, 10, "category_source")?,
+        context: optional_string(values, 11),
+        classifier_trace: optional_string(values, 12),
+        payment_status: required_string(values, 13, "payment_status")?,
+        source: required_string(values, 14, "source")?,
+        actor_id: required_string(values, 15, "actor_id")?,
+        idempotency_key: required_string(values, 16, "idempotency_key")?,
+        metadata_json: optional_json(values, 17, "metadata_json")?.unwrap_or_else(|| json!({})),
         created_at: parse_datetime_or_now(Some(&created_at)),
         updated_at: parse_datetime_or_now(Some(&updated_at)),
         enrichment_attempted_at,
@@ -664,18 +672,24 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             SELECT
-              transaction_id, account_id, transaction_date, description, CAST(amount AS STRING),
-              tx_type, category_id, category_source, context, payment_status, source,
-              actor_id, idempotency_key, TO_JSON_STRING(metadata_json),
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              TO_JSON_STRING(metadata_json),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
             FROM {}
-            WHERE LOWER(description) LIKE {}
+            WHERE LOWER(COALESCE(raw_description, '')) LIKE {}
+               OR LOWER(COALESCE(description, '')) LIKE {}
+               OR LOWER(COALESCE(merchant_name, '')) LIKE {}
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT {}
             ",
             self.qualified_table("transactions")?,
+            sql_string(&pattern),
+            sql_string(&pattern),
             sql_string(&pattern),
             limit,
         );
@@ -694,14 +708,16 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             SELECT
-              transaction_id, account_id, transaction_date, description, CAST(amount AS STRING),
-              tx_type, category_id, category_source, context, payment_status, source,
-              actor_id, idempotency_key, TO_JSON_STRING(metadata_json),
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              TO_JSON_STRING(metadata_json),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
             FROM {}
-            WHERE context IS NULL
+            WHERE description IS NULL
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT {}
             ",
@@ -716,6 +732,161 @@ impl FinanceStore for BigQueryStore {
             .collect()
     }
 
+    async fn pending_human_descriptions(&self, limit: usize) -> Result<Vec<TransactionRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
+            FROM {}
+            WHERE (description IS NULL OR TRIM(description) = '')
+              AND ABS(amount) > 0
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            LIMIT {}
+            ",
+            self.qualified_table("transactions")?,
+            limit,
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
+    }
+
+    async fn pending_merchants(&self, limit: usize) -> Result<Vec<TransactionRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
+            FROM {}
+            WHERE (merchant_name IS NULL OR TRIM(merchant_name) = '')
+              AND category_source != 'unclassified'
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            LIMIT {}
+            ",
+            self.qualified_table("transactions")?,
+            limit,
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
+    }
+
+    async fn pending_purposes(
+        &self,
+        min_abs_amount: Decimal,
+        limit: usize,
+    ) -> Result<Vec<TransactionRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
+            FROM {}
+            WHERE (purpose IS NULL OR TRIM(purpose) = '')
+              AND ABS(amount) >= {}
+              AND category_id IS NOT NULL
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            LIMIT {}
+            ",
+            self.qualified_table("transactions")?,
+            sql_decimal(&min_abs_amount.abs()),
+            limit,
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
+    }
+
+    async fn count_pending_human_descriptions(&self) -> Result<i64> {
+        let sql = format!(
+            "
+            SELECT CAST(COUNT(*) AS STRING)
+            FROM {}
+            WHERE (description IS NULL OR TRIM(description) = '')
+              AND ABS(amount) > 0
+            ",
+            self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let count = response
+            .rows
+            .first()
+            .and_then(|row| row.f.first())
+            .and_then(|cell| parse_scalar_string(&cell.v))
+            .unwrap_or_else(|| "0".to_string());
+        Ok(count.parse().unwrap_or(0))
+    }
+
+    async fn count_pending_merchants(&self) -> Result<i64> {
+        let sql = format!(
+            "
+            SELECT CAST(COUNT(*) AS STRING)
+            FROM {}
+            WHERE (merchant_name IS NULL OR TRIM(merchant_name) = '')
+              AND category_source != 'unclassified'
+            ",
+            self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let count = response
+            .rows
+            .first()
+            .and_then(|row| row.f.first())
+            .and_then(|cell| parse_scalar_string(&cell.v))
+            .unwrap_or_else(|| "0".to_string());
+        Ok(count.parse().unwrap_or(0))
+    }
+
+    async fn count_pending_purposes(&self, min_abs_amount: Decimal) -> Result<i64> {
+        let sql = format!(
+            "
+            SELECT CAST(COUNT(*) AS STRING)
+            FROM {}
+            WHERE (purpose IS NULL OR TRIM(purpose) = '')
+              AND ABS(amount) >= {}
+              AND category_id IS NOT NULL
+            ",
+            self.qualified_table("transactions")?,
+            sql_decimal(&min_abs_amount.abs()),
+        );
+        let response = self.run_query(&sql).await?;
+        let count = response
+            .rows
+            .first()
+            .and_then(|row| row.f.first())
+            .and_then(|cell| parse_scalar_string(&cell.v))
+            .unwrap_or_else(|| "0".to_string());
+        Ok(count.parse().unwrap_or(0))
+    }
+
     async fn upsert_transactions(&self, rows: &[TransactionRecord]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -724,17 +895,21 @@ impl FinanceStore for BigQueryStore {
             .iter()
             .map(|row| {
                 format!(
-                    "SELECT {} AS transaction_id, {} AS account_id, {} AS transaction_date, {} AS description, {} AS amount, {} AS amount_cents, {} AS tx_type, {} AS category_id, {} AS category_source, {} AS context, {} AS payment_status, {} AS source, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
+                    "SELECT {} AS transaction_id, {} AS account_id, {} AS transaction_date, {} AS raw_description, {} AS description, {} AS merchant_name, {} AS purpose, {} AS amount, {} AS amount_cents, {} AS tx_type, {} AS category_id, {} AS category_source, {} AS context, {} AS classifier_trace, {} AS payment_status, {} AS source, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at, {} AS enrichment_attempted_at",
                     sql_string(&row.transaction_id),
                     sql_optional_string(row.account_id.as_deref()),
                     sql_date(row.transaction_date),
-                    sql_string(&row.description),
+                    sql_string(&row.raw_description),
+                    sql_optional_string(row.description.as_deref()),
+                    sql_optional_string(row.merchant_name.as_deref()),
+                    sql_optional_string(row.purpose.as_deref()),
                     sql_decimal(&row.amount),
                     (row.amount * Decimal::from(100_i64)).round().to_i64().unwrap_or(0),
                     sql_string(&row.tx_type),
                     sql_optional_string(row.category_id.as_deref()),
                     sql_string(&row.category_source),
                     sql_optional_string(row.context.as_deref()),
+                    sql_optional_string(row.classifier_trace.as_deref()),
                     sql_string(&row.payment_status),
                     sql_string(&row.source),
                     sql_string(&row.actor_id),
@@ -742,6 +917,9 @@ impl FinanceStore for BigQueryStore {
                     sql_json(&row.metadata_json),
                     sql_timestamp(row.created_at),
                     sql_timestamp(row.updated_at),
+                    row.enrichment_attempted_at
+                        .map(sql_timestamp)
+                        .unwrap_or_else(|| "CAST(NULL AS TIMESTAMP)".to_string()),
                 )
             })
             .collect::<Vec<_>>()
@@ -755,13 +933,16 @@ impl FinanceStore for BigQueryStore {
             WHEN MATCHED THEN UPDATE SET
               account_id = source.account_id,
               transaction_date = source.transaction_date,
-              description = source.description,
+              raw_description = COALESCE(NULLIF(target.raw_description, ''), source.raw_description),
+              description = IF(source.source = 'pluggy', COALESCE(target.description, source.description), source.description),
+              merchant_name = COALESCE(target.merchant_name, source.merchant_name),
+              purpose = COALESCE(target.purpose, source.purpose),
               amount = source.amount,
               amount_cents = source.amount_cents,
               tx_type = source.tx_type,
               category_id = IF(target.category_source = 'manual', target.category_id, source.category_id),
               category_source = IF(target.category_source = 'manual', target.category_source, source.category_source),
-              context = IF(target.category_source = 'manual', target.context, source.context),
+              classifier_trace = IF(target.category_source = 'manual', target.classifier_trace, source.classifier_trace),
               payment_status = source.payment_status,
               source = source.source,
               actor_id = source.actor_id,
@@ -769,13 +950,17 @@ impl FinanceStore for BigQueryStore {
               metadata_json = source.metadata_json,
               updated_at = source.updated_at
             WHEN NOT MATCHED THEN INSERT (
-              transaction_id, account_id, transaction_date, description, amount, amount_cents, tx_type,
-              category_id, category_source, context, payment_status, source, actor_id,
-              idempotency_key, metadata_json, created_at, updated_at
+              transaction_id, account_id, transaction_date, raw_description, description,
+              merchant_name, purpose, amount, amount_cents, tx_type, category_id,
+              category_source, context, classifier_trace, payment_status, source, actor_id,
+              idempotency_key, metadata_json, created_at, updated_at, enrichment_attempted_at
             ) VALUES (
-              source.transaction_id, source.account_id, source.transaction_date, source.description, source.amount, source.amount_cents, source.tx_type,
-              source.category_id, source.category_source, source.context, source.payment_status, source.source, source.actor_id,
-              source.idempotency_key, source.metadata_json, source.created_at, source.updated_at
+              source.transaction_id, source.account_id, source.transaction_date, source.raw_description,
+              source.description, source.merchant_name, source.purpose, source.amount,
+              source.amount_cents, source.tx_type, source.category_id, source.category_source,
+              source.context, source.classifier_trace, source.payment_status, source.source,
+              source.actor_id, source.idempotency_key, source.metadata_json, source.created_at,
+              source.updated_at, source.enrichment_attempted_at
             )
             ",
             self.qualified_table("transactions")?,
@@ -1241,7 +1426,7 @@ impl FinanceStore for BigQueryStore {
         transaction_id: &str,
         category_id: Option<&str>,
         category_source: Option<&str>,
-        context: Option<&str>,
+        classifier_trace: Option<&str>,
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()> {
@@ -1250,7 +1435,7 @@ impl FinanceStore for BigQueryStore {
             UPDATE {}
             SET category_id = COALESCE({}, category_id),
                 category_source = COALESCE({}, category_source),
-                context = COALESCE({}, context),
+                classifier_trace = COALESCE({}, classifier_trace),
                 actor_id = {},
                 idempotency_key = {},
                 updated_at = CURRENT_TIMESTAMP()
@@ -1259,7 +1444,50 @@ impl FinanceStore for BigQueryStore {
             self.qualified_table("transactions")?,
             sql_optional_string(category_id),
             sql_optional_string(category_source),
-            sql_optional_string(context),
+            sql_optional_string(classifier_trace),
+            sql_string(actor_id),
+            sql_string(idempotency_key),
+            sql_string(transaction_id),
+        );
+        let resp = self.run_query(&sql).await?;
+        let affected: i64 = resp
+            .num_dml_affected_rows
+            .as_deref()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        if affected == 0 {
+            anyhow::bail!("Transação {transaction_id} não encontrada");
+        }
+        Ok(())
+    }
+
+    async fn update_transaction_anatomy(
+        &self,
+        transaction_id: &str,
+        patch: TransactionAnatomyPatch<'_>,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let sql = format!(
+            "
+            UPDATE {}
+            SET description = COALESCE({}, description),
+                merchant_name = COALESCE({}, merchant_name),
+                purpose = COALESCE({}, purpose),
+                classifier_trace = COALESCE({}, classifier_trace),
+                context = COALESCE({}, context),
+                actor_id = {},
+                idempotency_key = {},
+                updated_at = CURRENT_TIMESTAMP()
+            WHERE transaction_id = {}
+            ",
+            self.qualified_table("transactions")?,
+            sql_optional_string(patch.description),
+            sql_optional_string(patch.merchant_name),
+            sql_optional_string(patch.purpose),
+            sql_optional_string(patch.classifier_trace),
+            sql_optional_string(patch.description),
             sql_string(actor_id),
             sql_string(idempotency_key),
             sql_string(transaction_id),
@@ -1310,12 +1538,16 @@ impl FinanceStore for BigQueryStore {
               transaction_id,
               account_id,
               CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''),
               description,
+              merchant_name,
+              purpose,
               CAST(amount AS STRING),
               tx_type,
               category_id,
               category_source,
               context,
+              classifier_trace,
               payment_status,
               source,
               actor_id,
@@ -1527,11 +1759,11 @@ impl FinanceStore for BigQueryStore {
             SELECT
               t.transaction_id,
               CAST(t.transaction_date AS STRING),
-              t.description,
+              COALESCE(t.description, t.merchant_name, t.raw_description) AS description,
               CAST(t.amount AS STRING),
               t.account_id,
               t.category_id,
-              t.context,
+              t.classifier_trace,
               p.policy_id,
               p.name,
               p.match_type
@@ -1539,7 +1771,7 @@ impl FinanceStore for BigQueryStore {
             JOIN {} p
               ON p.status = 'active'
              AND (
-               (p.match_type = 'description_contains' AND STRPOS(LOWER(t.description), LOWER(p.match_value)) > 0)
+               (p.match_type = 'description_contains' AND STRPOS(LOWER(t.raw_description), LOWER(p.match_value)) > 0)
                OR (p.match_type = 'category_prefix' AND STARTS_WITH(COALESCE(t.category_id, ''), p.match_value))
                OR (p.match_type = 'account_id' AND COALESCE(t.account_id, '') = p.match_value)
              )
@@ -1737,7 +1969,7 @@ impl FinanceStore for BigQueryStore {
             SELECT
               t.transaction_id,
               CAST(t.transaction_date AS STRING),
-              t.display_label,
+              t.raw_description,
               CAST(t.amount AS STRING),
               t.account_id,
               a.label,
@@ -1837,19 +2069,24 @@ impl FinanceStore for BigQueryStore {
               transaction_id,
               account_id,
               CAST(transaction_date AS STRING),
+              raw_description,
               description,
+              merchant_name,
+              purpose,
               CAST(amount AS STRING),
               tx_type,
               category_id,
               category_source,
               context,
+              classifier_trace,
               payment_status,
               source,
               actor_id,
               idempotency_key,
               COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
               CAST(created_at AS STRING),
-              CAST(updated_at AS STRING)
+              CAST(updated_at AS STRING),
+              CAST(enrichment_attempted_at AS STRING)
             FROM {}
             WHERE transaction_date >= {}
               AND transaction_date <= {}
@@ -1883,12 +2120,16 @@ impl FinanceStore for BigQueryStore {
               transaction_id,
               account_id,
               CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''),
               description,
+              merchant_name,
+              purpose,
               CAST(amount AS STRING),
               tx_type,
               category_id,
               category_source,
               context,
+              classifier_trace,
               payment_status,
               source,
               actor_id,
@@ -2111,8 +2352,8 @@ impl FinanceStore for BigQueryStore {
               t.account_id,
               t.transaction_id,
               CAST(t.transaction_date AS STRING),
-              t.display_label,
-              t.description,
+              t.raw_description,
+              COALESCE(t.description, t.merchant_name, t.raw_description),
               CAST(t.amount AS STRING),
               t.category_id,
               t.payment_status,
@@ -2121,7 +2362,7 @@ impl FinanceStore for BigQueryStore {
             JOIN {} a
               ON a.account_id = t.account_id
             WHERE a.account_type = 'credit'
-              AND NOT (t.amount > 0 AND LOWER(t.description) LIKE '%pagamento recebido%')
+              AND NOT (t.amount > 0 AND LOWER(t.raw_description) LIKE '%pagamento recebido%')
               AND COALESCE(t.category_id, '') NOT IN (SELECT category_id FROM {})
               {where_month}
             ORDER BY t.transaction_date DESC, ABS(t.amount) DESC, t.transaction_id ASC
@@ -2171,7 +2412,7 @@ impl FinanceStore for BigQueryStore {
               t.transaction_id,
               CAST(t.transaction_date AS STRING),
               t.display_label,
-              t.description,
+              COALESCE(t.description, t.merchant_name, t.raw_description),
               CAST(ABS(t.amount) AS STRING),
               t.category_id,
               t.payment_status,
@@ -2543,7 +2784,7 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             SELECT
-              description,
+              COALESCE(raw_description, description, ''),
               CAST(amount AS STRING),
               JSON_VALUE(metadata_json, '$.pluggy_category') AS pluggy_category,
               SAFE_CAST(JSON_VALUE(metadata_json, '$.raw.order') AS INT64) AS pluggy_order
@@ -2551,7 +2792,7 @@ impl FinanceStore for BigQueryStore {
             WHERE transaction_date = {}
               AND account_id = {}
               AND transaction_id != {}
-            ORDER BY pluggy_order IS NULL, pluggy_order ASC, description ASC
+            ORDER BY pluggy_order IS NULL, pluggy_order ASC, raw_description ASC
             ",
             self.qualified_table("transactions")?,
             sql_date(date),
@@ -2591,14 +2832,16 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             SELECT
-              transaction_id, account_id, CAST(transaction_date AS STRING), description, CAST(amount AS STRING),
-              tx_type, category_id, category_source, context, payment_status, source,
-              actor_id, idempotency_key, COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
             FROM {}
-            WHERE LOWER(description) LIKE {}
+            WHERE LOWER(COALESCE(raw_description, '')) LIKE {}
               AND transaction_id != {}
               {category_filter}
             ORDER BY transaction_date DESC, transaction_id ASC

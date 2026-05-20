@@ -102,6 +102,175 @@ fn seed_fixture_sync(temp: &TempDir, config_dir: &Path, data_dir: &Path) {
 }
 
 #[test]
+fn transaction_anatomy_fields_and_pending_commands_work() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let (raw, description): (String, Option<String>) = conn
+        .query_row(
+            "SELECT raw_description, description
+             FROM transactions
+             WHERE transaction_id = 'pluggy-fixture-001'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("anatomy row");
+    assert_eq!(raw, "Supermercado Angeloni");
+    assert!(description.is_none());
+
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("set-anatomy")
+            .arg("--transaction-id")
+            .arg("pluggy-fixture-001")
+            .arg("--description")
+            .arg("Compra mensal de mercado")
+            .arg("--merchant-name")
+            .arg("Mercado Exemplo")
+            .arg("--purpose")
+            .arg("Reposição da cozinha"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let (description, merchant, purpose): (String, String, String) = conn
+        .query_row(
+            "SELECT description, merchant_name, purpose
+             FROM transactions
+             WHERE transaction_id = 'pluggy-fixture-001'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("updated anatomy row");
+    assert_eq!(description, "Compra mensal de mercado");
+    assert_eq!(merchant, "Mercado Exemplo");
+    assert_eq!(purpose, "Reposição da cozinha");
+
+    let pending = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("pending-human")
+            .arg("--kind")
+            .arg("description")
+            .arg("--json")
+            .arg("--limit")
+            .arg("20"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let rows: Value = serde_json::from_slice(&pending).expect("pending json");
+    assert!(rows
+        .as_array()
+        .expect("array")
+        .iter()
+        .all(|row| row["transaction_id"] != "pluggy-fixture-001"));
+
+    let review_summary = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("review-human")
+            .arg("--summary")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let summary: Value = serde_json::from_slice(&review_summary).expect("review summary json");
+    assert_eq!(summary["missingDescriptionCount"], 3);
+    assert_eq!(summary["missingMerchantCount"], 3);
+    assert!(summary["suggestedNextCommand"]
+        .as_str()
+        .expect("next command")
+        .contains("tx review-human --kind all"));
+
+    let review_queue = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("review-human")
+            .arg("--kind")
+            .arg("all")
+            .arg("--json")
+            .arg("--limit")
+            .arg("20"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let review_rows: Value = serde_json::from_slice(&review_queue).expect("review queue json");
+    assert!(review_rows
+        .as_array()
+        .expect("array")
+        .iter()
+        .any(|row| row["transaction_id"] != "pluggy-fixture-001"));
+
+    let review_result = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("review-human")
+            .arg("--transaction-id")
+            .arg("pluggy-fixture-003")
+            .arg("--description")
+            .arg("Refeição revisada")
+            .arg("--merchant-name")
+            .arg("Restaurante Exemplo")
+            .arg("--category")
+            .arg("alimentacao:restaurantes")
+            .arg("--json"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let applied_rows: Value = serde_json::from_slice(&review_result).expect("review result json");
+    let applied = applied_rows
+        .as_array()
+        .expect("review result array")
+        .first()
+        .expect("one applied result");
+    assert_eq!(applied["transactionId"], "pluggy-fixture-003");
+    assert_eq!(applied["updatedDescription"], true);
+    assert_eq!(applied["updatedMerchantName"], true);
+    assert_eq!(applied["updatedCategory"], true);
+
+    let (description, merchant, category): (String, String, String) = conn
+        .query_row(
+            "SELECT description, merchant_name, category_id
+             FROM transactions
+             WHERE transaction_id = 'pluggy-fixture-003'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("reviewed anatomy row");
+    assert_eq!(description, "Refeição revisada");
+    assert_eq!(merchant, "Restaurante Exemplo");
+    assert_eq!(category, "alimentacao:restaurantes");
+}
+
+#[test]
 fn milestone_zero_local_sync_and_report() {
     let temp = TempDir::new().expect("tempdir");
     let config_dir = temp.path().join("config");

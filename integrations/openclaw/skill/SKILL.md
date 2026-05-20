@@ -2,7 +2,7 @@
 name: finance-os
 description: >
   Runtime financeiro da OpenClaw baseado em Finance OS + BigQuery. Sincroniza Pluggy,
-  grava contexto/categoria direto no banco canônico e gera relatórios determinísticos
+  grava descrição/estabelecimento/propósito/categoria direto no banco canônico e gera relatórios determinísticos
   via CLI única.
 metadata:
   {
@@ -79,22 +79,53 @@ Resumo de cartões:
 bash skills/finance-os/finance.sh report card-summary --month YYYY-MM
 ```
 
-Pendências sem categoria/contexto:
+Pendências sem categoria:
 
 ```bash
 bash skills/finance-os/finance.sh report uncategorized --limit 20
 ```
 
-Persistir contexto manual:
+Pendências de campos humanos:
 
 ```bash
-bash skills/finance-os/finance.sh tx set-context --transaction-id ID --context "texto"
+bash skills/finance-os/finance.sh tx pending-human --kind description --limit 20
+bash skills/finance-os/finance.sh tx pending-human --kind merchant --limit 20
+bash skills/finance-os/finance.sh tx pending-human --kind purpose --min-abs-amount 30 --limit 20
+```
+
+Persistir descrição, estabelecimento ou propósito:
+
+```bash
+bash skills/finance-os/finance.sh tx set-anatomy --transaction-id ID --description "texto curto"
+bash skills/finance-os/finance.sh tx set-anatomy --transaction-id ID --merchant-name "Nome limpo"
+bash skills/finance-os/finance.sh tx set-anatomy --transaction-id ID --purpose "finalidade humana"
 ```
 
 Persistir categoria manual:
 
 ```bash
 bash skills/finance-os/finance.sh tx categorize --transaction-id ID --category Categoria --subcategory "Subcategoria opcional" --context "texto opcional"
+```
+
+Revisão humana interativa/local:
+
+```bash
+bash skills/finance-os/finance.sh review
+bash skills/finance-os/finance.sh tx review-human --kind all --limit 20 --tui --sound
+```
+
+Fluxo recomendado via WhatsApp/OpenClaw:
+
+```bash
+bash skills/finance-os/finance.sh tx review-human --summary --json
+bash skills/finance-os/finance.sh tx review-human --kind all --limit 5 --json
+bash skills/finance-os/finance.sh tx review-human --transaction-id ID \
+  --description "texto curto" \
+  --merchant-name "Nome limpo" \
+  --purpose "finalidade opcional" \
+  --category categoria:subcategoria \
+  --bulk identical \
+  --json
 ```
 
 Pré-visualizar split de transação (BigQuery-only):
@@ -135,7 +166,13 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
 
 ## Regras operacionais
 
-- Sempre preferir o `transaction_id` explícito quando o usuário responder contexto.
+- Sempre preferir o `transaction_id` explícito quando o usuário responder descrição, estabelecimento ou propósito.
+- Trigger conversacional: quando o usuário disser algo como "Ford, como estamos com as categorizações?", "tem coisa pra categorizar?", "vamos categorizar?", ou "quero brincar de categorizar", executar `tx review-human --summary --json`. Responder com as contagens de sem categoria, sem descrição, sem estabelecimento e sem propósito; se houver pendências, perguntar se ele quer revisar algumas agora.
+- Se o usuário aceitar revisar, executar `tx review-human --kind all --limit 5 --json`, mostrar uma transação por vez em formato curto, e aguardar resposta.
+- Para revisão pelo WhatsApp, usar `tx review-human --kind all --limit N --json` para obter a fila e `tx review-human --transaction-id ... --json` para salvar em uma única chamada. O modo sem `--transaction-id` e sem `--json` é interativo e deve ser usado apenas em terminal local.
+- Ao receber resposta natural do usuário para uma pendência, preencher somente os campos informados ou inferíveis com segurança. Exemplos: "é Mercado Exemplo, compra de mercado" salva `merchant_name = Mercado Exemplo` e `description = Compra de mercado`; "muda pra educação material escolar" salva `category = educacao:material-escolar`; "pula" não salva nada e passa para a próxima.
+- Quando houver áudio, transcrever primeiro, estruturar em `description`, `merchant_name`, `purpose` e `category`, apresentar um resumo com botões/ações `[Correto] [Ajustar]`, e só persistir depois do `Correto`. Se o usuário escolher `Ajustar`, aceitar texto ou áudio adicional, recompor a proposta e confirmar de novo.
+- Se a resposta do usuário sugerir que a mesma edição vale para transações idênticas ("todas essas", "aplica nas iguais", "é sempre isso"), chamar `tx review-human --transaction-id ... --bulk identical --json`. Caso contrário, salvar apenas a transação atual.
 - No fluxo Ford de split, seguir a ordem:
   1. `report split-candidates` para shortlist inicial
   2. `tx split preview` para validar estrutura e totais
@@ -145,7 +182,7 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
   6. `report item-prices` quando o usuário pedir comparação de preço unitário
 - Se backend não for BigQuery (ou runtime sem suporte de split), responder limitação e não inventar saída.
 - Se a resposta estiver ambígua entre múltiplas pendências, pedir qual ID deve ser atualizado.
-- Nunca inventar categoria. Se a categoria não estiver clara, gravar só o contexto.
+- Nunca inventar categoria. Se a categoria não estiver clara, gravar só os campos humanos que o usuário informou.
 - Nunca codificar heurística pessoal de item/produto em código compartilhado; usar somente dados/rules privados no runtime.
 - Ao relatar sync horário:
   - se `newTransactionsCount = 0` e `needsContextCount = 0`, ficar em silêncio
@@ -153,7 +190,7 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
   - se houver novidade, usar apenas o JSON do `--json-summary` como base factual
   - para repasse 1:1 em texto (sem remontar mensagem na Ford), usar `--notify-summary`
 - Para interações com usuário:
-  - sempre priorizar labels efetivos da CLI (contexto/categoria já aplicados no Finance OS)
+  - sempre priorizar labels efetivos da CLI (description/merchant_name/raw_description e categoria já aplicados no Finance OS)
   - não remontar manualmente listagens de transação, exceto se o usuário pedir uma visão específica
   - em caso de solicitação de visão customizada, deixar explícito que é um formato adicional sobre dados da CLI
 - Para perguntas sobre cartão/fatura, desambiguar antes de responder:

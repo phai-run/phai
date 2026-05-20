@@ -48,7 +48,13 @@ pub struct TransactionRecord {
     pub transaction_id: String,
     pub account_id: Option<String>,
     pub transaction_date: NaiveDate,
-    pub description: String,
+    pub raw_description: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub merchant_name: Option<String>,
+    #[serde(default)]
+    pub purpose: Option<String>,
     pub amount: Decimal,
     /// Exact integer cents (`amount * 100`). Populated on the write path
     /// for BigQuery upserts (NUMERIC parity) and derived automatically by
@@ -60,7 +66,10 @@ pub struct TransactionRecord {
     pub tx_type: String,
     pub category_id: Option<String>,
     pub category_source: String,
+    #[serde(default)]
     pub context: Option<String>,
+    #[serde(default)]
+    pub classifier_trace: Option<String>,
     pub payment_status: String,
     pub source: String,
     pub actor_id: String,
@@ -70,6 +79,20 @@ pub struct TransactionRecord {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub enrichment_attempted_at: Option<DateTime<Utc>>,
+}
+
+impl TransactionRecord {
+    pub fn display_description(&self) -> &str {
+        self.description
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                self.merchant_name
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or(&self.raw_description)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
