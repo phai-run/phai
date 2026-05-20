@@ -65,6 +65,7 @@ proposed → active → superseded
 | [0011](0011-canonical-payment-status.md) | Canonical `payment_status` vocabulary (`posted`/`pending`/`installment`) | active |
 | [0012](0012-amount-cents-exact-aggregation.md) | Exact decimal aggregation via `amount_cents` companion column | active |
 | [0013](0013-auto-migrate-on-every-command.md) | Auto-apply pending migrations on every command invocation | active |
+| [0014](0014-transaction-anatomy.md) | Transaction anatomy separates raw, human, merchant, purpose, and trace fields | active |
 
 ---
 

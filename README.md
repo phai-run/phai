@@ -114,12 +114,16 @@ finance-cli admin migrate           Apply pending database migrations
 finance-cli admin import-legacy     Import from legacy CSV files
 finance-cli sync pluggy             Sync transactions from Pluggy
 finance-cli report <subcommand>     See "Reports" above
+finance-cli review                  Open the fast terminal review UI
 finance-cli tx upsert-manual        Add a manual transaction
 finance-cli tx categorize           Assign category to a transaction
-finance-cli tx set-context          Add free-form context to a transaction
+finance-cli tx set-anatomy          Edit human transaction fields
+finance-cli tx set-context          Deprecated alias for setting a human description
 finance-cli tx find                 Search transactions by description
 finance-cli tx pending              List uncategorized transactions
-finance-cli tx set-context-by-desc  Set context for all transactions matching a query
+finance-cli tx pending-human        List missing description, merchant, or purpose fields
+finance-cli tx review-human         TUI/OpenClaw review of human fields and category
+finance-cli tx set-context-by-desc  Deprecated alias for setting descriptions by raw match
 finance-cli tx split <subcommand>   Split a transaction into multiple lines
 finance-cli forecast upsert         Create or update a forecast entry
 finance-cli rule upsert/list/inspect Classification rule management
@@ -148,7 +152,7 @@ finance-cli auth setup \
 finance-cli admin migrate
 ```
 
-Optional: use a Google Sheet as a category/context override source so your manual classifications survive across machines. See [docs/google-sheets-overrides.md](docs/google-sheets-overrides.md).
+Optional: use a Google Sheet as a category/human-field override source so your manual classifications survive across machines. See [docs/google-sheets-overrides.md](docs/google-sheets-overrides.md).
 
 ## Configuration
 

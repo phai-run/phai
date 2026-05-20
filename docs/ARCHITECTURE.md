@@ -60,7 +60,7 @@ flowchart LR
     Core -->|"SQL"| SQLite
     Core -->|"REST + service-account JWT"| BQ
     Core -->|"REST + HMAC"| Pluggy
-    Core -.->|"category/context overrides"| Sheets
+    Core -.->|"category/human-field overrides"| Sheets
     CLI -.->|"24h check, SHA-256 verify, atomic rename"| Releases
 
     style SQLite fill:#d4edda,stroke:#28a745,color:#000
@@ -178,7 +178,7 @@ sequenceDiagram
     end
 ```
 
-Reports read from views, not raw tables. Views encode the business logic (sign normalization for credit-card transactions, internal-transfer exclusion, effective categorization with overrides, display labels). See `schema/sqlite/012_effective_transactions_view.sql` and `013_display_labels_view.sql`.
+Reports read from views, not raw tables. Views encode the business logic (sign normalization for credit-card transactions, internal-transfer exclusion, effective categorization with overrides, and display labels that fall back from `description` to `merchant_name` to `raw_description`). See `schema/sqlite/033_transaction_anatomy.sql`.
 
 ### Self-update (atomic, SHA-256-verified)
 

@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 31] = [
+const SQLITE_MIGRATIONS: [Migration; 32] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -129,9 +129,13 @@ const SQLITE_MIGRATIONS: [Migration; 31] = [
         "032_fix_reportable_dedup",
         include_str!("../../../schema/sqlite/032_fix_reportable_dedup.sql"),
     ),
+    (
+        "033_transaction_anatomy",
+        include_str!("../../../schema/sqlite/033_transaction_anatomy.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 32] = [
+const BIGQUERY_MIGRATIONS: [Migration; 33] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -260,6 +264,10 @@ const BIGQUERY_MIGRATIONS: [Migration; 32] = [
         "032_fix_reportable_dedup",
         include_str!("../../../schema/bigquery/032_fix_reportable_dedup.sql"),
     ),
+    (
+        "033_transaction_anatomy",
+        include_str!("../../../schema/bigquery/033_transaction_anatomy.sql"),
+    ),
 ];
 
 fn backend_migrations(backend: BackendKind) -> &'static [Migration] {
@@ -305,6 +313,7 @@ pub async fn run_migrations(store: &dyn FinanceStore, config: &AppConfig) -> Res
 #[cfg(test)]
 mod tests {
     use super::{BIGQUERY_MIGRATIONS, SQLITE_MIGRATIONS};
+    use rusqlite::Connection;
 
     #[test]
     fn bigquery_migrations_include_transaction_splits() {
@@ -332,5 +341,90 @@ mod tests {
         assert!(BIGQUERY_MIGRATIONS
             .iter()
             .any(|(version, _)| *version == "018_category_budgets"));
+    }
+
+    #[test]
+    fn sqlite_transaction_anatomy_migration_preserves_raw_and_trace() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch(
+            "
+            CREATE TABLE accounts (
+              account_id TEXT PRIMARY KEY,
+              account_type TEXT NOT NULL,
+              metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE internal_categories (category_id TEXT PRIMARY KEY);
+            CREATE TABLE forecast (
+              forecast_id TEXT PRIMARY KEY,
+              due_date TEXT,
+              description TEXT NOT NULL,
+              account_id TEXT,
+              category_id TEXT,
+              amount TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              status TEXT NOT NULL
+            );
+            CREATE TABLE transactions (
+              transaction_id TEXT PRIMARY KEY,
+              account_id TEXT,
+              transaction_date TEXT NOT NULL,
+              description TEXT NOT NULL,
+              amount TEXT NOT NULL,
+              amount_cents INTEGER GENERATED ALWAYS AS (CAST(ROUND(amount * 100) AS INTEGER)) VIRTUAL,
+              tx_type TEXT NOT NULL,
+              category_id TEXT,
+              category_source TEXT NOT NULL,
+              context TEXT,
+              payment_status TEXT NOT NULL,
+              source TEXT NOT NULL,
+              actor_id TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL,
+              metadata_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              enrichment_attempted_at TEXT
+            );
+            INSERT INTO transactions (
+              transaction_id, account_id, transaction_date, description, amount, tx_type,
+              category_id, category_source, context, payment_status, source, actor_id,
+              idempotency_key, metadata_json, created_at, updated_at, enrichment_attempted_at
+            ) VALUES (
+              'tx-raw-1', NULL, '2026-05-01', 'Mp *Emporioexemplo', '-53.00', 'debit',
+              'alimentacao:restaurante', 'rule', 'MCC 5499; regra aplicada',
+              'posted', 'pluggy', 'test', 'pluggy:tx-raw-1', '{}',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', NULL
+            );
+            ",
+        )
+        .expect("seed old schema");
+
+        let sql = SQLITE_MIGRATIONS
+            .iter()
+            .find(|(version, _)| *version == "033_transaction_anatomy")
+            .map(|(_, sql)| *sql)
+            .expect("033 migration");
+        conn.execute_batch(sql).expect("apply migration");
+
+        let (raw, description, trace): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT raw_description, description, classifier_trace
+                 FROM transactions
+                 WHERE transaction_id = 'tx-raw-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("transaction anatomy row");
+        assert_eq!(raw, "Mp *Emporioexemplo");
+        assert!(description.is_none());
+        assert_eq!(trace.as_deref(), Some("MCC 5499; regra aplicada"));
+
+        let display_label: String = conn
+            .query_row(
+                "SELECT display_label FROM v_transactions_reportable WHERE transaction_id = 'tx-raw-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("display label");
+        assert!(display_label.contains("Mp *Emporioexemplo"));
     }
 }

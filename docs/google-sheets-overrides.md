@@ -2,7 +2,7 @@
 
 Finance OS keeps shared classification logic in the database and shared codebase, but the actual sheet URL and private categorization workflow should stay outside the repository.
 
-This repository now exposes a single read layer, `v_transactions_effective`, that can be replaced in a private BigQuery runtime. The default migration keeps it as a plain pass-through view over `transactions`. In a private environment, you can rewire that view to read an external Google Sheet and override `category_id` and `context` without mutating the canonical transaction rows.
+This repository exposes a single read layer, `v_transactions_effective`, that can be replaced in a private BigQuery runtime. In a private environment, you can rewire that view to read an external Google Sheet and override `category_id` plus human transaction fields without mutating the canonical transaction rows.
 
 This override layer is independent from transaction splits. Split flows (`tx split ...`, `report split-candidates`, `report item-prices`) are BigQuery-only runtime features and should not be implemented as shared, user-specific sheet heuristics.
 
@@ -10,7 +10,7 @@ This override layer is independent from transaction splits. Split flows (`tx spl
 
 Create a tab such as `category_overrides` with this header row:
 
-| transaction_id | category_id | context | updated_at | enabled |
+| transaction_id | category_id | description | merchant_name | purpose | updated_at | enabled |
 |---|---|---|---|---|
 | tx-123 | moradia:streaming | HBO Max annual plan | 2026-04-22T10:30:00Z | true |
 
@@ -18,7 +18,7 @@ Notes:
 
 - `transaction_id` must match the Finance OS transaction ID already stored in BigQuery.
 - `category_id` must use the canonical Finance OS category key (example: `alimentacao:mercado`).
-- `context` is optional.
+- Human fields are optional; leave a column blank when the canonical value should stand.
 - `updated_at` is optional but recommended. When multiple rows target the same transaction, the latest timestamp wins.
 - `enabled` is optional. Empty values are treated as enabled.
 

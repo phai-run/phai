@@ -21,7 +21,7 @@ use finance_core::enrichment::pipeline::{mark_attempted, EnrichmentPipeline};
 use finance_core::enrichment::rule_gen::{build_rule_record, keyword_from_result};
 use finance_core::enrichment::types::{CnpjInfo, EnrichmentDecision, EnrichmentResult};
 use finance_core::models::{AuditEvent, RuleRecord, TransactionRecord, UncategorizedRow};
-use finance_core::storage::FinanceStore;
+use finance_core::storage::{FinanceStore, TransactionAnatomyPatch};
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -272,7 +272,7 @@ async fn enrich_after_sync_one(
     let row = UncategorizedRow {
         transaction_id: record.transaction_id.clone(),
         transaction_date: record.transaction_date,
-        description: record.description.clone(),
+        description: record.raw_description.clone(),
         amount: record.amount,
         account_id: record.account_id.clone(),
         account_label: None,
@@ -328,6 +328,19 @@ async fn apply_auto_decision(
         )
         .await
         .context("annotate_transaction falhou no enrich_after_sync")?;
+    store
+        .update_transaction_anatomy(
+            &tx.transaction_id,
+            TransactionAnatomyPatch {
+                merchant_name: Some(&result.merchant_name),
+                classifier_trace: Some(&result.reasoning),
+                ..TransactionAnatomyPatch::default()
+            },
+            &config.actor_id,
+            &idempotency_key,
+        )
+        .await
+        .context("update_transaction_anatomy falhou no enrich_after_sync")?;
     mark_attempted(store, &tx.transaction_id, &config.actor_id).await?;
     let audit = AuditEvent::from_entity(
         "transaction",
@@ -387,7 +400,7 @@ async fn collect_candidates(
         return Ok(vec![UncategorizedRow {
             transaction_id: record.transaction_id,
             transaction_date: record.transaction_date,
-            description: record.description,
+            description: record.raw_description,
             amount: record.amount,
             account_id: record.account_id,
             account_label: None,
@@ -695,6 +708,18 @@ async fn apply_decision(
             Some(&category_id),
             Some(source),
             Some(&result.reasoning),
+            &config.actor_id,
+            &idempotency_key,
+        )
+        .await?;
+    store
+        .update_transaction_anatomy(
+            &tx.transaction_id,
+            TransactionAnatomyPatch {
+                merchant_name: Some(&result.merchant_name),
+                classifier_trace: Some(&result.reasoning),
+                ..TransactionAnatomyPatch::default()
+            },
             &config.actor_id,
             &idempotency_key,
         )
@@ -1063,6 +1088,24 @@ async fn apply_retroactive_batch(
             .await
             .with_context(|| format!("annotate_transaction falhou para {}", rec.transaction_id))?;
         store
+            .update_transaction_anatomy(
+                &rec.transaction_id,
+                TransactionAnatomyPatch {
+                    merchant_name: Some(&result.merchant_name),
+                    classifier_trace: Some(&result.reasoning),
+                    ..TransactionAnatomyPatch::default()
+                },
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "update_transaction_anatomy falhou para {}",
+                    rec.transaction_id
+                )
+            })?;
+        store
             .mark_enrichment_attempted(&rec.transaction_id, &config.actor_id, &idempotency_key)
             .await?;
         let audit = AuditEvent::from_entity(
@@ -1117,7 +1160,7 @@ async fn post_apply_rule_and_retroactive_human(
         println!(
             "    {} | {} | R$ {} (score: {})",
             rec.transaction_date,
-            rec.description.trim(),
+            rec.raw_description.trim(),
             rec.amount,
             score_to_percent(*score)
         );
@@ -1172,7 +1215,7 @@ async fn post_apply_rule_and_retroactive_machine(
         .iter()
         .map(|(rec, score)| RetroactiveMatch {
             transaction_id: &rec.transaction_id,
-            description: &rec.description,
+            description: &rec.raw_description,
             amount: format!("{}", rec.amount),
             date: rec.transaction_date.to_string(),
             score: *score,
@@ -1481,7 +1524,8 @@ mod test_support {
         ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
         TransactionSplitLineRecord, TransactionSplitRecord,
     };
-    use finance_core::storage::FinanceStore;
+    use finance_core::storage::{FinanceStore, TransactionAnatomyPatch};
+    use rust_decimal::Decimal;
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
@@ -1581,6 +1625,15 @@ mod test_support {
         ) -> Result<()> {
             Ok(())
         }
+        async fn update_transaction_anatomy(
+            &self,
+            _: &str,
+            _: TransactionAnatomyPatch<'_>,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn find_transactions_by_description(
             &self,
             _: &str,
@@ -1593,6 +1646,24 @@ mod test_support {
             _: usize,
         ) -> Result<Vec<TransactionRecord>> {
             Ok(vec![])
+        }
+        async fn pending_human_descriptions(&self, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn pending_merchants(&self, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn pending_purposes(&self, _: Decimal, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn count_pending_human_descriptions(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn count_pending_merchants(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn count_pending_purposes(&self, _: Decimal) -> Result<i64> {
+            Ok(0)
         }
         async fn existing_transaction_ids(&self, _: &[String]) -> Result<BTreeSet<String>> {
             Ok(BTreeSet::new())

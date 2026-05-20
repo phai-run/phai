@@ -18,7 +18,7 @@ use finance_core::rules::{apply_rules_with_facts, compile_rules};
 use finance_core::splits::{
     build_split_records, parse_split_payload, validate_split_payload, SplitPayload, SplitPreview,
 };
-use finance_core::storage::{open_store, FinanceStore};
+use finance_core::storage::{open_store, FinanceStore, TransactionAnatomyPatch};
 use finance_core::{AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
 use self_cmd::SelfCommand;
@@ -26,6 +26,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -75,6 +76,8 @@ enum Commands {
         #[command(subcommand)]
         command: TxCommand,
     },
+    /// Open the fast terminal review UI.
+    Review(ReviewShortcutArgs),
     Forecast {
         #[command(subcommand)]
         command: ForecastCommand,
@@ -101,6 +104,18 @@ enum Commands {
         #[command(subcommand)]
         command: SelfCommand,
     },
+}
+
+#[derive(Args)]
+struct ReviewShortcutArgs {
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    #[arg(long, value_enum, default_value_t = ReviewHumanKind::All)]
+    kind: ReviewHumanKind,
+    #[arg(long, default_value = "30")]
+    min_abs_amount: String,
+    #[arg(long)]
+    no_sound: bool,
 }
 
 #[derive(Subcommand)]
@@ -737,7 +752,7 @@ fn build_sync_pending_summary_fallback(
             transaction_id: row.transaction_id.clone(),
             transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
             day_of_week: day_of_week_text(row.transaction_date),
-            description: row.description.clone(),
+            description: row.display_description().to_string(),
             amount: decimal_text(row.amount),
             tx_type: row.tx_type.clone(),
             account_id: row.account_id.clone(),
@@ -1034,10 +1049,13 @@ struct OfxConsistencyOutput {
 enum TxCommand {
     UpsertManual(ManualTransactionArgs),
     Categorize(CategorizeTransactionArgs),
+    SetAnatomy(SetAnatomyArgs),
     SetContext(SetContextArgs),
     ListContext(ListContextArgs),
     Find(TxFindArgs),
     Pending(TxPendingArgs),
+    PendingHuman(PendingHumanArgs),
+    ReviewHuman(ReviewHumanArgs),
     SetContextByDesc(SetContextByDescArgs),
     Split {
         #[command(subcommand)]
@@ -1090,12 +1108,115 @@ struct CategorizeTransactionArgs {
     context: Option<String>,
 }
 
+fn category_key_from_input(category: &str, subcategory: Option<&str>) -> String {
+    match subcategory {
+        Some(value) => category_id(category, Some(value)),
+        None => match category.split_once(':') {
+            Some((base, sub)) => category_id(base, Some(sub)),
+            None => category_id(category, None),
+        },
+    }
+}
+
 #[derive(Args)]
 struct SetContextArgs {
     #[arg(long)]
     transaction_id: String,
     #[arg(long)]
     context: String,
+}
+
+#[derive(Args)]
+struct SetAnatomyArgs {
+    #[arg(long)]
+    transaction_id: String,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long)]
+    merchant_name: Option<String>,
+    #[arg(long)]
+    purpose: Option<String>,
+    #[arg(long)]
+    classifier_trace: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PendingHumanKind {
+    Description,
+    Merchant,
+    Purpose,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ReviewHumanKind {
+    All,
+    Description,
+    Merchant,
+    Purpose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReviewHumanBulk {
+    None,
+    Identical,
+}
+
+#[derive(Args)]
+struct ReviewHumanArgs {
+    /// Queue to review when running interactively or listing with --json.
+    #[arg(long, value_enum, default_value_t = ReviewHumanKind::All)]
+    kind: ReviewHumanKind,
+    /// Maximum number of transactions to load.
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    /// Minimum absolute amount for purpose-review candidates.
+    #[arg(long, default_value = "30")]
+    min_abs_amount: String,
+    /// Emit machine-readable JSON queue/result for OpenClaw.
+    #[arg(long)]
+    json: bool,
+    /// Show only counts and a phone-friendly invitation to review.
+    #[arg(long)]
+    summary: bool,
+    /// Run the richer terminal UI with cards, navigation and bulk prompts.
+    #[arg(long)]
+    tui: bool,
+    /// Ring the terminal bell when a review is saved in --tui mode.
+    #[arg(long)]
+    sound: bool,
+    /// Apply the same edit to related transactions. In TUI this can also be toggled with Ctrl+B.
+    #[arg(long, value_enum, default_value_t = ReviewHumanBulk::None)]
+    bulk: ReviewHumanBulk,
+    /// Apply a single review non-interactively.
+    #[arg(long)]
+    transaction_id: Option<String>,
+    /// Human short description to save.
+    #[arg(long)]
+    description: Option<String>,
+    /// Clean merchant/establishment name to save.
+    #[arg(long)]
+    merchant_name: Option<String>,
+    /// Human purchase purpose to save.
+    #[arg(long)]
+    purpose: Option<String>,
+    /// New category. Accepts either "categoria" or "categoria:subcategoria".
+    #[arg(long)]
+    category: Option<String>,
+    /// Optional subcategory when --category is provided as a top-level category.
+    #[arg(long)]
+    subcategory: Option<String>,
+}
+
+#[derive(Args)]
+struct PendingHumanArgs {
+    #[arg(long, value_enum, default_value_t = PendingHumanKind::Description)]
+    kind: PendingHumanKind,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long, default_value = "30")]
+    min_abs_amount: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -2039,7 +2160,7 @@ fn find_best_ofx_match(
         if date_diff > date_tolerance_days {
             continue;
         }
-        let desc_distance = description_distance(&ofx_tx.description, &candidate.description);
+        let desc_distance = description_distance(&ofx_tx.description, &candidate.raw_description);
         let replace_best = match best {
             None => true,
             Some((_, best_amount, best_date, best_desc)) => {
@@ -2128,7 +2249,7 @@ async fn upsert_transactions_chunked(
 /// R$50 parking fees the same morning).
 fn dedup_fingerprint(row: &TransactionRecord) -> String {
     let desc = row
-        .description
+        .raw_description
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -2362,10 +2483,13 @@ async fn main() -> Result<()> {
         Commands::Tx { command } => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
             TxCommand::Categorize(args) => tx_categorize(args).await,
+            TxCommand::SetAnatomy(args) => tx_set_anatomy(args).await,
             TxCommand::SetContext(args) => tx_set_context(args).await,
             TxCommand::ListContext(args) => tx_list_context(args).await,
             TxCommand::Find(args) => tx_find(args).await,
             TxCommand::Pending(args) => tx_pending(args).await,
+            TxCommand::PendingHuman(args) => tx_pending_human(args).await,
+            TxCommand::ReviewHuman(args) => tx_review_human(args).await,
             TxCommand::SetContextByDesc(args) => tx_set_context_by_desc(args).await,
             TxCommand::Split { command } => match command {
                 TxSplitCommand::Preview(args) => tx_split_preview(args).await,
@@ -2375,6 +2499,25 @@ async fn main() -> Result<()> {
             },
             TxCommand::Enrich(args) => tx_enrich(args).await,
         },
+        Commands::Review(args) => {
+            tx_review_human(ReviewHumanArgs {
+                kind: args.kind,
+                limit: args.limit,
+                min_abs_amount: args.min_abs_amount,
+                json: false,
+                summary: false,
+                tui: true,
+                sound: !args.no_sound,
+                bulk: ReviewHumanBulk::None,
+                transaction_id: None,
+                description: None,
+                merchant_name: None,
+                purpose: None,
+                category: None,
+                subcategory: None,
+            })
+            .await
+        }
         Commands::Forecast { command } => match command {
             ForecastCommand::Upsert(args) => forecast_upsert(args).await,
         },
@@ -2576,7 +2719,8 @@ async fn admin_reclassify(args: ReclassifyArgs) -> Result<()> {
     }
 
     let since = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
-    let items = store.daily_pulse(since).await?;
+    let today = Utc::now().date_naive();
+    let items = store.transactions_in_date_range(None, since, today).await?;
     println!("Transações encontradas: {}", items.len());
     println!("Regras compiladas: {}", compiled_rules.len());
 
@@ -2586,7 +2730,7 @@ async fn admin_reclassify(args: ReclassifyArgs) -> Result<()> {
 
     for item in &items {
         let rule_application = apply_rules_with_facts(
-            &item.description,
+            &item.raw_description,
             Some(item.amount),
             Some(item.transaction_id.as_str()),
             item.category_id.clone(),
@@ -2612,7 +2756,7 @@ async fn admin_reclassify(args: ReclassifyArgs) -> Result<()> {
             println!(
                 "  [DRY-RUN] {} {:50} {:30} -> {}",
                 item.transaction_date,
-                &item.description[..item.description.len().min(50)],
+                human_format::truncate_with_ellipsis(item.display_description(), 50),
                 item.category_id.as_deref().unwrap_or("(nenhuma)"),
                 new_category_id.as_deref().unwrap_or("(nenhuma)")
             );
@@ -2822,7 +2966,7 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
             transaction_id: row.transaction_id.clone(),
             transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
             day_of_week: day_of_week_text(row.transaction_date),
-            description: row.description.clone(),
+            description: row.display_description().to_string(),
             amount: decimal_text(row.amount),
             tx_type: row.tx_type.clone(),
             category_id: row.category_id.clone(),
@@ -3824,7 +3968,8 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
         .await?
         .into_iter()
         .map(|mut tx| {
-            tx.description = enrich_description_from_metadata(&tx.description, &tx.metadata_json);
+            tx.raw_description =
+                enrich_description_from_metadata(&tx.raw_description, &tx.metadata_json);
             tx
         })
         .collect();
@@ -4040,7 +4185,7 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
                 account_id: db_row.account_id.clone(),
                 transaction_date: Some(db_row.transaction_date.format("%Y-%m-%d").to_string()),
                 transaction_amount: Some(db_row.amount),
-                transaction_description: Some(normalize_inline_text(&db_row.description)),
+                transaction_description: Some(normalize_inline_text(db_row.display_description())),
                 date_diff_days: Some(date_diff),
             });
         } else {
@@ -4072,7 +4217,7 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
                     transaction_id: row.transaction_id.clone(),
                     transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
                     amount: row.amount,
-                    description: normalize_inline_text(&row.description),
+                    description: normalize_inline_text(row.display_description()),
                     account_id: row.account_id.clone(),
                 })
             }
@@ -4756,13 +4901,16 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
     let category_key = args
         .category
         .as_deref()
-        .map(|value| category_id(value, args.subcategory.as_deref()));
+        .map(|value| category_key_from_input(value, args.subcategory.as_deref()));
     let now = Utc::now();
     let mut tx = TransactionRecord {
         transaction_id: tx_id.clone(),
         account_id: args.account_id.clone(),
         transaction_date,
-        description: args.description,
+        raw_description: args.description.clone(),
+        description: Some(args.description),
+        merchant_name: None,
+        purpose: None,
         amount: decimal_from_str(&args.amount)?,
         tx_type: if args.amount.trim_start().starts_with('-') {
             "debit".to_string()
@@ -4775,7 +4923,8 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
         } else {
             "uncategorized".to_string()
         },
-        context: args.context,
+        context: None,
+        classifier_trace: args.context,
         payment_status: args.payment_status,
         source: "manual".to_string(),
         actor_id: config.actor_id.clone(),
@@ -4813,7 +4962,7 @@ async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
-    let category_key = category_id(&args.category, args.subcategory.as_deref());
+    let category_key = category_key_from_input(&args.category, args.subcategory.as_deref());
     let idempotency_key = format!("annotate:{}:{}", args.transaction_id, Uuid::now_v7());
     store
         .annotate_transaction(
@@ -4841,17 +4990,61 @@ async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {
     Ok(())
 }
 
+async fn tx_set_anatomy(args: SetAnatomyArgs) -> Result<()> {
+    if args.description.is_none()
+        && args.merchant_name.is_none()
+        && args.purpose.is_none()
+        && args.classifier_trace.is_none()
+    {
+        bail!("Informe ao menos um campo: --description, --merchant-name, --purpose ou --classifier-trace");
+    }
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    let idempotency_key = format!("anatomy:{}:{}", args.transaction_id, Uuid::now_v7());
+    store
+        .update_transaction_anatomy(
+            &args.transaction_id,
+            TransactionAnatomyPatch {
+                description: args.description.as_deref(),
+                merchant_name: args.merchant_name.as_deref(),
+                purpose: args.purpose.as_deref(),
+                classifier_trace: args.classifier_trace.as_deref(),
+            },
+            &config.actor_id,
+            &idempotency_key,
+        )
+        .await?;
+    let audit = AuditEvent::from_entity(
+        "transaction",
+        &args.transaction_id,
+        "set_anatomy",
+        &config.actor_id,
+        &idempotency_key,
+        json!({
+            "description": args.description,
+            "merchant_name": args.merchant_name,
+            "purpose": args.purpose,
+            "classifier_trace": args.classifier_trace,
+        }),
+    );
+    store.insert_audit_events(&[audit]).await?;
+    println!("Anatomia atualizada para {}", args.transaction_id);
+    Ok(())
+}
+
 async fn tx_set_context(args: SetContextArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let idempotency_key = format!("context:{}:{}", args.transaction_id, Uuid::now_v7());
     store
-        .annotate_transaction(
+        .update_transaction_anatomy(
             &args.transaction_id,
-            None,
-            Some("manual"),
-            Some(&args.context),
+            TransactionAnatomyPatch {
+                description: Some(&args.context),
+                ..TransactionAnatomyPatch::default()
+            },
             &config.actor_id,
             &idempotency_key,
         )
@@ -4913,7 +5106,7 @@ fn print_transaction_row(row: &TransactionRecord) {
         row.transaction_id,
         row.transaction_date.format("%Y-%m-%d"),
         decimal_text(row.amount),
-        row.description,
+        row.display_description(),
         account,
         row.context,
     );
@@ -4961,6 +5154,1304 @@ async fn tx_pending(args: TxPendingArgs) -> Result<()> {
     Ok(())
 }
 
+async fn tx_pending_human(args: PendingHumanArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    let rows = match args.kind {
+        PendingHumanKind::Description => store.pending_human_descriptions(args.limit).await?,
+        PendingHumanKind::Merchant => store.pending_merchants(args.limit).await?,
+        PendingHumanKind::Purpose => {
+            let threshold = decimal_from_str(&args.min_abs_amount)?;
+            store.pending_purposes(threshold, args.limit).await?
+        }
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    println!("Pending human {:?} transactions", args.kind);
+    println!("- linhas: {}", rows.len());
+    println!();
+    for row in &rows {
+        print_transaction_row(row);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewHumanQueueItem {
+    transaction_id: String,
+    transaction_date: String,
+    amount: String,
+    raw_description: String,
+    display_description: String,
+    description: Option<String>,
+    merchant_name: Option<String>,
+    purpose: Option<String>,
+    category_id: Option<String>,
+    category_source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewHumanApplyResult {
+    transaction_id: String,
+    updated_description: bool,
+    updated_merchant_name: bool,
+    updated_purpose: bool,
+    updated_category: bool,
+    category_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewHumanSummary {
+    uncategorized_count: i64,
+    missing_description_count: i64,
+    missing_merchant_count: i64,
+    missing_purpose_count: i64,
+    min_purpose_amount: String,
+    total_attention_count: i64,
+    suggested_next_command: String,
+}
+
+fn review_queue_item(row: &TransactionRecord) -> ReviewHumanQueueItem {
+    ReviewHumanQueueItem {
+        transaction_id: row.transaction_id.clone(),
+        transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
+        amount: decimal_text(row.amount),
+        raw_description: row.raw_description.clone(),
+        display_description: row.display_description().to_string(),
+        description: row.description.clone(),
+        merchant_name: row.merchant_name.clone(),
+        purpose: row.purpose.clone(),
+        category_id: row.category_id.clone(),
+        category_source: row.category_source.clone(),
+    }
+}
+
+async fn review_human_summary(
+    store: &dyn FinanceStore,
+    min_abs_amount: Decimal,
+    limit: usize,
+) -> Result<ReviewHumanSummary> {
+    let uncategorized_count = store.count_uncategorized().await?;
+    let missing_description_count = store.count_pending_human_descriptions().await?;
+    let missing_merchant_count = store.count_pending_merchants().await?;
+    let missing_purpose_count = store.count_pending_purposes(min_abs_amount).await?;
+    Ok(ReviewHumanSummary {
+        uncategorized_count,
+        missing_description_count,
+        missing_merchant_count,
+        missing_purpose_count,
+        min_purpose_amount: decimal_text(min_abs_amount),
+        total_attention_count: uncategorized_count
+            + missing_description_count
+            + missing_merchant_count
+            + missing_purpose_count,
+        suggested_next_command: format!("tx review-human --kind all --limit {limit} --json"),
+    })
+}
+
+fn print_review_human_summary(summary: &ReviewHumanSummary) {
+    println!("📌 Categorizações e descrições");
+    println!("- sem categoria: {}", summary.uncategorized_count);
+    println!(
+        "- sem descrição humana: {}",
+        summary.missing_description_count
+    );
+    println!("- sem estabelecimento: {}", summary.missing_merchant_count);
+    println!(
+        "- sem propósito acima de R$ {}: {}",
+        summary.min_purpose_amount.replace('.', ","),
+        summary.missing_purpose_count
+    );
+    println!();
+    if summary.total_attention_count == 0 {
+        println!("Tudo em dia por aqui.");
+    } else {
+        println!("Quer brincar de categorizar algumas agora? Responda \"sim\" que eu te mando a primeira leva.");
+    }
+}
+
+async fn review_human_rows(
+    store: &dyn FinanceStore,
+    kind: ReviewHumanKind,
+    limit: usize,
+    min_abs_amount: Decimal,
+) -> Result<Vec<TransactionRecord>> {
+    match kind {
+        ReviewHumanKind::Description => store.pending_human_descriptions(limit).await,
+        ReviewHumanKind::Merchant => store.pending_merchants(limit).await,
+        ReviewHumanKind::Purpose => store.pending_purposes(min_abs_amount, limit).await,
+        ReviewHumanKind::All => {
+            let mut rows = Vec::new();
+            let mut seen = BTreeSet::new();
+            for batch in [
+                store.pending_human_descriptions(limit).await?,
+                store.pending_merchants(limit).await?,
+                store.pending_purposes(min_abs_amount, limit).await?,
+            ] {
+                for row in batch {
+                    if seen.insert(row.transaction_id.clone()) {
+                        rows.push(row);
+                    }
+                    if rows.len() >= limit {
+                        return Ok(rows);
+                    }
+                }
+            }
+            Ok(rows)
+        }
+    }
+}
+
+fn print_review_queue(rows: &[TransactionRecord]) {
+    println!("Pendências de anatomia humana");
+    println!("- linhas: {}", rows.len());
+    println!();
+    for (index, row) in rows.iter().enumerate() {
+        let category = row.category_id.as_deref().unwrap_or("sem-categoria");
+        println!(
+            "{}. {} | {} | {} | {}",
+            index + 1,
+            row.transaction_date.format("%Y-%m-%d"),
+            brl(row.amount),
+            category,
+            row.display_description()
+        );
+        println!("   id: {}", row.transaction_id);
+        println!("   raw: {}", row.raw_description);
+        if let Some(merchant) = row.merchant_name.as_deref() {
+            println!("   merchant: {merchant}");
+        }
+        if let Some(description) = row.description.as_deref() {
+            println!("   description: {description}");
+        }
+        if let Some(purpose) = row.purpose.as_deref() {
+            println!("   purpose: {purpose}");
+        }
+        println!();
+    }
+}
+
+enum PromptValue {
+    Keep,
+    Set(String),
+    Skip,
+    Quit,
+}
+
+fn prompt_value(label: &str, current: Option<&str>) -> Result<PromptValue> {
+    match current {
+        Some(value) if !value.trim().is_empty() => print!("{label} [{value}]: "),
+        _ => print!("{label}: "),
+    }
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let value = line.trim();
+    match value {
+        "" => Ok(PromptValue::Keep),
+        "q" | "quit" | "sair" => Ok(PromptValue::Quit),
+        "s" | "skip" | "pular" => Ok(PromptValue::Skip),
+        _ => Ok(PromptValue::Set(value.to_string())),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HumanReviewPatch {
+    description: Option<String>,
+    merchant_name: Option<String>,
+    purpose: Option<String>,
+    category_id: Option<String>,
+}
+
+impl HumanReviewPatch {
+    fn has_changes(&self) -> bool {
+        self.description.is_some()
+            || self.merchant_name.is_some()
+            || self.purpose.is_some()
+            || self.category_id.is_some()
+    }
+}
+
+async fn apply_human_review(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    transaction_id: &str,
+    patch: HumanReviewPatch,
+) -> Result<ReviewHumanApplyResult> {
+    if !patch.has_changes() {
+        bail!("Informe ao menos um campo humano ou categoria para salvar");
+    }
+    let updated_description = patch.description.is_some();
+    let updated_merchant_name = patch.merchant_name.is_some();
+    let updated_purpose = patch.purpose.is_some();
+    let updated_category = patch.category_id.is_some();
+    let existing = store
+        .transaction_by_id(transaction_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Transação {transaction_id} não encontrada"))?;
+    let idempotency_key = format!("review-human:{transaction_id}:{}", Uuid::now_v7());
+
+    if patch.description.is_some() || patch.merchant_name.is_some() || patch.purpose.is_some() {
+        store
+            .update_transaction_anatomy(
+                transaction_id,
+                TransactionAnatomyPatch {
+                    description: patch.description.as_deref(),
+                    merchant_name: patch.merchant_name.as_deref(),
+                    purpose: patch.purpose.as_deref(),
+                    classifier_trace: None,
+                },
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await?;
+    }
+
+    if let Some(category_id) = patch.category_id.as_deref() {
+        store
+            .annotate_transaction(
+                transaction_id,
+                Some(category_id),
+                Some("manual"),
+                None,
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await?;
+    }
+
+    let audit = AuditEvent::from_entity(
+        "transaction",
+        transaction_id,
+        "review_human",
+        &config.actor_id,
+        &idempotency_key,
+        json!({
+            "old": {
+                "description": existing.description,
+                "merchant_name": existing.merchant_name,
+                "purpose": existing.purpose,
+                "category_id": existing.category_id,
+            },
+            "new": {
+                "description": patch.description.clone(),
+                "merchant_name": patch.merchant_name.clone(),
+                "purpose": patch.purpose.clone(),
+                "category_id": patch.category_id.clone(),
+            },
+        }),
+    );
+    store.insert_audit_events(&[audit]).await?;
+
+    Ok(ReviewHumanApplyResult {
+        transaction_id: transaction_id.to_string(),
+        updated_description,
+        updated_merchant_name,
+        updated_purpose,
+        updated_category,
+        category_id: patch.category_id,
+    })
+}
+
+async fn identical_review_targets(
+    store: &dyn FinanceStore,
+    row: &TransactionRecord,
+) -> Result<Vec<TransactionRecord>> {
+    let mut rows = vec![row.clone()];
+    let mut seen = BTreeSet::from([row.transaction_id.clone()]);
+    for candidate in store
+        .similar_transactions(&row.raw_description, &row.transaction_id, false)
+        .await?
+    {
+        if candidate.raw_description == row.raw_description
+            && seen.insert(candidate.transaction_id.clone())
+        {
+            rows.push(candidate);
+        }
+    }
+    Ok(rows)
+}
+
+async fn apply_human_review_with_bulk(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    transaction_id: &str,
+    patch: HumanReviewPatch,
+    bulk: ReviewHumanBulk,
+) -> Result<Vec<ReviewHumanApplyResult>> {
+    if bulk == ReviewHumanBulk::None {
+        return Ok(vec![
+            apply_human_review(store, config, transaction_id, patch).await?,
+        ]);
+    }
+
+    let row = store
+        .transaction_by_id(transaction_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Transação {transaction_id} não encontrada"))?;
+    let targets = identical_review_targets(store, &row).await?;
+    let mut results = Vec::with_capacity(targets.len());
+    for target in targets {
+        results
+            .push(apply_human_review(store, config, &target.transaction_id, patch.clone()).await?);
+    }
+    Ok(results)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewTuiField {
+    Merchant,
+    Description,
+    Purpose,
+    Category,
+}
+
+impl ReviewTuiField {
+    const ALL: [ReviewTuiField; 4] = [
+        ReviewTuiField::Merchant,
+        ReviewTuiField::Description,
+        ReviewTuiField::Purpose,
+        ReviewTuiField::Category,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            ReviewTuiField::Merchant => "Estabelecimento",
+            ReviewTuiField::Description => "Descrição humana",
+            ReviewTuiField::Purpose => "Propósito",
+            ReviewTuiField::Category => "Categoria",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReviewTuiDraft {
+    merchant_name: String,
+    description: String,
+    purpose: String,
+    category_id: String,
+    active: usize,
+}
+
+impl ReviewTuiDraft {
+    fn from_row(row: &TransactionRecord) -> Self {
+        Self {
+            merchant_name: row.merchant_name.clone().unwrap_or_default(),
+            description: row.description.clone().unwrap_or_default(),
+            purpose: row.purpose.clone().unwrap_or_default(),
+            category_id: row.category_id.clone().unwrap_or_default(),
+            active: 0,
+        }
+    }
+
+    fn field(&self) -> ReviewTuiField {
+        ReviewTuiField::ALL[self.active]
+    }
+
+    fn active_value_mut(&mut self) -> &mut String {
+        match self.field() {
+            ReviewTuiField::Merchant => &mut self.merchant_name,
+            ReviewTuiField::Description => &mut self.description,
+            ReviewTuiField::Purpose => &mut self.purpose,
+            ReviewTuiField::Category => &mut self.category_id,
+        }
+    }
+
+    fn patch_against(&self, row: &TransactionRecord) -> HumanReviewPatch {
+        let merchant_name = changed_text(&self.merchant_name, row.merchant_name.as_deref());
+        let description = changed_text(&self.description, row.description.as_deref());
+        let purpose = changed_text(&self.purpose, row.purpose.as_deref());
+        let category_id = changed_text(&self.category_id, row.category_id.as_deref())
+            .map(|value| category_key_from_input(&value, None));
+        HumanReviewPatch {
+            description,
+            merchant_name,
+            purpose,
+            category_id,
+        }
+    }
+}
+
+fn changed_text(new_value: &str, old_value: Option<&str>) -> Option<String> {
+    let trimmed = new_value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match old_value {
+        Some(old) if old.trim() == trimmed => None,
+        _ => Some(trimmed.to_string()),
+    }
+}
+
+#[derive(Debug, Default)]
+struct ReviewTuiContext {
+    identical_count: usize,
+    nearby: Vec<String>,
+    similar: Vec<String>,
+}
+
+fn metadata_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for part in path {
+        current = current.get(*part)?;
+    }
+    Some(current)
+}
+
+fn metadata_text(value: &Value, path: &[&str]) -> Option<String> {
+    metadata_path(value, path).and_then(|value| match value {
+        Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    })
+}
+
+async fn load_review_tui_context(
+    store: &dyn FinanceStore,
+    row: &TransactionRecord,
+) -> ReviewTuiContext {
+    let identical_count = identical_review_targets(store, row)
+        .await
+        .map(|rows| rows.len())
+        .unwrap_or(1);
+
+    let nearby = match row.account_id.as_deref() {
+        Some(account_id) => store
+            .transactions_on_date(row.transaction_date, account_id, &row.transaction_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .take(5)
+            .map(|ctx| format!("{} · {}", brl(ctx.amount), ctx.description))
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let similar = store
+        .similar_transactions(&row.raw_description, &row.transaction_id, false)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|candidate| candidate.raw_description == row.raw_description)
+        .take(5)
+        .map(|candidate| {
+            format!(
+                "{} · {} · {}",
+                candidate.transaction_date.format("%Y-%m-%d"),
+                brl(candidate.amount),
+                candidate.display_description()
+            )
+        })
+        .collect();
+
+    ReviewTuiContext {
+        identical_count,
+        nearby,
+        similar,
+    }
+}
+
+fn category_matches(categories: &[String], input: &str, cursor: usize) -> Vec<String> {
+    let needle = input.trim().to_ascii_lowercase().replace(' ', "-");
+    let mut out = categories
+        .iter()
+        .filter(|category| needle.is_empty() || category.to_ascii_lowercase().contains(&needle))
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !out.is_empty() {
+        let len = out.len();
+        out.rotate_left(cursor % len);
+    }
+    out
+}
+
+fn tui_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(100)
+        .clamp(60, 160)
+}
+
+fn fit_tui_line(text: &str, width: usize) -> String {
+    let max = width.saturating_sub(1);
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    format!("{}…", text.chars().take(keep).collect::<String>())
+}
+
+fn queue_tui_line(
+    out: &mut io::Stdout,
+    width: usize,
+    color: Option<crossterm::style::Color>,
+    text: impl AsRef<str>,
+) -> Result<()> {
+    use crossterm::{
+        queue,
+        style::{Print, ResetColor, SetForegroundColor},
+    };
+    if let Some(color) = color {
+        queue!(out, SetForegroundColor(color))?;
+    }
+    queue!(
+        out,
+        Print(fit_tui_line(text.as_ref(), width)),
+        ResetColor,
+        Print("\n")
+    )?;
+    Ok(())
+}
+
+struct ReviewTuiView<'a> {
+    row: &'a TransactionRecord,
+    draft: &'a ReviewTuiDraft,
+    context: &'a ReviewTuiContext,
+    summary: &'a ReviewHumanSummary,
+    categories: &'a [String],
+    category_cursor: usize,
+    index: usize,
+    total: usize,
+    bulk: ReviewHumanBulk,
+    status: &'a str,
+}
+
+fn draw_review_tui(view: ReviewTuiView<'_>) -> Result<()> {
+    use crossterm::{
+        cursor, execute,
+        terminal::{Clear, ClearType},
+    };
+
+    let row = view.row;
+    let draft = view.draft;
+    let context = view.context;
+    let summary = view.summary;
+    let categories = view.categories;
+    let category_cursor = view.category_cursor;
+    let index = view.index;
+    let total = view.total;
+    let bulk = view.bulk;
+    let status = view.status;
+
+    let mut out = io::stdout();
+    let width = tui_width();
+    execute!(out, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    draw_review_tui_header(&mut out, width, index, total, summary)?;
+    draw_review_tui_readonly(&mut out, width, row)?;
+    draw_review_tui_fields(&mut out, width, draft, categories, category_cursor)?;
+    draw_review_tui_context(&mut out, width, context, bulk)?;
+    draw_review_tui_footer(&mut out, width, status)?;
+    out.flush()?;
+    Ok(())
+}
+
+fn draw_review_tui_header(
+    out: &mut io::Stdout,
+    width: usize,
+    index: usize,
+    total: usize,
+    summary: &ReviewHumanSummary,
+) -> Result<()> {
+    use crossterm::{
+        queue,
+        style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor},
+    };
+    queue!(
+        out,
+        SetForegroundColor(Color::Cyan),
+        SetAttribute(Attribute::Bold)
+    )?;
+    queue_tui_line(
+        out,
+        width,
+        None,
+        format!(
+            "Finance OS · revisão humana    {}/{}    faltam: desc {} · merchant {} · propósito {}",
+            index + 1,
+            total,
+            summary.missing_description_count,
+            summary.missing_merchant_count,
+            summary.missing_purpose_count
+        ),
+    )?;
+    queue!(out, ResetColor, SetAttribute(Attribute::Reset))?;
+    queue_tui_line(out, width, None, "")?;
+    Ok(())
+}
+
+fn draw_review_tui_readonly(
+    out: &mut io::Stdout,
+    width: usize,
+    row: &TransactionRecord,
+) -> Result<()> {
+    use crossterm::style::Color;
+    queue_tui_line(
+        out,
+        width,
+        Some(Color::Yellow),
+        format!(
+            "{} · {} · {}",
+            row.transaction_date,
+            brl(row.amount),
+            row.category_id.as_deref().unwrap_or("sem-categoria")
+        ),
+    )?;
+    queue_tui_line(
+        out,
+        width,
+        Some(Color::DarkGrey),
+        format!("id: {}", row.transaction_id),
+    )?;
+    queue_tui_line(
+        out,
+        width,
+        Some(Color::DarkGrey),
+        format!("raw: {}", row.raw_description),
+    )?;
+
+    let metadata_bits = [
+        ("hora", metadata_text(&row.metadata_json, &["raw", "date"])),
+        (
+            "purchaseDate",
+            metadata_text(
+                &row.metadata_json,
+                &["raw", "creditCardMetadata", "purchaseDate"],
+            ),
+        ),
+        (
+            "MCC",
+            metadata_text(
+                &row.metadata_json,
+                &["raw", "creditCardMetadata", "payeeMCC"],
+            ),
+        ),
+        (
+            "receiver",
+            metadata_text(
+                &row.metadata_json,
+                &["raw", "paymentData", "receiver", "name"],
+            ),
+        ),
+    ];
+    let rendered_metadata = metadata_bits
+        .into_iter()
+        .filter_map(|(label, value)| value.map(|value| format!("{label}: {value}")))
+        .collect::<Vec<_>>();
+    if !rendered_metadata.is_empty() {
+        queue_tui_line(
+            out,
+            width,
+            Some(Color::DarkGrey),
+            rendered_metadata.join(" · "),
+        )?;
+    }
+    Ok(())
+}
+
+fn draw_review_tui_fields(
+    out: &mut io::Stdout,
+    width: usize,
+    draft: &ReviewTuiDraft,
+    categories: &[String],
+    category_cursor: usize,
+) -> Result<()> {
+    use crossterm::{
+        queue,
+        style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor},
+    };
+    queue_tui_line(out, width, None, "")?;
+    let fields = [
+        (ReviewTuiField::Merchant, &draft.merchant_name),
+        (ReviewTuiField::Description, &draft.description),
+        (ReviewTuiField::Purpose, &draft.purpose),
+        (ReviewTuiField::Category, &draft.category_id),
+    ];
+    for (field, value) in fields {
+        let active = draft.field() == field;
+        if active {
+            queue!(
+                out,
+                SetForegroundColor(Color::Green),
+                SetAttribute(Attribute::Bold)
+            )?;
+        }
+        queue_tui_line(
+            out,
+            width,
+            None,
+            format!(
+                "{} {:<18} {}",
+                if active { "▶" } else { " " },
+                field.label(),
+                if value.is_empty() { "…" } else { value }
+            ),
+        )?;
+        queue!(out, ResetColor, SetAttribute(Attribute::Reset))?;
+    }
+
+    if draft.field() == ReviewTuiField::Category {
+        let matches = category_matches(categories, &draft.category_id, category_cursor);
+        if !matches.is_empty() {
+            queue_tui_line(
+                out,
+                width,
+                Some(Color::DarkGrey),
+                format!("Sugestões: {}", matches.join("  ·  ")),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn draw_review_tui_context(
+    out: &mut io::Stdout,
+    width: usize,
+    context: &ReviewTuiContext,
+    bulk: ReviewHumanBulk,
+) -> Result<()> {
+    use crossterm::style::Color;
+    queue_tui_line(out, width, None, "")?;
+    queue_tui_line(
+        out,
+        width,
+        Some(Color::Magenta),
+        format!(
+            "idênticas: {}   bulk: {}",
+            context.identical_count,
+            if bulk == ReviewHumanBulk::Identical {
+                "idênticas"
+            } else {
+                "não"
+            }
+        ),
+    )?;
+    if !context.nearby.is_empty() {
+        queue_tui_line(out, width, Some(Color::DarkGrey), "Mesmo dia:")?;
+        for line in &context.nearby {
+            queue_tui_line(out, width, Some(Color::DarkGrey), format!("  - {line}"))?;
+        }
+    }
+    if !context.similar.is_empty() {
+        queue_tui_line(out, width, Some(Color::DarkGrey), "Transações idênticas:")?;
+        for line in &context.similar {
+            queue_tui_line(out, width, Some(Color::DarkGrey), format!("  - {line}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn draw_review_tui_footer(out: &mut io::Stdout, width: usize, status: &str) -> Result<()> {
+    use crossterm::style::Color;
+    queue_tui_line(out, width, None, "")?;
+    queue_tui_line(
+        out,
+        width,
+        Some(Color::Blue),
+        "Tab campos · ↑/↓ navega/categoria · Ctrl/Cmd+Enter salva · Ctrl/Cmd+↑ volta · Ctrl+B bulk · Esc sai",
+    )?;
+    if !status.is_empty() {
+        queue_tui_line(out, width, Some(Color::Green), status)?;
+    }
+    Ok(())
+}
+
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        use crossterm::{execute, terminal};
+        terminal::enable_raw_mode()?;
+        execute!(io::stdout(), terminal::EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        use crossterm::{execute, terminal};
+        let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+fn key_has_command_or_control(modifiers: crossterm::event::KeyModifiers) -> bool {
+    modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+        || modifiers.contains(crossterm::event::KeyModifiers::SUPER)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewTuiKeyAction {
+    Continue,
+    Save,
+    Exit,
+}
+
+fn move_review_tui_index(index: &mut usize, rows_len: usize, delta: isize) -> bool {
+    let old = *index;
+    if delta < 0 {
+        *index = index.saturating_sub(delta.unsigned_abs());
+    } else if rows_len > 0 {
+        *index = (*index + delta as usize).min(rows_len - 1);
+    }
+    *index != old
+}
+
+fn handle_review_tui_basic_key(
+    key: crossterm::event::KeyEvent,
+    draft: &mut ReviewTuiDraft,
+) -> Option<ReviewTuiKeyAction> {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Esc => Some(ReviewTuiKeyAction::Exit),
+        KeyCode::Tab => {
+            draft.active = (draft.active + 1) % ReviewTuiField::ALL.len();
+            Some(ReviewTuiKeyAction::Continue)
+        }
+        KeyCode::BackTab => {
+            draft.active = draft
+                .active
+                .checked_sub(1)
+                .unwrap_or(ReviewTuiField::ALL.len() - 1);
+            Some(ReviewTuiKeyAction::Continue)
+        }
+        KeyCode::Enter if key_has_command_or_control(key.modifiers) => {
+            Some(ReviewTuiKeyAction::Save)
+        }
+        _ => None,
+    }
+}
+
+fn handle_review_tui_row_key(
+    key: crossterm::event::KeyEvent,
+    index: &mut usize,
+    rows_len: usize,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Up if key_has_command_or_control(key.modifiers) => {
+            move_review_tui_index(index, rows_len, -1)
+        }
+        KeyCode::Down if key_has_command_or_control(key.modifiers) => {
+            move_review_tui_index(index, rows_len, 1)
+        }
+        KeyCode::Left => move_review_tui_index(index, rows_len, -1),
+        KeyCode::Right => move_review_tui_index(index, rows_len, 1),
+        _ => false,
+    }
+}
+
+fn handle_review_tui_bulk_key(
+    key: crossterm::event::KeyEvent,
+    bulk: &mut ReviewHumanBulk,
+    status: &mut String,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if key.code != KeyCode::Char('b') || !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    *bulk = if *bulk == ReviewHumanBulk::Identical {
+        ReviewHumanBulk::None
+    } else {
+        ReviewHumanBulk::Identical
+    };
+    *status = format!(
+        "bulk {}",
+        if *bulk == ReviewHumanBulk::Identical {
+            "ligado"
+        } else {
+            "desligado"
+        }
+    );
+    true
+}
+
+fn handle_review_tui_category_key(
+    key: crossterm::event::KeyEvent,
+    draft: &mut ReviewTuiDraft,
+    categories: &[String],
+    category_cursor: &mut usize,
+) -> bool {
+    use crossterm::event::KeyCode;
+    if draft.field() != ReviewTuiField::Category {
+        return false;
+    }
+    match key.code {
+        KeyCode::Up => *category_cursor = category_cursor.saturating_sub(1),
+        KeyCode::Down => *category_cursor += 1,
+        _ => return false,
+    }
+    if let Some(category) =
+        category_matches(categories, &draft.category_id, *category_cursor).first()
+    {
+        draft.category_id = category.clone();
+    }
+    true
+}
+
+fn handle_review_tui_field_key(
+    key: crossterm::event::KeyEvent,
+    draft: &mut ReviewTuiDraft,
+) -> bool {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Up => {
+            draft.active = draft
+                .active
+                .checked_sub(1)
+                .unwrap_or(ReviewTuiField::ALL.len() - 1);
+            true
+        }
+        KeyCode::Down | KeyCode::Enter => {
+            draft.active = (draft.active + 1) % ReviewTuiField::ALL.len();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_review_tui_text_key(
+    key: crossterm::event::KeyEvent,
+    draft: &mut ReviewTuiDraft,
+    category_cursor: &mut usize,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            draft.active_value_mut().push(ch);
+            if draft.field() == ReviewTuiField::Category {
+                *category_cursor = 0;
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            draft.active_value_mut().pop();
+            if draft.field() == ReviewTuiField::Category {
+                *category_cursor = 0;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn confirm_bulk_prompt(count: usize) -> Result<bool> {
+    use crossterm::{
+        cursor,
+        event::{self, Event, KeyCode},
+        queue,
+        style::{Color, Print, ResetColor, SetForegroundColor},
+    };
+    let mut out = io::stdout();
+    queue!(
+        out,
+        cursor::MoveTo(0, 28),
+        SetForegroundColor(Color::Yellow),
+        Print(format!(
+            "Tem {count} transações idênticas. Aplicar em massa? y/n "
+        )),
+        ResetColor
+    )?;
+    out.flush()?;
+    loop {
+        if let Event::Key(key) = event::read()? {
+            return Ok(matches!(key.code, KeyCode::Char('y') | KeyCode::Char('s')));
+        }
+    }
+}
+
+async fn save_current_tui_review(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    row: &TransactionRecord,
+    draft: &ReviewTuiDraft,
+    context: &ReviewTuiContext,
+    bulk: ReviewHumanBulk,
+    sound: bool,
+) -> Result<String> {
+    let patch = draft.patch_against(row);
+    if !patch.has_changes() {
+        return Ok("sem alterações".to_string());
+    }
+    let effective_bulk = if bulk == ReviewHumanBulk::None && context.identical_count > 1 {
+        if confirm_bulk_prompt(context.identical_count)? {
+            ReviewHumanBulk::Identical
+        } else {
+            ReviewHumanBulk::None
+        }
+    } else {
+        bulk
+    };
+    let results =
+        apply_human_review_with_bulk(store, config, &row.transaction_id, patch, effective_bulk)
+            .await?;
+    if sound {
+        print!("\x07");
+        io::stdout().flush().ok();
+    }
+    Ok(format!("salvo: {} transação(ões)", results.len()))
+}
+
+async fn tx_review_human_tui(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    rows: Vec<TransactionRecord>,
+    sound: bool,
+    initial_bulk: ReviewHumanBulk,
+) -> Result<()> {
+    use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+
+    if rows.is_empty() {
+        println!("Sem pendências para revisar.");
+        return Ok(());
+    }
+
+    let _guard = TerminalGuard::enter()?;
+    let mut categories = store
+        .internal_categories()
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
+    categories.sort();
+    let summary = review_human_summary(store, Decimal::from(30_i64), rows.len()).await?;
+    let mut index = 0usize;
+    let mut drafts = rows
+        .iter()
+        .map(ReviewTuiDraft::from_row)
+        .collect::<Vec<_>>();
+    let mut context = load_review_tui_context(store, &rows[index]).await;
+    let mut bulk = initial_bulk;
+    let mut category_cursor = 0usize;
+    let mut status = String::new();
+
+    loop {
+        draw_review_tui(ReviewTuiView {
+            row: &rows[index],
+            draft: &drafts[index],
+            context: &context,
+            summary: &summary,
+            categories: &categories,
+            category_cursor,
+            index,
+            total: rows.len(),
+            bulk,
+            status: &status,
+        })?;
+        status.clear();
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+
+        if matches!(key.code, KeyCode::Char('u')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            drafts[index] = ReviewTuiDraft::from_row(&rows[index]);
+            status = "edição atual descartada".to_string();
+            continue;
+        }
+
+        if handle_review_tui_bulk_key(key, &mut bulk, &mut status) {
+            continue;
+        }
+        if handle_review_tui_row_key(key, &mut index, rows.len()) {
+            context = load_review_tui_context(store, &rows[index]).await;
+            continue;
+        }
+        if let Some(action) = handle_review_tui_basic_key(key, &mut drafts[index]) {
+            match action {
+                ReviewTuiKeyAction::Exit => break,
+                ReviewTuiKeyAction::Continue => continue,
+                ReviewTuiKeyAction::Save => {
+                    status = save_current_tui_review(
+                        store,
+                        config,
+                        &rows[index],
+                        &drafts[index],
+                        &context,
+                        bulk,
+                        sound,
+                    )
+                    .await?;
+                    if move_review_tui_index(&mut index, rows.len(), 1) {
+                        context = load_review_tui_context(store, &rows[index]).await;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if handle_review_tui_category_key(
+            key,
+            &mut drafts[index],
+            &categories,
+            &mut category_cursor,
+        ) {
+            continue;
+        }
+        if handle_review_tui_field_key(key, &mut drafts[index]) {
+            continue;
+        }
+        handle_review_tui_text_key(key, &mut drafts[index], &mut category_cursor);
+    }
+
+    Ok(())
+}
+
+async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    let min_abs_amount = decimal_from_str(&args.min_abs_amount)?;
+
+    if args.summary {
+        let summary = review_human_summary(store.as_ref(), min_abs_amount, args.limit).await?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            print_review_human_summary(&summary);
+        }
+        return Ok(());
+    }
+
+    if let Some(transaction_id) = args.transaction_id.as_deref() {
+        let category_id = args
+            .category
+            .as_deref()
+            .map(|value| category_key_from_input(value, args.subcategory.as_deref()));
+        let results = apply_human_review_with_bulk(
+            store.as_ref(),
+            &config,
+            transaction_id,
+            HumanReviewPatch {
+                description: args.description,
+                merchant_name: args.merchant_name,
+                purpose: args.purpose,
+                category_id,
+            },
+            args.bulk,
+        )
+        .await?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        } else {
+            println!("Revisão salva para {} transação(ões)", results.len());
+        }
+        return Ok(());
+    }
+
+    let rows = review_human_rows(store.as_ref(), args.kind, args.limit, min_abs_amount).await?;
+    if args.json {
+        let items = rows.iter().map(review_queue_item).collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    if args.tui {
+        return tx_review_human_tui(store.as_ref(), &config, rows, args.sound, args.bulk).await;
+    }
+
+    if !io::stdin().is_terminal() {
+        print_review_queue(&rows);
+        println!(
+            "stdin não é interativo; use --json ou --transaction-id para salvar via OpenClaw."
+        );
+        return Ok(());
+    }
+
+    println!("Comandos: Enter mantém, 's' pula a transação, 'q' sai.");
+    println!();
+    for (index, row) in rows.iter().enumerate() {
+        println!(
+            "[{}/{}] {} | {} | {}",
+            index + 1,
+            rows.len(),
+            row.transaction_date.format("%Y-%m-%d"),
+            brl(row.amount),
+            row.category_id.as_deref().unwrap_or("sem-categoria")
+        );
+        println!("id: {}", row.transaction_id);
+        println!("raw: {}", row.raw_description);
+        println!("atual: {}", row.display_description());
+
+        let mut patch = HumanReviewPatch {
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            category_id: None,
+        };
+
+        let ask_merchant = matches!(args.kind, ReviewHumanKind::Merchant)
+            || (matches!(args.kind, ReviewHumanKind::All) && row.merchant_name.is_none());
+        if ask_merchant {
+            match prompt_value("merchant", row.merchant_name.as_deref())? {
+                PromptValue::Set(value) => patch.merchant_name = Some(value),
+                PromptValue::Skip => {
+                    println!("pulada\n");
+                    continue;
+                }
+                PromptValue::Quit => break,
+                PromptValue::Keep => {}
+            }
+        }
+
+        let ask_description = matches!(args.kind, ReviewHumanKind::Description)
+            || (matches!(args.kind, ReviewHumanKind::All) && row.description.is_none());
+        if ask_description {
+            match prompt_value("description", row.description.as_deref())? {
+                PromptValue::Set(value) => patch.description = Some(value),
+                PromptValue::Skip => {
+                    println!("pulada\n");
+                    continue;
+                }
+                PromptValue::Quit => break,
+                PromptValue::Keep => {}
+            }
+        }
+
+        let ask_purpose = matches!(args.kind, ReviewHumanKind::Purpose)
+            || (matches!(args.kind, ReviewHumanKind::All) && row.purpose.is_none());
+        if ask_purpose {
+            match prompt_value("purpose", row.purpose.as_deref())? {
+                PromptValue::Set(value) => patch.purpose = Some(value),
+                PromptValue::Skip => {
+                    println!("pulada\n");
+                    continue;
+                }
+                PromptValue::Quit => break,
+                PromptValue::Keep => {}
+            }
+        }
+
+        match prompt_value("category", row.category_id.as_deref())? {
+            PromptValue::Set(value) => {
+                patch.category_id = Some(category_key_from_input(&value, None))
+            }
+            PromptValue::Skip => {
+                println!("pulada\n");
+                continue;
+            }
+            PromptValue::Quit => break,
+            PromptValue::Keep => {}
+        }
+
+        if patch.has_changes() {
+            let result =
+                apply_human_review(store.as_ref(), &config, &row.transaction_id, patch).await?;
+            println!("salvo: {}\n", result.transaction_id);
+        } else {
+            println!("sem alterações\n");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetContextByDescResult {
@@ -4982,7 +6473,7 @@ async fn tx_set_context_by_desc(args: SetContextByDescArgs) -> Result<()> {
         .iter()
         .map(|row| SetContextByDescResult {
             transaction_id: row.transaction_id.clone(),
-            description: row.description.clone(),
+            description: row.display_description().to_string(),
             old_context: row.context.clone(),
             new_context: args.context.clone(),
         })
@@ -5013,11 +6504,12 @@ async fn tx_set_context_by_desc(args: SetContextByDescArgs) -> Result<()> {
             Uuid::now_v7()
         );
         store
-            .annotate_transaction(
+            .update_transaction_anatomy(
                 &row.transaction_id,
-                None,
-                Some("manual"),
-                Some(&args.context),
+                TransactionAnatomyPatch {
+                    description: Some(&args.context),
+                    ..TransactionAnatomyPatch::default()
+                },
                 &config.actor_id,
                 &idempotency_key,
             )
@@ -5065,7 +6557,11 @@ async fn tx_split_preview(args: TxSplitPreviewArgs) -> Result<()> {
     }
 
     println!("Split preview {}", preview.parent_transaction_id);
-    println!("- pai: {} | {}", brl(parent.amount), parent.description);
+    println!(
+        "- pai: {} | {}",
+        brl(parent.amount),
+        parent.display_description()
+    );
     println!("- linhas: {}", preview.lines.len());
     println!("- itens de recibo: {}", preview.items.len());
     println!("- total split: {}", brl(preview.split_total));
@@ -5147,7 +6643,7 @@ async fn tx_split_show(args: TxSplitShowArgs) -> Result<()> {
     println!(
         "- pai: {} | {}",
         brl(detail.parent.amount),
-        detail.parent.description
+        detail.parent.display_description()
     );
     match &detail.split {
         Some(split) => {
@@ -5246,7 +6742,7 @@ async fn forecast_upsert(args: ForecastUpsertArgs) -> Result<()> {
         category_id: args
             .category
             .as_deref()
-            .map(|value| category_id(value, args.subcategory.as_deref())),
+            .map(|value| category_key_from_input(value, args.subcategory.as_deref())),
         account_id: args.account_id,
         status: args.status,
         recurrence: args.recurrence,
@@ -6108,7 +7604,7 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
             }) {
                 return true;
             }
-            let desc_lower = tx.description.to_lowercase();
+            let desc_lower = tx.raw_description.to_lowercase();
             desc_lower.contains("pagamento de fatura")
                 || desc_lower.contains("pagamento cart")
                 || desc_lower.contains("pagamento de cart")

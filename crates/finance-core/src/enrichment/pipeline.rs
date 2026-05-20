@@ -123,7 +123,7 @@ impl EnrichmentPipeline {
             let row = UncategorizedRow {
                 transaction_id: record.transaction_id.clone(),
                 transaction_date: record.transaction_date,
-                description: record.description.clone(),
+                description: record.raw_description.clone(),
                 amount: record.amount,
                 account_id: record.account_id.clone(),
                 account_label: None,
@@ -226,7 +226,7 @@ impl EnrichmentPipeline {
                         .map(|t| {
                             let (cat, sub) = split_category_id(t.category_id.as_deref());
                             FewShotExample {
-                                description: t.description.clone(),
+                                description: t.raw_description.clone(),
                                 amount: t.amount,
                                 category: cat,
                                 subcategory: sub,
@@ -435,6 +435,7 @@ mod tests {
         ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
         TransactionSplitLineRecord, TransactionSplitRecord,
     };
+    use crate::storage::TransactionAnatomyPatch;
     use async_trait::async_trait;
     use chrono::NaiveDate;
     use rust_decimal::Decimal;
@@ -525,6 +526,15 @@ mod tests {
             ));
             Ok(())
         }
+        async fn update_transaction_anatomy(
+            &self,
+            _: &str,
+            _: TransactionAnatomyPatch<'_>,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn find_transactions_by_description(
             &self,
             _: &str,
@@ -537,6 +547,24 @@ mod tests {
             _: usize,
         ) -> Result<Vec<TransactionRecord>> {
             Ok(vec![])
+        }
+        async fn pending_human_descriptions(&self, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn pending_merchants(&self, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn pending_purposes(&self, _: Decimal, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn count_pending_human_descriptions(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn count_pending_merchants(&self) -> Result<i64> {
+            Ok(0)
+        }
+        async fn count_pending_purposes(&self, _: Decimal) -> Result<i64> {
+            Ok(0)
         }
         async fn existing_transaction_ids(&self, _: &[String]) -> Result<BTreeSet<String>> {
             Ok(BTreeSet::new())
@@ -725,12 +753,16 @@ mod tests {
             transaction_id: id.to_string(),
             account_id: None,
             transaction_date: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
-            description: desc.to_string(),
+            raw_description: desc.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
             amount: Decimal::new(cents, 2),
             tx_type: "debit".to_string(),
             category_id: Some("alimentacao:restaurantes".to_string()),
             category_source: source.to_string(),
             context: None,
+            classifier_trace: None,
             payment_status: "confirmed".to_string(),
             source: "pluggy".to_string(),
             actor_id: "u".to_string(),

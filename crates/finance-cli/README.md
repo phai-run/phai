@@ -72,6 +72,37 @@ Enrichment automático: 18 categorizadas | 22 adiadas para revisão | 2 falhas
 Para revisar as adiadas: finance tx enrich --days 7
 ```
 
+For quick human cleanup of transaction anatomy, use the interactive
+review loop locally. `finance review` opens a dense terminal UI with
+editable human fields, read-only raw bank data, category autocomplete,
+nearby transactions, identical-transaction bulk apply, and Ctrl/Cmd+Enter
+to save:
+
+```bash
+finance review
+```
+
+The lower-level command is still available when you need explicit queue
+selection:
+
+```bash
+finance tx review-human --kind all --limit 20 --tui --sound
+```
+
+For OpenClaw/WhatsApp, list machine-readable pending items and then
+apply one response by transaction id:
+
+```bash
+finance tx review-human --summary --json
+finance tx review-human --kind all --limit 5 --json
+finance tx review-human --transaction-id TX_ID \
+  --description "Compra de mercado" \
+  --merchant-name "Mercado Exemplo" \
+  --category alimentacao:mercado \
+  --bulk identical \
+  --json
+```
+
 Behavior summary:
 
 - `AutoApply` decisions (high confidence) are persisted as
