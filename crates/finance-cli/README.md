@@ -83,10 +83,11 @@ finance review
 ```
 
 The lower-level command is still available when you need explicit queue
-selection:
+selection. The shortcut loads a long local TUI queue by default; keep small
+limits for OpenClaw/WhatsApp JSON flows.
 
 ```bash
-finance tx review-human --kind all --limit 20 --tui --sound
+finance tx review-human --kind all --limit 500 --tui --sound
 ```
 
 For OpenClaw/WhatsApp, list machine-readable pending items and then
