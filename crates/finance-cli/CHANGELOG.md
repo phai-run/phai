@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/feliperun/finance-os/compare/v1.3.2...v1.4.0) (2026-05-20)
+
+
+### Features
+
+* **tx:** redesign transaction anatomy and human review workflow ([#36](https://github.com/feliperun/finance-os/issues/36)) ([80631fd](https://github.com/feliperun/finance-os/commit/80631fdce399f0c7c3d01da4fa36b6aa7745f3c2))
+
 ## [1.3.2](https://github.com/feliperun/finance-os/compare/v1.3.1...v1.3.2) (2026-05-19)
 
 
