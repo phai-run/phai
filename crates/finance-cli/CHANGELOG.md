@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/feliperun/finance-os/compare/v1.4.0...v1.5.0) (2026-05-20)
+
+
+### Features
+
+* **cli:** speed up review TUI for bulk categorization ([b5f3e22](https://github.com/feliperun/finance-os/commit/b5f3e2215e395264d06e1d7d59db7bec53a39f0b))
+
+
+### Bug Fixes
+
+* **cli:** fix review tui editing flow ([fd533da](https://github.com/feliperun/finance-os/commit/fd533daa80c738730e6ab804450caad7aa64faf8))
+
 ## [1.4.0](https://github.com/feliperun/finance-os/compare/v1.3.2...v1.4.0) (2026-05-20)
 
 
