@@ -5562,6 +5562,7 @@ struct ReviewTuiDraft {
     description: String,
     purpose: String,
     category_id: String,
+    category_query: String,
     merchant_cursor: usize,
     description_cursor: usize,
     purpose_cursor: usize,
@@ -5583,6 +5584,7 @@ impl ReviewTuiDraft {
             merchant_name,
             description,
             purpose,
+            category_query: category_id.clone(),
             category_id,
             active: ReviewTuiField::ALL
                 .iter()
@@ -5600,7 +5602,7 @@ impl ReviewTuiDraft {
             ReviewTuiField::Merchant => &mut self.merchant_name,
             ReviewTuiField::Description => &mut self.description,
             ReviewTuiField::Purpose => &mut self.purpose,
-            ReviewTuiField::Category => &mut self.category_id,
+            ReviewTuiField::Category => &mut self.category_query,
         }
     }
 
@@ -5609,7 +5611,7 @@ impl ReviewTuiDraft {
             ReviewTuiField::Merchant => &self.merchant_name,
             ReviewTuiField::Description => &self.description,
             ReviewTuiField::Purpose => &self.purpose,
-            ReviewTuiField::Category => &self.category_id,
+            ReviewTuiField::Category => &self.category_query,
         }
     }
 
@@ -5668,6 +5670,7 @@ impl ReviewTuiDraft {
 
     fn set_category_id(&mut self, category_id: String) {
         self.category_cursor = category_id.chars().count();
+        self.category_query = category_id.clone();
         self.category_id = category_id;
     }
 
@@ -5771,11 +5774,10 @@ fn next_word_cursor(value: &str, cursor: usize) -> usize {
 
 fn changed_text(new_value: &str, old_value: Option<&str>) -> Option<String> {
     let trimmed = new_value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
     match old_value {
         Some(old) if old.trim() == trimmed => None,
+        Some(_) if trimmed.is_empty() => Some(String::new()),
+        None if trimmed.is_empty() => None,
         _ => Some(trimmed.to_string()),
     }
 }
@@ -6070,7 +6072,7 @@ fn tui_field_value(field: ReviewTuiField, draft: &ReviewTuiDraft) -> &str {
         ReviewTuiField::Merchant => &draft.merchant_name,
         ReviewTuiField::Description => &draft.description,
         ReviewTuiField::Purpose => &draft.purpose,
-        ReviewTuiField::Category => &draft.category_id,
+        ReviewTuiField::Category => &draft.category_query,
     }
 }
 
@@ -6637,7 +6639,7 @@ fn review_tui_category_lines(area: Rect, view: &ReviewTuiView<'_>) -> Vec<Line<'
     lines.extend(
         category_matches(
             view.categories,
-            &view.draft.category_id,
+            &view.draft.category_query,
             view.category_cursor,
             view.recent_categories,
         )
@@ -6650,10 +6652,10 @@ fn review_tui_category_lines(area: Rect, view: &ReviewTuiView<'_>) -> Vec<Line<'
 }
 
 fn review_tui_category_filter_line(draft: &ReviewTuiDraft) -> Line<'static> {
-    let filter = if draft.category_id.is_empty() {
+    let filter = if draft.category_query.is_empty() {
         "(digite para buscar)".to_string()
     } else {
-        draft.category_id.clone()
+        draft.category_query.clone()
     };
     Line::from(vec![
         Span::styled("Filtro: ", Style::default().fg(TuiColor::DarkGray)),
@@ -6992,9 +6994,7 @@ fn handle_review_tui_bulk_key(
 
 fn handle_review_tui_category_key(
     key: crossterm::event::KeyEvent,
-    draft: &mut ReviewTuiDraft,
-    categories: &[String],
-    recent_categories: &[String],
+    draft: &ReviewTuiDraft,
     category_cursor: &mut usize,
 ) -> bool {
     use crossterm::event::KeyCode;
@@ -7005,16 +7005,6 @@ fn handle_review_tui_category_key(
         KeyCode::Up => *category_cursor = category_cursor.saturating_sub(1),
         KeyCode::Down => *category_cursor += 1,
         _ => return false,
-    }
-    if let Some(category) = category_matches(
-        categories,
-        &draft.category_id,
-        *category_cursor,
-        recent_categories,
-    )
-    .first()
-    {
-        draft.set_category_id(category.clone());
     }
     true
 }
@@ -7035,7 +7025,7 @@ fn handle_review_tui_category_number_key(
         return false;
     };
     let index = ch as usize - '1' as usize;
-    let matches = category_matches(categories, &draft.category_id, 0, recent_categories);
+    let matches = category_matches(categories, &draft.category_query, 0, recent_categories);
     let Some(category) = matches.get(index).cloned() else {
         return false;
     };
@@ -7071,12 +7061,12 @@ fn apply_review_tui_category_pick(
     recent_categories: &[String],
     category_cursor: usize,
 ) {
-    if draft.category_id.trim().is_empty() && category_cursor == 0 {
+    if draft.category_query.trim().is_empty() && category_cursor == 0 {
         return;
     }
     if let Some(category) = category_matches(
         categories,
-        &draft.category_id,
+        &draft.category_query,
         category_cursor,
         recent_categories,
     )
@@ -7487,7 +7477,7 @@ struct ReviewTuiEventState<'a> {
     terminal: &'a mut ReviewTerminal,
     rows: &'a mut Vec<TransactionRecord>,
     drafts: &'a mut Vec<ReviewTuiDraft>,
-    summary: &'a ReviewHumanSummary,
+    summary: &'a mut ReviewHumanSummary,
     categories: &'a [String],
     session: &'a mut ReviewTuiSession,
 }
@@ -7641,9 +7631,7 @@ fn handle_review_tui_edit_key(
     let index = state.session.index;
     if handle_review_tui_category_key(
         key,
-        &mut state.drafts[index],
-        state.categories,
-        &state.session.recent_categories,
+        &state.drafts[index],
         &mut state.session.category_cursor,
     ) {
         return;
@@ -7675,19 +7663,26 @@ async fn save_review_tui_current_draft(
     let transaction_id = state.rows[index].transaction_id.clone();
     let bulk = state.session.bulk;
     let patch_for_persist = patch.clone();
-    let future =
-        apply_human_review_with_bulk(store, config, &transaction_id, patch_for_persist, bulk);
-    let results = {
+    let queue_limit = state.rows.len();
+    let future = async {
+        let results =
+            apply_human_review_with_bulk(store, config, &transaction_id, patch_for_persist, bulk)
+                .await?;
+        let summary = review_human_summary(store, Decimal::from(30_i64), queue_limit).await?;
+        Ok((results, summary))
+    };
+    let (results, refreshed_summary) = {
         let mut render_state = ReviewTuiRenderState {
             terminal: &mut *state.terminal,
             rows: state.rows.as_slice(),
             drafts: state.drafts.as_slice(),
-            summary: state.summary,
+            summary: &*state.summary,
             categories: state.categories,
             session: &mut *state.session,
         };
         await_with_review_tui_spinner(future, &mut render_state, "salvando").await?
     };
+    *state.summary = refreshed_summary;
     if sound {
         print!("\x07");
         io::stdout().flush().ok();
@@ -7728,7 +7723,7 @@ async fn tx_review_human_tui(
         .into_iter()
         .collect::<Vec<_>>();
     categories.sort();
-    let summary = review_human_summary(store, Decimal::from(30_i64), rows.len()).await?;
+    let mut summary = review_human_summary(store, Decimal::from(30_i64), rows.len()).await?;
     let mut terminal = ReviewTerminal::enter()?;
     let mut drafts = rows
         .iter()
@@ -7773,7 +7768,7 @@ async fn tx_review_human_tui(
                 terminal: &mut terminal,
                 rows: &mut rows,
                 drafts: &mut drafts,
-                summary: &summary,
+                summary: &mut summary,
                 categories: &categories,
                 session: &mut session,
             },
@@ -9391,8 +9386,9 @@ impl NaiveDateSat for NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_review_tui_category_pick, category_matches, effective_review_human_limit,
-        resolve_sync_from, review_tui_plain_skip_requested, ReviewTuiDraft, ReviewTuiField,
+        apply_review_tui_category_pick, category_matches, changed_text,
+        effective_review_human_limit, handle_review_tui_category_key, resolve_sync_from,
+        review_tui_plain_skip_requested, ReviewTuiDraft, ReviewTuiField,
     };
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9490,6 +9486,32 @@ mod tests {
         apply_review_tui_category_pick(&mut draft, &categories, &recent, 1);
 
         assert_eq!(draft.category_id, "alimentacao:mercado");
+    }
+
+    #[test]
+    fn review_tui_category_arrows_keep_filter_text() {
+        let row = sample_review_row("alimentacao:mercado");
+        let mut draft = ReviewTuiDraft::from_row(&row);
+        draft.category_query = "trans".to_string();
+        draft.category_cursor = draft.category_query.chars().count();
+        let mut category_cursor = 0;
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+
+        assert!(handle_review_tui_category_key(
+            down,
+            &draft,
+            &mut category_cursor
+        ));
+
+        assert_eq!(category_cursor, 1);
+        assert_eq!(draft.category_query, "trans");
+        assert_eq!(draft.category_id, "alimentacao:mercado");
+    }
+
+    #[test]
+    fn changed_text_allows_clearing_existing_value() {
+        assert_eq!(changed_text("", Some("Texto antigo")), Some(String::new()));
+        assert_eq!(changed_text("", None), None);
     }
 
     #[test]
