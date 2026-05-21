@@ -18,6 +18,7 @@ use finance_core::config::AppConfig;
 use finance_core::enrichment::fuzzy::score_to_percent;
 use finance_core::enrichment::llm::LlmProvider;
 use finance_core::enrichment::pipeline::{mark_attempted, EnrichmentPipeline};
+use finance_core::enrichment::replication::{compute_replication, ReplicationOutcome};
 use finance_core::enrichment::rule_gen::{build_rule_record, keyword_from_result};
 use finance_core::enrichment::types::{CnpjInfo, EnrichmentDecision, EnrichmentResult};
 use finance_core::models::{AuditEvent, RuleRecord, TransactionRecord, UncategorizedRow};
@@ -306,6 +307,74 @@ async fn enrich_after_sync_one(
     Ok(())
 }
 
+/// Best-effort: copy description/purpose from a prior same-merchant
+/// transaction if the current one still has those fields empty.
+///
+/// Called immediately after the enrichment pipeline writes `merchant_name`
+/// so the merchant token is known. Errors are logged to stderr and do NOT
+/// propagate — replication is opportunistic and must not abort the enrichment
+/// flow.
+async fn try_replicate_anatomy(
+    store: &dyn FinanceStore,
+    transaction_id: &str,
+    merchant_name: &str,
+    category_id: &str,
+    amount: rust_decimal::Decimal,
+    actor_id: &str,
+) {
+    let donors = match store
+        .find_anatomy_donors(merchant_name, transaction_id)
+        .await
+    {
+        Ok(d) => d,
+        Err(err) => {
+            eprintln!("aviso: find_anatomy_donors falhou para {transaction_id}: {err:#}");
+            return;
+        }
+    };
+    // New Pluggy transactions always have NULL description and purpose.
+    let outcome = compute_replication(
+        Some(merchant_name),
+        None,
+        None,
+        Some(category_id),
+        amount,
+        &donors,
+    );
+    let rep = match outcome {
+        ReplicationOutcome::Replicated(r) => r,
+        _ => return,
+    };
+    let idempotency_key = format!("anatomy_rep:{}:{}", transaction_id, uuid::Uuid::now_v7());
+    let patch = finance_core::storage::TransactionAnatomyPatch {
+        description: rep.description.as_deref(),
+        purpose: rep.purpose.as_deref(),
+        ..finance_core::storage::TransactionAnatomyPatch::default()
+    };
+    if let Err(err) = store
+        .update_transaction_anatomy(transaction_id, patch, actor_id, &idempotency_key)
+        .await
+    {
+        eprintln!("aviso: replicação de anatomy falhou para {transaction_id}: {err:#}");
+        return;
+    }
+    let audit = AuditEvent::from_entity(
+        "transaction",
+        transaction_id,
+        "anatomy_replicated",
+        actor_id,
+        &idempotency_key,
+        serde_json::json!({
+            "donor_id": rep.donor_id,
+            "description_replicated": rep.description.is_some(),
+            "purpose_replicated": rep.purpose.is_some(),
+        }),
+    );
+    if let Err(err) = store.insert_audit_events(&[audit]).await {
+        eprintln!("aviso: audit event de replicação falhou para {transaction_id}: {err:#}");
+    }
+}
+
 /// Annotation + audit + mark-attempted for a high-confidence
 /// AutoApply during the sync hook. Mirrors [`apply_decision`] but is
 /// always non-dry-run and always uses `enriched:llm` as the source.
@@ -341,6 +410,15 @@ async fn apply_auto_decision(
         )
         .await
         .context("update_transaction_anatomy falhou no enrich_after_sync")?;
+    try_replicate_anatomy(
+        store,
+        &tx.transaction_id,
+        &result.merchant_name,
+        &category_id,
+        tx.amount,
+        &config.actor_id,
+    )
+    .await;
     mark_attempted(store, &tx.transaction_id, &config.actor_id).await?;
     let audit = AuditEvent::from_entity(
         "transaction",
@@ -724,6 +802,15 @@ async fn apply_decision(
             &idempotency_key,
         )
         .await?;
+    try_replicate_anatomy(
+        store,
+        &tx.transaction_id,
+        &result.merchant_name,
+        &category_id,
+        tx.amount,
+        &config.actor_id,
+    )
+    .await;
     mark_attempted(store, &tx.transaction_id, &config.actor_id).await?;
     let audit = AuditEvent::from_entity(
         "transaction",
@@ -1792,6 +1879,19 @@ mod test_support {
         }
         async fn mark_enrichment_attempted(&self, _: &str, _: &str, _: &str) -> Result<()> {
             Ok(())
+        }
+        async fn find_anatomy_donors(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<finance_core::models::TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn replicable_anatomy_candidates(
+            &self,
+            _: usize,
+        ) -> Result<Vec<finance_core::models::TransactionRecord>> {
+            Ok(vec![])
         }
     }
 }

@@ -1924,6 +1924,63 @@ impl FinanceStore for LocalStore {
         Ok(out)
     }
 
+    async fn find_anatomy_donors(
+        &self,
+        merchant_name: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let normalized = merchant_name.trim().to_lowercase();
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, raw_description, description,
+              merchant_name, purpose, CAST(amount AS TEXT), tx_type, category_id,
+              category_source, context, classifier_trace, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at,
+              enrichment_attempted_at
+            FROM transactions
+            WHERE LOWER(TRIM(merchant_name)) = ?1
+              AND transaction_id != ?2
+              AND (description IS NOT NULL OR purpose IS NOT NULL)
+              AND category_source IN ('manual', 'enriched:user', 'rule')
+            ORDER BY transaction_date DESC
+            LIMIT 5
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![normalized, exclude_id], transaction_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn replicable_anatomy_candidates(&self, limit: usize) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, raw_description, description,
+              merchant_name, purpose, CAST(amount AS TEXT), tx_type, category_id,
+              category_source, context, classifier_trace, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at,
+              enrichment_attempted_at
+            FROM transactions
+            WHERE TRIM(COALESCE(merchant_name, '')) != ''
+              AND (
+                description IS NULL OR TRIM(description) = ''
+                OR purpose IS NULL OR TRIM(purpose) = ''
+              )
+              AND category_id IS NOT NULL
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], transaction_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn similar_transactions(
         &self,
         keyword: &str,

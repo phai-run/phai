@@ -690,6 +690,12 @@ mod tests {
         ) -> Result<Vec<TransactionRecord>> {
             Ok(self.similar.clone())
         }
+        async fn find_anatomy_donors(&self, _: &str, _: &str) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn replicable_anatomy_candidates(&self, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
         async fn mark_enrichment_attempted(
             &self,
             transaction_id: &str,

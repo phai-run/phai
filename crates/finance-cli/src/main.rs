@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use finance_core::enrichment::replication::{find_and_replicate, ReplicationOutcome};
 use finance_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
     ensure_transaction_idempotency, manual_transaction_idempotency,
@@ -1080,6 +1081,9 @@ enum TxCommand {
     /// Run the LLM-driven enrichment pipeline over uncategorized
     /// transactions. Supports human + machine (NDJSON) modes.
     Enrich(enrich::EnrichArgs),
+    /// Propagate human-curated description and purpose from prior
+    /// same-merchant transactions to those that are still missing them.
+    ReplicateAnatomy(ReplicateAnatomyArgs),
 }
 
 #[derive(Subcommand)]
@@ -1154,6 +1158,16 @@ struct SetAnatomyArgs {
     purpose: Option<String>,
     #[arg(long)]
     classifier_trace: Option<String>,
+}
+
+#[derive(Args)]
+struct ReplicateAnatomyArgs {
+    /// Max transactions to process (default: 200).
+    #[arg(long, default_value_t = 200)]
+    limit: usize,
+    /// Show what would be replicated without writing any changes.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -2514,6 +2528,7 @@ async fn main() -> Result<()> {
                 TxSplitCommand::Clear(args) => tx_split_clear(args).await,
             },
             TxCommand::Enrich(args) => tx_enrich(args).await,
+            TxCommand::ReplicateAnatomy(args) => tx_replicate_anatomy(args).await,
         },
         Commands::Review(args) => {
             tx_review_human(ReviewHumanArgs {
@@ -4972,6 +4987,95 @@ async fn tx_enrich(args: enrich::EnrichArgs) -> Result<()> {
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     enrich::run(args, &config, store.as_ref()).await
+}
+
+async fn tx_replicate_anatomy(args: ReplicateAnatomyArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let candidates = store
+        .replicable_anatomy_candidates(args.limit)
+        .await
+        .context("replicable_anatomy_candidates falhou")?;
+
+    let total = candidates.len();
+    let mut replicated = 0usize;
+    let mut no_donor = 0usize;
+    let mut already_complete = 0usize;
+    let mut errors = 0usize;
+
+    for tx in &candidates {
+        let outcome = match find_and_replicate(store.as_ref(), tx).await {
+            Ok(o) => o,
+            Err(err) => {
+                eprintln!(
+                    "aviso: replicação falhou para {} ({}): {err:#}",
+                    tx.transaction_id, tx.raw_description
+                );
+                errors += 1;
+                continue;
+            }
+        };
+        match outcome {
+            ReplicationOutcome::Replicated(rep) => {
+                replicated += 1;
+                println!(
+                    "  replicate  {}  ←  {}{}{}",
+                    tx.transaction_id,
+                    rep.donor_id,
+                    rep.description
+                        .as_deref()
+                        .map(|d| format!("  desc={d:?}"))
+                        .unwrap_or_default(),
+                    rep.purpose
+                        .as_deref()
+                        .map(|p| format!("  purpose={p:?}"))
+                        .unwrap_or_default(),
+                );
+                if !args.dry_run {
+                    let idempotency_key =
+                        format!("anatomy_rep:{}:{}", tx.transaction_id, Uuid::now_v7());
+                    store
+                        .update_transaction_anatomy(
+                            &tx.transaction_id,
+                            TransactionAnatomyPatch {
+                                description: rep.description.as_deref(),
+                                purpose: rep.purpose.as_deref(),
+                                ..TransactionAnatomyPatch::default()
+                            },
+                            &config.actor_id,
+                            &idempotency_key,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("update_transaction_anatomy falhou: {}", tx.transaction_id)
+                        })?;
+                    let audit = AuditEvent::from_entity(
+                        "transaction",
+                        &tx.transaction_id,
+                        "anatomy_replicated",
+                        &config.actor_id,
+                        &idempotency_key,
+                        serde_json::json!({
+                            "donor_id": rep.donor_id,
+                            "description_replicated": rep.description.is_some(),
+                            "purpose_replicated": rep.purpose.is_some(),
+                        }),
+                    );
+                    store.insert_audit_events(&[audit]).await?;
+                }
+            }
+            ReplicationOutcome::NoDonor | ReplicationOutcome::NoMerchant => no_donor += 1,
+            ReplicationOutcome::AlreadyComplete => already_complete += 1,
+        }
+    }
+
+    println!(
+        "\nTotal: {total}  replicado: {replicated}  sem donor: {no_donor}  já completo: {already_complete}  erros: {errors}{}",
+        if args.dry_run { "  (dry-run — nenhuma alteração gravada)" } else { "" },
+    );
+    Ok(())
 }
 
 async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {

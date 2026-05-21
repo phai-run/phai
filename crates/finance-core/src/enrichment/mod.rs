@@ -22,6 +22,7 @@ pub mod llm;
 pub mod pipeline;
 pub mod pluggy_map;
 pub mod prompt;
+pub mod replication;
 pub mod rule_gen;
 pub mod types;
 pub mod web_search;

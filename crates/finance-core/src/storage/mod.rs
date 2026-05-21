@@ -217,6 +217,33 @@ pub trait FinanceStore {
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()>;
+
+    /// Prior transactions from the same merchant that carry a human-curated
+    /// `description` or `purpose`. Used by the replication engine to
+    /// propagate anatomy from recurring-merchant history.
+    ///
+    /// Only rows whose `category_source` is in
+    /// `('manual', 'enriched:user', 'rule')` are returned — these represent
+    /// deliberate human (or human-confirmed) decisions.
+    ///
+    /// Results are ordered by `transaction_date DESC` (most recent first)
+    /// and capped at 5 so callers can pick the best match without fetching
+    /// unbounded history. `exclude_id` prevents a transaction from donating
+    /// anatomy to itself.
+    async fn find_anatomy_donors(
+        &self,
+        merchant_name: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<TransactionRecord>>;
+
+    /// Transactions that have a `merchant_name` but are missing at least
+    /// one of `description` or `purpose`. Used by the batch replication
+    /// command to find candidates that may benefit from [`find_anatomy_donors`].
+    ///
+    /// Only categorized transactions (`category_id IS NOT NULL`) are
+    /// included — uncategorized ones are still in-flight and not ready
+    /// for anatomy propagation.
+    async fn replicable_anatomy_candidates(&self, limit: usize) -> Result<Vec<TransactionRecord>>;
 }
 
 pub async fn open_store(config: &AppConfig) -> Result<Box<dyn FinanceStore>> {
