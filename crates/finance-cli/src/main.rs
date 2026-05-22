@@ -7475,7 +7475,10 @@ fn review_tui_skip_requested(
 
 fn review_tui_ctrl_skip_requested(key: crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
-    matches!(key.code, KeyCode::Char('s')) && key.modifiers.contains(KeyModifiers::CONTROL)
+    // Force-skip even when the draft has edits. Uses Ctrl+P ("pular") so
+    // Ctrl+S can mean Save in the same way every desktop app does.
+    // (Plain `s` still skips when the draft has no pending changes.)
+    matches!(key.code, KeyCode::Char('p')) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn review_tui_plain_skip_requested(
