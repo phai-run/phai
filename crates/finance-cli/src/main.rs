@@ -65,10 +65,10 @@ const REVIEW_TUI_CATEGORY_MATCH_LIMIT: usize = 9;
 const REVIEW_TUI_RECENT_CATEGORY_LIMIT: usize = 5;
 
 #[derive(Parser)]
-#[command(name = "finance", version, about = "Finance OS v1 CLI")]
+#[command(name = "fin", version, about = "Finance OS — `fin` abre a revisão TUI")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -2570,7 +2570,7 @@ fn should_run_auto_check(cli: &Cli) -> bool {
         }
         return false;
     }
-    if matches!(cli.command, Commands::SelfCmd { .. }) {
+    if matches!(cli.command, Some(Commands::SelfCmd { .. })) {
         return false;
     }
     true
@@ -2600,19 +2600,41 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::SelfCmd { command } => self_cmd::run(command).await,
-        Commands::Auth { command } => match command {
+        None => {
+            tx_review_human(ReviewHumanArgs {
+                kind: ReviewHumanKind::All,
+                limit: None,
+                min_abs_amount: "30".to_string(),
+                json: false,
+                summary: false,
+                tui: true,
+                sound: true,
+                month: None,
+                account_id: None,
+                merchant: None,
+                filter_category: None,
+                transaction_id: None,
+                description: None,
+                merchant_name: None,
+                purpose: None,
+                category: None,
+                subcategory: None,
+            })
+            .await
+        }
+        Some(Commands::SelfCmd { command }) => self_cmd::run(command).await,
+        Some(Commands::Auth { command }) => match command {
             AuthCommand::Setup(args) => auth_setup(args).await,
         },
-        Commands::Admin { command } => match command {
+        Some(Commands::Admin { command }) => match command {
             AdminCommand::Migrate => admin_migrate().await,
             AdminCommand::ImportLegacy(args) => admin_import_legacy(args).await,
             AdminCommand::Reclassify(args) => admin_reclassify(args).await,
         },
-        Commands::Sync { command } => match command {
+        Some(Commands::Sync { command }) => match command {
             SyncCommand::Pluggy(args) => sync_pluggy_command(args).await,
         },
-        Commands::Report { command } => match command {
+        Some(Commands::Report { command }) => match command {
             ReportCommand::DailyPulse(args) => report_daily_pulse(args).await,
             ReportCommand::MonthlySpend(args) => report_monthly_spend(args).await,
             ReportCommand::Cashflow(args) => report_cashflow(args).await,
@@ -2631,7 +2653,7 @@ async fn main() -> Result<()> {
             ReportCommand::Cards(args) => report_cards(args).await,
             ReportCommand::Balances(args) => report_balances(args).await,
         },
-        Commands::Tx { command } => match command {
+        Some(Commands::Tx { command }) => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
             TxCommand::Categorize(args) => tx_categorize(args).await,
             TxCommand::SetAnatomy(args) => tx_set_anatomy(args).await,
@@ -2651,7 +2673,7 @@ async fn main() -> Result<()> {
             TxCommand::Enrich(args) => tx_enrich(args).await,
             TxCommand::ReplicateAnatomy(args) => tx_replicate_anatomy(args).await,
         },
-        Commands::Review(args) => {
+        Some(Commands::Review(args)) => {
             tx_review_human(ReviewHumanArgs {
                 kind: args.kind,
                 limit: args.limit,
@@ -2673,22 +2695,22 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Commands::Forecast { command } => match command {
+        Some(Commands::Forecast { command }) => match command {
             ForecastCommand::Upsert(args) => forecast_upsert(args).await,
         },
-        Commands::Rule { command } => match command {
+        Some(Commands::Rule { command }) => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,
             RuleCommand::List(args) => rule_list(args).await,
             RuleCommand::Inspect(args) => rule_inspect(args).await,
         },
-        Commands::Account { command } => match command {
+        Some(Commands::Account { command }) => match command {
             AccountCommand::Upsert(args) => account_upsert(args).await,
         },
-        Commands::Budget { command } => match command {
+        Some(Commands::Budget { command }) => match command {
             BudgetCommand::Upsert(args) => budget_upsert(args).await,
             BudgetCommand::List(args) => budget_list(args).await,
         },
-        Commands::Notify { command } => match command {
+        Some(Commands::Notify { command }) => match command {
             NotifyCommand::Whatsapp(args) => notify_whatsapp(args).await,
         },
     }
@@ -5593,6 +5615,33 @@ async fn review_human_rows_all(
     Ok(rows)
 }
 
+async fn collect_available_months(
+    store: &dyn FinanceStore,
+    kind: ReviewHumanKind,
+    limit: usize,
+    min_abs_amount: Decimal,
+) -> Result<Vec<String>> {
+    let rows = review_human_rows(
+        store,
+        kind,
+        limit,
+        min_abs_amount,
+        &ReviewFilters::default(),
+    )
+    .await?;
+    let mut months: Vec<String> = rows
+        .iter()
+        .map(|r| r.transaction_date.format("%Y-%m").to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if months.is_empty() {
+        months.push(chrono::Utc::now().format("%Y-%m").to_string());
+    }
+    Ok(months)
+}
+
 fn print_review_queue(rows: &[TransactionRecord]) {
     println!("Pendências de anatomia humana");
     println!("- linhas: {}", rows.len());
@@ -6179,6 +6228,9 @@ struct ReviewTuiView<'a> {
     total: usize,
     filters: &'a ReviewFilters,
     filter_menu_open: bool,
+    month_picker_open: bool,
+    month_picker_cursor: usize,
+    available_months: &'a [String],
     category_modal_open: bool,
     details_open: bool,
     details_scroll: usize,
@@ -6300,6 +6352,9 @@ fn draw_review_tui_frame(frame: &mut Frame<'_>, view: &ReviewTuiView<'_>) {
     if view.filter_menu_open {
         draw_review_tui_filter_modal(frame, root, view);
     }
+    if view.month_picker_open {
+        draw_review_tui_month_picker(frame, root, view);
+    }
     if view.category_modal_open {
         draw_review_tui_category_modal(frame, root, view);
     }
@@ -6313,39 +6368,92 @@ fn draw_review_tui_frame(frame: &mut Frame<'_>, view: &ReviewTuiView<'_>) {
 }
 
 fn draw_review_tui_header(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
-    let progress = format!("{}/{}", view.index + 1, view.total);
+    let progress = format!(" {}/{} ", view.index + 1, view.total);
     let missing = format!(
-        "faltam: desc {} | merchant {} | propósito {}",
+        "desc {} · merchant {} · propósito {}",
         view.summary.missing_description_count,
         view.summary.missing_merchant_count,
         view.summary.missing_purpose_count
     );
-    let header = Paragraph::new(Text::from(vec![
-        Line::from(vec![
-            Span::styled(
-                "Finance OS",
-                Style::default()
-                    .fg(TuiColor::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  revisão humana  "),
-            Span::styled(
-                progress,
-                Style::default()
-                    .fg(TuiColor::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(missing, Style::default().fg(TuiColor::Gray)),
-            Span::raw("  "),
-            review_tui_processing_span(view.processing, view.spinner_tick),
-        ]),
-        Line::from(vec![Span::styled(
-            view.filters.summary(),
+
+    // Build filter badges
+    let mut filter_spans: Vec<Span<'_>> = Vec::new();
+    if let Some(ref m) = view.filters.month {
+        filter_spans.push(Span::styled(
+            format!(" {} ", m),
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        filter_spans.push(Span::raw(" "));
+    }
+    if let Some(ref a) = view.filters.account_id {
+        filter_spans.push(Span::styled(
+            format!(" {} ", a),
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Blue)
+                .add_modifier(Modifier::BOLD),
+        ));
+        filter_spans.push(Span::raw(" "));
+    }
+    if let Some(ref e) = view.filters.merchant {
+        filter_spans.push(Span::styled(
+            format!(" {} ", clip_tui_text(e, 18)),
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+        filter_spans.push(Span::raw(" "));
+    }
+    if let Some(ref c) = view.filters.category {
+        filter_spans.push(Span::styled(
+            format!(" {} ", clip_tui_text(c, 18)),
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+        filter_spans.push(Span::raw(" "));
+    }
+
+    let mut row1 = vec![
+        Span::styled(
+            " fin ",
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            progress,
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(missing, Style::default().fg(TuiColor::DarkGray)),
+        Span::raw("  "),
+        review_tui_processing_span(view.processing, view.spinner_tick),
+    ];
+    let mut row2 = if filter_spans.is_empty() {
+        vec![Span::styled(
+            "  sem filtros",
             Style::default().fg(TuiColor::DarkGray),
-        )]),
-    ]))
-    .block(Block::default().borders(Borders::BOTTOM));
+        )]
+    } else {
+        let mut spans = vec![Span::styled("  ", Style::default())];
+        spans.extend(filter_spans);
+        spans
+    };
+    let _ = (&mut row1, &mut row2); // silence unused_mut
+
+    let header = Paragraph::new(Text::from(vec![Line::from(row1), Line::from(row2)]))
+        .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, area);
 }
 
@@ -6637,13 +6745,45 @@ fn review_tui_category_match_line((idx, category): (usize, &String)) -> Line<'st
 }
 
 fn draw_review_tui_footer(frame: &mut Frame<'_>, area: Rect, status: &str) {
+    let key = |s: &'static str| {
+        Span::styled(
+            s,
+            Style::default()
+                .fg(TuiColor::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let sep = || Span::styled("  ", Style::default().fg(TuiColor::DarkGray));
+    let lbl = |s: &'static str| Span::styled(s, Style::default().fg(TuiColor::DarkGray));
+    let keybindings = Line::from(vec![
+        key("Tab"),
+        lbl(" foco"),
+        sep(),
+        key("↑↓"),
+        lbl(" navega"),
+        sep(),
+        key("Enter"),
+        lbl(" cat"),
+        sep(),
+        key("^F"),
+        lbl(" filtros"),
+        sep(),
+        key("^D"),
+        lbl(" detalhes"),
+        sep(),
+        key("^S"),
+        lbl(" salva"),
+        sep(),
+        key("Esc"),
+        lbl(" cancela"),
+        sep(),
+        key("^X"),
+        lbl(" sai"),
+    ]);
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             review_tui_footer_status_line(status),
-            Line::from(Span::styled(
-                "Tab/Shift+Tab alterna foco | ↑↓ navega | Enter categoria | Ctrl+F filtros | Ctrl+D detalhes | Ctrl+S salva | Esc cancela | Ctrl+X sai",
-                Style::default().fg(TuiColor::DarkGray),
-            )),
+            keybindings,
         ]))
         .block(Block::default().borders(Borders::TOP)),
         area,
@@ -6672,7 +6812,7 @@ fn centered_tui_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 }
 
 fn draw_review_tui_filter_modal(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
-    let popup = centered_tui_rect(area, 54, 34);
+    let popup = centered_tui_rect(area, 58, 38);
     frame.render_widget(Clear, popup);
     let current_merchant = view
         .row
@@ -6680,44 +6820,149 @@ fn draw_review_tui_filter_modal(frame: &mut Frame<'_>, area: Rect, view: &Review
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(&view.row.raw_description);
+
+    let active_style = Style::default()
+        .fg(TuiColor::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(TuiColor::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(TuiColor::DarkGray);
+    let val_style = Style::default().fg(TuiColor::White);
+
+    let month_hint = format!(
+        "→ seletor  (atual: {})",
+        view.row.transaction_date.format("%Y-%m")
+    );
     let lines = vec![
         Line::from(Span::styled(
-            "Filtrar fila pelo valor da transação atual",
+            " Filtrar fila ",
             Style::default()
-                .fg(TuiColor::White)
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(format!(
-            "m  mês       {}",
-            view.row.transaction_date.format("%Y-%m")
-        )),
-        Line::from(format!(
-            "a  conta     {}",
-            view.row.account_id.as_deref().unwrap_or("sem-conta")
-        )),
-        Line::from(format!(
-            "c  categoria {}",
-            view.row.category_id.as_deref().unwrap_or("sem-categoria")
-        )),
-        Line::from(format!("e  merchant  {current_merchant}")),
-        Line::from("0  limpar filtros"),
-        Line::from("Esc fecha este menu"),
+        Line::from(vec![
+            Span::styled("  m ", key_style),
+            Span::styled("mês       ", dim_style),
+            Span::styled(month_hint, val_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  a ", key_style),
+            Span::styled("conta     ", dim_style),
+            Span::styled(
+                view.row
+                    .account_id
+                    .as_deref()
+                    .unwrap_or("sem-conta")
+                    .to_string(),
+                val_style,
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  c ", key_style),
+            Span::styled("categoria ", dim_style),
+            Span::styled(
+                view.row
+                    .category_id
+                    .as_deref()
+                    .unwrap_or("sem-categoria")
+                    .to_string(),
+                val_style,
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  e ", key_style),
+            Span::styled("merchant  ", dim_style),
+            Span::styled(clip_tui_text(current_merchant, 30), val_style),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  0 ", key_style),
+            Span::styled("limpar todos os filtros", dim_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc ", key_style),
+            Span::styled("fechar", dim_style),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
-            view.filters.summary(),
-            Style::default().fg(TuiColor::Yellow),
+            format!("  ▸ {}", view.filters.summary()),
+            active_style,
         )),
     ];
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .block(
                 Block::default()
-                    .title("Filtros")
+                    .title(" Filtros ")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(TuiColor::Cyan)),
             )
             .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn draw_review_tui_month_picker(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
+    let popup = centered_tui_rect(area, 34, 50);
+    frame.render_widget(Clear, popup);
+
+    let cursor = view
+        .month_picker_cursor
+        .min(view.available_months.len().saturating_sub(1));
+    let visible = popup.height.saturating_sub(4) as usize;
+    let scroll = if cursor >= visible {
+        cursor - visible + 1
+    } else {
+        0
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(TuiColor::DarkGray)),
+            Span::raw(" navegar  "),
+            Span::styled("Enter", Style::default().fg(TuiColor::DarkGray)),
+            Span::raw(" aplicar  "),
+            Span::styled("Esc", Style::default().fg(TuiColor::DarkGray)),
+            Span::raw(" voltar"),
+        ]),
+        Line::from(""),
+    ];
+
+    for (i, month) in view
+        .available_months
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+    {
+        let is_selected = i == cursor;
+        let is_active = view.filters.month.as_deref() == Some(month.as_str());
+        let (fg, bg, modifier) = if is_selected {
+            (TuiColor::Black, TuiColor::Cyan, Modifier::BOLD)
+        } else if is_active {
+            (TuiColor::Yellow, TuiColor::Reset, Modifier::BOLD)
+        } else {
+            (TuiColor::White, TuiColor::Reset, Modifier::empty())
+        };
+        let prefix = if is_active { "● " } else { "  " };
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{month}"),
+            Style::default().fg(fg).bg(bg).add_modifier(modifier),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Selecionar mês ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(TuiColor::Cyan)),
+            )
+            .wrap(Wrap { trim: false }),
         popup,
     );
 }
@@ -7190,6 +7435,7 @@ struct ReviewTuiSession {
     limit: usize,
     min_abs_amount: Decimal,
     filters: ReviewFilters,
+    available_months: Vec<String>,
     focus_queue: bool,
     category_cursor: usize,
     status: String,
@@ -7198,6 +7444,8 @@ struct ReviewTuiSession {
     processing: Option<String>,
     spinner_tick: usize,
     filter_menu_open: bool,
+    month_picker_open: bool,
+    month_picker_cursor: usize,
     category_modal_open: bool,
     details_open: bool,
     details_scroll: usize,
@@ -7211,6 +7459,7 @@ impl ReviewTuiSession {
         limit: usize,
         min_abs_amount: Decimal,
         filters: ReviewFilters,
+        available_months: Vec<String>,
     ) -> Self {
         Self {
             index: 0,
@@ -7220,6 +7469,7 @@ impl ReviewTuiSession {
             limit,
             min_abs_amount,
             filters,
+            available_months,
             focus_queue: true,
             category_cursor: 0,
             status: String::new(),
@@ -7228,6 +7478,8 @@ impl ReviewTuiSession {
             processing: None,
             spinner_tick: 0,
             filter_menu_open: false,
+            month_picker_open: false,
+            month_picker_cursor: 0,
             category_modal_open: false,
             details_open: false,
             details_scroll: 0,
@@ -7344,6 +7596,9 @@ fn draw_current_review_tui(
         processing: session.processing.as_deref(),
         filters: &session.filters,
         filter_menu_open: session.filter_menu_open,
+        month_picker_open: session.month_picker_open,
+        month_picker_cursor: session.month_picker_cursor,
+        available_months: &session.available_months,
         category_modal_open: session.category_modal_open,
         details_open: session.details_open,
         details_scroll: session.details_scroll,
@@ -7390,6 +7645,7 @@ struct ReviewTuiLaunch {
     limit: usize,
     min_abs_amount: Decimal,
     filters: ReviewFilters,
+    available_months: Vec<String>,
     sound: bool,
 }
 
@@ -7434,6 +7690,9 @@ async fn handle_review_tui_modal_event(
     }
     if state.session.category_modal_open {
         return Ok(handle_review_tui_category_modal_key(key, state));
+    }
+    if state.session.month_picker_open {
+        return handle_review_tui_month_picker_key(store, key, state).await;
     }
     if state.session.filter_menu_open {
         return handle_review_tui_filter_menu_key(store, key, state).await;
@@ -7537,10 +7796,24 @@ async fn handle_review_tui_filter_menu_key(
     key: crossterm::event::KeyEvent,
     state: &mut ReviewTuiEventState<'_>,
 ) -> Result<bool> {
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
     if matches!(key.code, KeyCode::Esc) {
         state.session.filter_menu_open = false;
         state.session.status = "menu de filtros fechado".to_string();
+        return Ok(true);
+    }
+    // 'm' opens the month picker instead of immediately applying
+    if matches!(key.code, KeyCode::Char('m')) && key.modifiers == KeyModifiers::NONE {
+        let cursor = state
+            .session
+            .available_months
+            .iter()
+            .position(|m| state.session.filters.month.as_deref() == Some(m.as_str()))
+            .unwrap_or(0);
+        state.session.month_picker_cursor = cursor;
+        state.session.month_picker_open = true;
+        state.session.filter_menu_open = false;
+        state.session.status = "selecione o mês".to_string();
         return Ok(true);
     }
     let Some(next_filters) = review_tui_filters_from_menu_key(
@@ -7558,6 +7831,51 @@ async fn handle_review_tui_filter_menu_key(
     }
     state.session.filters = previous_filters;
     state.session.status = "filtro sem resultados; mantendo fila atual".to_string();
+    Ok(true)
+}
+
+async fn handle_review_tui_month_picker_key(
+    store: &dyn FinanceStore,
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> Result<bool> {
+    use crossterm::event::KeyCode;
+    let n = state.session.available_months.len();
+    match key.code {
+        KeyCode::Esc => {
+            state.session.month_picker_open = false;
+            state.session.filter_menu_open = true;
+            state.session.status = "menu de filtros".to_string();
+        }
+        KeyCode::Up => {
+            state.session.month_picker_cursor = state.session.month_picker_cursor.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            if n > 0 {
+                state.session.month_picker_cursor =
+                    (state.session.month_picker_cursor + 1).min(n - 1);
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(month) = state
+                .session
+                .available_months
+                .get(state.session.month_picker_cursor)
+                .cloned()
+            {
+                let previous_filters = state.session.filters.clone();
+                state.session.filters.month = Some(month.clone());
+                if reload_review_tui_queue(store, state).await? {
+                    state.session.month_picker_open = false;
+                    state.session.status = format!("mês: {month}");
+                } else {
+                    state.session.filters = previous_filters;
+                    state.session.status = "filtro sem resultados; mês mantido".to_string();
+                }
+            }
+        }
+        _ => {}
+    }
     Ok(true)
 }
 
@@ -7602,9 +7920,6 @@ fn review_tui_filters_from_menu_key(
     let mut filters = current.clone();
     match key.code {
         KeyCode::Char('0') => filters = ReviewFilters::default(),
-        KeyCode::Char('m') => {
-            filters.month = Some(row.transaction_date.format("%Y-%m").to_string())
-        }
         KeyCode::Char('a') => filters.account_id = row.account_id.clone(),
         KeyCode::Char('c') => filters.category = row.category_id.clone(),
         KeyCode::Char('e') => {
@@ -7839,8 +8154,7 @@ async fn save_review_tui_current_draft(
     };
     *state.summary = refreshed_summary;
     if sound {
-        print!("\x07");
-        io::stdout().flush().ok();
+        crossterm::execute!(io::stdout(), crossterm::style::Print('\x07')).ok();
     }
     let updated_ids = results
         .iter()
@@ -7889,6 +8203,7 @@ async fn tx_review_human_tui(
         launch.limit,
         launch.min_abs_amount,
         launch.filters,
+        launch.available_months,
     );
 
     loop {
@@ -7995,6 +8310,8 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
     }
 
     if args.tui {
+        let available_months =
+            collect_available_months(store.as_ref(), args.kind, limit, min_abs_amount).await?;
         return tx_review_human_tui(
             store.as_ref(),
             &config,
@@ -8004,6 +8321,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
                 limit,
                 min_abs_amount,
                 filters,
+                available_months,
                 sound: args.sound,
             },
         )
@@ -9694,22 +10012,24 @@ mod tests {
         row.merchant_name = Some("Mercado Exemplo".to_string());
         let empty = ReviewFilters::default();
 
-        let month = review_tui_filters_from_menu_key(
+        // 'm' no longer applies directly — it opens the month picker modal instead
+        let month_direct = review_tui_filters_from_menu_key(
             KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
             &row,
             &empty,
-        )
-        .expect("month filter");
-        assert_eq!(month.month.as_deref(), Some("2026-05"));
+        );
+        assert!(
+            month_direct.is_none(),
+            "'m' should return None (handled by month picker)"
+        );
 
         let account = review_tui_filters_from_menu_key(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
             &row,
-            &month,
+            &empty,
         )
         .expect("account filter");
         assert_eq!(account.account_id.as_deref(), Some("conta_teste"));
-        assert_eq!(account.month.as_deref(), Some("2026-05"));
 
         let merchant = review_tui_filters_from_menu_key(
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),

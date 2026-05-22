@@ -9,7 +9,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn cargo_bin() -> Command {
-    Command::cargo_bin("finance-cli").expect("finance-cli binary")
+    Command::cargo_bin("fin").expect("fin binary")
 }
 
 fn envs<'a>(cmd: &'a mut Command, config_dir: &Path, data_dir: &Path) -> &'a mut Command {
