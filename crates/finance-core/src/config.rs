@@ -62,12 +62,12 @@ impl ConfigPaths {
     pub fn discover() -> Result<Self> {
         let config_root = std::env::var_os("FINANCE_OS_CONFIG_DIR")
             .map(PathBuf::from)
-            .or_else(|| dirs::config_dir().map(|dir| dir.join("finance-os")))
+            .or_else(Self::resolve_config_root)
             .context("Não foi possível resolver o diretório de configuração")?;
 
         let data_root = std::env::var_os("FINANCE_OS_DATA_DIR")
             .map(PathBuf::from)
-            .or_else(|| dirs::data_dir().map(|dir| dir.join("finance-os")))
+            .or_else(Self::resolve_data_root)
             .context("Não foi possível resolver o diretório de dados")?;
 
         Ok(Self {
@@ -76,6 +76,57 @@ impl ConfigPaths {
             config_file: config_root.join("config.toml"),
             local_db_file: data_root.join("finance-os.local.db"),
         })
+    }
+
+    /// Resolve the config directory with XDG precedence over platform native.
+    ///
+    /// Order:
+    /// 1. `$XDG_CONFIG_HOME/finance-os` (or `$HOME/.config/finance-os`) if it
+    ///    contains a `config.toml` — this matches the production launcher and
+    ///    keeps Linux/macOS configs portable.
+    /// 2. The platform-native directory from `dirs::config_dir()` (on macOS
+    ///    that's `~/Library/Application Support/finance-os`).
+    ///
+    /// Falling back to native only when XDG has no `config.toml` avoids the
+    /// classic macOS trap where a user puts their config under `~/.config`
+    /// (the XDG default) but the binary silently reads a stale config from
+    /// `~/Library/Application Support`.
+    fn resolve_config_root() -> Option<PathBuf> {
+        if let Some(xdg) = Self::xdg_config_finance_os() {
+            if xdg.join("config.toml").is_file() {
+                return Some(xdg);
+            }
+        }
+        dirs::config_dir().map(|dir| dir.join("finance-os"))
+    }
+
+    fn resolve_data_root() -> Option<PathBuf> {
+        // Mirror the config resolver: when the user has an XDG config that
+        // ships a local_db_path, the platform-native data dir is never
+        // touched. For cases without an explicit local_db_path, prefer the
+        // XDG data dir when it exists.
+        if let Some(xdg) = Self::xdg_data_finance_os() {
+            if xdg.exists() {
+                return Some(xdg);
+            }
+        }
+        dirs::data_dir().map(|dir| dir.join("finance-os"))
+    }
+
+    fn xdg_config_finance_os() -> Option<PathBuf> {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .map(|root| root.join("finance-os"))
+    }
+
+    fn xdg_data_finance_os() -> Option<PathBuf> {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
+            })
+            .map(|root| root.join("finance-os"))
     }
 
     pub fn ensure(&self) -> Result<()> {
@@ -162,5 +213,77 @@ impl AppConfig {
         self.service_account_path
             .as_deref()
             .context("service_account_path não configurado")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    fn setup_env(home: &Path, xdg_config: Option<&Path>, xdg_data: Option<&Path>) {
+        unsafe {
+            std::env::set_var("HOME", home);
+            match xdg_config {
+                Some(p) => std::env::set_var("XDG_CONFIG_HOME", p),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match xdg_data {
+                Some(p) => std::env::set_var("XDG_DATA_HOME", p),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            std::env::remove_var("FINANCE_OS_CONFIG_DIR");
+            std::env::remove_var("FINANCE_OS_DATA_DIR");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn discover_prefers_xdg_config_when_config_toml_exists() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let xdg = home.join(".config").join("finance-os");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(xdg.join("config.toml"), "backend = \"bigquery\"").unwrap();
+
+        setup_env(home, None, None);
+        let paths = ConfigPaths::discover().unwrap();
+        assert_eq!(paths.config_dir, xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn discover_falls_back_to_native_when_xdg_has_no_config() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        setup_env(home, None, None);
+
+        let paths = ConfigPaths::discover().unwrap();
+        // On any platform, the fallback must NOT be the empty XDG path.
+        let xdg_path = home.join(".config").join("finance-os");
+        assert_ne!(paths.config_dir, xdg_path);
+        // It must come from `dirs::config_dir()` — non-empty path under HOME.
+        assert!(paths.config_dir.starts_with(home));
+    }
+
+    #[test]
+    #[serial]
+    fn discover_honours_explicit_env_var_override() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let custom = home.join("custom-cfg");
+        fs::create_dir_all(&custom).unwrap();
+        setup_env(home, None, None);
+        unsafe {
+            std::env::set_var("FINANCE_OS_CONFIG_DIR", &custom);
+        }
+
+        let paths = ConfigPaths::discover().unwrap();
+        assert_eq!(paths.config_dir, custom);
+
+        unsafe {
+            std::env::remove_var("FINANCE_OS_CONFIG_DIR");
+        }
     }
 }
