@@ -28,7 +28,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color as TuiColor, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
 use rust_decimal::Decimal;
@@ -131,6 +131,18 @@ struct ReviewShortcutArgs {
     kind: ReviewHumanKind,
     #[arg(long, default_value = "30")]
     min_abs_amount: String,
+    /// Filter queue to a month in YYYY-MM.
+    #[arg(long)]
+    month: Option<String>,
+    /// Filter queue to a single account_id.
+    #[arg(long)]
+    account_id: Option<String>,
+    /// Filter queue by merchant/raw description text.
+    #[arg(long)]
+    merchant: Option<String>,
+    /// Filter queue to a category. Accepts "categoria" or "categoria:subcategoria".
+    #[arg(long)]
+    category: Option<String>,
     #[arg(long)]
     no_sound: bool,
 }
@@ -1185,10 +1197,110 @@ enum ReviewHumanKind {
     Purpose,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ReviewHumanBulk {
-    None,
-    Identical,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReviewFilters {
+    month: Option<String>,
+    account_id: Option<String>,
+    merchant: Option<String>,
+    category: Option<String>,
+}
+
+impl ReviewFilters {
+    fn from_review_args(args: &ReviewHumanArgs) -> Self {
+        let category = if args.transaction_id.is_some() {
+            args.filter_category.as_deref()
+        } else {
+            args.filter_category.as_deref().or(args.category.as_deref())
+        };
+        Self {
+            month: args.month.clone(),
+            account_id: args.account_id.clone(),
+            merchant: args.merchant.clone(),
+            category: category.map(|value| category_key_from_input(value, None)),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.month.is_none()
+            && self.account_id.is_none()
+            && self.merchant.is_none()
+            && self.category.is_none()
+    }
+
+    fn matches(&self, row: &TransactionRecord) -> bool {
+        self.matches_month(row)
+            && self.matches_account(row)
+            && self.matches_category(row)
+            && self.matches_merchant(row)
+    }
+
+    fn matches_month(&self, row: &TransactionRecord) -> bool {
+        self.month
+            .as_deref()
+            .is_none_or(|month| row.transaction_date.format("%Y-%m").to_string() == month)
+    }
+
+    fn matches_account(&self, row: &TransactionRecord) -> bool {
+        self.account_id
+            .as_deref()
+            .is_none_or(|account| row.account_id.as_deref() == Some(account))
+    }
+
+    fn matches_category(&self, row: &TransactionRecord) -> bool {
+        self.category
+            .as_deref()
+            .is_none_or(|category| row.category_id.as_deref() == Some(category))
+    }
+
+    fn matches_merchant(&self, row: &TransactionRecord) -> bool {
+        let Some(needle) = self.merchant.as_deref().map(normalize_filter_text) else {
+            return true;
+        };
+        if needle.is_empty() {
+            return true;
+        }
+        review_filter_merchant_haystack(row).contains(&needle)
+    }
+
+    fn summary(&self) -> String {
+        let parts = [
+            self.month.as_ref().map(|value| format!("mês={value}")),
+            self.account_id
+                .as_ref()
+                .map(|value| format!("conta={value}")),
+            self.category
+                .as_ref()
+                .map(|value| format!("categoria={value}")),
+            self.merchant
+                .as_ref()
+                .map(|value| format!("merchant={value}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if parts.is_empty() {
+            "filtros: nenhum".to_string()
+        } else {
+            format!("filtros: {}", parts.join(" | "))
+        }
+    }
+}
+
+fn normalize_filter_text(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn review_filter_merchant_haystack(row: &TransactionRecord) -> String {
+    [
+        row.merchant_name.as_deref(),
+        Some(row.raw_description.as_str()),
+        row.description.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(normalize_filter_text)
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 #[derive(Args)]
@@ -1208,15 +1320,24 @@ struct ReviewHumanArgs {
     /// Show only counts and a phone-friendly invitation to review.
     #[arg(long)]
     summary: bool,
-    /// Run the richer terminal UI with cards, navigation and bulk prompts.
+    /// Run the richer terminal UI with cards, filters and guided editing.
     #[arg(long)]
     tui: bool,
     /// Ring the terminal bell when a review is saved in --tui mode.
     #[arg(long)]
     sound: bool,
-    /// Apply the same edit to related transactions. In TUI this can also be toggled with Ctrl+B.
-    #[arg(long, value_enum, default_value_t = ReviewHumanBulk::None)]
-    bulk: ReviewHumanBulk,
+    /// Filter queue to a month in YYYY-MM.
+    #[arg(long)]
+    month: Option<String>,
+    /// Filter queue to a single account_id.
+    #[arg(long)]
+    account_id: Option<String>,
+    /// Filter queue by merchant/raw description text.
+    #[arg(long)]
+    merchant: Option<String>,
+    /// Explicit category filter for queue mode. In queue mode, --category also filters.
+    #[arg(long)]
+    filter_category: Option<String>,
     /// Apply a single review non-interactively.
     #[arg(long)]
     transaction_id: Option<String>,
@@ -2539,12 +2660,15 @@ async fn main() -> Result<()> {
                 summary: false,
                 tui: true,
                 sound: !args.no_sound,
-                bulk: ReviewHumanBulk::None,
+                month: args.month,
+                account_id: args.account_id,
+                merchant: args.merchant,
+                filter_category: None,
                 transaction_id: None,
                 description: None,
                 merchant_name: None,
                 purpose: None,
-                category: None,
+                category: args.category,
                 subcategory: None,
             })
             .await
@@ -5305,6 +5429,7 @@ async fn tx_pending_human(args: PendingHumanArgs) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 struct ReviewHumanQueueItem {
     transaction_id: String,
+    account_id: Option<String>,
     transaction_date: String,
     amount: String,
     raw_description: String,
@@ -5342,6 +5467,7 @@ struct ReviewHumanSummary {
 fn review_queue_item(row: &TransactionRecord) -> ReviewHumanQueueItem {
     ReviewHumanQueueItem {
         transaction_id: row.transaction_id.clone(),
+        account_id: row.account_id.clone(),
         transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
         amount: decimal_text(row.amount),
         raw_description: row.raw_description.clone(),
@@ -5411,31 +5537,60 @@ async fn review_human_rows(
     kind: ReviewHumanKind,
     limit: usize,
     min_abs_amount: Decimal,
+    filters: &ReviewFilters,
 ) -> Result<Vec<TransactionRecord>> {
-    match kind {
-        ReviewHumanKind::Description => store.pending_human_descriptions(limit).await,
-        ReviewHumanKind::Merchant => store.pending_merchants(limit).await,
-        ReviewHumanKind::Purpose => store.pending_purposes(min_abs_amount, limit).await,
-        ReviewHumanKind::All => {
-            let mut rows = Vec::new();
-            let mut seen = BTreeSet::new();
-            for batch in [
-                store.pending_human_descriptions(limit).await?,
-                store.pending_merchants(limit).await?,
-                store.pending_purposes(min_abs_amount, limit).await?,
-            ] {
-                for row in batch {
-                    if seen.insert(row.transaction_id.clone()) {
-                        rows.push(row);
-                    }
-                    if rows.len() >= limit {
-                        return Ok(rows);
-                    }
-                }
+    let fetch_limit = review_human_fetch_limit(limit, filters);
+    let mut rows = match kind {
+        ReviewHumanKind::Description => store.pending_human_descriptions(fetch_limit).await?,
+        ReviewHumanKind::Merchant => store.pending_merchants(fetch_limit).await?,
+        ReviewHumanKind::Purpose => store.pending_purposes(min_abs_amount, fetch_limit).await?,
+        ReviewHumanKind::All => review_human_rows_all(store, fetch_limit, min_abs_amount).await?,
+    };
+    rows.retain(|row| filters.matches(row));
+    sort_review_human_rows(&mut rows);
+    rows.truncate(limit);
+    Ok(rows)
+}
+
+fn sort_review_human_rows(rows: &mut [TransactionRecord]) {
+    rows.sort_by(|left, right| {
+        right
+            .transaction_date
+            .cmp(&left.transaction_date)
+            .then_with(|| right.amount.abs().cmp(&left.amount.abs()))
+            .then_with(|| left.transaction_id.cmp(&right.transaction_id))
+    });
+}
+
+fn review_human_fetch_limit(limit: usize, filters: &ReviewFilters) -> usize {
+    if filters.is_empty() {
+        return limit;
+    }
+    limit.saturating_mul(50).clamp(limit, 5_000)
+}
+
+async fn review_human_rows_all(
+    store: &dyn FinanceStore,
+    limit: usize,
+    min_abs_amount: Decimal,
+) -> Result<Vec<TransactionRecord>> {
+    let mut rows = Vec::new();
+    let mut seen = BTreeSet::new();
+    for batch in [
+        store.pending_human_descriptions(limit).await?,
+        store.pending_merchants(limit).await?,
+        store.pending_purposes(min_abs_amount, limit).await?,
+    ] {
+        for row in batch {
+            if seen.insert(row.transaction_id.clone()) {
+                rows.push(row);
             }
-            Ok(rows)
+            if rows.len() >= limit {
+                return Ok(rows);
+            }
         }
     }
+    Ok(rows)
 }
 
 fn print_review_queue(rows: &[TransactionRecord]) {
@@ -5587,51 +5742,6 @@ async fn apply_human_review(
         updated_category,
         category_id: patch.category_id,
     })
-}
-
-async fn identical_review_targets(
-    store: &dyn FinanceStore,
-    row: &TransactionRecord,
-) -> Result<Vec<TransactionRecord>> {
-    let mut rows = vec![row.clone()];
-    let mut seen = BTreeSet::from([row.transaction_id.clone()]);
-    for candidate in store
-        .similar_transactions(&row.raw_description, &row.transaction_id, false)
-        .await?
-    {
-        if candidate.raw_description == row.raw_description
-            && seen.insert(candidate.transaction_id.clone())
-        {
-            rows.push(candidate);
-        }
-    }
-    Ok(rows)
-}
-
-async fn apply_human_review_with_bulk(
-    store: &dyn FinanceStore,
-    config: &AppConfig,
-    transaction_id: &str,
-    patch: HumanReviewPatch,
-    bulk: ReviewHumanBulk,
-) -> Result<Vec<ReviewHumanApplyResult>> {
-    if bulk == ReviewHumanBulk::None {
-        return Ok(vec![
-            apply_human_review(store, config, transaction_id, patch).await?,
-        ]);
-    }
-
-    let row = store
-        .transaction_by_id(transaction_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Transação {transaction_id} não encontrada"))?;
-    let targets = identical_review_targets(store, &row).await?;
-    let mut results = Vec::with_capacity(targets.len());
-    for target in targets {
-        results
-            .push(apply_human_review(store, config, &target.transaction_id, patch.clone()).await?);
-    }
-    Ok(results)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5791,6 +5901,27 @@ impl ReviewTuiDraft {
         self.patch_against(row).has_changes()
     }
 
+    fn reset_active_field_from_row(&mut self, row: &TransactionRecord) {
+        match self.field() {
+            ReviewTuiField::Merchant => {
+                self.merchant_name = row.merchant_name.clone().unwrap_or_default();
+                self.merchant_cursor = self.merchant_name.chars().count();
+            }
+            ReviewTuiField::Description => {
+                self.description = row.description.clone().unwrap_or_default();
+                self.description_cursor = self.description.chars().count();
+            }
+            ReviewTuiField::Purpose => {
+                self.purpose = row.purpose.clone().unwrap_or_default();
+                self.purpose_cursor = self.purpose.chars().count();
+            }
+            ReviewTuiField::Category => {
+                let category = row.category_id.clone().unwrap_or_default();
+                self.set_category_id(category);
+            }
+        }
+    }
+
     fn insert_char(&mut self, ch: char) {
         self.clamp_active_cursor();
         let cursor = self.active_cursor();
@@ -5888,26 +6019,13 @@ fn changed_text(new_value: &str, old_value: Option<&str>) -> Option<String> {
 
 #[derive(Debug, Default, Clone)]
 struct ReviewTuiContext {
-    identical_count: usize,
-    nearby: Vec<String>,
-    similar: Vec<String>,
     raw_hour: Option<String>,
-    bulk_targets: Vec<String>,
-    rule_hint: String,
 }
 
 impl ReviewTuiContext {
     fn loading(row: &TransactionRecord) -> Self {
         Self {
-            identical_count: 1,
-            raw_hour: metadata_text(&row.metadata_json, &["raw", "date"]).or_else(|| {
-                metadata_text(
-                    &row.metadata_json,
-                    &["raw", "creditCardMetadata", "purchaseDate"],
-                )
-            }),
-            rule_hint: "carregando contexto...".to_string(),
-            ..Self::default()
+            raw_hour: review_tui_raw_hour(row),
         }
     }
 }
@@ -5929,118 +6047,36 @@ fn metadata_text(value: &Value, path: &[&str]) -> Option<String> {
 }
 
 async fn load_review_tui_context(
-    store: &dyn FinanceStore,
+    _store: &dyn FinanceStore,
     row: &TransactionRecord,
 ) -> ReviewTuiContext {
-    let raw_hour = review_tui_raw_hour(row);
-    let (identical_count, bulk_targets) = review_tui_identical_context(store, row).await;
-    let nearby = review_tui_nearby_context(store, row).await;
-    let similar_rows = review_tui_similar_context(store, row).await;
-    let rule_hint = review_tui_rule_hint(&similar_rows);
-
     ReviewTuiContext {
-        identical_count,
-        nearby,
-        similar: similar_rows,
-        raw_hour,
-        bulk_targets,
-        rule_hint,
+        raw_hour: review_tui_raw_hour(row),
     }
 }
 
 fn review_tui_raw_hour(row: &TransactionRecord) -> Option<String> {
-    metadata_text(&row.metadata_json, &["raw", "date"]).or_else(|| {
-        metadata_text(
-            &row.metadata_json,
-            &["raw", "creditCardMetadata", "purchaseDate"],
-        )
-    })
+    metadata_text(&row.metadata_json, &["raw", "date"])
+        .or_else(|| {
+            metadata_text(
+                &row.metadata_json,
+                &["raw", "creditCardMetadata", "purchaseDate"],
+            )
+        })
+        .map(|value| review_tui_time_only(&value))
 }
 
-async fn review_tui_identical_context(
-    store: &dyn FinanceStore,
-    row: &TransactionRecord,
-) -> (usize, Vec<String>) {
-    let identical_rows = identical_review_targets(store, row)
-        .await
-        .unwrap_or_else(|_| vec![row.clone()]);
-    let bulk_targets = identical_rows
-        .iter()
-        .filter(|candidate| candidate.transaction_id != row.transaction_id)
-        .take(12)
-        .map(review_tui_bulk_target_line)
-        .collect::<Vec<_>>();
-    (identical_rows.len(), bulk_targets)
-}
-
-fn review_tui_bulk_target_line(candidate: &TransactionRecord) -> String {
-    format!(
-        "{} · {} · {}",
-        candidate.transaction_date.format("%Y-%m-%d"),
-        brl(candidate.amount),
-        candidate.display_description()
-    )
-}
-
-async fn review_tui_nearby_context(
-    store: &dyn FinanceStore,
-    row: &TransactionRecord,
-) -> Vec<String> {
-    let Some(account_id) = row.account_id.as_deref() else {
-        return Vec::new();
-    };
-    store
-        .transactions_in_date_range(Some(account_id), row.transaction_date, row.transaction_date)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|tx| tx.transaction_id != row.transaction_id)
-        .take(8)
-        .map(review_tui_nearby_line)
-        .collect()
-}
-
-fn review_tui_nearby_line(tx: TransactionRecord) -> String {
-    format!(
-        "{} · {} · {} · {}",
-        brl(tx.amount),
-        tx.merchant_name.as_deref().unwrap_or("sem-merchant"),
-        tx.display_description(),
-        tx.category_id.as_deref().unwrap_or("sem-categoria")
-    )
-}
-
-async fn review_tui_similar_context(
-    store: &dyn FinanceStore,
-    row: &TransactionRecord,
-) -> Vec<String> {
-    store
-        .similar_transactions(&row.raw_description, &row.transaction_id, false)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|candidate| candidate.raw_description == row.raw_description)
-        .take(8)
-        .map(review_tui_similar_line)
-        .collect()
-}
-
-fn review_tui_similar_line(candidate: TransactionRecord) -> String {
-    format!(
-        "{} · {} · {} · {}",
-        candidate.transaction_date.format("%Y-%m-%d"),
-        brl(candidate.amount),
-        candidate.merchant_name.as_deref().unwrap_or("sem-merchant"),
-        candidate.display_description()
-    )
-}
-
-fn review_tui_rule_hint(similar_rows: &[String]) -> String {
-    if similar_rows.is_empty() {
-        "Sem padrão forte. Sugestão: criar regra por raw_description.".to_string()
-    } else {
-        "Há padrão recorrente. Sugestão: promover para regra.".to_string()
+fn review_tui_time_only(value: &str) -> String {
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) {
+        return parsed.format("%H:%M").to_string();
     }
+    if let Some((_, rest)) = value.split_once('T') {
+        return rest.chars().take(5).collect();
+    }
+    if let Some((_, rest)) = value.split_once(' ') {
+        return rest.chars().take(5).collect();
+    }
+    value.to_string()
 }
 
 fn category_matches(
@@ -6138,9 +6174,15 @@ struct ReviewTuiView<'a> {
     categories: &'a [String],
     recent_categories: &'a [String],
     category_cursor: usize,
+    focus_queue: bool,
     index: usize,
     total: usize,
-    bulk: ReviewHumanBulk,
+    filters: &'a ReviewFilters,
+    filter_menu_open: bool,
+    category_modal_open: bool,
+    details_open: bool,
+    details_scroll: usize,
+    details_query: &'a str,
     status: &'a str,
     processing: Option<&'a str>,
     spinner_tick: usize,
@@ -6255,6 +6297,16 @@ fn draw_review_tui_frame(frame: &mut Frame<'_>, view: &ReviewTuiView<'_>) {
     let cursor = draw_review_tui_body(frame, vertical[1], view);
     draw_review_tui_footer(frame, vertical[2], view.status);
 
+    if view.filter_menu_open {
+        draw_review_tui_filter_modal(frame, root, view);
+    }
+    if view.category_modal_open {
+        draw_review_tui_category_modal(frame, root, view);
+    }
+    if view.details_open {
+        draw_review_tui_details_modal(frame, root, view);
+    }
+
     if let Some(position) = cursor {
         frame.set_cursor_position(position);
     }
@@ -6288,25 +6340,10 @@ fn draw_review_tui_header(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiVie
             Span::raw("  "),
             review_tui_processing_span(view.processing, view.spinner_tick),
         ]),
-        Line::from(vec![
-            Span::styled(
-                if view.bulk == ReviewHumanBulk::Identical {
-                    "bulk: idênticas"
-                } else {
-                    "bulk: desligado"
-                },
-                Style::default().fg(if view.bulk == ReviewHumanBulk::Identical {
-                    TuiColor::Magenta
-                } else {
-                    TuiColor::DarkGray
-                }),
-            ),
-            Span::raw("  |  "),
-            Span::styled(
-                "lista em memória; grava apenas no salvar",
-                Style::default().fg(TuiColor::DarkGray),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            view.filters.summary(),
+            Style::default().fg(TuiColor::DarkGray),
+        )]),
     ]))
     .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, area);
@@ -6330,30 +6367,21 @@ fn draw_review_tui_body(
     area: Rect,
     view: &ReviewTuiView<'_>,
 ) -> Option<Position> {
-    if area.width >= 120 {
+    if area.width >= 110 {
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(34),
-                Constraint::Percentage(43),
-                Constraint::Min(38),
-            ])
+            .constraints([Constraint::Length(60), Constraint::Min(52)])
             .split(area);
         draw_review_tui_queue(frame, horizontal[0], view);
-        let cursor = draw_review_tui_editor(frame, horizontal[1], view);
-        draw_review_tui_context(frame, horizontal[2], view);
-        cursor
+        draw_review_tui_editor(frame, horizontal[1], view)
     } else {
-        let editor_height = area.height.min(16);
+        let queue_height = area.height.min(10);
         let vertical = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(editor_height), Constraint::Min(0)])
+            .constraints([Constraint::Length(queue_height), Constraint::Min(14)])
             .split(area);
-        let cursor = draw_review_tui_editor(frame, vertical[0], view);
-        if vertical[1].height > 2 {
-            draw_review_tui_context(frame, vertical[1], view);
-        }
-        cursor
+        draw_review_tui_queue(frame, vertical[0], view);
+        draw_review_tui_editor(frame, vertical[1], view)
     }
 }
 
@@ -6361,29 +6389,44 @@ fn draw_review_tui_queue(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView
     let visible = area.height.saturating_sub(2).max(1) as usize;
     let start = view.index.saturating_sub(visible / 2);
     let end = (start + visible).min(view.rows.len());
+    let index_width = view.total.to_string().chars().count().max(2);
+    let amount_width = view
+        .rows
+        .iter()
+        .map(|row| brl(row.amount).chars().count())
+        .max()
+        .unwrap_or(0);
     let items = view.rows[start..end]
         .iter()
         .enumerate()
         .map(|(offset, row)| {
             let absolute = start + offset;
             let marker = if absolute == view.index { ">" } else { " " };
-            let label = clip_tui_text(row.display_description(), 18);
+            let fixed_width = 5 + index_width + amount_width;
+            let label_width = area.width.saturating_sub(fixed_width as u16) as usize;
+            let label = clip_tui_text(row.display_description(), label_width.max(12));
             let amount = brl(row.amount);
+            let emoji = category_emoji(row.category_id.as_deref(), Some(row.amount));
             let line = Line::from(vec![
                 Span::styled(marker, Style::default().fg(TuiColor::Cyan)),
                 Span::raw(" "),
                 Span::styled(
-                    format!("{:>2}", absolute + 1),
+                    format!("{:>index_width$}", absolute + 1),
                     Style::default().fg(TuiColor::DarkGray),
                 ),
                 Span::raw(" "),
-                Span::styled(amount, amount_tui_style(row.amount)),
+                Span::raw(emoji),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{amount:>amount_width$}"),
+                    amount_tui_style(row.amount),
+                ),
                 Span::raw(" "),
                 Span::raw(label),
             ]);
             let style = if absolute == view.index {
                 Style::default()
-                    .bg(TuiColor::DarkGray)
+                    .bg(TuiColor::Rgb(34, 48, 64))
                     .fg(TuiColor::White)
                     .add_modifier(Modifier::BOLD)
             } else {
@@ -6395,7 +6438,11 @@ fn draw_review_tui_queue(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView
     frame.render_widget(
         List::new(items).block(
             Block::default()
-                .title("Fila")
+                .title(if view.focus_queue {
+                    "> Transações"
+                } else {
+                    "Transações"
+                })
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(TuiColor::DarkGray)),
         ),
@@ -6408,58 +6455,23 @@ fn draw_review_tui_editor(
     area: Rect,
     view: &ReviewTuiView<'_>,
 ) -> Option<Position> {
-    let chunks = review_tui_editor_chunks(area);
-    draw_review_tui_readonly(frame, chunks[0], view);
-    let cursor = if area.height < 24 {
-        draw_review_tui_fields_compact(frame, chunks[1], view.draft)
-    } else {
-        draw_review_tui_fields(frame, chunks[1], view.draft)
-    };
-    draw_review_tui_category_suggestions(frame, chunks[2], view);
-    cursor
-}
-
-fn review_tui_editor_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
-    let transaction_height = if area.height < 24 { 5 } else { 8 };
-    let fields_height = if area.height < 24 { 6 } else { 12 };
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(transaction_height),
-            Constraint::Length(fields_height),
-            Constraint::Min(4),
-        ])
-        .split(area)
-}
-
-fn draw_review_tui_readonly(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
+    let block = Block::default()
+        .title("Transação")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TuiColor::Blue));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (lines, cursor) = review_tui_card_lines(view, inner);
     frame.render_widget(
-        Paragraph::new(Text::from(review_tui_transaction_lines(
-            view.row,
-            view.context,
-            area.width,
-        )))
-        .block(
-            Block::default()
-                .title("Transação")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(TuiColor::Blue)),
-        )
-        .wrap(Wrap { trim: true }),
-        area,
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }),
+        inner,
     );
+    cursor
 }
 
 fn review_tui_metadata_bits(row: &TransactionRecord, context: &ReviewTuiContext) -> Vec<String> {
     [
         ("hora", context.raw_hour.clone()),
-        (
-            "purchaseDate",
-            metadata_text(
-                &row.metadata_json,
-                &["raw", "creditCardMetadata", "purchaseDate"],
-            ),
-        ),
         (
             "MCC",
             metadata_text(
@@ -6480,291 +6492,132 @@ fn review_tui_metadata_bits(row: &TransactionRecord, context: &ReviewTuiContext)
     .collect()
 }
 
-fn review_tui_transaction_lines(
-    row: &TransactionRecord,
-    context: &ReviewTuiContext,
-    width: u16,
-) -> Vec<Line<'static>> {
-    let detail_width = width.saturating_sub(4) as usize;
-    let metadata_bits = review_tui_metadata_bits(row, context);
-    vec![
-        Line::from(vec![
-            Span::styled(brl(row.amount), amount_tui_style(row.amount)),
-            Span::raw("   "),
-            Span::styled(
-                row.transaction_date.format("%Y-%m-%d").to_string(),
-                Style::default().fg(TuiColor::Yellow),
-            ),
-            Span::raw("   "),
-            Span::styled(category_tui_label(row), Style::default().fg(TuiColor::Cyan)),
-        ]),
-        Line::from(vec![
-            Span::styled("raw ", Style::default().fg(TuiColor::DarkGray)),
-            Span::raw(clip_tui_text(&row.raw_description, detail_width)),
-        ]),
-        Line::from(vec![
-            Span::styled("id  ", Style::default().fg(TuiColor::DarkGray)),
-            Span::raw(clip_tui_text(&row.transaction_id, detail_width)),
-        ]),
-        Line::from(vec![
-            Span::styled("src ", Style::default().fg(TuiColor::DarkGray)),
-            Span::raw(clip_tui_text(&row.source, detail_width / 2)),
-            Span::raw("   "),
-            Span::styled("status ", Style::default().fg(TuiColor::DarkGray)),
-            Span::raw(row.payment_status.clone()),
-        ]),
-        Line::from(vec![
-            Span::styled("pluggy ", Style::default().fg(TuiColor::DarkGray)),
-            Span::raw(clip_tui_text(&metadata_bits.join(" | "), detail_width)),
-        ]),
-    ]
-}
-
-fn draw_review_tui_fields(
-    frame: &mut Frame<'_>,
+fn review_tui_card_lines(
+    view: &ReviewTuiView<'_>,
     area: Rect,
-    draft: &ReviewTuiDraft,
-) -> Option<Position> {
-    let field_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    let mut cursor = None;
-    for (index, field) in ReviewTuiField::ALL.into_iter().enumerate() {
-        let Some(field_area) = field_areas.get(index).copied() else {
-            continue;
-        };
-        cursor = cursor.or_else(|| render_review_tui_field_block(frame, field_area, field, draft));
-    }
-    cursor
-}
-
-fn render_review_tui_field_block(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    field: ReviewTuiField,
-    draft: &ReviewTuiDraft,
-) -> Option<Position> {
-    let active = draft.field() == field;
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let (shown, cursor_col) = review_tui_field_display(field, draft, inner_width, active);
-    frame.render_widget(
-        Paragraph::new(shown)
-            .style(review_tui_field_text_style(active))
-            .block(
-                Block::default()
-                    .title(review_tui_field_title(field, active))
-                    .borders(Borders::ALL)
-                    .border_style(review_tui_field_border_style(active)),
-            ),
-        area,
-    );
-    active.then(|| {
-        Position::new(
-            area.x + 1 + (cursor_col as u16).min(area.width.saturating_sub(2)),
-            area.y + 1,
-        )
-    })
-}
-
-fn review_tui_field_display(
-    field: ReviewTuiField,
-    draft: &ReviewTuiDraft,
-    width: usize,
-    active: bool,
-) -> (String, usize) {
-    let (display, cursor_col) = raw_review_tui_field_display(field, draft, width, active);
-    (
-        visible_review_tui_field_display(display, active),
-        cursor_col,
-    )
-}
-
-fn raw_review_tui_field_display(
-    field: ReviewTuiField,
-    draft: &ReviewTuiDraft,
-    width: usize,
-    active: bool,
-) -> (String, usize) {
-    let value = tui_field_value(field, draft);
-    if active {
-        editable_tui_view(value, draft.active_cursor(), width)
-    } else {
-        (clip_tui_text(value, width), 0)
-    }
-}
-
-fn visible_review_tui_field_display(display: String, active: bool) -> String {
-    if !display.is_empty() {
-        return display;
-    }
-    if active {
-        " ".to_string()
-    } else {
-        "…".to_string()
-    }
-}
-
-fn review_tui_field_title(field: ReviewTuiField, active: bool) -> String {
-    if active {
-        format!("> {}", field.label())
-    } else {
-        field.label().to_string()
-    }
-}
-
-fn review_tui_field_border_style(active: bool) -> Style {
-    if active {
-        Style::default()
-            .fg(TuiColor::LightGreen)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(TuiColor::DarkGray)
-    }
-}
-
-fn review_tui_field_text_style(active: bool) -> Style {
-    if active {
-        Style::default().fg(TuiColor::White)
-    } else {
-        Style::default().fg(TuiColor::Gray)
-    }
-}
-
-fn draw_review_tui_fields_compact(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    draft: &ReviewTuiDraft,
-) -> Option<Position> {
-    let inner_width = area.width.saturating_sub(4) as usize;
-    let mut cursor = None;
-    let items = ReviewTuiField::ALL
-        .into_iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let (item, item_cursor) =
-                review_tui_compact_field_item(area, index, field, draft, inner_width);
-            cursor = cursor.or(item_cursor);
-            item
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title("Campos")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(TuiColor::LightGreen)),
+) -> (Vec<Line<'static>>, Option<Position>) {
+    let row = view.row;
+    let detail_width = area.width.saturating_sub(2) as usize;
+    let metadata_bits = review_tui_metadata_bits(row, view.context);
+    let mut header = vec![
+        Span::raw(category_emoji(row.category_id.as_deref(), Some(row.amount))),
+        Span::raw(" "),
+        Span::styled(brl(row.amount), amount_tui_style(row.amount)),
+        Span::raw("   "),
+        Span::styled(
+            row.transaction_date.format("%Y-%m-%d").to_string(),
+            Style::default().fg(TuiColor::Yellow),
         ),
-        area,
-    );
-    cursor
-}
-
-fn review_tui_compact_field_item(
-    area: Rect,
-    index: usize,
-    field: ReviewTuiField,
-    draft: &ReviewTuiDraft,
-    inner_width: usize,
-) -> (ListItem<'static>, Option<Position>) {
-    let active = draft.field() == field;
-    let prefix = format!("{} {:<18} ", if active { ">" } else { " " }, field.label());
-    let value_width = inner_width.saturating_sub(prefix.chars().count());
-    let (value, cursor_col) = review_tui_compact_field_value(field, draft, value_width, active);
-    let cursor = active.then(|| {
-        Position::new(
-            area.x + 2 + prefix.chars().count() as u16 + cursor_col as u16,
-            area.y + 1 + index as u16,
-        )
-    });
-    (
-        ListItem::new(Line::from(vec![Span::raw(prefix), Span::raw(value)]))
-            .style(review_tui_compact_field_style(active)),
-        cursor,
-    )
-}
-
-fn review_tui_compact_field_value(
-    field: ReviewTuiField,
-    draft: &ReviewTuiDraft,
-    width: usize,
-    active: bool,
-) -> (String, usize) {
-    if active {
-        editable_tui_view(tui_field_value(field, draft), draft.active_cursor(), width)
-    } else {
-        (clip_tui_text(tui_field_value(field, draft), width), 0)
+    ];
+    if non_empty_text(row.category_id.as_deref()).is_some() {
+        header.push(Span::raw("   "));
+        header.push(Span::styled(
+            category_tui_label(row),
+            Style::default().fg(TuiColor::Cyan),
+        ));
     }
+    let mut lines = vec![Line::from(header)];
+    if let Some(account_id) = non_empty_text(row.account_id.as_deref()) {
+        lines.push(review_tui_labeled_line("Conta", account_id, detail_width));
+    }
+    lines.push(review_tui_labeled_line(
+        "Descrição original",
+        &row.raw_description,
+        detail_width,
+    ));
+    if !metadata_bits.is_empty() {
+        lines.push(review_tui_labeled_line(
+            "Metadados",
+            &metadata_bits.join(" | "),
+            detail_width,
+        ));
+    }
+    lines.push(Line::from(""));
+
+    let label_width = review_tui_card_label_width();
+    let mut cursor = None;
+    for field in ReviewTuiField::ALL {
+        let (line, field_cursor) =
+            review_tui_edit_line(view, field, label_width, lines.len(), area);
+        if cursor.is_none() {
+            cursor = field_cursor;
+        }
+        lines.push(line);
+    }
+    (lines, cursor)
 }
 
-fn review_tui_compact_field_style(active: bool) -> Style {
-    if active {
+fn review_tui_card_label_width() -> usize {
+    ReviewTuiField::ALL
+        .iter()
+        .map(|field| field.label().chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2
+}
+
+fn review_tui_labeled_line(label: &'static str, value: &str, width: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<19}"),
+            Style::default().fg(TuiColor::DarkGray),
+        ),
+        Span::raw(clip_tui_text(value, width.saturating_sub(19))),
+    ])
+}
+
+fn non_empty_text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn review_tui_edit_line(
+    view: &ReviewTuiView<'_>,
+    field: ReviewTuiField,
+    label_width: usize,
+    line_index: usize,
+    area: Rect,
+) -> (Line<'static>, Option<Position>) {
+    let active = !view.focus_queue && view.draft.field() == field;
+    let raw_value = match field {
+        ReviewTuiField::Category => view.draft.category_id.as_str(),
+        _ => tui_field_value(field, view.draft),
+    };
+    let value_width = (area.width as usize).saturating_sub(label_width + 2);
+    let (shown, cursor_col) = if active && field != ReviewTuiField::Category {
+        editable_tui_view(raw_value, view.draft.active_cursor(), value_width)
+    } else {
+        (clip_tui_text(raw_value, value_width), 0)
+    };
+    let hint = if active && field == ReviewTuiField::Category {
+        "  Enter abre busca".to_string()
+    } else {
+        String::new()
+    };
+    let style = if active {
         Style::default()
             .fg(TuiColor::White)
-            .bg(TuiColor::DarkGray)
-            .add_modifier(Modifier::BOLD)
+            .bg(TuiColor::Rgb(31, 58, 51))
     } else {
         Style::default().fg(TuiColor::Gray)
-    }
-}
-
-fn draw_review_tui_category_suggestions(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    view: &ReviewTuiView<'_>,
-) {
-    frame.render_widget(
-        Paragraph::new(Text::from(review_tui_category_lines(area, view)))
-            .block(
-                Block::default()
-                    .title("Categorias")
-                    .borders(Borders::ALL)
-                    .border_style(review_tui_category_border_style(view.draft)),
-            )
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn review_tui_category_lines(area: Rect, view: &ReviewTuiView<'_>) -> Vec<Line<'static>> {
-    if view.draft.field() != ReviewTuiField::Category {
-        return vec![Line::from(vec![Span::styled(
-            "Selecione Categoria e digite para buscar. Setas escolhem sugestão.",
-            Style::default().fg(TuiColor::DarkGray),
-        )])];
-    }
-    let mut lines = vec![review_tui_category_filter_line(view.draft)];
-    lines.extend(
-        category_matches(
-            view.categories,
-            &view.draft.category_query,
-            view.category_cursor,
-            view.recent_categories,
-        )
-        .iter()
-        .take(area.height.saturating_sub(3) as usize)
-        .enumerate()
-        .map(review_tui_category_match_line),
-    );
-    lines
-}
-
-fn review_tui_category_filter_line(draft: &ReviewTuiDraft) -> Line<'static> {
-    let filter = if draft.category_query.is_empty() {
-        "(digite para buscar)".to_string()
-    } else {
-        draft.category_query.clone()
     };
-    Line::from(vec![
-        Span::styled("Filtro: ", Style::default().fg(TuiColor::DarkGray)),
-        Span::raw(filter),
-    ])
+    let mut line = Line::from(vec![
+        Span::styled(
+            format!("{:<label_width$}", field.label()),
+            Style::default().fg(TuiColor::DarkGray),
+        ),
+        Span::styled(shown, style),
+        Span::styled(hint, Style::default().fg(TuiColor::DarkGray)),
+    ]);
+    if active {
+        line = line.style(style);
+    }
+    let cursor = (active && field != ReviewTuiField::Category).then(|| {
+        Position::new(
+            area.x + label_width as u16 + cursor_col as u16,
+            area.y + line_index as u16,
+        )
+    });
+    (line, cursor)
 }
 
 fn review_tui_category_match_line((idx, category): (usize, &String)) -> Line<'static> {
@@ -6783,161 +6636,151 @@ fn review_tui_category_match_line((idx, category): (usize, &String)) -> Line<'st
     ])
 }
 
-fn review_tui_category_border_style(draft: &ReviewTuiDraft) -> Style {
-    let color = if draft.field() == ReviewTuiField::Category {
-        TuiColor::LightGreen
-    } else {
-        TuiColor::DarkGray
-    };
-    Style::default().fg(color)
-}
-
-fn draw_review_tui_context(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
-    let context = view.context;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(review_tui_context_constraints(view.bulk))
-        .split(area);
+fn draw_review_tui_footer(frame: &mut Frame<'_>, area: Rect, status: &str) {
     frame.render_widget(
-        Paragraph::new(Text::from(review_tui_context_lines(
-            context,
-            view.bulk,
-            chunks[0].width,
-        )))
-        .block(
-            Block::default()
-                .title("Contexto")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(TuiColor::Magenta)),
-        )
-        .wrap(Wrap { trim: true }),
-        chunks[0],
-    );
-
-    render_tui_lines_panel(
-        frame,
-        chunks[1],
-        "Idênticas / similares",
-        &context.similar,
-        TuiColor::DarkGray,
-    );
-    render_tui_lines_panel(
-        frame,
-        chunks[2],
-        "Mesmo dia",
-        &context.nearby,
-        TuiColor::Blue,
-    );
-}
-
-fn review_tui_context_constraints(bulk: ReviewHumanBulk) -> [Constraint; 3] {
-    let summary_height = if bulk == ReviewHumanBulk::Identical {
-        10
-    } else {
-        6
-    };
-    [
-        Constraint::Length(summary_height),
-        Constraint::Percentage(45),
-        Constraint::Percentage(35),
-    ]
-}
-
-fn review_tui_context_lines(
-    context: &ReviewTuiContext,
-    bulk: ReviewHumanBulk,
-    width: u16,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        review_tui_bulk_status_line(context.identical_count, bulk),
-        Line::from(vec![
-            Span::styled("regra ", Style::default().fg(TuiColor::DarkGray)),
-            Span::raw(clip_tui_text(
-                &context.rule_hint,
-                width.saturating_sub(10) as usize,
+        Paragraph::new(Text::from(vec![
+            review_tui_footer_status_line(status),
+            Line::from(Span::styled(
+                "Tab/Shift+Tab alterna foco | ↑↓ navega | Enter categoria | Ctrl+F filtros | Ctrl+D detalhes | Ctrl+S salva | Esc cancela | Ctrl+X sai",
+                Style::default().fg(TuiColor::DarkGray),
             )),
-        ]),
-    ];
-    extend_review_tui_bulk_lines(&mut lines, context, bulk, width);
-    lines
+        ]))
+        .block(Block::default().borders(Borders::TOP)),
+        area,
+    );
 }
 
-fn review_tui_bulk_status_line(identical_count: usize, bulk: ReviewHumanBulk) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("idênticas ", Style::default().fg(TuiColor::DarkGray)),
-        Span::styled(
-            identical_count.to_string(),
+fn centered_tui_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let vertical_margin = (100 - percent_y) / 2;
+    let horizontal_margin = (100 - percent_x) / 2;
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(vertical_margin),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage(vertical_margin),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(horizontal_margin),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage(horizontal_margin),
+        ])
+        .split(vertical[1])[1]
+}
+
+fn draw_review_tui_filter_modal(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
+    let popup = centered_tui_rect(area, 54, 34);
+    frame.render_widget(Clear, popup);
+    let current_merchant = view
+        .row
+        .merchant_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&view.row.raw_description);
+    let lines = vec![
+        Line::from(Span::styled(
+            "Filtrar fila pelo valor da transação atual",
             Style::default()
-                .fg(TuiColor::Magenta)
+                .fg(TuiColor::White)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("   "),
-        Span::styled("bulk ", Style::default().fg(TuiColor::DarkGray)),
-        Span::styled(review_tui_bulk_label(bulk), review_tui_bulk_style(bulk)),
-    ])
+        )),
+        Line::from(""),
+        Line::from(format!(
+            "m  mês       {}",
+            view.row.transaction_date.format("%Y-%m")
+        )),
+        Line::from(format!(
+            "a  conta     {}",
+            view.row.account_id.as_deref().unwrap_or("sem-conta")
+        )),
+        Line::from(format!(
+            "c  categoria {}",
+            view.row.category_id.as_deref().unwrap_or("sem-categoria")
+        )),
+        Line::from(format!("e  merchant  {current_merchant}")),
+        Line::from("0  limpar filtros"),
+        Line::from("Esc fecha este menu"),
+        Line::from(""),
+        Line::from(Span::styled(
+            view.filters.summary(),
+            Style::default().fg(TuiColor::Yellow),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title("Filtros")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(TuiColor::Cyan)),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
-fn review_tui_bulk_label(bulk: ReviewHumanBulk) -> &'static str {
-    if bulk == ReviewHumanBulk::Identical {
-        "ON"
-    } else {
-        "off"
-    }
-}
-
-fn review_tui_bulk_style(bulk: ReviewHumanBulk) -> Style {
-    let color = if bulk == ReviewHumanBulk::Identical {
-        TuiColor::Magenta
-    } else {
-        TuiColor::Gray
-    };
-    Style::default().fg(color)
-}
-
-fn extend_review_tui_bulk_lines(
-    lines: &mut Vec<Line<'static>>,
-    context: &ReviewTuiContext,
-    bulk: ReviewHumanBulk,
-    width: u16,
-) {
-    if bulk == ReviewHumanBulk::Identical {
-        lines.push(Line::from(Span::styled(
-            "Afetadas no salvar:",
-            Style::default().fg(TuiColor::Magenta),
-        )));
-        lines.extend(context.bulk_targets.iter().take(5).map(|line| {
-            Line::from(format!(
-                "- {}",
-                clip_tui_text(line, width.saturating_sub(4) as usize)
-            ))
-        }));
-    } else if context.identical_count > 1 {
-        lines.push(Line::from(Span::styled(
-            "Ctrl+B aplica esta edição às idênticas.",
-            Style::default().fg(TuiColor::DarkGray),
-        )));
-    }
-}
-
-fn render_tui_lines_panel(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    title: &str,
-    lines: &[String],
-    border_color: TuiColor,
-) {
-    let width = area.width.saturating_sub(4) as usize;
-    let text = if lines.is_empty() {
-        vec![Line::from(Span::styled(
-            "sem dados carregados",
-            Style::default().fg(TuiColor::DarkGray),
-        ))]
-    } else {
-        lines
+fn draw_review_tui_category_modal(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
+    let popup = centered_tui_rect(area, 62, 68);
+    frame.render_widget(Clear, popup);
+    let matches = category_matches(
+        view.categories,
+        &view.draft.category_query,
+        view.category_cursor,
+        view.recent_categories,
+    );
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Busca: ", Style::default().fg(TuiColor::DarkGray)),
+            Span::raw(if view.draft.category_query.is_empty() {
+                "digite para buscar".to_string()
+            } else {
+                view.draft.category_query.clone()
+            }),
+        ]),
+        Line::from(""),
+    ];
+    lines.extend(
+        matches
             .iter()
-            .take(area.height.saturating_sub(2) as usize)
-            .map(|line| Line::from(clip_tui_text(line, width)))
-            .collect::<Vec<_>>()
+            .take(popup.height.saturating_sub(5) as usize)
+            .enumerate()
+            .map(review_tui_category_match_line),
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title("Selecionar categoria · Enter aplica · Esc fecha")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(TuiColor::LightGreen)),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn draw_review_tui_details_modal(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
+    let popup = centered_tui_rect(area, 78, 76);
+    frame.render_widget(Clear, popup);
+    let lines = review_tui_detail_lines(view);
+    let visible = popup.height.saturating_sub(3) as usize;
+    let start = view.details_scroll.min(lines.len().saturating_sub(visible));
+    let text = lines
+        .into_iter()
+        .skip(start)
+        .take(visible)
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let title = if view.details_query.is_empty() {
+        "Atributos da transação · digite para filtrar · setas navegam · Esc fecha".to_string()
+    } else {
+        format!(
+            "Atributos da transação · filtro: {} · Esc fecha",
+            view.details_query
+        )
     };
     frame.render_widget(
         Paragraph::new(Text::from(text))
@@ -6945,25 +6788,24 @@ fn render_tui_lines_panel(
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border_color)),
+                    .border_style(Style::default().fg(TuiColor::Yellow)),
             )
-            .wrap(Wrap { trim: true }),
-        area,
+            .wrap(Wrap { trim: false }),
+        popup,
     );
 }
 
-fn draw_review_tui_footer(frame: &mut Frame<'_>, area: Rect, status: &str) {
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            review_tui_footer_status_line(status),
-            Line::from(Span::styled(
-                "Campos raw são somente leitura. Bulk só é aplicado quando está ON.",
-                Style::default().fg(TuiColor::DarkGray),
-            )),
-        ]))
-        .block(Block::default().borders(Borders::TOP)),
-        area,
-    );
+fn review_tui_detail_lines(view: &ReviewTuiView<'_>) -> Vec<String> {
+    let json =
+        serde_json::to_string_pretty(view.row).unwrap_or_else(|_| "erro ao serializar".into());
+    let query = view.details_query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return json.lines().map(str::to_string).collect();
+    }
+    json.lines()
+        .filter(|line| line.to_ascii_lowercase().contains(&query))
+        .map(str::to_string)
+        .collect()
 }
 
 fn review_tui_footer_status_line(status: &str) -> Line<'static> {
@@ -6975,8 +6817,7 @@ fn review_tui_footer_status_line(status: &str) -> Line<'static> {
 
 fn review_tui_footer_status_text(status: &str) -> String {
     if status.is_empty() {
-        "1-9 cat | Enter salva cat | = repete | Ctrl+B bulk | s/Ctrl+S pula | Ctrl/Cmd+↑↓/Pg transação | Ctrl+←→ palavra | Ctrl+X sai"
-            .to_string()
+        "Campos raw são somente leitura.".to_string()
     } else {
         status.to_string()
     }
@@ -7024,10 +6865,9 @@ fn handle_review_tui_basic_key(
 ) -> Option<ReviewTuiKeyAction> {
     use crossterm::event::KeyCode;
     match key.code {
-        KeyCode::Esc | KeyCode::Char('x') if key_has_command_or_control(key.modifiers) => {
+        KeyCode::Char('x') if key_has_command_or_control(key.modifiers) => {
             Some(ReviewTuiKeyAction::Exit)
         }
-        KeyCode::Esc => Some(ReviewTuiKeyAction::Exit),
         KeyCode::Tab => {
             draft.active = (draft.active + 1) % ReviewTuiField::ALL.len();
             Some(ReviewTuiKeyAction::Continue)
@@ -7050,9 +6890,12 @@ fn handle_review_tui_row_key(
     key: crossterm::event::KeyEvent,
     index: &mut usize,
     rows_len: usize,
+    focus_queue: bool,
 ) -> bool {
     use crossterm::event::KeyCode;
     match key.code {
+        KeyCode::Up if focus_queue => move_review_tui_index(index, rows_len, -1),
+        KeyCode::Down if focus_queue => move_review_tui_index(index, rows_len, 1),
         KeyCode::Up if key_has_navigation_modifier(key.modifiers) => {
             move_review_tui_index(index, rows_len, -1)
         }
@@ -7069,92 +6912,6 @@ fn handle_review_tui_row_key(
         }
         _ => false,
     }
-}
-
-fn handle_review_tui_bulk_key(
-    key: crossterm::event::KeyEvent,
-    bulk: &mut ReviewHumanBulk,
-    status: &mut String,
-) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    if key.code != KeyCode::Char('b') || !key.modifiers.contains(KeyModifiers::CONTROL) {
-        return false;
-    }
-    *bulk = if *bulk == ReviewHumanBulk::Identical {
-        ReviewHumanBulk::None
-    } else {
-        ReviewHumanBulk::Identical
-    };
-    *status = format!(
-        "bulk {}",
-        if *bulk == ReviewHumanBulk::Identical {
-            "ligado"
-        } else {
-            "desligado"
-        }
-    );
-    true
-}
-
-fn handle_review_tui_category_key(
-    key: crossterm::event::KeyEvent,
-    draft: &ReviewTuiDraft,
-    category_cursor: &mut usize,
-) -> bool {
-    use crossterm::event::KeyCode;
-    if draft.field() != ReviewTuiField::Category {
-        return false;
-    }
-    match key.code {
-        KeyCode::Up => *category_cursor = category_cursor.saturating_sub(1),
-        KeyCode::Down => *category_cursor += 1,
-        _ => return false,
-    }
-    true
-}
-
-fn handle_review_tui_category_number_key(
-    key: crossterm::event::KeyEvent,
-    draft: &mut ReviewTuiDraft,
-    categories: &[String],
-    recent_categories: &[String],
-    category_cursor: &mut usize,
-    status: &mut String,
-) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    if draft.field() != ReviewTuiField::Category || key.modifiers != KeyModifiers::NONE {
-        return false;
-    }
-    let KeyCode::Char(ch @ '1'..='9') = key.code else {
-        return false;
-    };
-    let index = ch as usize - '1' as usize;
-    let matches = category_matches(categories, &draft.category_query, 0, recent_categories);
-    let Some(category) = matches.get(index).cloned() else {
-        return false;
-    };
-    draft.set_category_id(category.clone());
-    *category_cursor = 0;
-    *status = format!("categoria selecionada: {}", category.replace(':', " > "));
-    true
-}
-
-fn confirm_review_tui_category_selection(
-    key: crossterm::event::KeyEvent,
-    draft: &mut ReviewTuiDraft,
-    categories: &[String],
-    recent_categories: &[String],
-    category_cursor: usize,
-) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    if draft.field() != ReviewTuiField::Category
-        || key.code != KeyCode::Enter
-        || key.modifiers != KeyModifiers::NONE
-    {
-        return false;
-    }
-    apply_review_tui_category_pick(draft, categories, recent_categories, category_cursor);
-    true
 }
 
 /// Applies the highlighted category suggestion when the user typed a filter,
@@ -7277,6 +7034,9 @@ fn handle_review_tui_text_key(
     category_cursor: &mut usize,
 ) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
+    if draft.field() == ReviewTuiField::Category {
+        return false;
+    }
     if handle_review_tui_modified_arrow_key(key, draft) {
         return true;
     }
@@ -7426,28 +7186,52 @@ struct ReviewTuiSession {
     index: usize,
     context_cache: BTreeMap<String, ReviewTuiContext>,
     context: ReviewTuiContext,
-    bulk: ReviewHumanBulk,
+    kind: ReviewHumanKind,
+    limit: usize,
+    min_abs_amount: Decimal,
+    filters: ReviewFilters,
+    focus_queue: bool,
     category_cursor: usize,
     status: String,
     recent_categories: Vec<String>,
     last_category_id: Option<String>,
     processing: Option<String>,
     spinner_tick: usize,
+    filter_menu_open: bool,
+    category_modal_open: bool,
+    details_open: bool,
+    details_scroll: usize,
+    details_query: String,
 }
 
 impl ReviewTuiSession {
-    fn new(rows: &[TransactionRecord], initial_bulk: ReviewHumanBulk) -> Self {
+    fn new(
+        rows: &[TransactionRecord],
+        kind: ReviewHumanKind,
+        limit: usize,
+        min_abs_amount: Decimal,
+        filters: ReviewFilters,
+    ) -> Self {
         Self {
             index: 0,
             context_cache: BTreeMap::new(),
             context: ReviewTuiContext::loading(&rows[0]),
-            bulk: initial_bulk,
+            kind,
+            limit,
+            min_abs_amount,
+            filters,
+            focus_queue: true,
             category_cursor: 0,
             status: String::new(),
             recent_categories: Vec::new(),
             last_category_id: None,
             processing: None,
             spinner_tick: 0,
+            filter_menu_open: false,
+            category_modal_open: false,
+            details_open: false,
+            details_scroll: 0,
+            details_query: String::new(),
         }
     }
 }
@@ -7553,11 +7337,17 @@ fn draw_current_review_tui(
         categories,
         recent_categories: &session.recent_categories,
         category_cursor: session.category_cursor,
+        focus_queue: session.focus_queue,
         index: session.index,
         total: rows.len(),
-        bulk: session.bulk,
         status: &session.status,
         processing: session.processing.as_deref(),
+        filters: &session.filters,
+        filter_menu_open: session.filter_menu_open,
+        category_modal_open: session.category_modal_open,
+        details_open: session.details_open,
+        details_scroll: session.details_scroll,
+        details_query: &session.details_query,
         spinner_tick: session.spinner_tick,
     })
 }
@@ -7595,6 +7385,14 @@ struct ReviewTuiRenderState<'a> {
     session: &'a mut ReviewTuiSession,
 }
 
+struct ReviewTuiLaunch {
+    kind: ReviewHumanKind,
+    limit: usize,
+    min_abs_amount: Decimal,
+    filters: ReviewFilters,
+    sound: bool,
+}
+
 async fn handle_review_tui_event(
     store: &dyn FinanceStore,
     config: &AppConfig,
@@ -7603,16 +7401,255 @@ async fn handle_review_tui_event(
     sound: bool,
 ) -> Result<bool> {
     let mut state = state;
-    if handle_review_tui_local_event(key, &mut state) {
+    if review_tui_exit_key(key) {
+        return Ok(true);
+    }
+    if handle_review_tui_modal_event(store, key, &mut state).await? {
         return Ok(false);
     }
-    if handle_review_tui_category_save_event(store, config, key, &mut state, sound).await? {
+    if handle_review_tui_global_event(key, &mut state) {
+        return Ok(false);
+    }
+    if handle_review_tui_local_event(key, &mut state) {
         return Ok(false);
     }
     Ok(matches!(
         handle_review_tui_basic_action(store, config, key, &mut state, sound).await?,
         ReviewTuiEventFlow::Exit
     ))
+}
+
+fn review_tui_exit_key(key: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    matches!(key.code, KeyCode::Char('x')) && key_has_command_or_control(key.modifiers)
+}
+
+async fn handle_review_tui_modal_event(
+    store: &dyn FinanceStore,
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> Result<bool> {
+    if state.session.details_open {
+        return Ok(handle_review_tui_details_modal_key(key, state));
+    }
+    if state.session.category_modal_open {
+        return Ok(handle_review_tui_category_modal_key(key, state));
+    }
+    if state.session.filter_menu_open {
+        return handle_review_tui_filter_menu_key(store, key, state).await;
+    }
+    Ok(false)
+}
+
+fn handle_review_tui_details_modal_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Esc => {
+            state.session.details_open = false;
+            state.session.status = "detalhes fechados".to_string();
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.session.details_open = false;
+            state.session.status = "detalhes fechados".to_string();
+        }
+        KeyCode::Up => {
+            state.session.details_scroll = state.session.details_scroll.saturating_sub(1)
+        }
+        KeyCode::Down => state.session.details_scroll += 1,
+        KeyCode::PageUp => {
+            state.session.details_scroll = state.session.details_scroll.saturating_sub(10)
+        }
+        KeyCode::PageDown => state.session.details_scroll += 10,
+        KeyCode::Backspace => {
+            state.session.details_query.pop();
+            state.session.details_scroll = 0;
+        }
+        KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            state.session.details_query.push(ch);
+            state.session.details_scroll = 0;
+        }
+        _ => {}
+    }
+    true
+}
+
+fn handle_review_tui_category_modal_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let index = state.session.index;
+    match key.code {
+        KeyCode::Esc => {
+            state.session.category_modal_open = false;
+            state.session.status = "busca de categoria fechada".to_string();
+        }
+        KeyCode::Up => {
+            state.session.category_cursor = state.session.category_cursor.saturating_sub(1)
+        }
+        KeyCode::Down => state.session.category_cursor += 1,
+        KeyCode::Enter => {
+            apply_review_tui_category_pick(
+                &mut state.drafts[index],
+                state.categories,
+                &state.session.recent_categories,
+                state.session.category_cursor,
+            );
+            state.session.category_modal_open = false;
+            state.session.category_cursor = 0;
+        }
+        KeyCode::Char(ch @ '1'..='9') if key.modifiers == KeyModifiers::NONE => {
+            let category_index = ch as usize - '1' as usize;
+            let matches = category_matches(
+                state.categories,
+                &state.drafts[index].category_query,
+                state.session.category_cursor,
+                &state.session.recent_categories,
+            );
+            if let Some(category) = matches.get(category_index).cloned() {
+                state.drafts[index].set_category_id(category);
+                state.session.category_modal_open = false;
+                state.session.category_cursor = 0;
+            }
+        }
+        KeyCode::Backspace => {
+            state.drafts[index].category_query.pop();
+            state.drafts[index].category_cursor =
+                state.drafts[index].category_query.chars().count();
+            state.session.category_cursor = 0;
+        }
+        KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            state.drafts[index].category_query.push(ch);
+            state.drafts[index].category_cursor =
+                state.drafts[index].category_query.chars().count();
+            state.session.category_cursor = 0;
+        }
+        _ => {}
+    }
+    true
+}
+
+async fn handle_review_tui_filter_menu_key(
+    store: &dyn FinanceStore,
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> Result<bool> {
+    use crossterm::event::KeyCode;
+    if matches!(key.code, KeyCode::Esc) {
+        state.session.filter_menu_open = false;
+        state.session.status = "menu de filtros fechado".to_string();
+        return Ok(true);
+    }
+    let Some(next_filters) = review_tui_filters_from_menu_key(
+        key,
+        &state.rows[state.session.index],
+        &state.session.filters,
+    ) else {
+        return Ok(true);
+    };
+    let previous_filters = state.session.filters.clone();
+    state.session.filters = next_filters;
+    if reload_review_tui_queue(store, state).await? {
+        state.session.filter_menu_open = false;
+        return Ok(true);
+    }
+    state.session.filters = previous_filters;
+    state.session.status = "filtro sem resultados; mantendo fila atual".to_string();
+    Ok(true)
+}
+
+fn handle_review_tui_global_event(
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.session.filter_menu_open = true;
+            state.session.status = "menu de filtros aberto".to_string();
+            true
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.session.details_open = true;
+            state.session.details_scroll = 0;
+            state.session.details_query.clear();
+            state.session.status = "detalhes abertos".to_string();
+            true
+        }
+        KeyCode::Esc => {
+            let index = state.session.index;
+            state.drafts[index].reset_active_field_from_row(&state.rows[index]);
+            state.session.category_cursor = 0;
+            state.session.status = "campo atual restaurado".to_string();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn review_tui_filters_from_menu_key(
+    key: crossterm::event::KeyEvent,
+    row: &TransactionRecord,
+    current: &ReviewFilters,
+) -> Option<ReviewFilters> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if key.modifiers != KeyModifiers::NONE {
+        return None;
+    }
+    let mut filters = current.clone();
+    match key.code {
+        KeyCode::Char('0') => filters = ReviewFilters::default(),
+        KeyCode::Char('m') => {
+            filters.month = Some(row.transaction_date.format("%Y-%m").to_string())
+        }
+        KeyCode::Char('a') => filters.account_id = row.account_id.clone(),
+        KeyCode::Char('c') => filters.category = row.category_id.clone(),
+        KeyCode::Char('e') => {
+            filters.merchant = row
+                .merchant_name
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| Some(row.raw_description.clone()));
+        }
+        _ => return None,
+    }
+    Some(filters)
+}
+
+async fn reload_review_tui_queue(
+    store: &dyn FinanceStore,
+    state: &mut ReviewTuiEventState<'_>,
+) -> Result<bool> {
+    let rows = review_human_rows(
+        store,
+        state.session.kind,
+        state.session.limit,
+        state.session.min_abs_amount,
+        &state.session.filters,
+    )
+    .await?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+    *state.rows = rows;
+    *state.drafts = state
+        .rows
+        .iter()
+        .map(ReviewTuiDraft::from_row)
+        .collect::<Vec<_>>();
+    state.session.index = 0;
+    state.session.category_cursor = 0;
+    state.session.context_cache.clear();
+    state.session.context = ReviewTuiContext::loading(&state.rows[0]);
+    state.session.status = format!(
+        "{} · {} itens",
+        state.session.filters.summary(),
+        state.rows.len()
+    );
+    Ok(true)
 }
 
 enum ReviewTuiEventFlow {
@@ -7625,13 +7662,14 @@ fn handle_review_tui_local_event(
     state: &mut ReviewTuiEventState<'_>,
 ) -> bool {
     let index = state.session.index;
-    reset_current_tui_draft_if_requested(
-        key,
-        &state.rows[index],
-        &mut state.drafts[index],
-        &mut state.session.status,
-    ) || handle_review_tui_skip_event(key, state)
-        || handle_review_tui_bulk_key(key, &mut state.session.bulk, &mut state.session.status)
+    handle_review_tui_focus_key(key, state)
+        || reset_current_tui_draft_if_requested(
+            key,
+            &state.rows[index],
+            &mut state.drafts[index],
+            &mut state.session.status,
+        )
+        || handle_review_tui_skip_event(key, state)
         || handle_review_tui_row_event(key, state)
         || handle_review_tui_repeat_category_key(
             key,
@@ -7639,14 +7677,39 @@ fn handle_review_tui_local_event(
             state.session.last_category_id.as_deref(),
             &mut state.session.status,
         )
-        || handle_review_tui_category_number_key(
-            key,
-            &mut state.drafts[index],
-            state.categories,
-            &state.session.recent_categories,
-            &mut state.session.category_cursor,
-            &mut state.session.status,
-        )
+}
+
+fn handle_review_tui_focus_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> bool {
+    use crossterm::event::KeyCode;
+    let index = state.session.index;
+    match key.code {
+        KeyCode::Tab => {
+            if state.session.focus_queue {
+                state.session.focus_queue = false;
+                state.drafts[index].active = 0;
+            } else if state.drafts[index].active + 1 >= ReviewTuiField::ALL.len() {
+                state.session.focus_queue = true;
+            } else {
+                state.drafts[index].active += 1;
+            }
+            true
+        }
+        KeyCode::BackTab => {
+            if state.session.focus_queue {
+                state.session.focus_queue = false;
+                state.drafts[index].active = ReviewTuiField::ALL.len() - 1;
+            } else if state.drafts[index].active == 0 {
+                state.session.focus_queue = true;
+            } else {
+                state.drafts[index].active -= 1;
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 fn handle_review_tui_skip_event(
@@ -7675,7 +7738,12 @@ fn handle_review_tui_row_event(
     key: crossterm::event::KeyEvent,
     state: &mut ReviewTuiEventState<'_>,
 ) -> bool {
-    if !handle_review_tui_row_key(key, &mut state.session.index, state.rows.len()) {
+    if !handle_review_tui_row_key(
+        key,
+        &mut state.session.index,
+        state.rows.len(),
+        state.session.focus_queue,
+    ) {
         return false;
     }
     state.session.context = cached_review_context(
@@ -7683,27 +7751,6 @@ fn handle_review_tui_row_event(
         &state.rows[state.session.index],
     );
     true
-}
-
-async fn handle_review_tui_category_save_event(
-    store: &dyn FinanceStore,
-    config: &AppConfig,
-    key: crossterm::event::KeyEvent,
-    state: &mut ReviewTuiEventState<'_>,
-    sound: bool,
-) -> Result<bool> {
-    let index = state.session.index;
-    if !confirm_review_tui_category_selection(
-        key,
-        &mut state.drafts[index],
-        state.categories,
-        &state.session.recent_categories,
-        state.session.category_cursor,
-    ) {
-        return Ok(false);
-    }
-    save_review_tui_current_draft(store, config, state, sound).await?;
-    Ok(true)
 }
 
 async fn handle_review_tui_basic_action(
@@ -7714,6 +7761,18 @@ async fn handle_review_tui_basic_action(
     sound: bool,
 ) -> Result<ReviewTuiEventFlow> {
     let index = state.session.index;
+    if !state.session.focus_queue
+        && state.drafts[index].field() == ReviewTuiField::Category
+        && matches!(key.code, crossterm::event::KeyCode::Enter)
+        && key.modifiers.is_empty()
+    {
+        state.session.category_modal_open = true;
+        state.session.category_cursor = 0;
+        return Ok(ReviewTuiEventFlow::Continue);
+    }
+    if state.session.focus_queue {
+        return Ok(ReviewTuiEventFlow::Continue);
+    }
     let Some(action) = handle_review_tui_basic_key(key, &mut state.drafts[index]) else {
         handle_review_tui_edit_key(key, state);
         return Ok(ReviewTuiEventFlow::Continue);
@@ -7733,13 +7792,6 @@ fn handle_review_tui_edit_key(
     state: &mut ReviewTuiEventState<'_>,
 ) {
     let index = state.session.index;
-    if handle_review_tui_category_key(
-        key,
-        &state.drafts[index],
-        &mut state.session.category_cursor,
-    ) {
-        return;
-    }
     if handle_review_tui_field_key(key, &mut state.drafts[index]) {
         return;
     }
@@ -7765,14 +7817,13 @@ async fn save_review_tui_current_draft(
         return Ok(());
     }
     let transaction_id = state.rows[index].transaction_id.clone();
-    let bulk = state.session.bulk;
     let patch_for_persist = patch.clone();
     let queue_limit = state.rows.len();
-    let future = async {
+    let min_abs_amount = state.session.min_abs_amount;
+    let future = async move {
         let results =
-            apply_human_review_with_bulk(store, config, &transaction_id, patch_for_persist, bulk)
-                .await?;
-        let summary = review_human_summary(store, Decimal::from(30_i64), queue_limit).await?;
+            vec![apply_human_review(store, config, &transaction_id, patch_for_persist).await?];
+        let summary = review_human_summary(store, min_abs_amount, queue_limit).await?;
         Ok((results, summary))
     };
     let (results, refreshed_summary) = {
@@ -7811,8 +7862,7 @@ async fn tx_review_human_tui(
     store: &dyn FinanceStore,
     config: &AppConfig,
     mut rows: Vec<TransactionRecord>,
-    sound: bool,
-    initial_bulk: ReviewHumanBulk,
+    launch: ReviewTuiLaunch,
 ) -> Result<()> {
     use crossterm::event::{self, Event};
 
@@ -7827,13 +7877,19 @@ async fn tx_review_human_tui(
         .into_iter()
         .collect::<Vec<_>>();
     categories.sort();
-    let mut summary = review_human_summary(store, Decimal::from(30_i64), rows.len()).await?;
+    let mut summary = review_human_summary(store, launch.min_abs_amount, rows.len()).await?;
     let mut terminal = ReviewTerminal::enter()?;
     let mut drafts = rows
         .iter()
         .map(ReviewTuiDraft::from_row)
         .collect::<Vec<_>>();
-    let mut session = ReviewTuiSession::new(&rows, initial_bulk);
+    let mut session = ReviewTuiSession::new(
+        &rows,
+        launch.kind,
+        launch.limit,
+        launch.min_abs_amount,
+        launch.filters,
+    );
 
     loop {
         draw_current_review_tui(
@@ -7876,7 +7932,7 @@ async fn tx_review_human_tui(
                 categories: &categories,
                 session: &mut session,
             },
-            sound,
+            launch.sound,
         )
         .await?
         {
@@ -7893,6 +7949,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
     run_migrations(store.as_ref(), &config).await?;
     let min_abs_amount = decimal_from_str(&args.min_abs_amount)?;
     let limit = effective_review_human_limit(args.limit, args.tui);
+    let filters = ReviewFilters::from_review_args(&args);
 
     if args.summary {
         let summary = review_human_summary(store.as_ref(), min_abs_amount, limit).await?;
@@ -7909,7 +7966,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
             .category
             .as_deref()
             .map(|value| category_key_from_input(value, args.subcategory.as_deref()));
-        let results = apply_human_review_with_bulk(
+        let result = apply_human_review(
             store.as_ref(),
             &config,
             transaction_id,
@@ -7919,18 +7976,18 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
                 purpose: args.purpose,
                 category_id,
             },
-            args.bulk,
         )
         .await?;
         if args.json {
-            println!("{}", serde_json::to_string_pretty(&results)?);
+            println!("{}", serde_json::to_string_pretty(&vec![result])?);
         } else {
-            println!("Revisão salva para {} transação(ões)", results.len());
+            println!("Revisão salva");
         }
         return Ok(());
     }
 
-    let rows = review_human_rows(store.as_ref(), args.kind, limit, min_abs_amount).await?;
+    let rows =
+        review_human_rows(store.as_ref(), args.kind, limit, min_abs_amount, &filters).await?;
     if args.json {
         let items = rows.iter().map(review_queue_item).collect::<Vec<_>>();
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -7938,7 +7995,19 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
     }
 
     if args.tui {
-        return tx_review_human_tui(store.as_ref(), &config, rows, args.sound, args.bulk).await;
+        return tx_review_human_tui(
+            store.as_ref(),
+            &config,
+            rows,
+            ReviewTuiLaunch {
+                kind: args.kind,
+                limit,
+                min_abs_amount,
+                filters,
+                sound: args.sound,
+            },
+        )
+        .await;
     }
 
     if !io::stdin().is_terminal() {
@@ -9491,8 +9560,8 @@ impl NaiveDateSat for NaiveDate {
 mod tests {
     use super::{
         apply_review_tui_category_pick, category_matches, changed_text,
-        effective_review_human_limit, handle_review_tui_category_key, resolve_sync_from,
-        review_tui_plain_skip_requested, ReviewTuiDraft, ReviewTuiField,
+        effective_review_human_limit, resolve_sync_from, review_tui_filters_from_menu_key,
+        review_tui_plain_skip_requested, ReviewFilters, ReviewTuiDraft, ReviewTuiField,
     };
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9593,26 +9662,6 @@ mod tests {
     }
 
     #[test]
-    fn review_tui_category_arrows_keep_filter_text() {
-        let row = sample_review_row("alimentacao:mercado");
-        let mut draft = ReviewTuiDraft::from_row(&row);
-        draft.category_query = "trans".to_string();
-        draft.category_cursor = draft.category_query.chars().count();
-        let mut category_cursor = 0;
-        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
-
-        assert!(handle_review_tui_category_key(
-            down,
-            &draft,
-            &mut category_cursor
-        ));
-
-        assert_eq!(category_cursor, 1);
-        assert_eq!(draft.category_query, "trans");
-        assert_eq!(draft.category_id, "alimentacao:mercado");
-    }
-
-    #[test]
     fn changed_text_allows_clearing_existing_value() {
         assert_eq!(changed_text("", Some("Texto antigo")), Some(String::new()));
         assert_eq!(changed_text("", None), None);
@@ -9636,6 +9685,47 @@ mod tests {
         draft = ReviewTuiDraft::from_row(&row);
         draft.active = 0;
         assert!(review_tui_plain_skip_requested(skip, &row, &draft));
+    }
+
+    #[test]
+    fn review_tui_filter_menu_keys_apply_current_row_filters_and_clear() {
+        let mut row = sample_review_row("alimentacao:mercado");
+        row.account_id = Some("conta_teste".to_string());
+        row.merchant_name = Some("Mercado Exemplo".to_string());
+        let empty = ReviewFilters::default();
+
+        let month = review_tui_filters_from_menu_key(
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+            &row,
+            &empty,
+        )
+        .expect("month filter");
+        assert_eq!(month.month.as_deref(), Some("2026-05"));
+
+        let account = review_tui_filters_from_menu_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &row,
+            &month,
+        )
+        .expect("account filter");
+        assert_eq!(account.account_id.as_deref(), Some("conta_teste"));
+        assert_eq!(account.month.as_deref(), Some("2026-05"));
+
+        let merchant = review_tui_filters_from_menu_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &row,
+            &account,
+        )
+        .expect("merchant filter");
+        assert_eq!(merchant.merchant.as_deref(), Some("Mercado Exemplo"));
+
+        let cleared = review_tui_filters_from_menu_key(
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            &row,
+            &merchant,
+        )
+        .expect("clear filters");
+        assert!(cleared.is_empty());
     }
 
     fn sample_review_row(category_id: &str) -> TransactionRecord {

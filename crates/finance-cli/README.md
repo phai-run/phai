@@ -75,8 +75,7 @@ Para revisar as adiadas: finance tx enrich --days 7
 For quick human cleanup of transaction anatomy, use the interactive
 review loop locally. `finance review` opens a dense terminal UI with
 editable human fields, read-only raw bank data, category autocomplete,
-nearby transactions, identical-transaction bulk apply, and Ctrl/Cmd+Enter
-to save:
+filters, a searchable details modal, and Ctrl+S to save:
 
 ```bash
 finance review
@@ -90,6 +89,17 @@ limits for OpenClaw/WhatsApp JSON flows.
 finance tx review-human --kind all --limit 500 --tui --sound
 ```
 
+Filter the queue before opening the TUI or emitting JSON:
+
+```bash
+finance review --month 2026-03 --account-id shared_credit --category gas-stations --merchant posto
+finance tx review-human --kind all --json --month 2026-03 --filter-category gas-stations
+```
+
+Inside the TUI, press `Ctrl+F` to open the filter menu, then choose `m`, `a`,
+`c`, or `e` to filter by the current transaction's month, account, category, or
+merchant. Press `0` in that menu to clear TUI filters.
+
 For OpenClaw/WhatsApp, list machine-readable pending items and then
 apply one response by transaction id:
 
@@ -100,7 +110,6 @@ finance tx review-human --transaction-id TX_ID \
   --description "Compra de mercado" \
   --merchant-name "Mercado Exemplo" \
   --category alimentacao:mercado \
-  --bulk identical \
   --json
 ```
 

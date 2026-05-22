@@ -218,9 +218,10 @@ pub trait FinanceStore {
         idempotency_key: &str,
     ) -> Result<()>;
 
-    /// Prior transactions from the same merchant that carry a human-curated
+    /// Prior transactions from the same merchant, or the same raw description
+    /// when merchant enrichment is not available, that carry a human-curated
     /// `description` or `purpose`. Used by the replication engine to
-    /// propagate anatomy from recurring-merchant history.
+    /// propagate anatomy from recurring history.
     ///
     /// Any transaction with `description IS NOT NULL` or `purpose IS NOT NULL`
     /// qualifies — both fields are exclusively set by humans (via `set-anatomy`
@@ -236,9 +237,10 @@ pub trait FinanceStore {
         exclude_id: &str,
     ) -> Result<Vec<TransactionRecord>>;
 
-    /// Transactions that have a `merchant_name` but are missing at least
-    /// one of `description` or `purpose`. Used by the batch replication
-    /// command to find candidates that may benefit from [`find_anatomy_donors`].
+    /// Transactions that have a merchant/raw-description match key but are
+    /// missing at least one of `description` or `purpose`. Used by the batch
+    /// replication command to find candidates that may benefit from
+    /// [`find_anatomy_donors`].
     ///
     /// Only categorized transactions (`category_id IS NOT NULL`) are
     /// included — uncategorized ones are still in-flight and not ready

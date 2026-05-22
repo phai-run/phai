@@ -1940,9 +1940,12 @@ impl FinanceStore for LocalStore {
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
             FROM transactions
-            WHERE LOWER(TRIM(merchant_name)) = ?1
+            WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')))) = ?1
               AND transaction_id != ?2
-              AND (description IS NOT NULL OR purpose IS NOT NULL)
+              AND (
+                NULLIF(TRIM(COALESCE(description, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(purpose, '')), '') IS NOT NULL
+              )
             ORDER BY transaction_date DESC
             LIMIT 5
             ",
@@ -1964,7 +1967,7 @@ impl FinanceStore for LocalStore {
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
             FROM transactions
-            WHERE TRIM(COALESCE(merchant_name, '')) != ''
+            WHERE COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')) IS NOT NULL
               AND (
                 description IS NULL OR TRIM(description) = ''
                 OR purpose IS NULL OR TRIM(purpose) = ''

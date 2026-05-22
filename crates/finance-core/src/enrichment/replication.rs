@@ -1,10 +1,12 @@
 //! Anatomy replication: copy human-curated `description` and `purpose`
-//! from a prior transaction with the same merchant.
+//! from a prior transaction with the same merchant or raw description.
 //!
 //! When a new transaction arrives from Pluggy, `description` and `purpose`
 //! are always NULL. LLM enrichment sets `merchant_name` but not those
 //! fields. For recurring merchants, this module propagates the
 //! human-curated anatomy from the best-matching prior transaction.
+//! When historical rows have not been enriched with `merchant_name`, the
+//! raw Pluggy description is used as a conservative fallback key.
 //!
 //! Selection criteria (in priority order):
 //!   1. Same `category_id` as the target transaction.
@@ -88,16 +90,18 @@ fn amount_within_tolerance(donor: Decimal, target: Decimal) -> bool {
 /// `current_description` / `current_purpose` represent the target's
 /// current (possibly `None`) values. Only `None` fields are filled.
 pub fn compute_replication(
-    merchant_name: Option<&str>,
+    match_key: Option<&str>,
     current_description: Option<&str>,
     current_purpose: Option<&str>,
     target_category_id: Option<&str>,
     target_amount: Decimal,
     candidates: &[TransactionRecord],
 ) -> ReplicationOutcome {
-    if merchant_name.map(str::trim).unwrap_or("").is_empty() {
+    if match_key.map(str::trim).unwrap_or("").is_empty() {
         return ReplicationOutcome::NoMerchant;
     }
+    let current_description = non_blank(current_description);
+    let current_purpose = non_blank(current_purpose);
     if current_description.is_some() && current_purpose.is_some() {
         return ReplicationOutcome::AlreadyComplete;
     }
@@ -107,11 +111,23 @@ pub fn compute_replication(
     };
     let description = current_description
         .is_none()
-        .then(|| donor.description.clone())
+        .then(|| {
+            donor
+                .description
+                .as_deref()
+                .and_then(|value| non_blank(Some(value)))
+                .map(str::to_string)
+        })
         .flatten();
     let purpose = current_purpose
         .is_none()
-        .then(|| donor.purpose.clone())
+        .then(|| {
+            donor
+                .purpose
+                .as_deref()
+                .and_then(|value| non_blank(Some(value)))
+                .map(str::to_string)
+        })
         .flatten();
     if description.is_none() && purpose.is_none() {
         // Donor exists but has no anatomy we can use.
@@ -124,6 +140,14 @@ pub fn compute_replication(
     })
 }
 
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn anatomy_match_key(tx: &TransactionRecord) -> Option<&str> {
+    non_blank(tx.merchant_name.as_deref()).or_else(|| non_blank(Some(&tx.raw_description)))
+}
+
 /// Async entry point: fetch donor candidates from the store, then run
 /// [`compute_replication`]. Use this for the batch command and any other
 /// callers that already have a full [`TransactionRecord`].
@@ -131,15 +155,20 @@ pub async fn find_and_replicate(
     store: &dyn FinanceStore,
     tx: &TransactionRecord,
 ) -> Result<ReplicationOutcome> {
-    let merchant = tx.merchant_name.as_deref().map(str::trim).unwrap_or("");
-    if merchant.is_empty() {
+    let match_key = match anatomy_match_key(tx) {
+        Some(value) => value,
+        None => {
+            return Ok(ReplicationOutcome::NoMerchant);
+        }
+    };
+    if match_key.is_empty() {
         return Ok(ReplicationOutcome::NoMerchant);
     }
     let candidates = store
-        .find_anatomy_donors(merchant, &tx.transaction_id)
+        .find_anatomy_donors(match_key, &tx.transaction_id)
         .await?;
     Ok(compute_replication(
-        tx.merchant_name.as_deref(),
+        Some(match_key),
         tx.description.as_deref(),
         tx.purpose.as_deref(),
         tx.category_id.as_deref(),
@@ -185,6 +214,41 @@ mod tests {
             enrichment_attempted_at: None,
             amount_cents: None,
         }
+    }
+
+    #[test]
+    fn test_compute_replication_treats_blank_fields_as_missing() {
+        let candidates = vec![record(
+            "donor-1",
+            "alimentacao:restaurantes",
+            -5000,
+            Some("  Almoço  "),
+            Some("  lazer  "),
+        )];
+        let out = compute_replication(
+            Some("Sapiens"),
+            Some("  "),
+            Some(""),
+            Some("alimentacao:restaurantes"),
+            Decimal::new(-5000, 2),
+            &candidates,
+        );
+        match out {
+            ReplicationOutcome::Replicated(rep) => {
+                assert_eq!(rep.description.as_deref(), Some("Almoço"));
+                assert_eq!(rep.purpose.as_deref(), Some("lazer"));
+            }
+            other => panic!("expected Replicated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_anatomy_match_key_falls_back_to_raw_description() {
+        let mut tx = record("target", "alimentacao:restaurantes", -5000, None, None);
+        tx.merchant_name = None;
+        tx.raw_description = "  Loja Exemplo  ".to_string();
+
+        assert_eq!(anatomy_match_key(&tx), Some("Loja Exemplo"));
     }
 
     #[test]

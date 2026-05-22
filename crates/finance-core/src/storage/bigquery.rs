@@ -2835,9 +2835,12 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
             FROM {}
-            WHERE LOWER(TRIM(COALESCE(merchant_name, ''))) = {}
+            WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')))) = {}
               AND transaction_id != {}
-              AND (description IS NOT NULL OR purpose IS NOT NULL)
+              AND (
+                NULLIF(TRIM(COALESCE(description, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(purpose, '')), '') IS NOT NULL
+              )
             ORDER BY transaction_date DESC
             LIMIT 5
             ",
@@ -2866,7 +2869,7 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
             FROM {}
-            WHERE TRIM(COALESCE(merchant_name, '')) != ''
+            WHERE COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')) IS NOT NULL
               AND (
                 description IS NULL OR TRIM(description) = ''
                 OR purpose IS NULL OR TRIM(purpose) = ''

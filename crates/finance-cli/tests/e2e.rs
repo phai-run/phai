@@ -271,6 +271,48 @@ fn transaction_anatomy_fields_and_pending_commands_work() {
 }
 
 #[test]
+fn review_human_queue_filters_by_month_account_category_and_merchant() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let review_queue = envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("review-human")
+            .arg("--kind")
+            .arg("all")
+            .arg("--json")
+            .arg("--limit")
+            .arg("20")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--account-id")
+            .arg("shared_credit")
+            .arg("--category")
+            .arg("gas-stations")
+            .arg("--merchant")
+            .arg("posto"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let rows: Value = serde_json::from_slice(&review_queue).expect("review queue json");
+    let rows = rows.as_array().expect("array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["transactionId"], "pluggy-fixture-003");
+    assert_eq!(rows[0]["accountId"], "shared_credit");
+    assert_eq!(rows[0]["categoryId"], "gas-stations");
+}
+
+#[test]
 fn milestone_zero_local_sync_and_report() {
     let temp = TempDir::new().expect("tempdir");
     let config_dir = temp.path().join("config");
