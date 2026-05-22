@@ -1943,7 +1943,6 @@ impl FinanceStore for LocalStore {
             WHERE LOWER(TRIM(merchant_name)) = ?1
               AND transaction_id != ?2
               AND (description IS NOT NULL OR purpose IS NOT NULL)
-              AND category_source IN ('manual', 'enriched:user', 'rule')
             ORDER BY transaction_date DESC
             LIMIT 5
             ",

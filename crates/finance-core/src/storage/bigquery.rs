@@ -2838,7 +2838,6 @@ impl FinanceStore for BigQueryStore {
             WHERE LOWER(TRIM(COALESCE(merchant_name, ''))) = {}
               AND transaction_id != {}
               AND (description IS NOT NULL OR purpose IS NOT NULL)
-              AND category_source IN ('manual', 'enriched:user', 'rule')
             ORDER BY transaction_date DESC
             LIMIT 5
             ",

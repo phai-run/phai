@@ -222,9 +222,9 @@ pub trait FinanceStore {
     /// `description` or `purpose`. Used by the replication engine to
     /// propagate anatomy from recurring-merchant history.
     ///
-    /// Only rows whose `category_source` is in
-    /// `('manual', 'enriched:user', 'rule')` are returned — these represent
-    /// deliberate human (or human-confirmed) decisions.
+    /// Any transaction with `description IS NOT NULL` or `purpose IS NOT NULL`
+    /// qualifies — both fields are exclusively set by humans (via `set-anatomy`
+    /// or `review-human`), so no `category_source` filter is needed.
     ///
     /// Results are ordered by `transaction_date DESC` (most recent first)
     /// and capped at 5 so callers can pick the best match without fetching

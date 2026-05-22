@@ -27,8 +27,8 @@ Replication is offered in two modes:
 The engine calls `find_anatomy_donors(merchant_name, exclude_id)`:
 - Matches on `LOWER(TRIM(merchant_name))` — exact, case-insensitive.
 - Returns up to 5 candidates ordered by `transaction_date DESC`.
-- Filters to `category_source IN ('manual', 'enriched:user', 'rule')` — only deliberate human or human-confirmed decisions.
 - Requires the donor to have at least one of `description IS NOT NULL` or `purpose IS NOT NULL`.
+- No `category_source` filter — `description` and `purpose` are exclusively set by humans (via `set-anatomy` or `review-human`), so any transaction that has them set is a valid donor regardless of how its category was determined.
 
 From the candidates, `select_donor` picks the best match by score:
 - +2 same `category_id` as the target.
