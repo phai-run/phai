@@ -8806,8 +8806,7 @@ fn poll_review_tui_pending_saves(session: &mut ReviewTuiSession) -> bool {
                     }
                 },
                 Some(Err(join_err)) => {
-                    session.last_save_error =
-                        Some(format!("task de save panicou: {join_err}"));
+                    session.last_save_error = Some(format!("task de save panicou: {join_err}"));
                 }
                 None => {
                     // Shouldn't happen — is_finished said yes.
