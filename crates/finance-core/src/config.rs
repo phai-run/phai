@@ -260,11 +260,23 @@ mod tests {
         setup_env(home, None, None);
 
         let paths = ConfigPaths::discover().unwrap();
-        // On any platform, the fallback must NOT be the empty XDG path.
-        let xdg_path = home.join(".config").join("finance-os");
-        assert_ne!(paths.config_dir, xdg_path);
-        // It must come from `dirs::config_dir()` — non-empty path under HOME.
-        assert!(paths.config_dir.starts_with(home));
+        // The fallback must come from `dirs::config_dir()`. On Linux that's
+        // `$XDG_CONFIG_HOME/finance-os` (so it coincides with the XDG path
+        // we'd otherwise prefer); on macOS it's
+        // `~/Library/Application Support/finance-os`. Either way the path
+        // must be under HOME — that's all this test can portably assert.
+        assert!(
+            paths.config_dir.starts_with(home),
+            "expected fallback under HOME, got {:?}",
+            paths.config_dir
+        );
+        // And critically: on macOS specifically, fallback must NOT equal
+        // the XDG path, because that's the whole reason for the resolver.
+        #[cfg(target_os = "macos")]
+        {
+            let xdg_path = home.join(".config").join("finance-os");
+            assert_ne!(paths.config_dir, xdg_path);
+        }
     }
 
     #[test]
