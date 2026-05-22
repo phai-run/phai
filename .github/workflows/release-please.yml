@@ -50,7 +50,7 @@ jobs:
         run: |
           BIN_DIR=${{ matrix.cross && format('target/{0}/release', matrix.target) || 'target/release' }}
           cd "$BIN_DIR"
-          tar czf finance-cli-${{ matrix.target }}.tar.gz finance-cli
+          tar czf finance-cli-${{ matrix.target }}.tar.gz fin
           shasum -a 256 finance-cli-${{ matrix.target }}.tar.gz \
             > finance-cli-${{ matrix.target }}.tar.gz.sha256
           mv finance-cli-${{ matrix.target }}.tar.gz \
