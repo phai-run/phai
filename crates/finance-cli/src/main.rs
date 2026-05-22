@@ -7904,6 +7904,7 @@ struct ReviewTuiLaunch {
     filters: ReviewFilters,
     available_months: Vec<String>,
     sound: bool,
+    include_reviewed: bool,
 }
 
 async fn handle_review_tui_event(
@@ -8667,6 +8668,7 @@ async fn tx_review_human_tui(
         launch.filters,
         launch.available_months,
     );
+    session.include_reviewed = launch.include_reviewed;
 
     loop {
         draw_current_review_tui(
@@ -8768,7 +8770,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
         return Ok(());
     }
 
-    let rows =
+    let mut rows =
         review_human_rows(store.as_ref(), args.kind, limit, min_abs_amount, &filters).await?;
     if args.json {
         let items = rows.iter().map(review_queue_item).collect::<Vec<_>>();
@@ -8777,6 +8779,43 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
     }
 
     if args.tui {
+        // Smart fallback: if the default month filter (or any filter) yields
+        // an empty queue in TUI mode, broaden the search so the user always
+        // lands inside the TUI rather than seeing "Sem pendências" and
+        // bouncing back to the shell.
+        let mut launch_include_reviewed = false;
+        let user_supplied_filters = ReviewFilters::from_review_args(&args);
+        let we_added_default_month = user_supplied_filters.is_empty() && !filters.is_empty();
+
+        if rows.is_empty() && we_added_default_month {
+            // Drop the auto-applied month and try the full pending queue.
+            filters = ReviewFilters::default();
+            rows = review_human_rows(store.as_ref(), args.kind, limit, min_abs_amount, &filters)
+                .await?;
+            if !rows.is_empty() {
+                eprintln!(
+                    "sem pendências em {}, mostrando todas as pendências",
+                    chrono::Utc::now().format("%Y-%m")
+                );
+            }
+        }
+
+        if rows.is_empty() {
+            // No pending items at all — open in "ver todas" mode so the user
+            // can still navigate and edit curated rows from the last 3 months.
+            launch_include_reviewed = true;
+            rows = all_transactions_for_review(store.as_ref(), limit, min_abs_amount, &filters)
+                .await?;
+            if !rows.is_empty() {
+                eprintln!("sem pendências; abrindo em modo 'todas' (Ctrl+R alterna)");
+            }
+        }
+
+        if rows.is_empty() {
+            println!("Sem transações no período.");
+            return Ok(());
+        }
+
         let available_months =
             collect_available_months(store.as_ref(), args.kind, limit, min_abs_amount).await?;
         return tx_review_human_tui(
@@ -8790,6 +8829,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
                 filters,
                 available_months,
                 sound: args.sound,
+                include_reviewed: launch_include_reviewed,
             },
         )
         .await;
