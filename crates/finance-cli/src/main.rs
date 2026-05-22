@@ -40,7 +40,9 @@ use std::fs;
 use std::future::Future;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration as StdDuration;
+use tokio::task::{JoinHandle, LocalSet};
 use uuid::Uuid;
 
 mod enrich;
@@ -6245,6 +6247,8 @@ struct ReviewTuiView<'a> {
     include_reviewed: bool,
     bulk_mode: bool,
     bulk_targets: &'a [TransactionRecord],
+    pending_save_count: usize,
+    last_save_error: Option<&'a str>,
 }
 
 fn clip_tui_text(text: &str, max_chars: usize) -> String {
@@ -6521,6 +6525,26 @@ fn draw_review_tui_header(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiVie
     } else {
         None
     };
+    let pending_badge = if view.pending_save_count > 0 {
+        Some(Span::styled(
+            format!(" ⟳ salvando {} ", view.pending_save_count),
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        None
+    };
+    let error_badge = view.last_save_error.map(|e| {
+        Span::styled(
+            format!(" ⚠ {} ", clip_tui_text(e, 60)),
+            Style::default()
+                .fg(TuiColor::White)
+                .bg(TuiColor::Red)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let mut row1 = vec![
         Span::styled(
             " fin ",
@@ -6541,6 +6565,14 @@ fn draw_review_tui_header(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiVie
         mode_badge,
     ];
     if let Some(badge) = bulk_badge {
+        row1.push(Span::raw("  "));
+        row1.push(badge);
+    }
+    if let Some(badge) = pending_badge {
+        row1.push(Span::raw("  "));
+        row1.push(badge);
+    }
+    if let Some(badge) = error_badge {
         row1.push(Span::raw("  "));
         row1.push(badge);
     }
@@ -7700,6 +7732,26 @@ struct ReviewTuiSession {
     bulk_mode: bool,
     bulk_targets: Vec<TransactionRecord>,
     bulk_target_key: String,
+    /// In-flight background save tasks. Polled each event-loop tick; on
+    /// completion the result is folded into `pending_save_count` /
+    /// `last_save_error` for status reporting.
+    pending_saves: Vec<JoinHandle<BackgroundSaveOutcome>>,
+    /// Number of background saves currently in flight (denormalised for the
+    /// header chip; kept in sync with `pending_saves.len()` after polling).
+    pending_save_count: usize,
+    /// Last save error surfaced to the user, if any. Cleared when the user
+    /// dismisses it (Esc) or when a subsequent save succeeds.
+    last_save_error: Option<String>,
+    /// Cumulative number of background saves persisted in this session.
+    /// Used purely for the status line.
+    saves_completed: usize,
+}
+
+#[derive(Debug)]
+struct BackgroundSaveOutcome {
+    label: String,
+    result: Result<usize>,
+    sound: bool,
 }
 
 impl ReviewTuiSession {
@@ -7740,6 +7792,10 @@ impl ReviewTuiSession {
             bulk_mode: false,
             bulk_targets: Vec::new(),
             bulk_target_key: String::new(),
+            pending_saves: Vec::new(),
+            pending_save_count: 0,
+            last_save_error: None,
+            saves_completed: 0,
         }
     }
 }
@@ -7871,6 +7927,8 @@ fn draw_current_review_tui(
         include_reviewed: session.include_reviewed,
         bulk_mode: session.bulk_mode,
         bulk_targets: &session.bulk_targets,
+        pending_save_count: session.pending_save_count,
+        last_save_error: session.last_save_error.as_deref(),
     })
 }
 
@@ -7890,6 +7948,9 @@ fn reset_current_tui_draft_if_requested(
 }
 
 struct ReviewTuiEventState<'a> {
+    // Kept for handlers that might wrap an in-line spinner later. Not
+    // currently read because all blocking awaits moved to background tasks.
+    #[allow(dead_code)]
     terminal: &'a mut ReviewTerminal,
     rows: &'a mut Vec<TransactionRecord>,
     drafts: &'a mut Vec<ReviewTuiDraft>,
@@ -7918,7 +7979,7 @@ struct ReviewTuiLaunch {
 }
 
 async fn handle_review_tui_event(
-    store: &dyn FinanceStore,
+    store: &Rc<dyn FinanceStore>,
     config: &AppConfig,
     key: crossterm::event::KeyEvent,
     state: ReviewTuiEventState<'_>,
@@ -7928,10 +7989,10 @@ async fn handle_review_tui_event(
     if review_tui_exit_key(key) {
         return Ok(true);
     }
-    if handle_review_tui_modal_event(store, key, &mut state).await? {
+    if handle_review_tui_modal_event(&**store, key, &mut state).await? {
         return Ok(false);
     }
-    if handle_review_tui_async_global_event(store, key, &mut state).await? {
+    if handle_review_tui_async_global_event(&**store, key, &mut state).await? {
         return Ok(false);
     }
     if handle_review_tui_global_event(key, &mut state) {
@@ -7941,7 +8002,7 @@ async fn handle_review_tui_event(
         return Ok(false);
     }
     Ok(matches!(
-        handle_review_tui_basic_action(store, config, key, &mut state, sound).await?,
+        handle_review_tui_basic_action(store, config, key, &mut state, sound)?,
         ReviewTuiEventFlow::Exit
     ))
 }
@@ -8266,10 +8327,17 @@ fn handle_review_tui_global_event(
             true
         }
         KeyCode::Esc => {
-            let index = state.session.index;
-            state.drafts[index].reset_active_field_from_row(&state.rows[index]);
-            state.session.category_cursor = 0;
-            state.session.status = "campo atual restaurado".to_string();
+            // Esc dismisses any sticky save-error banner first; only resets
+            // the active draft field if there was no banner to dismiss.
+            if state.session.last_save_error.is_some() {
+                state.session.last_save_error = None;
+                state.session.status = "aviso fechado".to_string();
+            } else {
+                let index = state.session.index;
+                state.drafts[index].reset_active_field_from_row(&state.rows[index]);
+                state.session.category_cursor = 0;
+                state.session.status = "campo atual restaurado".to_string();
+            }
             true
         }
         _ => false,
@@ -8503,8 +8571,8 @@ fn handle_review_tui_row_event(
     true
 }
 
-async fn handle_review_tui_basic_action(
-    store: &dyn FinanceStore,
+fn handle_review_tui_basic_action(
+    store: &Rc<dyn FinanceStore>,
     config: &AppConfig,
     key: crossterm::event::KeyEvent,
     state: &mut ReviewTuiEventState<'_>,
@@ -8533,7 +8601,7 @@ async fn handle_review_tui_basic_action(
         ReviewTuiKeyAction::Exit => Ok(ReviewTuiEventFlow::Exit),
         ReviewTuiKeyAction::Continue => Ok(ReviewTuiEventFlow::Continue),
         ReviewTuiKeyAction::Save => {
-            save_review_tui_current_draft(store, config, state, sound).await?;
+            save_review_tui_current_draft_optimistic(store, config, state, sound);
             Ok(ReviewTuiEventFlow::Continue)
         }
     }
@@ -8554,25 +8622,28 @@ fn handle_review_tui_edit_key(
     );
 }
 
-async fn save_review_tui_current_draft(
-    store: &dyn FinanceStore,
+/// Apply a review save **optimistically**: mutate the local queue + summary
+/// immediately, advance the cursor, and dispatch the actual store write to
+/// a `spawn_local` task so the UI doesn't block on the BigQuery roundtrip.
+///
+/// The user sees the save complete instantly. Background failures surface
+/// as a red banner on the next event-loop tick (`last_save_error`).
+fn save_review_tui_current_draft_optimistic(
+    store: &Rc<dyn FinanceStore>,
     config: &AppConfig,
     state: &mut ReviewTuiEventState<'_>,
     sound: bool,
-) -> Result<()> {
+) {
     let index = state.session.index;
     let patch = state.drafts[index].patch_against(&state.rows[index]);
     let category_for_history = draft_category_for_history(&state.drafts[index]);
     if !patch.has_changes() {
         state.session.status = "sem alterações; avançando".to_string();
         advance_review_tui_index_after_save(state.rows, state.session);
-        return Ok(());
+        return;
     }
 
-    // Build the list of transaction ids to apply the patch to.
-    // Default: just the current row. Bulk mode: every cached target with
-    // the same raw_description (plus the current row, in case it's not
-    // present in the cached list — e.g. when bulk was just toggled).
+    // Targets: just the current row, or every cached bulk target plus current.
     let mut transaction_ids: Vec<String> = if state.session.bulk_mode {
         let mut ids: Vec<String> = state
             .session
@@ -8591,63 +8662,187 @@ async fn save_review_tui_current_draft(
     transaction_ids.sort();
     transaction_ids.dedup();
 
-    let patch_for_persist = patch.clone();
-    let queue_limit = state.rows.len();
-    let min_abs_amount = state.session.min_abs_amount;
     let bulk_count = transaction_ids.len();
-    let future = async move {
-        let mut results = Vec::with_capacity(transaction_ids.len());
-        for tid in &transaction_ids {
-            results.push(apply_human_review(store, config, tid, patch_for_persist.clone()).await?);
-        }
-        let summary = review_human_summary(store, min_abs_amount, queue_limit).await?;
-        Ok((results, summary))
-    };
     let label = if bulk_count > 1 {
-        format!("salvando {bulk_count} (bulk)")
+        format!("{bulk_count} (bulk)")
     } else {
-        "salvando".to_string()
+        "1".to_string()
     };
-    let (results, refreshed_summary) = {
-        let mut render_state = ReviewTuiRenderState {
-            terminal: &mut *state.terminal,
-            rows: state.rows.as_slice(),
-            drafts: state.drafts.as_slice(),
-            summary: &*state.summary,
-            categories: state.categories,
-            session: &mut *state.session,
-        };
-        await_with_review_tui_spinner(future, &mut render_state, &label).await?
-    };
-    *state.summary = refreshed_summary;
-    if sound {
-        crossterm::execute!(io::stdout(), crossterm::style::Print('\x07')).ok();
-    }
-    let updated_ids = results
-        .iter()
-        .map(|result| result.transaction_id.clone())
-        .collect::<Vec<_>>();
-    apply_review_tui_patch_to_local_rows(state.rows, state.drafts, &updated_ids, &patch);
-    invalidate_review_tui_contexts(&mut state.session.context_cache, &updated_ids);
-    state.session.status = format!("salvo: {} transação(ões)", results.len());
-    // Invalidate the bulk cache after a bulk save so the targets refresh on
-    // the next navigation (counts/state changed).
+
+    // --- Optimistic local mutation ---
+    apply_review_tui_patch_to_local_rows(state.rows, state.drafts, &transaction_ids, &patch);
+    invalidate_review_tui_contexts(&mut state.session.context_cache, &transaction_ids);
+    apply_optimistic_summary_decrement(state.summary, &patch, bulk_count);
     if state.session.bulk_mode {
         state.session.bulk_target_key.clear();
         state.session.bulk_targets.clear();
     }
-    advance_review_tui_index_after_save(state.rows, state.session);
     remember_recent_category(
         &mut state.session.recent_categories,
         &mut state.session.last_category_id,
         category_for_history,
     );
-    Ok(())
+    state.session.status = format!("salvo (background): {label}");
+    state.session.last_save_error = None;
+    state.session.pending_save_count += 1;
+    advance_review_tui_index_after_save(state.rows, state.session);
+
+    // --- Spawn the real write ---
+    let store_clone = Rc::clone(store);
+    let config_clone = config.clone();
+    let patch_for_persist = patch.clone();
+    let label_for_task = label;
+    let handle = tokio::task::spawn_local(async move {
+        let n = transaction_ids.len();
+        let mut last_err: Option<anyhow::Error> = None;
+        for tid in &transaction_ids {
+            if let Err(e) =
+                apply_human_review(&*store_clone, &config_clone, tid, patch_for_persist.clone())
+                    .await
+            {
+                last_err = Some(e);
+                break;
+            }
+        }
+        let result = match last_err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        };
+        BackgroundSaveOutcome {
+            label: label_for_task,
+            result,
+            sound,
+        }
+    });
+    state.session.pending_saves.push(handle);
+}
+
+/// Best-effort optimistic decrement of the summary counters shown in the
+/// header. Real values get re-fetched from the store on the next reload,
+/// but this keeps the header in sync between saves.
+fn apply_optimistic_summary_decrement(
+    summary: &mut ReviewHumanSummary,
+    patch: &HumanReviewPatch,
+    bulk_count: usize,
+) {
+    let count = bulk_count as i64;
+    let dec = |field: &mut i64, n: i64| {
+        *field = (*field).saturating_sub(n).max(0);
+    };
+    if patch.description.is_some() {
+        dec(&mut summary.missing_description_count, count);
+    }
+    if patch.merchant_name.is_some() {
+        dec(&mut summary.missing_merchant_count, count);
+    }
+    if patch.purpose.is_some() {
+        dec(&mut summary.missing_purpose_count, count);
+    }
+}
+
+/// Drain any background saves that have already completed. Updates
+/// `pending_save_count`, surfaces the first error as `last_save_error`,
+/// and triggers the save-success sound on at least one completed save.
+/// Returns `true` if any task completed (caller may want to redraw).
+fn poll_review_tui_pending_saves(session: &mut ReviewTuiSession) -> bool {
+    if session.pending_saves.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    let mut any_completed = false;
+    let mut any_success_with_sound = false;
+    while i < session.pending_saves.len() {
+        if session.pending_saves[i].is_finished() {
+            let handle = session.pending_saves.swap_remove(i);
+            any_completed = true;
+            // Inspect the outcome without blocking (the task is finished).
+            match futures_now_or_never(handle) {
+                Some(Ok(outcome)) => match outcome.result {
+                    Ok(n) => {
+                        session.saves_completed += n;
+                        if outcome.sound {
+                            any_success_with_sound = true;
+                        }
+                    }
+                    Err(e) => {
+                        session.last_save_error =
+                            Some(format!("falha ao salvar ({}): {}", outcome.label, e));
+                    }
+                },
+                Some(Err(join_err)) => {
+                    session.last_save_error =
+                        Some(format!("task de save panicou: {join_err}"));
+                }
+                None => {
+                    // Shouldn't happen — is_finished said yes.
+                    i += 1;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    session.pending_save_count = session.pending_saves.len();
+    if any_success_with_sound {
+        crossterm::execute!(io::stdout(), crossterm::style::Print('\x07')).ok();
+    }
+    any_completed
+}
+
+/// Best-effort sync poll of a finished JoinHandle. Returns the value if the
+/// task is finished (won't actually block waiting); returns None if
+/// somehow it's not ready (defensive — `is_finished()` should have ensured).
+fn futures_now_or_never<T>(
+    handle: JoinHandle<T>,
+) -> Option<std::result::Result<T, tokio::task::JoinError>> {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut pinned = Box::pin(handle);
+    match Pin::new(&mut pinned).poll(&mut cx) {
+        Poll::Ready(v) => Some(v),
+        Poll::Pending => None,
+    }
+}
+
+fn noop_waker() -> std::task::Waker {
+    use std::task::{RawWaker, RawWakerVTable, Waker};
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(std::ptr::null(), &VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+}
+
+/// Block the loop while we await any still-pending background saves on
+/// TUI exit. Surfaces the first failure to stderr so the user knows.
+async fn drain_pending_saves_on_exit(session: &mut ReviewTuiSession) {
+    let pending: Vec<JoinHandle<BackgroundSaveOutcome>> =
+        std::mem::take(&mut session.pending_saves);
+    if pending.is_empty() {
+        return;
+    }
+    eprintln!("aguardando {} save(s) pendente(s)…", pending.len());
+    for handle in pending {
+        match handle.await {
+            Ok(outcome) => {
+                if let Err(e) = outcome.result {
+                    eprintln!("falha em save background ({}): {e}", outcome.label);
+                }
+            }
+            Err(e) => eprintln!("task de save panicou: {e}"),
+        }
+    }
+    session.pending_save_count = 0;
 }
 
 async fn tx_review_human_tui(
-    store: &dyn FinanceStore,
-    config: &AppConfig,
+    store: Rc<dyn FinanceStore>,
+    config: AppConfig,
     mut rows: Vec<TransactionRecord>,
     launch: ReviewTuiLaunch,
 ) -> Result<()> {
@@ -8664,7 +8859,7 @@ async fn tx_review_human_tui(
         .into_iter()
         .collect::<Vec<_>>();
     categories.sort();
-    let mut summary = review_human_summary(store, launch.min_abs_amount, rows.len()).await?;
+    let mut summary = review_human_summary(&*store, launch.min_abs_amount, rows.len()).await?;
     let mut terminal = ReviewTerminal::enter()?;
     let mut drafts = rows
         .iter()
@@ -8681,6 +8876,11 @@ async fn tx_review_human_tui(
     session.include_reviewed = launch.include_reviewed;
 
     loop {
+        // Drain any background saves that finished since the last tick.
+        // Doing this before the redraw means the header chip + error
+        // banner reflect the latest state.
+        poll_review_tui_pending_saves(&mut session);
+
         draw_current_review_tui(
             &mut terminal,
             &rows,
@@ -8692,7 +8892,7 @@ async fn tx_review_human_tui(
         session.status.clear();
 
         if !prepare_review_tui_context_for_input(
-            store,
+            &*store,
             &mut terminal,
             &rows,
             &drafts,
@@ -8705,13 +8905,18 @@ async fn tx_review_human_tui(
             continue;
         }
 
+        // Poll input with a short timeout so background saves get a chance
+        // to surface in the UI even while the user is idle.
+        if !crossterm::event::poll(StdDuration::from_millis(250))? {
+            continue;
+        }
         let Event::Key(key) = event::read()? else {
             continue;
         };
 
         if handle_review_tui_event(
-            store,
-            config,
+            &store,
+            &config,
             key,
             ReviewTuiEventState {
                 terminal: &mut terminal,
@@ -8729,6 +8934,7 @@ async fn tx_review_human_tui(
         }
     }
 
+    drain_pending_saves_on_exit(&mut session).await;
     Ok(())
 }
 
@@ -8828,21 +9034,23 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
 
         let available_months =
             collect_available_months(store.as_ref(), args.kind, limit, min_abs_amount).await?;
-        return tx_review_human_tui(
-            store.as_ref(),
-            &config,
-            rows,
-            ReviewTuiLaunch {
-                kind: args.kind,
-                limit,
-                min_abs_amount,
-                filters,
-                available_months,
-                sound: args.sound,
-                include_reviewed: launch_include_reviewed,
-            },
-        )
-        .await;
+        // Hand ownership of the store to an `Rc` so background save tasks
+        // (spawned via `spawn_local`) can hold a clone. The whole TUI runs
+        // inside a `LocalSet` to allow `spawn_local`.
+        let store_rc: Rc<dyn FinanceStore> = Rc::from(store);
+        let launch = ReviewTuiLaunch {
+            kind: args.kind,
+            limit,
+            min_abs_amount,
+            filters,
+            available_months,
+            sound: args.sound,
+            include_reviewed: launch_include_reviewed,
+        };
+        let local = LocalSet::new();
+        return local
+            .run_until(tx_review_human_tui(store_rc, config, rows, launch))
+            .await;
     }
 
     if !io::stdin().is_terminal() {
