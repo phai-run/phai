@@ -42,7 +42,7 @@ The installer detects your platform (macOS Apple Silicon or Intel), downloads th
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh \
-  | bash -s -- --version=v0.5.1 --prefix=/usr/local
+  | bash -s -- --version=v1.6.0 --prefix=/usr/local
 ```
 
 Other paths: [build from source](#build-from-source) · [cargo install](#cargo-install)
