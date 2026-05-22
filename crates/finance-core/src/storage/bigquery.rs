@@ -1963,6 +1963,30 @@ impl FinanceStore for BigQueryStore {
         Ok(categories)
     }
 
+    async fn list_all_category_ids(&self) -> Result<BTreeSet<String>> {
+        let sql = format!(
+            "
+            SELECT category_id FROM {categories}
+            UNION DISTINCT
+            SELECT DISTINCT category_id FROM {transactions}
+              WHERE category_id IS NOT NULL AND TRIM(category_id) <> ''
+            ",
+            categories = self.qualified_table("categories")?,
+            transactions = self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut categories = BTreeSet::new();
+        for row in response.rows {
+            let values = row_values(&row);
+            if let Some(id) = optional_string(&values, 0) {
+                if !id.trim().is_empty() {
+                    categories.insert(id);
+                }
+            }
+        }
+        Ok(categories)
+    }
+
     async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>> {
         let sql = format!(
             "
@@ -2815,6 +2839,78 @@ impl FinanceStore for BigQueryStore {
             });
         }
         Ok(out)
+    }
+
+    async fn find_anatomy_donors(
+        &self,
+        merchant_name: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<TransactionRecord>> {
+        let normalized = merchant_name.trim().to_lowercase();
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
+            FROM {}
+            WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')))) = {}
+              AND transaction_id != {}
+              AND (
+                NULLIF(TRIM(COALESCE(description, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(purpose, '')), '') IS NOT NULL
+              )
+            ORDER BY transaction_date DESC
+            LIMIT 5
+            ",
+            self.qualified_table("transactions")?,
+            sql_string(&normalized),
+            sql_string(exclude_id),
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
+    }
+
+    async fn replicable_anatomy_candidates(&self, limit: usize) -> Result<Vec<TransactionRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              transaction_id, account_id, CAST(transaction_date AS STRING),
+              COALESCE(raw_description, description, ''), description, merchant_name, purpose,
+              CAST(amount AS STRING), tx_type, category_id, category_source, context,
+              classifier_trace, payment_status, source, actor_id, idempotency_key,
+              COALESCE(TO_JSON_STRING(metadata_json), '{{}}'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
+              FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
+            FROM {}
+            WHERE COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')) IS NOT NULL
+              AND (
+                description IS NULL OR TRIM(description) = ''
+                OR purpose IS NULL OR TRIM(purpose) = ''
+              )
+              AND category_id IS NOT NULL
+            ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
+            LIMIT {}
+            ",
+            self.qualified_table("transactions")?,
+            limit,
+        );
+        let response = self.run_query(&sql).await?;
+        response
+            .rows
+            .iter()
+            .map(|row| transaction_record_from_values(&row_values(row)))
+            .collect()
     }
 
     async fn similar_transactions(

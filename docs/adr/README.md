@@ -66,6 +66,7 @@ proposed → active → superseded
 | [0012](0012-amount-cents-exact-aggregation.md) | Exact decimal aggregation via `amount_cents` companion column | active |
 | [0013](0013-auto-migrate-on-every-command.md) | Auto-apply pending migrations on every command invocation | active |
 | [0014](0014-transaction-anatomy.md) | Transaction anatomy separates raw, human, merchant, purpose, and trace fields | active |
+| [0015](0015-anatomy-replication.md) | Anatomy replication propagates human-curated description and purpose from prior same-merchant transactions | active |
 
 ---
 

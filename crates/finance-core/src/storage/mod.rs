@@ -141,6 +141,12 @@ pub trait FinanceStore {
     async fn all_rules(&self) -> Result<Vec<RuleRecord>>;
     async fn active_rules(&self) -> Result<Vec<RuleRecord>>;
     async fn internal_categories(&self) -> Result<BTreeSet<String>>;
+    /// Returns every category id known to the system — the union of the
+    /// `categories` reference table and DISTINCT `transactions.category_id`.
+    /// Used by interactive tools (e.g. the review TUI picker) to surface the
+    /// full set of available categories, not just the ones in the current
+    /// in-memory queue.
+    async fn list_all_category_ids(&self) -> Result<BTreeSet<String>>;
     async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>>;
     async fn count_transactions_with_context(&self) -> Result<i64>;
     async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>>;
@@ -217,6 +223,35 @@ pub trait FinanceStore {
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()>;
+
+    /// Prior transactions from the same merchant, or the same raw description
+    /// when merchant enrichment is not available, that carry a human-curated
+    /// `description` or `purpose`. Used by the replication engine to
+    /// propagate anatomy from recurring history.
+    ///
+    /// Any transaction with `description IS NOT NULL` or `purpose IS NOT NULL`
+    /// qualifies — both fields are exclusively set by humans (via `set-anatomy`
+    /// or `review-human`), so no `category_source` filter is needed.
+    ///
+    /// Results are ordered by `transaction_date DESC` (most recent first)
+    /// and capped at 5 so callers can pick the best match without fetching
+    /// unbounded history. `exclude_id` prevents a transaction from donating
+    /// anatomy to itself.
+    async fn find_anatomy_donors(
+        &self,
+        merchant_name: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<TransactionRecord>>;
+
+    /// Transactions that have a merchant/raw-description match key but are
+    /// missing at least one of `description` or `purpose`. Used by the batch
+    /// replication command to find candidates that may benefit from
+    /// [`find_anatomy_donors`].
+    ///
+    /// Only categorized transactions (`category_id IS NOT NULL`) are
+    /// included — uncategorized ones are still in-flight and not ready
+    /// for anatomy propagation.
+    async fn replicable_anatomy_candidates(&self, limit: usize) -> Result<Vec<TransactionRecord>>;
 }
 
 pub async fn open_store(config: &AppConfig) -> Result<Box<dyn FinanceStore>> {

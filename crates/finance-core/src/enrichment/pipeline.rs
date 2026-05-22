@@ -602,6 +602,9 @@ mod tests {
         async fn internal_categories(&self) -> Result<BTreeSet<String>> {
             Ok(BTreeSet::new())
         }
+        async fn list_all_category_ids(&self) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
         async fn transactions_with_context(&self, _: usize) -> Result<Vec<TransactionContextRow>> {
             Ok(vec![])
         }
@@ -689,6 +692,12 @@ mod tests {
             _: bool,
         ) -> Result<Vec<TransactionRecord>> {
             Ok(self.similar.clone())
+        }
+        async fn find_anatomy_donors(&self, _: &str, _: &str) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
+        }
+        async fn replicable_anatomy_candidates(&self, _: usize) -> Result<Vec<TransactionRecord>> {
+            Ok(vec![])
         }
         async fn mark_enrichment_attempted(
             &self,

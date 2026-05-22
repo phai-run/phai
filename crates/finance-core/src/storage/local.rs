@@ -1061,6 +1061,32 @@ impl FinanceStore for LocalStore {
         Ok(rows.into_iter().collect())
     }
 
+    async fn list_all_category_ids(&self) -> Result<BTreeSet<String>> {
+        let conn = self.connection()?;
+        let mut set = BTreeSet::new();
+        if Self::table_exists(&conn, "categories")? {
+            let mut stmt = conn.prepare("SELECT category_id FROM categories")?;
+            for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+                let id = row?;
+                if !id.trim().is_empty() {
+                    set.insert(id);
+                }
+            }
+        }
+        if Self::table_exists(&conn, "transactions")? {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT category_id FROM transactions WHERE category_id IS NOT NULL",
+            )?;
+            for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+                let id = row?;
+                if !id.trim().is_empty() {
+                    set.insert(id);
+                }
+            }
+        }
+        Ok(set)
+    }
+
     async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
@@ -1922,6 +1948,65 @@ impl FinanceStore for LocalStore {
             });
         }
         Ok(out)
+    }
+
+    async fn find_anatomy_donors(
+        &self,
+        merchant_name: &str,
+        exclude_id: &str,
+    ) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let normalized = merchant_name.trim().to_lowercase();
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, raw_description, description,
+              merchant_name, purpose, CAST(amount AS TEXT), tx_type, category_id,
+              category_source, context, classifier_trace, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at,
+              enrichment_attempted_at
+            FROM transactions
+            WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')))) = ?1
+              AND transaction_id != ?2
+              AND (
+                NULLIF(TRIM(COALESCE(description, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(purpose, '')), '') IS NOT NULL
+              )
+            ORDER BY transaction_date DESC
+            LIMIT 5
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![normalized, exclude_id], transaction_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn replicable_anatomy_candidates(&self, limit: usize) -> Result<Vec<TransactionRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_id, account_id, transaction_date, raw_description, description,
+              merchant_name, purpose, CAST(amount AS TEXT), tx_type, category_id,
+              category_source, context, classifier_trace, payment_status, source,
+              actor_id, idempotency_key, metadata_json, created_at, updated_at,
+              enrichment_attempted_at
+            FROM transactions
+            WHERE COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')) IS NOT NULL
+              AND (
+                description IS NULL OR TRIM(description) = ''
+                OR purpose IS NULL OR TRIM(purpose) = ''
+              )
+              AND category_id IS NOT NULL
+            ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], transaction_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     async fn similar_transactions(

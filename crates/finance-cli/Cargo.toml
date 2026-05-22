@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "fin"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
