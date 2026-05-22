@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/feliperun/finance-os/compare/v1.6.0...v1.6.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* **cli:** remove dead functions section_header and category_subtotal from human_format ([#44](https://github.com/feliperun/finance-os/issues/44)) ([c622e11](https://github.com/feliperun/finance-os/commit/c622e113672bb956d2572e39c466a125efc6acee))
+
 ## [1.6.0](https://github.com/feliperun/finance-os/compare/v1.5.0...v1.6.0) (2026-05-22)
 
 
