@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/feliperun/finance-os/compare/v1.5.0...v1.6.0) (2026-05-22)
+
+
+### Features
+
+* **tui:** review TUI overhaul — fin shortcut, BigQuery default, bulk mode, optimistic save ([b9e9fc2](https://github.com/feliperun/finance-os/commit/b9e9fc2e237e755ad32cb53ad19127e85ea83ef6))
+
 ## [1.5.0](https://github.com/feliperun/finance-os/compare/v1.4.0...v1.5.0) (2026-05-20)
 
 
