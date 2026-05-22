@@ -1789,6 +1789,9 @@ mod test_support {
         async fn internal_categories(&self) -> Result<BTreeSet<String>> {
             Ok(BTreeSet::new())
         }
+        async fn list_all_category_ids(&self) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
         async fn transactions_with_context(&self, _: usize) -> Result<Vec<TransactionContextRow>> {
             Ok(vec![])
         }

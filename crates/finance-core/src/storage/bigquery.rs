@@ -1963,6 +1963,30 @@ impl FinanceStore for BigQueryStore {
         Ok(categories)
     }
 
+    async fn list_all_category_ids(&self) -> Result<BTreeSet<String>> {
+        let sql = format!(
+            "
+            SELECT category_id FROM {categories}
+            UNION DISTINCT
+            SELECT DISTINCT category_id FROM {transactions}
+              WHERE category_id IS NOT NULL AND TRIM(category_id) <> ''
+            ",
+            categories = self.qualified_table("categories")?,
+            transactions = self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut categories = BTreeSet::new();
+        for row in response.rows {
+            let values = row_values(&row);
+            if let Some(id) = optional_string(&values, 0) {
+                if !id.trim().is_empty() {
+                    categories.insert(id);
+                }
+            }
+        }
+        Ok(categories)
+    }
+
     async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>> {
         let sql = format!(
             "

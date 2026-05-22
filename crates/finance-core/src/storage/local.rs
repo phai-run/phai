@@ -1061,6 +1061,32 @@ impl FinanceStore for LocalStore {
         Ok(rows.into_iter().collect())
     }
 
+    async fn list_all_category_ids(&self) -> Result<BTreeSet<String>> {
+        let conn = self.connection()?;
+        let mut set = BTreeSet::new();
+        if Self::table_exists(&conn, "categories")? {
+            let mut stmt = conn.prepare("SELECT category_id FROM categories")?;
+            for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+                let id = row?;
+                if !id.trim().is_empty() {
+                    set.insert(id);
+                }
+            }
+        }
+        if Self::table_exists(&conn, "transactions")? {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT category_id FROM transactions WHERE category_id IS NOT NULL",
+            )?;
+            for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+                let id = row?;
+                if !id.trim().is_empty() {
+                    set.insert(id);
+                }
+            }
+        }
+        Ok(set)
+    }
+
     async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(

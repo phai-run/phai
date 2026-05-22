@@ -141,6 +141,12 @@ pub trait FinanceStore {
     async fn all_rules(&self) -> Result<Vec<RuleRecord>>;
     async fn active_rules(&self) -> Result<Vec<RuleRecord>>;
     async fn internal_categories(&self) -> Result<BTreeSet<String>>;
+    /// Returns every category id known to the system — the union of the
+    /// `categories` reference table and DISTINCT `transactions.category_id`.
+    /// Used by interactive tools (e.g. the review TUI picker) to surface the
+    /// full set of available categories, not just the ones in the current
+    /// in-memory queue.
+    async fn list_all_category_ids(&self) -> Result<BTreeSet<String>>;
     async fn transactions_with_context(&self, limit: usize) -> Result<Vec<TransactionContextRow>>;
     async fn count_transactions_with_context(&self) -> Result<i64>;
     async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>>;
