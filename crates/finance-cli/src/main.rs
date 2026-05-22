@@ -8132,11 +8132,9 @@ async fn handle_review_tui_month_picker_key(
         KeyCode::Up => {
             state.session.month_picker_cursor = state.session.month_picker_cursor.saturating_sub(1);
         }
-        KeyCode::Down => {
-            if n > 0 {
-                state.session.month_picker_cursor =
-                    (state.session.month_picker_cursor + 1).min(n - 1);
-            }
+        KeyCode::Down if n > 0 => {
+            state.session.month_picker_cursor =
+                (state.session.month_picker_cursor + 1).min(n - 1);
         }
         KeyCode::Enter => {
             if let Some(month) = state
@@ -8233,7 +8231,7 @@ async fn refresh_bulk_targets_for_session(
     let from = today - chrono::Duration::days(730);
     let mut targets = store.transactions_in_date_range(None, from, today).await?;
     targets.retain(|r| r.raw_description.trim().to_lowercase() == key);
-    targets.sort_by(|a, b| b.transaction_date.cmp(&a.transaction_date));
+    targets.sort_by_key(|t| std::cmp::Reverse(t.transaction_date));
     session.bulk_targets = targets;
     session.bulk_target_key = key;
     Ok(())
