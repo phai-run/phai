@@ -8133,8 +8133,7 @@ async fn handle_review_tui_month_picker_key(
             state.session.month_picker_cursor = state.session.month_picker_cursor.saturating_sub(1);
         }
         KeyCode::Down if n > 0 => {
-            state.session.month_picker_cursor =
-                (state.session.month_picker_cursor + 1).min(n - 1);
+            state.session.month_picker_cursor = (state.session.month_picker_cursor + 1).min(n - 1);
         }
         KeyCode::Enter => {
             if let Some(month) = state
