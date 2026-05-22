@@ -117,8 +117,11 @@ bash skills/finance-os/finance.sh tx review-human --kind all --limit 20 --tui --
 Fluxo recomendado via WhatsApp/OpenClaw:
 
 ```bash
-bash skills/finance-os/finance.sh tx review-human --summary --json
-bash skills/finance-os/finance.sh tx review-human --kind all --limit 5 --json
+# Sempre passar --owner <nome> para escopar pela pessoa que está conversando
+# (Ford = "felipe", OpenClaw da Aline = "aline"). Isso filtra a fila para
+# as contas daquele owner — ver accounts.owner no BigQuery.
+bash skills/finance-os/finance.sh tx review-human --summary --owner felipe --json
+bash skills/finance-os/finance.sh tx review-human --kind all --limit 5 --owner felipe --json
 bash skills/finance-os/finance.sh tx review-human --transaction-id ID \
   --description "texto curto" \
   --merchant-name "Nome limpo" \
@@ -169,6 +172,8 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
 - Sempre preferir o `transaction_id` explícito quando o usuário responder descrição, estabelecimento ou propósito.
 - Trigger conversacional: quando o usuário disser algo como "Ford, como estamos com as categorizações?", "tem coisa pra categorizar?", "vamos categorizar?", ou "quero brincar de categorizar", executar `tx review-human --summary --json`. Responder com as contagens de sem categoria, sem descrição, sem estabelecimento e sem propósito; se houver pendências, perguntar se ele quer revisar algumas agora.
 - Se o usuário aceitar revisar, executar `tx review-human --kind all --limit 5 --json`, mostrar uma transação por vez em formato curto, e aguardar resposta.
+- **Trigger proativo no sync horário (anatomia das transações novas).** Após anunciar transações recém-chegadas, NÃO ficar em silêncio nem esperar o usuário pedir. Para cada transação nova retornada pelo `--json-summary`/`--notify-summary`, perguntar imediatamente: "**descrição humana**, **estabelecimento** (se diferente do raw) e **propósito** (se aplicável) da transação X?" — uma transação por vez. Quando o usuário responder em texto livre, mapear o conteúdo em `--description`, `--merchant-name`, `--purpose` e/ou `--category` e gravar via `tx review-human --transaction-id ID --... --json`. Use a anatomia para enriquecer o histórico — isso alimenta a replicação automática para próximas transações do mesmo estabelecimento. Se o usuário disser "pula", "depois" ou ignorar, registrar o estado e seguir adiante; voltar a perguntar somente se ele iniciar a conversa de novo.
+- **Escopo por owner (multi-usuário).** Quando a skill rodar para uma pessoa específica (Ford = Felipe, OpenClaw da Aline = Aline), sempre passar `--owner <nome>` em todas as queries de revisão e pendências: `tx review-human --summary --owner aline --json`, `tx review-human --kind all --limit 5 --owner aline --json`, etc. Isso garante que cada assistente só veja transações da sua pessoa, mesmo num dataset BigQuery compartilhado. Combine com `--account-id` quando o usuário pedir uma conta específica.
 - Para revisão pelo WhatsApp, usar `tx review-human --kind all --limit N --json` para obter a fila e `tx review-human --transaction-id ... --json` para salvar em uma única chamada. O modo sem `--transaction-id` e sem `--json` é interativo e deve ser usado apenas em terminal local.
 - Ao receber resposta natural do usuário para uma pendência, preencher somente os campos informados ou inferíveis com segurança. Exemplos: "é Mercado Exemplo, compra de mercado" salva `merchant_name = Mercado Exemplo` e `description = Compra de mercado`; "muda pra educação material escolar" salva `category = educacao:material-escolar`; "pula" não salva nada e passa para a próxima.
 - Quando houver áudio, transcrever primeiro, estruturar em `description`, `merchant_name`, `purpose` e `category`, apresentar um resumo com botões/ações `[Correto] [Ajustar]`, e só persistir depois do `Correto`. Se o usuário escolher `Ajustar`, aceitar texto ou áudio adicional, recompor a proposta e confirmar de novo.
@@ -189,6 +194,7 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
   - se `summaryStatus != "complete"`, tratar como resumo parcial: confiar apenas em `newTransactions*`, expor `warnings` e não inferir pendências a partir de `needsContextCount = -1`
   - se houver novidade, usar apenas o JSON do `--json-summary` como base factual
   - para repasse 1:1 em texto (sem remontar mensagem na Ford), usar `--notify-summary`
+  - **depois de listar as transações novas, perguntar a anatomia (descrição/estabelecimento/propósito) de cada uma, uma por vez** — não esperar o usuário iniciar (ver "Trigger proativo no sync horário" acima). Use `tx review-human --transaction-id ID --description … --merchant-name … --purpose … --owner <pessoa> --json` para gravar a resposta.
 - Para interações com usuário:
   - sempre priorizar labels efetivos da CLI (description/merchant_name/raw_description e categoria já aplicados no Finance OS)
   - não remontar manualmente listagens de transação, exceto se o usuário pedir uma visão específica

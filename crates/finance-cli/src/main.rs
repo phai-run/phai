@@ -139,6 +139,12 @@ struct ReviewShortcutArgs {
     /// Filter queue to a single account_id.
     #[arg(long)]
     account_id: Option<String>,
+    /// Filter queue to every account owned by `<name>` (resolved against
+    /// the `accounts` table). Useful when one assistant should only see
+    /// transactions belonging to one person — e.g. Aline's OpenClaw runs
+    /// `fin review --owner aline`. Combine freely with `--account-id`.
+    #[arg(long)]
+    owner: Option<String>,
     /// Filter queue by merchant/raw description text.
     #[arg(long)]
     merchant: Option<String>,
@@ -1203,6 +1209,13 @@ enum ReviewHumanKind {
 struct ReviewFilters {
     month: Option<String>,
     account_id: Option<String>,
+    /// Set of account_ids belonging to a specific owner. Populated when
+    /// `--owner` is supplied (resolved against `accounts.owner` at startup).
+    /// When `Some`, a row matches only if its `account_id` is in this set;
+    /// `account_id` (singular) is still ANDed on top for finer scoping.
+    owner_accounts: Option<BTreeSet<String>>,
+    /// Original owner name (for display/summary purposes).
+    owner: Option<String>,
     merchant: Option<String>,
     category: Option<String>,
 }
@@ -1217,6 +1230,8 @@ impl ReviewFilters {
         Self {
             month: args.month.clone(),
             account_id: args.account_id.clone(),
+            owner_accounts: None,
+            owner: args.owner.clone(),
             merchant: args.merchant.clone(),
             category: category.map(|value| category_key_from_input(value, None)),
         }
@@ -1225,6 +1240,8 @@ impl ReviewFilters {
     fn is_empty(&self) -> bool {
         self.month.is_none()
             && self.account_id.is_none()
+            && self.owner_accounts.is_none()
+            && self.owner.is_none()
             && self.merchant.is_none()
             && self.category.is_none()
     }
@@ -1243,6 +1260,16 @@ impl ReviewFilters {
     }
 
     fn matches_account(&self, row: &TransactionRecord) -> bool {
+        // 1. If --owner was provided, the row's account must belong to that
+        //    owner's account set. An unbound account_id never matches.
+        if let Some(allowed) = &self.owner_accounts {
+            match row.account_id.as_deref() {
+                Some(account) if allowed.contains(account) => {}
+                _ => return false,
+            }
+        }
+        // 2. --account-id is still ANDed on top — useful for narrowing
+        //    even further (e.g. owner=aline + account_id=aline_cartao).
         self.account_id
             .as_deref()
             .is_none_or(|account| row.account_id.as_deref() == Some(account))
@@ -1267,6 +1294,7 @@ impl ReviewFilters {
     fn summary(&self) -> String {
         let parts = [
             self.month.as_ref().map(|value| format!("mês={value}")),
+            self.owner.as_ref().map(|value| format!("owner={value}")),
             self.account_id
                 .as_ref()
                 .map(|value| format!("conta={value}")),
@@ -1334,6 +1362,12 @@ struct ReviewHumanArgs {
     /// Filter queue to a single account_id.
     #[arg(long)]
     account_id: Option<String>,
+    /// Filter queue to every account owned by `<name>` (resolved against
+    /// the `accounts.owner` column at runtime). Useful for assistants
+    /// that should only see one person's transactions — e.g. Aline's
+    /// OpenClaw passes `--owner aline`. Combines with `--account-id`.
+    #[arg(long)]
+    owner: Option<String>,
     /// Filter queue by merchant/raw description text.
     #[arg(long)]
     merchant: Option<String>,
@@ -2613,6 +2647,7 @@ async fn main() -> Result<()> {
                 sound: true,
                 month: None,
                 account_id: None,
+                owner: None,
                 merchant: None,
                 filter_category: None,
                 transaction_id: None,
@@ -2686,6 +2721,7 @@ async fn main() -> Result<()> {
                 sound: !args.no_sound,
                 month: args.month,
                 account_id: args.account_id,
+                owner: args.owner,
                 merchant: args.merchant,
                 filter_category: None,
                 transaction_id: None,
@@ -8945,6 +8981,24 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
     let min_abs_amount = decimal_from_str(&args.min_abs_amount)?;
     let limit = effective_review_human_limit(args.limit, args.tui);
     let mut filters = ReviewFilters::from_review_args(&args);
+    // Resolve --owner to the set of account_ids owned by that name. This is
+    // what makes Ford/OpenClaw able to scope the queue per-person without
+    // having to enumerate accounts on every call.
+    if let Some(owner_name) = filters.owner.clone() {
+        let accounts = store.get_accounts().await?;
+        let owned: BTreeSet<String> = accounts
+            .into_iter()
+            .filter(|a| a.owner == owner_name)
+            .map(|a| a.account_id)
+            .collect();
+        if owned.is_empty() {
+            anyhow::bail!(
+                "Owner '{}' não bate com nenhuma conta. Use `fin --help` para listar opções (ou cheque accounts.owner).",
+                owner_name
+            );
+        }
+        filters.owner_accounts = Some(owned);
+    }
     // In TUI mode, default the month filter to the current month so the user
     // lands on this month's queue. They can clear it via Ctrl+F → 0.
     if args.tui && filters.is_empty() {
