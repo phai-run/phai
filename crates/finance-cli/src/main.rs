@@ -7361,6 +7361,13 @@ fn handle_review_tui_basic_key(
         KeyCode::Enter if key_has_command_or_control(key.modifiers) => {
             Some(ReviewTuiKeyAction::Save)
         }
+        // Save shortcut: Ctrl+S (intuitive, matches the footer hint).
+        // Kept alongside Ctrl/Cmd+Enter for backward compat and for users
+        // whose terminal swallows Ctrl+S as XOFF (raw mode disables that,
+        // so this should work everywhere crossterm supports raw mode).
+        KeyCode::Char('s') if key_has_command_or_control(key.modifiers) => {
+            Some(ReviewTuiKeyAction::Save)
+        }
         _ => None,
     }
 }
