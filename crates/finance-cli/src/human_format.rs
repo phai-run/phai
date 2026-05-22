@@ -2,13 +2,6 @@
 //!
 //! Reports default to this format; pass `--raw` (or the deprecated `--json`)
 //! to get structured JSON for agents and scripts.
-//!
-//! Some helpers (`brl`, `section_header`, `category_subtotal`) are not yet
-//! referenced from the only refactored report (`daily-pulse`) but are part
-//! of the public surface for upcoming report refactors (monthly-spend,
-//! card-summary, budget-status, etc.).
-
-#![allow(dead_code)]
 
 use chrono::{Datelike, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -226,27 +219,11 @@ pub fn bold(s: &str) -> String {
     format!("*{s}*")
 }
 
-/// Render a section header with an emoji + bold title.
-pub fn section_header(emoji: &str, title: &str) -> String {
-    format!("{emoji} {}", bold(title))
-}
-
 /// Render a subsection delimiter as `── *Title* ──`, used inside multi-block
 /// reports (e.g. card-closed-insights) where visual grouping helps but
 /// emojis would feel repetitive.
 pub fn subsection_header(title: &str) -> String {
     format!("── {} ──", bold(title))
-}
-
-/// Format a category subtotal line: `🍽️ Alimentação · R$ 487,30`.
-pub fn category_subtotal(category_id: Option<&str>, total: Decimal) -> String {
-    let family = category_family(category_id);
-    let label = family
-        .as_deref()
-        .map(family_label)
-        .unwrap_or_else(|| "Sem categoria".into());
-    let emoji = category_emoji(category_id, Some(total));
-    format!("{emoji} {} · {}", bold(&label), brl(total))
 }
 
 /// Format a percentage value as `XX%` (rounded to integer).
