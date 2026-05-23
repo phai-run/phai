@@ -5314,6 +5314,7 @@ async fn tx_set_anatomy(args: SetAnatomyArgs) -> Result<()> {
                 merchant_name: args.merchant_name.as_deref(),
                 purpose: args.purpose.as_deref(),
                 classifier_trace: args.classifier_trace.as_deref(),
+                context: None,
             },
             &config.actor_id,
             &idempotency_key,
@@ -5346,7 +5347,7 @@ async fn tx_set_context(args: SetContextArgs) -> Result<()> {
         .update_transaction_anatomy(
             &args.transaction_id,
             TransactionAnatomyPatch {
-                description: Some(&args.context),
+                context: Some(&args.context),
                 ..TransactionAnatomyPatch::default()
             },
             &config.actor_id,
@@ -5782,6 +5783,7 @@ async fn apply_human_review(
                     merchant_name: patch.merchant_name.as_deref(),
                     purpose: patch.purpose.as_deref(),
                     classifier_trace: None,
+                    context: None,
                 },
                 &config.actor_id,
                 &idempotency_key,
@@ -9256,7 +9258,7 @@ async fn tx_set_context_by_desc(args: SetContextByDescArgs) -> Result<()> {
             .update_transaction_anatomy(
                 &row.transaction_id,
                 TransactionAnatomyPatch {
-                    description: Some(&args.context),
+                    context: Some(&args.context),
                     ..TransactionAnatomyPatch::default()
                 },
                 &config.actor_id,

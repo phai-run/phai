@@ -698,17 +698,18 @@ impl FinanceStore for LocalStore {
                 merchant_name = COALESCE(?2, merchant_name),
                 purpose = COALESCE(?3, purpose),
                 classifier_trace = COALESCE(?4, classifier_trace),
-                context = COALESCE(?1, context),
-                actor_id = ?5,
-                idempotency_key = ?6,
-                updated_at = ?7
-            WHERE transaction_id = ?8
+                context = COALESCE(?5, context),
+                actor_id = ?6,
+                idempotency_key = ?7,
+                updated_at = ?8
+            WHERE transaction_id = ?9
             ",
             params![
                 patch.description,
                 patch.merchant_name,
                 patch.purpose,
                 patch.classifier_trace,
+                patch.context,
                 actor_id,
                 idempotency_key,
                 Utc::now().to_rfc3339(),
@@ -782,7 +783,7 @@ impl FinanceStore for LocalStore {
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
             FROM transactions
-            WHERE description IS NULL
+            WHERE context IS NULL
             ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             LIMIT ?1
             ",

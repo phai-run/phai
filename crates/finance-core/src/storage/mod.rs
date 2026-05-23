@@ -24,6 +24,9 @@ pub struct TransactionAnatomyPatch<'a> {
     pub merchant_name: Option<&'a str>,
     pub purpose: Option<&'a str>,
     pub classifier_trace: Option<&'a str>,
+    /// Raw Pluggy context label (e.g. `"mercado-mes"`). `None` means keep
+    /// the existing value; `Some(v)` overwrites it.
+    pub context: Option<&'a str>,
 }
 
 const ALLOWED_TABLES: &[&str] = &[
