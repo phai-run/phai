@@ -43,7 +43,7 @@ const CHECKSUM_ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz.sha256
 #[cfg(not(target_os = "macos"))]
 const CHECKSUM_ASSET_NAME: &str = "finance-cli-unsupported.tar.gz.sha256";
 
-const BINARY_NAME: &str = "finance-cli";
+const BINARY_NAME: &str = "fin";
 
 /// Release Please produces tags like `v0.3.1` (include-component-in-tag: false,
 /// include-v-in-tag: true). The updater strips the leading `v`.
@@ -294,7 +294,7 @@ fn extract_binary(tarball: &[u8], dest_dir: &Path) -> Result<PathBuf> {
         }
     }
 
-    binary_path.context("executable 'finance-cli' not found in tarball")
+    binary_path.context("executable 'fin' not found in tarball")
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +861,7 @@ mod tests {
         // (on macOS, tempdir may sit under /var/... which symlinks to /private/var/...).
         let dest = tempdir.path().canonicalize().unwrap();
         let binary_data = b"fake binary content";
-        let tarball = build_tarball(&[("finance-cli", binary_data)]);
+        let tarball = build_tarball(&[("fin", binary_data)]);
         let extracted = extract_binary(&tarball, &dest).unwrap();
         assert!(extracted.exists(), "extracted binary should exist");
         let contents = std::fs::read(&extracted).unwrap();
