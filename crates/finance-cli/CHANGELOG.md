@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.3](https://github.com/feliperun/finance-os/compare/v1.6.2...v1.6.3) (2026-05-23)
+
+
+### Bug Fixes
+
+* **cli:** self update looks for fin binary, not finance-cli ([#48](https://github.com/feliperun/finance-os/issues/48)) ([8f33705](https://github.com/feliperun/finance-os/commit/8f3370524b3a393442dd3deacf8f72697b703051))
+
 ## [1.6.2](https://github.com/feliperun/finance-os/compare/v1.6.1...v1.6.2) (2026-05-23)
 
 
