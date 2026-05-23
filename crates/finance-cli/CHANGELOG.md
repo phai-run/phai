@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/feliperun/finance-os/compare/v1.6.1...v1.6.2) (2026-05-23)
+
+
+### Bug Fixes
+
+* **storage:** add context field to TransactionAnatomyPatch; fix set-context commands ([#46](https://github.com/feliperun/finance-os/issues/46)) ([1877729](https://github.com/feliperun/finance-os/commit/18777291362630f559591d54fa700f4138bdaf0b))
+
 ## [1.6.1](https://github.com/feliperun/finance-os/compare/v1.6.0...v1.6.1) (2026-05-22)
 
 
