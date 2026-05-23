@@ -717,7 +717,7 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
             FROM {}
-            WHERE description IS NULL
+            WHERE context IS NULL
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT {}
             ",
@@ -1487,7 +1487,7 @@ impl FinanceStore for BigQueryStore {
             sql_optional_string(patch.merchant_name),
             sql_optional_string(patch.purpose),
             sql_optional_string(patch.classifier_trace),
-            sql_optional_string(patch.description),
+            sql_optional_string(patch.context),
             sql_string(actor_id),
             sql_string(idempotency_key),
             sql_string(transaction_id),
