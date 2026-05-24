@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/feliperun/finance-os/compare/v1.6.3...v2.0.0) (2026-05-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **report:** cashflow agora é cash-basis em contas correntes, com saldo inicial/final ([#50](https://github.com/feliperun/finance-os/issues/50))
+
+### Features
+
+* **report:** cashflow agora é cash-basis em contas correntes, com saldo inicial/final ([#50](https://github.com/feliperun/finance-os/issues/50)) ([4a6ca49](https://github.com/feliperun/finance-os/commit/4a6ca490b7ce42b6a0ee968852430a6b25c6cdf9))
+
 ## [1.6.3](https://github.com/feliperun/finance-os/compare/v1.6.2...v1.6.3) (2026-05-23)
 
 
