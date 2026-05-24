@@ -1239,6 +1239,254 @@ fn card_summary_excludes_legacy_manual_shadow() {
 }
 
 #[test]
+fn cashflow_details_expands_paid_card_bill_and_forecast() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    for (account_id, account_type, label) in [
+        ("primary_checking", "checking", "Primary Checking"),
+        ("visa_credit", "credit", "Visa Credit"),
+    ] {
+        envs(
+            cargo_bin()
+                .arg("account")
+                .arg("upsert")
+                .arg("--account-id")
+                .arg(account_id)
+                .arg("--owner")
+                .arg("test")
+                .arg("--account-type")
+                .arg(account_type)
+                .arg("--bank")
+                .arg("fixture-bank")
+                .arg("--label")
+                .arg(label),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute(
+        "UPDATE accounts
+         SET metadata_json = '{\"billing_closing_day\":10}'
+         WHERE account_id = 'visa_credit'",
+        [],
+    )
+    .expect("set credit metadata");
+
+    let upsert_tx = |id: &str,
+                     account: &str,
+                     date: &str,
+                     description: &str,
+                     amount: &str,
+                     category: &str,
+                     subcategory: Option<&str>| {
+        let mut cmd = cargo_bin();
+        cmd.arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg(id)
+            .arg("--account-id")
+            .arg(account)
+            .arg("--date")
+            .arg(date)
+            .arg("--description")
+            .arg(description)
+            .arg(format!("--amount={amount}"))
+            .arg("--category")
+            .arg(category)
+            .arg("--payment-status")
+            .arg("posted");
+        if let Some(value) = subcategory {
+            cmd.arg("--subcategory").arg(value);
+        }
+        envs(&mut cmd, &config_dir, &data_dir).assert().success();
+    };
+
+    upsert_tx(
+        "salary_may",
+        "primary_checking",
+        "2026-05-05",
+        "Salario",
+        "1000.00",
+        "Receitas",
+        Some("Salario"),
+    );
+    upsert_tx(
+        "rent_may",
+        "primary_checking",
+        "2026-05-06",
+        "Aluguel",
+        "-300.00",
+        "Moradia",
+        Some("Aluguel"),
+    );
+    upsert_tx(
+        "card_payment_may",
+        "primary_checking",
+        "2026-05-15",
+        "Pagamento de fatura Visa",
+        "-230.00",
+        "credit-card-payment",
+        None,
+    );
+    upsert_tx(
+        "card_installment_may",
+        "visa_credit",
+        "2026-05-03",
+        "Notebook 1/3",
+        "-100.00",
+        "Compras",
+        Some("Parceladas"),
+    );
+    upsert_tx(
+        "card_subscription_may",
+        "visa_credit",
+        "2026-05-04",
+        "Streaming assinatura",
+        "-50.00",
+        "Assinaturas",
+        Some("Streaming"),
+    );
+    upsert_tx(
+        "card_market_may",
+        "visa_credit",
+        "2026-05-05",
+        "Mercado no cartao",
+        "-80.00",
+        "Alimentacao",
+        Some("Mercado"),
+    );
+
+    let output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow")
+            .arg("--month")
+            .arg("2026-05")
+            .arg("--details")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let report: Value = serde_json::from_slice(&output).expect("valid cashflow detail json");
+    assert_eq!(report["summary"]["income"].as_str(), Some("1000.00"));
+    assert_eq!(report["summary"]["expenses"].as_str(), Some("530.00"));
+    assert_eq!(report["summary"]["net"].as_str(), Some("470.00"));
+    assert_eq!(
+        report["details"]["cardBills"][0]["installments"]["subtotal"].as_str(),
+        Some("-100.00")
+    );
+    assert_eq!(
+        report["details"]["cardBills"][0]["subscriptions"]["subtotal"].as_str(),
+        Some("-50.00")
+    );
+    assert_eq!(
+        report["details"]["cardBills"][0]["otherCategories"][0]["subtotal"].as_str(),
+        Some("-80.00")
+    );
+    let detail_text = String::from_utf8(output).expect("utf8 json");
+    assert!(
+        !detail_text.contains("Pagamento de fatura Visa"),
+        "cashflow details must replace the checking-account card payment with bill details"
+    );
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow")
+            .arg("--month")
+            .arg("2026-05")
+            .arg("--details"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Saídas por categoria"))
+    .stdout(predicate::str::contains("Cartões"))
+    .stdout(predicate::str::contains("total de cartão de crédito"))
+    .stdout(predicate::str::contains("compras parceladas").or(predicate::str::contains("Compras")))
+    .stdout(predicate::str::contains("Pagamento de fatura Visa").not());
+
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("upsert")
+            .arg("--forecast-id")
+            .arg("rent_forecast_june")
+            .arg("--date")
+            .arg("2026-06-10")
+            .arg("--description")
+            .arg("Aluguel previsto")
+            .arg("--amount")
+            .arg("200.00")
+            .arg("--category")
+            .arg("Moradia")
+            .arg("--subcategory")
+            .arg("Aluguel")
+            .arg("--account-id")
+            .arg("primary_checking"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let forecast_output = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow")
+            .arg("--month")
+            .arg("2026-06")
+            .arg("--forecast")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let forecast_report: Value =
+        serde_json::from_slice(&forecast_output).expect("valid forecast cashflow json");
+    assert_eq!(
+        forecast_report["forecastSummary"]["expenses"].as_str(),
+        Some("200.00")
+    );
+    assert_eq!(forecast_report["summary"]["net"].as_str(), Some("-200.00"));
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow")
+            .arg("--month")
+            .arg("2026-06")
+            .arg("--details")
+            .arg("--forecast"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Cartões"))
+    .stdout(predicate::str::contains("total de cartão de crédito"))
+    .stdout(predicate::str::contains("sem fatura paga no período"));
+}
+
+#[test]
 fn report_ofx_consistency_compares_transactions_row_by_row() {
     let temp = TempDir::new().expect("tempdir");
     let config_dir = temp.path().join("config");
