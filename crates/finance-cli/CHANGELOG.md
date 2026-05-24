@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/feliperun/finance-os/compare/v2.0.0...v2.1.0) (2026-05-24)
+
+
+### Features
+
+* **report:** add cashflow-chart subcommand with SVG output and forecast overlay ([#52](https://github.com/feliperun/finance-os/issues/52)) ([dc3140f](https://github.com/feliperun/finance-os/commit/dc3140f15516a4fc77e9a4d5a9053491d789b3ee))
+
 ## [2.0.0](https://github.com/feliperun/finance-os/compare/v1.6.3...v2.0.0) (2026-05-24)
 
 
