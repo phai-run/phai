@@ -1604,8 +1604,8 @@ mod test_support {
     use finance_core::models::{
         AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
         CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord,
-        CategoryRecord, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
-        RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+        CategoryRecord, CheckingBalance, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
+        MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
     };
     use finance_core::splits::{
         ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -1824,6 +1824,20 @@ mod test_support {
         }
         async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> {
             Ok(vec![])
+        }
+        async fn cashflow_month(&self, _: &str) -> Result<CashflowRow> {
+            Ok(CashflowRow {
+                month_ref: String::new(),
+                income: Decimal::ZERO,
+                expenses: Decimal::ZERO,
+                expense_reduction: Decimal::ZERO,
+                net: Decimal::ZERO,
+                opening_balance: None,
+                closing_balance: None,
+            })
+        }
+        async fn checking_balance_at(&self, _: NaiveDate) -> Result<Option<CheckingBalance>> {
+            Ok(None)
         }
         async fn forecast_vs_actual(&self, _: Option<&str>) -> Result<Vec<ForecastVsActualRow>> {
             Ok(vec![])

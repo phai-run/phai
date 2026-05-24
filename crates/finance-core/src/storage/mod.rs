@@ -1,9 +1,9 @@
 use crate::config::{AppConfig, BackendKind};
 use crate::models::{
     AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow, CardClosedTransactionRow,
-    CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, DailyPulseItem,
-    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow,
-    TransactionRecord, UncategorizedRow,
+    CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, CheckingBalance,
+    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -168,7 +168,25 @@ pub trait FinanceStore {
         to: NaiveDate,
     ) -> Result<Vec<TransactionRecord>>;
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>>;
+    /// Cash-basis monthly cashflow restricted to `account_type='checking'`
+    /// accounts. Excludes `transfer-internal` (transfers between own
+    /// accounts) but **includes** `credit-card-payment` (the actual cash
+    /// event when a card bill is paid). Returned rows carry
+    /// `opening_balance` / `closing_balance` as `None` — use
+    /// [`Self::cashflow_month`] when you need anchored balances for a
+    /// single month.
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>>;
+    /// Single-month variant of [`Self::cashflow`] with snapshot-anchored
+    /// `opening_balance` and `closing_balance` populated when every
+    /// checking account has a usable snapshot anchor.
+    async fn cashflow_month(&self, month_ref: &str) -> Result<CashflowRow>;
+    /// Aggregate balance across all `account_type='checking'` accounts at
+    /// `target`. Anchored on the latest snapshot ≤ `target` per account
+    /// plus the delta of transactions between snapshot date and `target`.
+    /// Returns `Ok(None)` when at least one checking account lacks a
+    /// snapshot ≤ `target` (callers should surface "incomplete" rather
+    /// than guessing).
+    async fn checking_balance_at(&self, target: NaiveDate) -> Result<Option<CheckingBalance>>;
     async fn forecast_vs_actual(&self, month_ref: Option<&str>)
         -> Result<Vec<ForecastVsActualRow>>;
     async fn card_summary(&self, month_ref: Option<&str>) -> Result<Vec<CardSummaryRow>>;

@@ -3,8 +3,8 @@ use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
-    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    TransactionContextRow, TransactionRecord, UncategorizedRow,
+    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
+    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -67,6 +67,32 @@ fn decimal_to_sql(value: &Decimal) -> String {
 
 fn parse_decimal(value: String) -> std::result::Result<Decimal, rust_decimal::Error> {
     Decimal::from_str(&value)
+}
+
+/// Convert a `Decimal` BRL amount to integer cents, mirroring how
+/// `amount_cents` is stored in `v_transactions_reportable`.
+fn decimal_to_cents(value: Decimal) -> Result<i64> {
+    let scaled = (value * Decimal::from(100u32)).round();
+    scaled
+        .to_i64()
+        .with_context(|| format!("Valor monetário fora do range i64: {value}"))
+}
+
+/// Returns the closing-anchor date for `month_start`: the last day of that
+/// calendar month, capped at `today` so the current (in-progress) month
+/// uses "now" as its closing edge rather than a future date.
+fn last_day_of_target_month(month_start: NaiveDate, today: NaiveDate) -> Result<NaiveDate> {
+    let (year, month) = (month_start.year(), month_start.month());
+    let next_month_first = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }
+    .context("Falha ao calcular início do mês seguinte")?;
+    let last_day = next_month_first
+        .checked_sub_days(Days::new(1))
+        .context("Falha ao calcular último dia do mês")?;
+    Ok(if last_day > today { today } else { last_day })
 }
 
 fn parse_sql_date(
@@ -1291,20 +1317,24 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>> {
-        // ADR-0003: exact integer-cent SUM via amount_cents, then convert
-        // to Decimal at the end. Source is v_transactions_reportable so the
-        // legacy/manual ↔ Pluggy dedup predicate is honoured — querying
-        // `transactions` directly would double-count shadowed manual rows.
+        // ADR-0003: exact integer-cent SUM via amount_cents.
+        //
+        // Cash-basis semantics: only checking accounts contribute. Credit
+        // card swipes live on credit accounts and are intentionally dropped
+        // — the card bill payment (category_id='credit-card-payment') on
+        // the checking account IS the cash event we want to count.
+        // 'transfer-internal' is still excluded because it represents
+        // movement between own accounts (no household net effect).
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
-            SELECT strftime('%Y-%m', transaction_date) AS month_ref,
-                   amount_cents,
-                   COALESCE(category_id, '') AS category_id
-            FROM v_transactions_reportable
-            WHERE COALESCE(category_id, '') NOT IN (
-              SELECT category_id FROM internal_categories
-            )
+            SELECT strftime('%Y-%m', t.transaction_date) AS month_ref,
+                   t.amount_cents,
+                   COALESCE(t.category_id, '') AS category_id
+            FROM v_transactions_reportable t
+            JOIN accounts a ON a.account_id = t.account_id
+            WHERE a.account_type = 'checking'
+              AND COALESCE(t.category_id, '') != 'transfer-internal'
             ",
         )?;
         let mut by_month: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
@@ -1333,11 +1363,159 @@ impl FinanceStore for LocalStore {
                 expenses: Decimal::new(exp, 2),
                 expense_reduction: Decimal::new(er, 2),
                 net: Decimal::new(inc + er - exp, 2),
+                opening_balance: None,
+                closing_balance: None,
             })
             .collect();
         out.sort_by(|a, b| b.month_ref.cmp(&a.month_ref));
         out.truncate(months);
         Ok(out)
+    }
+
+    async fn cashflow_month(&self, month_ref: &str) -> Result<CashflowRow> {
+        // Cash-basis cashflow restricted to a single month + checking accounts.
+        // Shares the predicate/sign-bucket logic with `cashflow()` but bound
+        // to one `YYYY-MM` to avoid scanning all history.
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT t.amount_cents,
+                   COALESCE(t.category_id, '') AS category_id
+            FROM v_transactions_reportable t
+            JOIN accounts a ON a.account_id = t.account_id
+            WHERE a.account_type = 'checking'
+              AND COALESCE(t.category_id, '') != 'transfer-internal'
+              AND strftime('%Y-%m', t.transaction_date) = ?1
+            ",
+        )?;
+        let mut income_cents: i64 = 0;
+        let mut expense_cents: i64 = 0;
+        let mut reduction_cents: i64 = 0;
+        let rows = stmt.query_map([month_ref], |row| {
+            let cents: i64 = row.get(0)?;
+            let category_id: String = row.get(1)?;
+            Ok((cents, category_id))
+        })?;
+        for row in rows {
+            let (cents, category_id) = row?;
+            if cents < 0 {
+                expense_cents += cents.abs();
+            } else if category_id == "cashback" {
+                reduction_cents += cents;
+            } else {
+                income_cents += cents;
+            }
+        }
+
+        // Anchor opening at the last day of the previous month and closing
+        // at the last day of `month_ref` (or `today` for the current month).
+        let target_month_start = NaiveDate::parse_from_str(&format!("{month_ref}-01"), "%Y-%m-%d")
+            .with_context(|| format!("month_ref inválido: {month_ref} (esperado YYYY-MM)"))?;
+        let opening_anchor = target_month_start
+            .checked_sub_days(Days::new(1))
+            .context("Falha ao calcular dia anterior ao início do mês")?;
+        let closing_anchor = last_day_of_target_month(target_month_start, Utc::now().date_naive())?;
+
+        let opening = self.checking_balance_at(opening_anchor).await?;
+        let closing = self.checking_balance_at(closing_anchor).await?;
+
+        Ok(CashflowRow {
+            month_ref: month_ref.to_string(),
+            income: Decimal::new(income_cents, 2),
+            expenses: Decimal::new(expense_cents, 2),
+            expense_reduction: Decimal::new(reduction_cents, 2),
+            net: Decimal::new(income_cents + reduction_cents - expense_cents, 2),
+            opening_balance: opening.map(|b| b.balance),
+            closing_balance: closing.map(|b| b.balance),
+        })
+    }
+
+    async fn checking_balance_at(&self, target: NaiveDate) -> Result<Option<CheckingBalance>> {
+        // Anchor strategy: for each checking account, pick the latest
+        // snapshot whose `snapshot_date <= target`, then add the sum of
+        // `amount_cents` for transactions with `snapshot_date < tx_date
+        // <= target`. Sum across accounts. If any checking account lacks
+        // a snapshot ≤ target, return None — guessing the missing anchor
+        // would silently report a wrong saldo, so we prefer "unknown".
+        let conn = self.connection()?;
+
+        let mut accounts_stmt =
+            conn.prepare("SELECT account_id FROM accounts WHERE account_type = 'checking'")?;
+        let account_ids: Vec<String> = accounts_stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        if account_ids.is_empty() {
+            return Ok(Some(CheckingBalance {
+                balance: Decimal::ZERO,
+                accounts_considered: 0,
+                snapshot_anchor_date: None,
+            }));
+        }
+
+        let target_str = target.format("%Y-%m-%d").to_string();
+        let mut anchor_stmt = conn.prepare(
+            "
+            SELECT snapshot_date, balance
+            FROM account_snapshots
+            WHERE account_id = ?1
+              AND snapshot_date <= ?2
+            ORDER BY snapshot_date DESC, created_at DESC
+            LIMIT 1
+            ",
+        )?;
+        let mut delta_stmt = conn.prepare(
+            "
+            SELECT COALESCE(SUM(amount_cents), 0)
+            FROM v_transactions_reportable
+            WHERE account_id = ?1
+              AND transaction_date > ?2
+              AND transaction_date <= ?3
+            ",
+        )?;
+
+        let mut total_cents: i64 = 0;
+        let mut latest_anchor: Option<NaiveDate> = None;
+
+        for account_id in &account_ids {
+            let anchor: Option<(String, Option<String>)> = anchor_stmt
+                .query_row(params![account_id, &target_str], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .optional()?;
+            let Some((anchor_date_str, balance_str)) = anchor else {
+                return Ok(None);
+            };
+            let anchor_date = parse_sql_date(anchor_date_str.clone(), 0)
+                .map_err(|e| anyhow::anyhow!("snapshot_date inválido para {account_id}: {e}"))?;
+            let snapshot_balance = balance_str
+                .as_deref()
+                .map(|s| parse_decimal(s.to_string()))
+                .transpose()
+                .with_context(|| format!("balance inválido no snapshot de {account_id}"))?
+                .unwrap_or(Decimal::ZERO);
+            let snapshot_cents = decimal_to_cents(snapshot_balance)?;
+
+            let delta_cents: i64 = delta_stmt
+                .query_row(params![account_id, &anchor_date_str, &target_str], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+
+            total_cents = total_cents
+                .checked_add(snapshot_cents)
+                .and_then(|v| v.checked_add(delta_cents))
+                .context("Overflow ao agregar saldo de contas correntes")?;
+            latest_anchor = Some(match latest_anchor {
+                Some(prev) if prev > anchor_date => prev,
+                _ => anchor_date,
+            });
+        }
+
+        Ok(Some(CheckingBalance {
+            balance: Decimal::new(total_cents, 2),
+            accounts_considered: account_ids.len(),
+            snapshot_anchor_date: latest_anchor,
+        }))
     }
 
     async fn forecast_vs_actual(

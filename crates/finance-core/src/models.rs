@@ -261,6 +261,30 @@ pub struct CashflowRow {
     #[serde(default)]
     pub expense_reduction: Decimal,
     pub net: Decimal,
+    /// Aggregate checking-account balance at the last day of the previous
+    /// month, anchored on the latest snapshot ≤ that date. `None` when no
+    /// usable anchor exists for at least one checking account, or when the
+    /// caller didn't request balance anchoring (multi-month listings).
+    #[serde(default)]
+    pub opening_balance: Option<Decimal>,
+    /// Aggregate checking-account balance at the last day of `month_ref`
+    /// (or `today` for the current month). Same anchoring rules as
+    /// `opening_balance`.
+    #[serde(default)]
+    pub closing_balance: Option<Decimal>,
+}
+
+/// Snapshot-anchored aggregate balance across all `account_type='checking'`
+/// accounts at a given target date.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckingBalance {
+    /// Sum of per-account balances at `target_date`.
+    pub balance: Decimal,
+    /// How many checking accounts contributed.
+    pub accounts_considered: usize,
+    /// Latest snapshot date across the accounts that were anchored. Useful
+    /// to surface freshness in the UI (e.g. "âncora: snapshot YYYY-MM-DD").
+    pub snapshot_anchor_date: Option<NaiveDate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

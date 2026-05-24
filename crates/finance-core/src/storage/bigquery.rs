@@ -3,8 +3,8 @@ use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
-    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    TransactionContextRow, TransactionRecord, UncategorizedRow,
+    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
+    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -214,6 +214,23 @@ fn escape_string(value: &str) -> String {
 
 fn sql_string(value: &str) -> String {
     format!("'{}'", escape_string(value))
+}
+
+/// Mirror of `local::last_day_of_target_month`: last calendar day of the
+/// month at `month_start`, capped at `today` so the current month's
+/// closing anchor is "now".
+fn bq_last_day_of_target_month(month_start: NaiveDate, today: NaiveDate) -> Result<NaiveDate> {
+    let (year, month) = (month_start.year(), month_start.month());
+    let next_month_first = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }
+    .context("Falha ao calcular início do mês seguinte")?;
+    let last_day = next_month_first
+        .checked_sub_days(Days::new(1))
+        .context("Falha ao calcular último dia do mês")?;
+    Ok(if last_day > today { today } else { last_day })
 }
 
 fn sql_optional_string(value: Option<&str>) -> String {
@@ -2210,19 +2227,34 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn cashflow(&self, months: usize) -> Result<Vec<CashflowRow>> {
+        // Cash-basis: only checking accounts contribute. See the SQLite
+        // implementation for the rationale on the inclusion of
+        // `credit-card-payment` and exclusion of `transfer-internal`.
         let sql = format!(
             "
+            WITH base AS (
+              SELECT
+                FORMAT_DATE('%Y-%m', t.transaction_date) AS month_ref,
+                t.amount,
+                COALESCE(t.category_id, '') AS category_id
+              FROM {tx} t
+              JOIN {accounts} a ON a.account_id = t.account_id
+              WHERE a.account_type = 'checking'
+                AND COALESCE(t.category_id, '') != 'transfer-internal'
+            )
             SELECT month_ref,
-                   CAST(income AS STRING),
-                   CAST(expenses AS STRING),
-                   CAST(expense_reduction AS STRING),
-                   CAST(net AS STRING)
-            FROM {}
+                   CAST(SUM(CASE WHEN amount > 0 AND category_id != 'cashback' THEN amount ELSE 0 END) AS STRING) AS income,
+                   CAST(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END) AS STRING) AS expenses,
+                   CAST(SUM(CASE WHEN amount > 0 AND category_id = 'cashback' THEN amount ELSE 0 END) AS STRING) AS expense_reduction,
+                   CAST(SUM(amount) AS STRING) AS net
+            FROM base
+            GROUP BY month_ref
             ORDER BY month_ref DESC
-            LIMIT {}
+            LIMIT {limit}
             ",
-            self.qualified_table("v_cashflow")?,
-            months,
+            tx = self.qualified_table("v_transactions_reportable")?,
+            accounts = self.qualified_table("accounts")?,
+            limit = months,
         );
         let response = self.run_query(&sql).await?;
         let mut items = Vec::with_capacity(response.rows.len());
@@ -2234,9 +2266,164 @@ impl FinanceStore for BigQueryStore {
                 expenses: required_decimal(&values, 2, "expenses")?,
                 expense_reduction: required_decimal(&values, 3, "expense_reduction")?,
                 net: required_decimal(&values, 4, "net")?,
+                opening_balance: None,
+                closing_balance: None,
             });
         }
         Ok(items)
+    }
+
+    async fn cashflow_month(&self, month_ref: &str) -> Result<CashflowRow> {
+        let sql = format!(
+            "
+            WITH base AS (
+              SELECT
+                t.amount,
+                COALESCE(t.category_id, '') AS category_id
+              FROM {tx} t
+              JOIN {accounts} a ON a.account_id = t.account_id
+              WHERE a.account_type = 'checking'
+                AND COALESCE(t.category_id, '') != 'transfer-internal'
+                AND FORMAT_DATE('%Y-%m', t.transaction_date) = {month}
+            )
+            SELECT
+              CAST(COALESCE(SUM(CASE WHEN amount > 0 AND category_id != 'cashback' THEN amount ELSE 0 END), 0) AS STRING) AS income,
+              CAST(COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS STRING) AS expenses,
+              CAST(COALESCE(SUM(CASE WHEN amount > 0 AND category_id = 'cashback' THEN amount ELSE 0 END), 0) AS STRING) AS expense_reduction,
+              CAST(COALESCE(SUM(amount), 0) AS STRING) AS net
+            FROM base
+            ",
+            tx = self.qualified_table("v_transactions_reportable")?,
+            accounts = self.qualified_table("accounts")?,
+            month = sql_string(month_ref),
+        );
+        let response = self.run_query(&sql).await?;
+        let (income, expenses, expense_reduction, net) = response
+            .rows
+            .first()
+            .map(|row| {
+                let values = row_values(row);
+                Ok::<_, anyhow::Error>((
+                    required_decimal(&values, 0, "income")?,
+                    required_decimal(&values, 1, "expenses")?,
+                    required_decimal(&values, 2, "expense_reduction")?,
+                    required_decimal(&values, 3, "net")?,
+                ))
+            })
+            .transpose()?
+            .unwrap_or((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+
+        let target_month_start = NaiveDate::parse_from_str(&format!("{month_ref}-01"), "%Y-%m-%d")
+            .with_context(|| format!("month_ref inválido: {month_ref} (esperado YYYY-MM)"))?;
+        let opening_anchor = target_month_start
+            .checked_sub_days(Days::new(1))
+            .context("Falha ao calcular dia anterior ao início do mês")?;
+        let closing_anchor =
+            bq_last_day_of_target_month(target_month_start, Utc::now().date_naive())?;
+
+        let opening = self.checking_balance_at(opening_anchor).await?;
+        let closing = self.checking_balance_at(closing_anchor).await?;
+
+        Ok(CashflowRow {
+            month_ref: month_ref.to_string(),
+            income,
+            expenses,
+            expense_reduction,
+            net,
+            opening_balance: opening.map(|b| b.balance),
+            closing_balance: closing.map(|b| b.balance),
+        })
+    }
+
+    async fn checking_balance_at(&self, target: NaiveDate) -> Result<Option<CheckingBalance>> {
+        // Snapshot-anchored aggregate: per checking account, take the latest
+        // snapshot ≤ target and add the sum of `amount` for transactions
+        // strictly after snapshot_date and ≤ target. If any checking account
+        // has no snapshot in range, return None.
+        let target_str = target.format("%Y-%m-%d").to_string();
+        let sql = format!(
+            "
+            WITH checking AS (
+              SELECT account_id
+              FROM {accounts}
+              WHERE account_type = 'checking'
+            ),
+            anchors AS (
+              SELECT
+                c.account_id,
+                ARRAY_AGG(
+                  STRUCT(s.snapshot_date AS snapshot_date, s.balance AS balance)
+                  ORDER BY s.snapshot_date DESC, s.created_at DESC
+                  LIMIT 1
+                )[OFFSET(0)] AS anchor
+              FROM checking c
+              LEFT JOIN {snapshots} s
+                ON s.account_id = c.account_id
+               AND s.snapshot_date <= DATE {target}
+              GROUP BY c.account_id
+            ),
+            deltas AS (
+              SELECT
+                a.account_id,
+                a.anchor.snapshot_date AS anchor_date,
+                a.anchor.balance AS anchor_balance,
+                COALESCE((
+                  SELECT SUM(t.amount)
+                  FROM {tx} t
+                  WHERE t.account_id = a.account_id
+                    AND t.transaction_date > a.anchor.snapshot_date
+                    AND t.transaction_date <= DATE {target}
+                ), 0) AS delta
+              FROM anchors a
+            )
+            SELECT
+              CAST(account_id AS STRING) AS account_id,
+              CAST(anchor_date AS STRING) AS anchor_date,
+              CAST(anchor_balance AS STRING) AS anchor_balance,
+              CAST(delta AS STRING) AS delta
+            FROM deltas
+            ORDER BY account_id
+            ",
+            accounts = self.qualified_table("accounts")?,
+            snapshots = self.qualified_table("account_snapshots")?,
+            tx = self.qualified_table("v_transactions_reportable")?,
+            target = sql_string(&target_str),
+        );
+        let response = self.run_query(&sql).await?;
+
+        let mut total = Decimal::ZERO;
+        let mut accounts_considered = 0usize;
+        let mut latest_anchor: Option<NaiveDate> = None;
+
+        for row in response.rows {
+            let values = row_values(&row);
+            accounts_considered += 1;
+            let anchor_date_str = optional_string(&values, 1);
+            let anchor_balance_str = optional_string(&values, 2);
+            if anchor_date_str.is_none() {
+                return Ok(None);
+            }
+            let anchor_date = optional_date(&values, 1, "anchor_date")?
+                .ok_or_else(|| anyhow!("anchor_date inesperadamente nulo"))?;
+            let anchor_balance = anchor_balance_str
+                .as_deref()
+                .map(Decimal::from_str)
+                .transpose()
+                .with_context(|| "balance inválido em snapshot")?
+                .unwrap_or(Decimal::ZERO);
+            let delta = required_decimal(&values, 3, "delta")?;
+            total += anchor_balance + delta;
+            latest_anchor = Some(match latest_anchor {
+                Some(prev) if prev > anchor_date => prev,
+                _ => anchor_date,
+            });
+        }
+
+        Ok(Some(CheckingBalance {
+            balance: total,
+            accounts_considered,
+            snapshot_anchor_date: latest_anchor,
+        }))
     }
 
     async fn forecast_vs_actual(

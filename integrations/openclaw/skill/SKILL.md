@@ -61,10 +61,10 @@ Resumo de gastos do mês:
 bash skills/finance-os/finance.sh report monthly-spend --month YYYY-MM
 ```
 
-Fluxo de caixa:
+Fluxo de caixa (competência de caixa, somente contas correntes — saldo inicial, entradas, saídas, saldo final do mês):
 
 ```bash
-bash skills/finance-os/finance.sh report cashflow --months 3
+bash skills/finance-os/finance.sh report cashflow --month YYYY-MM
 ```
 
 Forecast vs realizado:
