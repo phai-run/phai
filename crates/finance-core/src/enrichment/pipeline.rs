@@ -638,6 +638,23 @@ mod tests {
         async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> {
             Ok(vec![])
         }
+        async fn cashflow_month(&self, _: &str) -> Result<CashflowRow> {
+            Ok(CashflowRow {
+                month_ref: String::new(),
+                income: Decimal::ZERO,
+                expenses: Decimal::ZERO,
+                expense_reduction: Decimal::ZERO,
+                net: Decimal::ZERO,
+                opening_balance: None,
+                closing_balance: None,
+            })
+        }
+        async fn checking_balance_at(
+            &self,
+            _: NaiveDate,
+        ) -> Result<Option<crate::models::CheckingBalance>> {
+            Ok(None)
+        }
         async fn forecast_vs_actual(&self, _: Option<&str>) -> Result<Vec<ForecastVsActualRow>> {
             Ok(vec![])
         }

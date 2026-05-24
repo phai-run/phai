@@ -710,16 +710,17 @@ fn mutating_commands_feed_reporting_views() {
         cargo_bin()
             .arg("report")
             .arg("cashflow")
-            .arg("--months")
-            .arg("1"),
+            .arg("--month")
+            .arg("2026-03"),
         &config_dir,
         &data_dir,
     )
     .assert()
     .success()
-    // human format: month shown as "março/2026" not "2026-03"
-    .stdout(predicate::str::contains("março/2026"))
-    .stdout(predicate::str::contains("líquido"));
+    // human format: header shows "Caixa · março/2026" and saldo lines
+    .stdout(predicate::str::contains("Caixa · março/2026"))
+    .stdout(predicate::str::contains("Saldo inicial"))
+    .stdout(predicate::str::contains("Saldo final"));
 
     envs(
         cargo_bin()
@@ -1138,11 +1139,15 @@ fn report_views_exclude_legacy_manual_statement_when_pluggy_match_exists() {
 }
 
 #[test]
-fn cashflow_and_card_summary_exclude_legacy_manual_shadow() {
-    // Regression: v_cashflow and v_card_summary must honour the same
-    // legacy/manual ↔ pluggy dedup filter applied by v_transactions_reportable.
-    // A previous refactor pointed these aggregates directly at `transactions`,
-    // which caused shadowed manual statement rows to be counted twice.
+fn card_summary_excludes_legacy_manual_shadow() {
+    // Regression: v_card_summary must honour the same legacy/manual ↔
+    // pluggy dedup filter applied by v_transactions_reportable. A previous
+    // refactor pointed it directly at `transactions`, which caused
+    // shadowed manual statement rows to be counted twice.
+    //
+    // (cashflow is exercised separately — under cash-basis semantics it
+    // only sees checking accounts, so a credit-card duplicate does not
+    // surface there.)
     let temp = TempDir::new().expect("tempdir");
     let config_dir = temp.path().join("config");
     let data_dir = temp.path().join("data");
@@ -1200,32 +1205,6 @@ fn cashflow_and_card_summary_exclude_legacy_manual_shadow() {
     )
     .expect("set manual source as legacy");
 
-    // ── cashflow ──
-    // Fixture March-2026 expenses without the dup: 152.30 + 150.00 = 302.30.
-    // Double-counting the shadowed -150.00 manual row would yield 452.30.
-    let cashflow_json = envs(
-        cargo_bin().arg("report").arg("cashflow").arg("--json"),
-        &config_dir,
-        &data_dir,
-    )
-    .output()
-    .expect("cashflow json output");
-    assert!(cashflow_json.status.success());
-    let cashflow: Value =
-        serde_json::from_slice(&cashflow_json.stdout).expect("valid cashflow json");
-    let march = cashflow
-        .as_array()
-        .expect("cashflow array")
-        .iter()
-        .find(|m| m["month_ref"].as_str() == Some("2026-03"))
-        .expect("March 2026 row");
-    assert_eq!(
-        march["expenses"].as_str().expect("expenses string"),
-        "302.30",
-        "cashflow must ignore deduped manual statement row"
-    );
-
-    // ── card summary (credit card only) ──
     // Only the Pluggy -150.00 charge belongs to shared_credit; with dedup the
     // legacy shadow drops, so total_charges must remain 150.00 (not 300.00).
     let card_json = envs(
@@ -3801,6 +3780,28 @@ fn amount_cents_exact_integer_sum_regression() {
     .assert()
     .success();
 
+    // Cash-basis cashflow only sees checking accounts. Seed one so the
+    // manual transactions below are picked up by the new aggregator.
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("prec_checking")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("checking")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Precision Checking"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
     // Insert transactions with edge-case cent values that would expose
     // floating-point drift under CAST(amount AS REAL) aggregation.
     let txs = [
@@ -3819,6 +3820,8 @@ fn amount_cents_exact_integer_sum_regression() {
                 .arg("upsert-manual")
                 .arg("--transaction-id")
                 .arg(id)
+                .arg("--account-id")
+                .arg("prec_checking")
                 .arg("--date")
                 .arg(date)
                 .arg("--description")
@@ -3847,9 +3850,14 @@ fn amount_cents_exact_integer_sum_regression() {
         .expect("count mismatches");
     assert_eq!(mismatch_count, 0, "amount_cents mismatch detected");
 
-    // Verify exact view aggregation: v_cashflow income.
+    // Verify exact aggregation via `report cashflow --month 2026-05 --json`.
     let cashflow_json = envs(
-        cargo_bin().arg("report").arg("cashflow").arg("--json"),
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow")
+            .arg("--month")
+            .arg("2026-05")
+            .arg("--json"),
         &config_dir,
         &data_dir,
     )
@@ -3859,38 +3867,33 @@ fn amount_cents_exact_integer_sum_regression() {
     .stdout
     .clone();
 
-    // Cashflow report returns a JSON array of month objects.
     let cf: Value = serde_json::from_slice(&cashflow_json).expect("valid cashflow json");
-    let months = cf.as_array().expect("cashflow is an array");
-    let may = months
-        .iter()
-        .find(|m| m["month_ref"].as_str() == Some("2026-05"))
-        .expect("May 2026 in cashflow");
+    assert_eq!(cf["month_ref"].as_str(), Some("2026-05"));
 
-    // Income: salary 5000.00 + uncategorized credit 1.99 = 5001.99.
+    // Inflows: salary 5000.00 + uncategorized credit 1.99 = 5001.99.
     // JSON serialization of Decimal uses exact string representation.
     assert_eq!(
-        may["income"].as_str().expect("income string"),
+        cf["inflows"].as_str().expect("inflows string"),
         "5001.99",
-        "income deve ser exato, sem drift de ponto flutuante"
+        "inflows deve ser exato, sem drift de ponto flutuante"
     );
 
-    // Expenses: 0.01 + 0.02 + 0.03 + 1234.56 = 1234.62 (exact).
+    // Outflows: 0.01 + 0.02 + 0.03 + 1234.56 = 1234.62 (exact).
     assert_eq!(
-        may["expenses"].as_str().expect("expenses string"),
+        cf["outflows"].as_str().expect("outflows string"),
         "1234.62",
-        "expenses deve ser exato, sem drift de ponto flutuante"
+        "outflows deve ser exato, sem drift de ponto flutuante"
     );
 
-    // Net = income - expenses = 5001.99 - 1234.62 = 3767.37
+    // Net = inflows - outflows = 5001.99 - 1234.62 = 3767.37
     assert_eq!(
-        may["net"].as_str().expect("net string"),
+        cf["net"].as_str().expect("net string"),
         "3767.37",
         "net deve ser exato"
     );
 
-    // Also verify the v_cashflow view via direct SQLite query:
-    // SUM(amount_cents) / 100.0 should match exactly.
+    // Also verify the v_cashflow view via direct SQLite query as a
+    // belt-and-suspenders integer-cent check at the storage layer.
     let (view_income, view_expenses, view_net): (String, String, String) = conn
         .query_row(
             "SELECT income, expenses, net FROM v_cashflow WHERE month_ref = '2026-05'",
@@ -3902,4 +3905,226 @@ fn amount_cents_exact_integer_sum_regression() {
     assert_eq!(view_income, "5001.99", "v_cashflow income exato");
     assert_eq!(view_expenses, "1234.62", "v_cashflow expenses exato");
     assert_eq!(view_net, "3767.37", "v_cashflow net exato");
+}
+
+#[test]
+fn cashflow_is_cash_basis_on_checking_accounts() {
+    // The new `report cashflow` is a single-month cash-basis summary
+    // restricted to checking accounts. Verify the filtering rules:
+    //   - credit-card swipes are EXCLUDED (they live on credit accounts)
+    //   - credit-card-payment from checking IS counted as an outflow
+    //   - transfer-internal between own accounts is EXCLUDED
+    //   - opening / closing balance is anchored on the latest snapshot
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    // Two accounts: one checking, one credit.
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("checking_a")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("checking")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Checking A"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("credit_a")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Credit A"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Transactions in 2026-05:
+    //   +5000.00 salary on checking         → inflow
+    //   - 100.00 grocery on checking        → outflow
+    //   - 800.00 credit-card-payment        → outflow (cash event)
+    //   - 250.00 swipe on credit_a          → EXCLUDED (not a cash event)
+    //   - 200.00 transfer-internal          → EXCLUDED
+    struct TxCase {
+        id: &'static str,
+        account: &'static str,
+        date: &'static str,
+        desc: &'static str,
+        amount: &'static str,
+        category: Option<&'static str>,
+    }
+    let tx_cases = [
+        TxCase {
+            id: "cb-salary",
+            account: "checking_a",
+            date: "2026-05-10",
+            desc: "Salario",
+            amount: "5000.00",
+            category: None,
+        },
+        TxCase {
+            id: "cb-market",
+            account: "checking_a",
+            date: "2026-05-12",
+            desc: "Supermercado",
+            amount: "-100.00",
+            category: None,
+        },
+        TxCase {
+            id: "cb-cardpay",
+            account: "checking_a",
+            date: "2026-05-15",
+            desc: "Pagamento fatura",
+            amount: "-800.00",
+            category: Some("credit-card-payment"),
+        },
+        TxCase {
+            id: "cb-swipe",
+            account: "credit_a",
+            date: "2026-05-08",
+            desc: "Posto",
+            amount: "-250.00",
+            category: None,
+        },
+        TxCase {
+            id: "cb-transfer",
+            account: "checking_a",
+            date: "2026-05-20",
+            desc: "Transferencia interna",
+            amount: "-200.00",
+            category: Some("transfer-internal"),
+        },
+    ];
+    for case in &tx_cases {
+        let mut cmd = cargo_bin();
+        cmd.arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg(case.id)
+            .arg("--account-id")
+            .arg(case.account)
+            .arg("--date")
+            .arg(case.date)
+            .arg("--description")
+            .arg(case.desc)
+            .arg(format!("--amount={}", case.amount));
+        if let Some(cat) = case.category {
+            cmd.arg("--category").arg(cat);
+        }
+        envs(&mut cmd, &config_dir, &data_dir).assert().success();
+    }
+
+    // Seed a snapshot for the checking account at 2026-04-30 (last day of
+    // previous month) so opening_balance can be anchored. Closing then
+    // rolls forward by sum(amount) on checking up to today.
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO account_snapshots (
+            snapshot_id, account_id, snapshot_date, balance, credit_limit,
+            currency_code, source, actor_id, idempotency_key, metadata_json, created_at
+         ) VALUES (
+            'snap-checking-a', 'checking_a', '2026-04-30', '10000.00', NULL,
+            'BRL', 'manual', 'test-actor', 'snap-checking-a-key',
+            '{}', '2026-04-30T12:00:00Z'
+         )",
+        [],
+    )
+    .expect("insert snapshot");
+    drop(conn);
+
+    // ── Happy path: anchored balances, cash-basis filtering ──
+    let raw = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow")
+            .arg("--month")
+            .arg("2026-05")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let cf: Value = serde_json::from_slice(&raw).expect("valid cashflow json");
+
+    assert_eq!(cf["month_ref"].as_str(), Some("2026-05"));
+    assert_eq!(
+        cf["inflows"].as_str(),
+        Some("5000.00"),
+        "inflows = salário (swipe de cartão e transfer-internal não contam)"
+    );
+    assert_eq!(
+        cf["outflows"].as_str(),
+        Some("900.00"),
+        "outflows = mercado + pagamento da fatura; swipe de cartão e transfer-internal não contam"
+    );
+    assert_eq!(cf["net"].as_str(), Some("4100.00"));
+    assert_eq!(
+        cf["opening_balance"].as_str(),
+        Some("10000.00"),
+        "opening = snapshot em 2026-04-30 com delta zero (nenhuma tx anterior)"
+    );
+    // Closing = snapshot + sum(checking_a transactions in May up to today).
+    // May checking_a deltas: +5000 -100 -800 -200 = +3900. Closing = 13900.00.
+    assert_eq!(
+        cf["closing_balance"].as_str(),
+        Some("13900.00"),
+        "closing = snapshot + delta de todas as transações na conta corrente (inclusive transfer-internal — só são excluídas do cashflow agregado)"
+    );
+    assert_eq!(cf["snapshot_complete"], Value::Bool(true));
+    assert_eq!(cf["accounts_considered"], Value::Number(1.into()));
+
+    // ── Edge case: drop the snapshot → balances go null ──
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute("DELETE FROM account_snapshots", [])
+        .expect("drop snapshots");
+    drop(conn);
+
+    let raw2 = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow")
+            .arg("--month")
+            .arg("2026-05")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let cf2: Value = serde_json::from_slice(&raw2).expect("valid cashflow json");
+    assert_eq!(cf2["opening_balance"], Value::Null);
+    assert_eq!(cf2["closing_balance"], Value::Null);
+    assert_eq!(cf2["snapshot_complete"], Value::Bool(false));
+    // Inflows/outflows still computable from transaction data alone.
+    assert_eq!(cf2["inflows"].as_str(), Some("5000.00"));
+    assert_eq!(cf2["outflows"].as_str(), Some("900.00"));
 }

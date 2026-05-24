@@ -122,6 +122,8 @@ pub async fn gather_pulse_data(
             expenses: Decimal::ZERO,
             expense_reduction: Decimal::ZERO,
             net: Decimal::ZERO,
+            opening_balance: None,
+            closing_balance: None,
         });
     let closed: Vec<&CashflowRow> = cashflow
         .iter()
@@ -136,6 +138,8 @@ pub async fn gather_pulse_data(
             expenses: Decimal::ZERO,
             expense_reduction: Decimal::ZERO,
             net: Decimal::ZERO,
+            opening_balance: None,
+            closing_balance: None,
         }
     } else {
         let n = Decimal::from(closed.len() as i64);
@@ -148,6 +152,8 @@ pub async fn gather_pulse_data(
             expenses,
             expense_reduction,
             net: income - expenses + expense_reduction,
+            opening_balance: None,
+            closing_balance: None,
         }
     };
 
@@ -713,6 +719,8 @@ mod tests {
             income,
             expenses,
             net: income - expenses,
+            opening_balance: None,
+            closing_balance: None,
         }
     }
 

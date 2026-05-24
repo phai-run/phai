@@ -92,7 +92,7 @@ All reports produce a human-readable output by default and accept `--raw` for JS
 |---|---|
 | `report daily-pulse` | Recent transactions, grouped by category |
 | `report monthly-spend` | Current month broken down by category |
-| `report cashflow` | Income vs expenses vs net, last N months |
+| `report cashflow` | Cash-basis monthly summary for checking accounts: saldo inicial, entradas, saídas, saldo final |
 | `report card-summary` | Current credit-card cycle (open + closed bills) |
 | `report card-closed-insights` | What changed in the most recent closed bill |
 | `report budget-status` | Budget vs actual per category, with alerts |

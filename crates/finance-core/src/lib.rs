@@ -16,7 +16,7 @@ pub use installments::{
     group_into_chains, parse_installment_description, InstallmentChain, InstallmentMarker,
 };
 pub use models::{
-    AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, DailyPulseItem,
-    ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord, RuntimeMetadata,
-    TransactionRecord, UncategorizedRow,
+    AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, CheckingBalance,
+    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    RuntimeMetadata, TransactionRecord, UncategorizedRow,
 };

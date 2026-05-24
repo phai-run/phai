@@ -268,10 +268,13 @@ enum ReportCommand {
     )]
     MonthlySpend(MonthlySpendArgs),
     #[command(
-        about = "monthly income vs expenses vs net, last N months",
-        long_about = "Displays a side-by-side comparison of total income, total expenses, and net \
-                      cash flow for each of the last N calendar months. Good for spotting \
-                      seasonal patterns or confirming that income reliably covers expenses. \
+        about = "cash-basis monthly cashflow for checking accounts: saldo inicial, entradas, saídas, saldo final",
+        long_about = "Single-month cash-basis summary restricted to checking accounts \
+                      (account_type='checking'). Shows opening balance (anchored on the latest \
+                      Pluggy snapshot ≤ last day of the previous month), inflows, outflows, and \
+                      closing balance. Credit card transactions are intentionally excluded — only \
+                      the bill payment on the checking account counts as an outflow. \
+                      Defaults to the current month when --month is omitted. \
                       WhatsApp-friendly by default; pass --raw for JSON."
     )]
     Cashflow(CashflowArgs),
@@ -450,9 +453,9 @@ impl MonthlySpendArgs {
 
 #[derive(Args)]
 struct CashflowArgs {
-    /// Number of trailing calendar months to include (e.g. 6 for the past half-year).
-    #[arg(long, default_value_t = 6)]
-    months: usize,
+    /// Target month in YYYY-MM format (e.g. 2024-11). Defaults to the current month.
+    #[arg(long)]
+    month: Option<String>,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
     raw: bool,
@@ -3539,69 +3542,98 @@ async fn report_cashflow(args: CashflowArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
-    let rows = store.cashflow(args.months).await?;
+
+    // Default to the current month so a bare `finance report cashflow`
+    // answers "como tô agora?" without arguments.
+    let today = chrono::Local::now().date_naive();
+    let month_ref = args.month.clone().unwrap_or_else(|| month_ref_for(today));
+    parse_month_ref(&month_ref)?;
+
+    let row = store.cashflow_month(&month_ref).await?;
+    let today_balance = store.checking_balance_at(today).await?;
+    let snapshot_anchor = today_balance.as_ref().and_then(|b| b.snapshot_anchor_date);
+    let accounts_considered = today_balance
+        .as_ref()
+        .map(|b| b.accounts_considered)
+        .unwrap_or(0);
 
     if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let payload = serde_json::json!({
+            "month_ref": row.month_ref,
+            "opening_balance": row.opening_balance.as_ref().map(|d| d.to_string()),
+            "inflows": row.income.to_string(),
+            "outflows": row.expenses.to_string(),
+            "expense_reduction": row.expense_reduction.to_string(),
+            "closing_balance": row.closing_balance.as_ref().map(|d| d.to_string()),
+            "net": row.net.to_string(),
+            "accounts_considered": accounts_considered,
+            "snapshot_anchor_date": snapshot_anchor,
+            "snapshot_complete": row.opening_balance.is_some() && row.closing_balance.is_some(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
-    print_cashflow_human(&rows, args.months);
+    print_cashflow_human(&row, accounts_considered, snapshot_anchor);
     Ok(())
 }
 
-fn print_cashflow_human(rows: &[finance_core::models::CashflowRow], months: usize) {
+fn print_cashflow_human(
+    row: &finance_core::models::CashflowRow,
+    accounts_considered: usize,
+    snapshot_anchor: Option<chrono::NaiveDate>,
+) {
     use human_format::{bold, brl, brl_signed, month_label};
 
-    println!("📊 {}", bold(&format!("Cashflow · últimos {months} meses")));
+    println!(
+        "💵 {}",
+        bold(&format!("Caixa · {}", month_label(&row.month_ref)))
+    );
+    println!();
 
-    if rows.is_empty() {
-        return;
+    let opening_str = row
+        .opening_balance
+        .map(brl)
+        .unwrap_or_else(|| "—".to_string());
+    let closing_str = row
+        .closing_balance
+        .map(brl)
+        .unwrap_or_else(|| "—".to_string());
+
+    println!("  Saldo inicial   {}", opening_str);
+    println!("  Entradas      + {}", brl(row.income));
+    println!("  Saídas        − {}", brl(row.expenses));
+    if row.expense_reduction > Decimal::ZERO {
+        println!("  Cashback      + {}", brl(row.expense_reduction));
+    }
+    println!("  ─────────────────────────────");
+
+    match (row.opening_balance, row.closing_balance) {
+        (Some(open), Some(close)) => {
+            let delta = close - open;
+            println!(
+                "  Saldo final     {}   (Δ {})",
+                brl(close),
+                brl_signed(delta),
+            );
+        }
+        _ => {
+            println!("  Saldo final     {}", closing_str);
+        }
     }
 
     println!();
-    for row in rows {
-        let net_emoji = if row.net > Decimal::ZERO {
-            "✅"
-        } else if row.net < Decimal::ZERO {
-            "🔻"
-        } else {
-            "⚖️"
-        };
-        println!(
-            "• *{}*  entradas {}  saídas {}  líquido {} {net_emoji}",
-            month_label(&row.month_ref),
-            brl(row.income),
-            brl(-row.expenses),
-            brl_signed(row.net),
-        );
-    }
-
-    // Footer: average net + best/worst month
-    let count = rows.len() as i64;
-    if count > 0 {
-        let total_net: Decimal = rows.iter().map(|r| r.net).sum();
-        let avg_net = total_net / Decimal::from(count);
-
-        let best = rows.iter().max_by_key(|r| r.net);
-        let worst = rows.iter().min_by_key(|r| r.net);
-
-        println!();
-        println!("*Média mensal*: {}", brl_signed(avg_net));
-        if let Some(b) = best {
-            println!(
-                "_Melhor mês_: {} ({})",
-                month_label(&b.month_ref),
-                brl_signed(b.net)
-            );
-        }
-        if let Some(w) = worst {
-            println!(
-                "_Pior mês_: {} ({})",
-                month_label(&w.month_ref),
-                brl_signed(w.net)
-            );
-        }
+    let accounts_label = if accounts_considered == 1 {
+        "1 conta corrente".to_string()
+    } else {
+        format!("{accounts_considered} contas correntes")
+    };
+    match snapshot_anchor {
+        Some(date) => println!(
+            "  _{accounts_label} · âncora: snapshot {}_",
+            human_format::short_date(date)
+        ),
+        None => println!("  _{accounts_label} · snapshot incompleto: rode `finance sync pluggy`_"),
     }
 }
 
