@@ -45,6 +45,7 @@ use std::time::Duration as StdDuration;
 use tokio::task::{JoinHandle, LocalSet};
 use uuid::Uuid;
 
+mod cashflow_chart;
 mod enrich;
 mod human_format;
 mod pulse;
@@ -279,6 +280,16 @@ enum ReportCommand {
     )]
     Cashflow(CashflowArgs),
     #[command(
+        about = "renderiza um gráfico SVG da evolução de caixa (saldo, entradas, saídas) por mês",
+        long_about = "Gera um gráfico SVG mostrando a evolução do caixa das contas correntes \
+                      ao longo dos últimos N meses (default: 6). Inclui linha de saldo final \
+                      por mês (snapshot-anchored), barras pareadas de entradas e saídas e, \
+                      quando --forecast é passado, sobrepõe linhas tracejadas com os totais \
+                      previstos de entrada e saída por mês a partir da tabela de forecasts. \
+                      Use --text para um sparkline ASCII no terminal em vez (ou além) do SVG."
+    )]
+    CashflowChart(CashflowChartArgs),
+    #[command(
         about = "planned amounts vs what actually happened, sorted by variance",
         long_about = "Compares each budget envelope's forecasted amount against actual spend for \
                       the selected month, ranked by the size of the variance so the biggest \
@@ -468,6 +479,27 @@ impl CashflowArgs {
     fn structured_output(&self) -> bool {
         self.raw || self.json
     }
+}
+
+#[derive(Args)]
+struct CashflowChartArgs {
+    /// Janela em meses incluindo o mês atual (default: 6, mín: 2, máx: 24).
+    #[arg(long, default_value_t = 6)]
+    months: usize,
+    /// Caminho do arquivo SVG de saída. Default: ./finance-cashflow.svg
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+    /// Também imprime um sparkline ASCII no stdout (útil em terminal).
+    #[arg(long)]
+    text: bool,
+    /// Sobrepõe linhas tracejadas com totais de entradas/saídas previstos por
+    /// mês a partir da tabela `forecasts` (somatório dos `amount` ativos com
+    /// `due_date` no respectivo mês).
+    #[arg(long)]
+    forecast: bool,
+    /// Não escreve o SVG (útil junto com --text para sair só o sparkline).
+    #[arg(long)]
+    no_svg: bool,
 }
 
 #[derive(Args)]
@@ -1842,16 +1874,16 @@ fn merge_billing_metadata(new_meta: &mut serde_json::Value, existing_meta: &serd
     }
 }
 
-fn parse_month_ref(value: &str) -> Result<NaiveDate> {
+pub(crate) fn parse_month_ref(value: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d")
         .with_context(|| format!("month inválido: {value} (esperado YYYY-MM)"))
 }
 
-fn month_ref_for(date: NaiveDate) -> String {
+pub(crate) fn month_ref_for(date: NaiveDate) -> String {
     date.format("%Y-%m").to_string()
 }
 
-fn shift_month(date: NaiveDate, delta: i32) -> Result<NaiveDate> {
+pub(crate) fn shift_month(date: NaiveDate, delta: i32) -> Result<NaiveDate> {
     let mut year = date.year();
     let mut month = date.month() as i32 + delta;
     while month > 12 {
@@ -2564,7 +2596,7 @@ async fn insert_snapshots_chunked(
     Ok(total)
 }
 
-async fn load_config() -> Result<(ConfigPaths, AppConfig)> {
+pub(crate) async fn load_config() -> Result<(ConfigPaths, AppConfig)> {
     let paths = ConfigPaths::discover()?;
     paths.ensure()?;
     let config = AppConfig::load(&paths)?;
@@ -2678,6 +2710,7 @@ async fn main() -> Result<()> {
             ReportCommand::DailyPulse(args) => report_daily_pulse(args).await,
             ReportCommand::MonthlySpend(args) => report_monthly_spend(args).await,
             ReportCommand::Cashflow(args) => report_cashflow(args).await,
+            ReportCommand::CashflowChart(args) => report_cashflow_chart(args).await,
             ReportCommand::ForecastVsActual(args) => report_forecast_vs_actual(args).await,
             ReportCommand::CardSummary(args) => report_card_summary(args).await,
             ReportCommand::CardClosedInsights(args) => report_card_closed_insights(args).await,
@@ -3536,6 +3569,10 @@ fn print_monthly_spend_human(rows: &[finance_core::models::MonthlySpendRow], mon
             println!("  {} {}%", family_label(family), pct(share));
         }
     }
+}
+
+async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()> {
+    cashflow_chart::report_cashflow_chart(args).await
 }
 
 async fn report_cashflow(args: CashflowArgs) -> Result<()> {

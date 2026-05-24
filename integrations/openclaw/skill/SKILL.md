@@ -67,6 +67,22 @@ Fluxo de caixa (competência de caixa, somente contas correntes — saldo inicia
 bash skills/finance-os/finance.sh report cashflow --month YYYY-MM
 ```
 
+Gráfico de evolução de caixa (SVG; opcionalmente sobreposto com forecast):
+
+```bash
+# Default: últimos 6 meses, SVG em ./finance-cashflow.svg
+bash skills/finance-os/finance.sh report cashflow-chart
+
+# Janela e arquivo customizados, com sparkline ASCII no terminal:
+bash skills/finance-os/finance.sh report cashflow-chart \
+  --months 12 \
+  --output ~/Downloads/cashflow.svg \
+  --text
+
+# Com overlay de forecast (linhas tracejadas de entradas/saídas previstas):
+bash skills/finance-os/finance.sh report cashflow-chart --forecast
+```
+
 Forecast vs realizado:
 
 ```bash

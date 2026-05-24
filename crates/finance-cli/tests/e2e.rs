@@ -4128,3 +4128,216 @@ fn cashflow_is_cash_basis_on_checking_accounts() {
     assert_eq!(cf2["inflows"].as_str(), Some("5000.00"));
     assert_eq!(cf2["outflows"].as_str(), Some("900.00"));
 }
+
+#[test]
+fn cashflow_chart_emits_svg_and_optional_sparkline() {
+    // End-to-end check for `report cashflow-chart`: SVG is written to disk
+    // with the expected structural markers, --text emits a sparkline to
+    // stdout, and --forecast adds dashed overlays + ⇢ marker rows.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("chk")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("checking")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Checking"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // A couple of transactions in the current calendar month — only purpose
+    // is to exercise the report end-to-end. Use the very recent past to
+    // stay within the default 6-month window regardless of when the test
+    // is run.
+    let today = chrono::Local::now().date_naive();
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("chart-in")
+            .arg("--account-id")
+            .arg("chk")
+            .arg("--date")
+            .arg(today.format("%Y-%m-%d").to_string())
+            .arg("--description")
+            .arg("Entrada")
+            .arg("--amount=2500.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("chart-out")
+            .arg("--account-id")
+            .arg("chk")
+            .arg("--date")
+            .arg(today.format("%Y-%m-%d").to_string())
+            .arg("--description")
+            .arg("Saida")
+            .arg("--amount=-1200.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Seed a snapshot for the leftmost month so the saldo line gets an
+    // anchor. We just put it at "today minus 200 days" — plenty of head
+    // room for the default 6-month window.
+    let snap_date = today - chrono::Duration::days(200);
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO account_snapshots (
+            snapshot_id, account_id, snapshot_date, balance, credit_limit,
+            currency_code, source, actor_id, idempotency_key, metadata_json, created_at
+         ) VALUES (
+            'snap-chk', 'chk', ?1, '8000.00', NULL,
+            'BRL', 'manual', 'test-actor', 'snap-chk-key',
+            '{}', '2025-01-01T12:00:00Z'
+         )",
+        [snap_date.format("%Y-%m-%d").to_string()],
+    )
+    .expect("insert snapshot");
+    drop(conn);
+
+    // ── Plain run: SVG written, no text on stdout ──
+    let svg_path = temp.path().join("out.svg");
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow-chart")
+            .arg("--months")
+            .arg("4")
+            .arg("--output")
+            .arg(&svg_path),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    let svg = fs::read_to_string(&svg_path).expect("svg file exists");
+    assert!(svg.starts_with("<svg"), "SVG should open with <svg");
+    assert!(svg.ends_with("</svg>"), "SVG should close with </svg>");
+    assert!(svg.contains("Evolução de caixa"), "expected title");
+    assert!(svg.contains("Saldo final do mês"), "expected legend");
+    assert!(svg.contains("Entradas"), "expected entradas legend");
+    assert!(svg.contains("Saídas"), "expected saidas legend");
+    // No forecast overlay
+    assert!(
+        !svg.contains("Forecast"),
+        "no --forecast → no forecast legend"
+    );
+
+    // ── --text mode: sparkline shows up on stdout ──
+    let svg_path2 = temp.path().join("out2.svg");
+    let stdout = envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow-chart")
+            .arg("--months")
+            .arg("4")
+            .arg("--output")
+            .arg(&svg_path2)
+            .arg("--text"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let stdout = String::from_utf8(stdout).expect("utf8 stdout");
+    assert!(stdout.contains("SVG gravado"));
+    assert!(stdout.contains("Evolução de caixa"));
+    assert!(stdout.contains("Saldo"));
+    assert!(stdout.contains("Entradas"));
+    assert!(stdout.contains("Saídas"));
+
+    // ── --forecast: dashed overlay shows up in SVG ──
+    // Seed an active forecast in the current month.
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO forecast (
+            forecast_id, due_date, description, amount, category_id,
+            account_id, status, recurrence, actor_id, idempotency_key,
+            metadata_json, created_at, updated_at
+         ) VALUES (
+            'fc-in', ?1, 'Salario previsto', '3000.00', NULL,
+            'chk', 'ativo', NULL, 'test-actor', 'fc-in-key',
+            '{}', '2025-01-01T12:00:00Z', '2025-01-01T12:00:00Z'
+         )",
+        [today.format("%Y-%m-%d").to_string()],
+    )
+    .expect("insert forecast");
+    conn.execute(
+        "INSERT INTO forecast (
+            forecast_id, due_date, description, amount, category_id,
+            account_id, status, recurrence, actor_id, idempotency_key,
+            metadata_json, created_at, updated_at
+         ) VALUES (
+            'fc-out', ?1, 'Aluguel previsto', '-1500.00', NULL,
+            'chk', 'ativo', NULL, 'test-actor', 'fc-out-key',
+            '{}', '2025-01-01T12:00:00Z', '2025-01-01T12:00:00Z'
+         )",
+        [today.format("%Y-%m-%d").to_string()],
+    )
+    .expect("insert forecast");
+    drop(conn);
+
+    let svg_path3 = temp.path().join("out3.svg");
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow-chart")
+            .arg("--months")
+            .arg("4")
+            .arg("--output")
+            .arg(&svg_path3)
+            .arg("--forecast"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    let svg3 = fs::read_to_string(&svg_path3).expect("svg file exists");
+    assert!(
+        svg3.contains("stroke-dasharray"),
+        "--forecast → dashed lines in SVG"
+    );
+    assert!(svg3.contains("Forecast entradas"));
+    assert!(svg3.contains("Forecast saídas"));
+
+    // ── --no-svg without --text should fail ──
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow-chart")
+            .arg("--no-svg"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure();
+}
