@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/feliperun/finance-os/compare/v2.1.0...v2.2.0) (2026-05-24)
+
+
+### Features
+
+* **report:** add detailed cashflow forecast TUI ([ade6d34](https://github.com/feliperun/finance-os/commit/ade6d34f36f55c5e9df41b85f65e9a5fa2161ce7))
+
 ## [2.1.0](https://github.com/feliperun/finance-os/compare/v2.0.0...v2.1.0) (2026-05-24)
 
 
