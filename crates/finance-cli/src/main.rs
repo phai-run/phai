@@ -11,8 +11,8 @@ use finance_core::legacy::load_legacy_bundle;
 use finance_core::migrations::run_migrations;
 use finance_core::models::{
     decimal_from_str, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
-    CardClosedTransactionRow, CategoryBudgetRecord, CategoryRecord, ForecastRecord, RuleRecord,
-    TransactionRecord,
+    CardClosedTransactionRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, ForecastRecord,
+    ForecastVsActualRow, RuleRecord, TransactionRecord,
 };
 use finance_core::pluggy::{sync_pluggy, SyncPluggyParams};
 use finance_core::rules::{apply_rules_with_facts, compile_rules};
@@ -269,12 +269,14 @@ enum ReportCommand {
     )]
     MonthlySpend(MonthlySpendArgs),
     #[command(
-        about = "cash-basis monthly cashflow for checking accounts: saldo inicial, entradas, saídas, saldo final",
+        about = "cash-basis monthly cashflow for checking accounts, with optional details and forecast",
         long_about = "Single-month cash-basis summary restricted to checking accounts \
                       (account_type='checking'). Shows opening balance (anchored on the latest \
                       Pluggy snapshot ≤ last day of the previous month), inflows, outflows, and \
                       closing balance. Credit card transactions are intentionally excluded — only \
-                      the bill payment on the checking account counts as an outflow. \
+                      the bill payment on the checking account counts as an outflow. Use \
+                      --details to replace paid-card bill payments with bill components, and \
+                      --forecast to add remaining forecast values for month-end simulation. \
                       Defaults to the current month when --month is omitted. \
                       WhatsApp-friendly by default; pass --raw for JSON."
     )]
@@ -467,6 +469,15 @@ struct CashflowArgs {
     /// Target month in YYYY-MM format (e.g. 2024-11). Defaults to the current month.
     #[arg(long)]
     month: Option<String>,
+    /// Show income and expense details grouped by category.
+    #[arg(long)]
+    details: bool,
+    /// Add remaining forecast amounts to simulate month-end cashflow.
+    #[arg(long)]
+    forecast: bool,
+    /// Open an interactive terminal dashboard. Implies `--details` in TTY sessions.
+    #[arg(long)]
+    tui: bool,
     /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
     #[arg(long)]
     raw: bool,
@@ -977,6 +988,82 @@ struct ScenarioOutput {
     projected_net: Decimal,
     projected_cash_after_card_carry: Decimal,
     looks_ok_after_card_carry: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CashflowDetailItem {
+    description: String,
+    amount: Decimal,
+    category_id: Option<String>,
+    account_id: Option<String>,
+    transaction_id: Option<String>,
+    transaction_date: Option<NaiveDate>,
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CashflowCategoryGroup {
+    category_id: String,
+    subtotal: Decimal,
+    transactions: usize,
+    items: Vec<CashflowDetailItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CashflowCardBillDetail {
+    account_id: String,
+    payment_transaction_id: Option<String>,
+    payment_date: Option<NaiveDate>,
+    paid_amount: Decimal,
+    bill_total: Decimal,
+    installments: CashflowCategoryGroup,
+    subscriptions: CashflowCategoryGroup,
+    other_categories: Vec<CashflowCategoryGroup>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CashflowDetailSections {
+    income: Vec<CashflowCategoryGroup>,
+    expenses: Vec<CashflowCategoryGroup>,
+    card_bills: Vec<CashflowCardBillDetail>,
+    forecast: Vec<CashflowCategoryGroup>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CashflowAccountBalance {
+    account_id: String,
+    owner: String,
+    label: String,
+    balance: Option<Decimal>,
+    snapshot_date: NaiveDate,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CashflowCardSummary {
+    total: Decimal,
+    paid_on: Vec<NaiveDate>,
+    installments_total: Decimal,
+    installment_transactions: usize,
+    installments_released_this_month: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CashflowMonthReport {
+    month_ref: String,
+    actual_summary: CashflowRow,
+    forecast_summary: Option<CashflowRow>,
+    summary: CashflowRow,
+    account_balances: Vec<CashflowAccountBalance>,
+    previous_details: Option<CashflowDetailSections>,
+    card_summary: CashflowCardSummary,
+    details: Option<CashflowDetailSections>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3575,18 +3662,967 @@ async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()> {
     cashflow_chart::report_cashflow_chart(args).await
 }
 
+fn month_bounds(month_ref: &str) -> Result<(NaiveDate, NaiveDate)> {
+    let start = parse_month_ref(month_ref)?;
+    let next = shift_month(start, 1)?;
+    let end = next
+        .checked_sub_signed(Duration::days(1))
+        .context("Falha ao calcular fim do mês")?;
+    Ok((start, end))
+}
+
+fn combine_cashflow_rows(month_ref: &str, left: &CashflowRow, right: &CashflowRow) -> CashflowRow {
+    CashflowRow {
+        month_ref: month_ref.to_string(),
+        income: left.income + right.income,
+        expenses: left.expenses + right.expenses,
+        expense_reduction: left.expense_reduction + right.expense_reduction,
+        net: left.net + right.net,
+        opening_balance: left.opening_balance,
+        closing_balance: left.closing_balance.map(|balance| balance + right.net),
+    }
+}
+
+fn summarize_forecast_groups(month_ref: &str, forecast: &[CashflowCategoryGroup]) -> CashflowRow {
+    let mut income = Decimal::ZERO;
+    let mut expenses = Decimal::ZERO;
+    for group in forecast {
+        if group.subtotal >= Decimal::ZERO {
+            income += group.subtotal;
+        } else {
+            expenses += -group.subtotal;
+        }
+    }
+    CashflowRow {
+        month_ref: month_ref.to_string(),
+        income,
+        expenses,
+        expense_reduction: Decimal::ZERO,
+        net: income - expenses,
+        opening_balance: None,
+        closing_balance: None,
+    }
+}
+
+fn cashflow_category_id(category_id: Option<&str>) -> String {
+    category_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("sem-categoria")
+        .to_string()
+}
+
+fn cashflow_transaction_description(tx: &TransactionRecord) -> String {
+    tx.display_description().trim().to_string()
+}
+
+fn add_cashflow_group_item(
+    groups: &mut BTreeMap<String, CashflowCategoryGroup>,
+    category_id: String,
+    item: CashflowDetailItem,
+) {
+    let entry = groups
+        .entry(category_id.clone())
+        .or_insert_with(|| CashflowCategoryGroup {
+            category_id,
+            subtotal: Decimal::ZERO,
+            transactions: 0,
+            items: Vec::new(),
+        });
+    entry.subtotal += item.amount;
+    entry.transactions += 1;
+    entry.items.push(item);
+}
+
+fn sorted_cashflow_groups(
+    groups: BTreeMap<String, CashflowCategoryGroup>,
+) -> Vec<CashflowCategoryGroup> {
+    let mut rows = groups.into_values().collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        b.subtotal
+            .abs()
+            .cmp(&a.subtotal.abs())
+            .then_with(|| a.category_id.cmp(&b.category_id))
+    });
+    for row in &mut rows {
+        row.items.sort_by(|a, b| {
+            b.amount
+                .abs()
+                .cmp(&a.amount.abs())
+                .then_with(|| a.description.cmp(&b.description))
+        });
+    }
+    rows
+}
+
+fn cashflow_item_from_transaction(tx: &TransactionRecord, source: &str) -> CashflowDetailItem {
+    CashflowDetailItem {
+        description: cashflow_transaction_description(tx),
+        amount: tx.amount,
+        category_id: tx.category_id.clone(),
+        account_id: tx.account_id.clone(),
+        transaction_id: Some(tx.transaction_id.clone()),
+        transaction_date: Some(tx.transaction_date),
+        source: source.to_string(),
+    }
+}
+
+fn is_credit_card_payment_transaction(tx: &TransactionRecord) -> bool {
+    if tx.amount >= Decimal::ZERO {
+        return false;
+    }
+    if tx.category_id.as_deref().is_some_and(|category| {
+        category.contains("credit-card-payment") || category.contains("pagamento-fatura")
+    }) {
+        return true;
+    }
+    let description = format!(
+        "{} {} {}",
+        tx.raw_description,
+        tx.description.as_deref().unwrap_or_default(),
+        tx.merchant_name.as_deref().unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    description.contains("pagamento de fatura")
+        || description.contains("pagamento cart")
+        || description.contains("pagamento de cart")
+        || description.contains("nubank pagamento")
+}
+
+fn card_cycle_ref_for(date: NaiveDate, closing_day: Option<u32>) -> Result<String> {
+    match closing_day {
+        Some(day) if date.day() >= day => Ok(month_ref_for(shift_month(
+            NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+                .context("Falha ao calcular mês da transação")?,
+            1,
+        )?)),
+        _ => Ok(month_ref_for(
+            NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+                .context("Falha ao calcular mês da transação")?,
+        )),
+    }
+}
+
+fn card_row_from_transaction(tx: &TransactionRecord, month_ref: &str) -> CardClosedTransactionRow {
+    CardClosedTransactionRow {
+        month_ref: month_ref.to_string(),
+        account_id: tx.account_id.clone().unwrap_or_default(),
+        transaction_id: tx.transaction_id.clone(),
+        transaction_date: tx.transaction_date,
+        label: tx.raw_description.clone(),
+        description: cashflow_transaction_description(tx),
+        amount: tx.amount,
+        category_id: tx.category_id.clone(),
+        payment_status: tx.payment_status.clone(),
+        metadata_json: tx.metadata_json.clone(),
+    }
+}
+
+fn card_cashflow_item(row: &CardClosedTransactionRow, source: &str) -> CashflowDetailItem {
+    CashflowDetailItem {
+        description: row.description.clone(),
+        amount: row.amount,
+        category_id: row.category_id.clone(),
+        account_id: Some(row.account_id.clone()),
+        transaction_id: Some(row.transaction_id.clone()),
+        transaction_date: Some(row.transaction_date),
+        source: source.to_string(),
+    }
+}
+
+fn is_card_side_bill_payment(tx: &TransactionRecord) -> bool {
+    tx.amount > Decimal::ZERO
+        && tx
+            .raw_description
+            .to_ascii_lowercase()
+            .contains("pagamento recebido")
+}
+
+fn cashflow_progress(enabled: bool, message: &str) {
+    if enabled && io::stderr().is_terminal() {
+        let _ = writeln!(io::stderr(), "{} {message}", dim("cashflow"));
+    }
+}
+
+fn ansi(code: &str, value: impl AsRef<str>) -> String {
+    format!("\x1b[{code}m{}\x1b[0m", value.as_ref())
+}
+
+fn green(value: impl AsRef<str>) -> String {
+    ansi("32", value)
+}
+
+fn red(value: impl AsRef<str>) -> String {
+    ansi("31", value)
+}
+
+fn yellow(value: impl AsRef<str>) -> String {
+    ansi("33", value)
+}
+
+fn cyan(value: impl AsRef<str>) -> String {
+    ansi("36", value)
+}
+
+fn dim(value: impl AsRef<str>) -> String {
+    ansi("2", value)
+}
+
+fn bold_terminal(value: impl AsRef<str>) -> String {
+    ansi("1", value)
+}
+
+fn signed_money_color(value: Decimal) -> String {
+    let formatted = human_format::brl_signed(value);
+    if value < Decimal::ZERO {
+        red(formatted)
+    } else if value > Decimal::ZERO {
+        green(formatted)
+    } else {
+        formatted
+    }
+}
+
+fn unsigned_money_color(value: Decimal, positive: bool) -> String {
+    let formatted = human_format::brl(value);
+    if value == Decimal::ZERO {
+        formatted
+    } else if positive {
+        green(formatted)
+    } else {
+        red(formatted)
+    }
+}
+
+fn category_family_key(category_id: &str) -> String {
+    human_format::category_family(Some(category_id)).unwrap_or_else(|| "sem-categoria".to_string())
+}
+
+fn category_subcategory_key(category_id: &str) -> String {
+    category_id
+        .split_once(':')
+        .map(|(_, sub)| sub.to_string())
+        .unwrap_or_else(|| {
+            let family = category_family_key(category_id);
+            if category_id == family {
+                "geral".to_string()
+            } else {
+                category_id.to_string()
+            }
+        })
+}
+
+fn display_token(value: &str) -> String {
+    if value == "geral" {
+        "Geral".to_string()
+    } else {
+        value.replace([':', '-'], " ")
+    }
+}
+
+fn is_income_category(category_id: Option<&str>) -> bool {
+    let family = category_id.and_then(|id| human_format::category_family(Some(id)));
+    matches!(family.as_deref(), Some("receitas" | "salario"))
+        || category_id.is_some_and(|id| {
+            let id = id.to_ascii_lowercase();
+            id.contains("receita") || id.contains("income") || id.contains("salary")
+        })
+}
+
+struct CashflowCardBillContext<'a> {
+    store: &'a dyn FinanceStore,
+    month_ref: &'a str,
+    month_start: NaiveDate,
+    month_end: NaiveDate,
+    account_types: &'a BTreeMap<String, String>,
+    accounts: &'a [AccountRecord],
+    internal_categories: &'a BTreeSet<String>,
+}
+
+struct CashflowActualParts {
+    income_groups: BTreeMap<String, CashflowCategoryGroup>,
+    expense_groups: BTreeMap<String, CashflowCategoryGroup>,
+    card_payments: Vec<TransactionRecord>,
+}
+
+fn collect_cashflow_actual_parts(
+    rows: Vec<TransactionRecord>,
+    account_types: &BTreeMap<String, String>,
+    internal_categories: &BTreeSet<String>,
+) -> CashflowActualParts {
+    let mut income_groups = BTreeMap::<String, CashflowCategoryGroup>::new();
+    let mut expense_groups = BTreeMap::<String, CashflowCategoryGroup>::new();
+    let mut card_payments = Vec::<TransactionRecord>::new();
+
+    for tx in rows {
+        if is_credit_card_payment_transaction(&tx) {
+            card_payments.push(tx);
+            continue;
+        }
+        if skip_cashflow_actual_transaction(&tx, account_types, internal_categories) {
+            continue;
+        }
+
+        add_cashflow_actual_transaction(&mut income_groups, &mut expense_groups, &tx);
+    }
+
+    CashflowActualParts {
+        income_groups,
+        expense_groups,
+        card_payments,
+    }
+}
+
+fn skip_cashflow_actual_transaction(
+    tx: &TransactionRecord,
+    account_types: &BTreeMap<String, String>,
+    internal_categories: &BTreeSet<String>,
+) -> bool {
+    cashflow_account_type(tx, account_types) == Some("credit")
+        || tx
+            .category_id
+            .as_deref()
+            .is_some_and(|category| internal_categories.contains(category))
+}
+
+fn cashflow_account_type<'a>(
+    tx: &TransactionRecord,
+    account_types: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    tx.account_id
+        .as_deref()
+        .and_then(|id| account_types.get(id))
+        .map(String::as_str)
+}
+
+fn add_cashflow_actual_transaction(
+    income_groups: &mut BTreeMap<String, CashflowCategoryGroup>,
+    expense_groups: &mut BTreeMap<String, CashflowCategoryGroup>,
+    tx: &TransactionRecord,
+) {
+    let category = cashflow_category_id(tx.category_id.as_deref());
+    let item = cashflow_item_from_transaction(tx, "transaction");
+    if tx.amount >= Decimal::ZERO {
+        add_cashflow_group_item(income_groups, category, item);
+    } else {
+        add_cashflow_group_item(expense_groups, category, item);
+    }
+}
+
+async fn cashflow_card_bill_rows(
+    context: &CashflowCardBillContext<'_>,
+) -> Result<BTreeMap<(String, String), Vec<CardClosedTransactionRow>>> {
+    let closing_days = cashflow_card_closing_days(context.accounts);
+    let window_start = shift_month(context.month_start, -2)?;
+    let credit_rows = context
+        .store
+        .effective_transactions_window(window_start, context.month_end)
+        .await?;
+
+    let mut bills = BTreeMap::<(String, String), Vec<CardClosedTransactionRow>>::new();
+    for tx in credit_rows {
+        let Some(account_id) = cashflow_bill_credit_account(context, &tx) else {
+            continue;
+        };
+        let cycle_ref =
+            card_cycle_ref_for(tx.transaction_date, closing_days.get(account_id).copied())?;
+        if cycle_ref == context.month_ref {
+            bills
+                .entry((account_id.to_string(), cycle_ref.clone()))
+                .or_default()
+                .push(card_row_from_transaction(&tx, &cycle_ref));
+        }
+    }
+    Ok(bills)
+}
+
+fn cashflow_card_closing_days(accounts: &[AccountRecord]) -> BTreeMap<String, u32> {
+    accounts
+        .iter()
+        .filter_map(|account| {
+            parse_closing_day(&account.metadata_json).map(|day| (account.account_id.clone(), day))
+        })
+        .collect()
+}
+
+fn cashflow_bill_credit_account<'a>(
+    context: &CashflowCardBillContext<'_>,
+    tx: &'a TransactionRecord,
+) -> Option<&'a str> {
+    let account_id = tx.account_id.as_deref()?;
+    if context.account_types.get(account_id).map(String::as_str) != Some("credit") {
+        return None;
+    }
+    if tx
+        .category_id
+        .as_deref()
+        .is_some_and(|category| context.internal_categories.contains(category))
+        || is_card_side_bill_payment(tx)
+    {
+        return None;
+    }
+    Some(account_id)
+}
+
+fn matched_cashflow_card_payment<'a>(
+    bill_account_id: &str,
+    bill_total: Decimal,
+    month_start: NaiveDate,
+    card_payments: &'a [TransactionRecord],
+    used_payments: &BTreeSet<String>,
+    account_owners: &BTreeMap<String, String>,
+) -> Option<&'a TransactionRecord> {
+    let bill_owner = account_owners
+        .get(bill_account_id)
+        .map(String::as_str)
+        .unwrap_or_default();
+    let tolerance = bill_total * Decimal::new(25, 2);
+    card_payments
+        .iter()
+        .filter(|payment| !used_payments.contains(&payment.transaction_id))
+        .filter(|payment| {
+            let Some(payment_account_id) = payment.account_id.as_deref() else {
+                return bill_owner.is_empty();
+            };
+            let payment_owner = account_owners
+                .get(payment_account_id)
+                .map(String::as_str)
+                .unwrap_or_default();
+            bill_owner.is_empty() || payment_owner.is_empty() || bill_owner == payment_owner
+        })
+        .filter(|payment| {
+            let paid = payment.amount.abs();
+            paid >= bill_total - tolerance && paid <= bill_total + tolerance
+        })
+        .min_by_key(|payment| {
+            (payment.transaction_date - month_start)
+                .num_days()
+                .unsigned_abs()
+        })
+}
+
+fn cashflow_card_bill_detail(
+    account_id: String,
+    rows: Vec<CardClosedTransactionRow>,
+    payment: &TransactionRecord,
+) -> CashflowCardBillDetail {
+    let mut installment_items = Vec::new();
+    let mut subscription_items = Vec::new();
+    let mut other_groups = BTreeMap::<String, CashflowCategoryGroup>::new();
+
+    for row in &rows {
+        if detect_installment_marker(row).is_some() {
+            installment_items.push(card_cashflow_item(row, "card_installment"));
+        } else if is_subscription_row(row) {
+            subscription_items.push(card_cashflow_item(row, "card_subscription"));
+        } else {
+            add_cashflow_group_item(
+                &mut other_groups,
+                cashflow_category_id(row.category_id.as_deref()),
+                card_cashflow_item(row, "card_category"),
+            );
+        }
+    }
+
+    CashflowCardBillDetail {
+        account_id,
+        payment_transaction_id: Some(payment.transaction_id.clone()),
+        payment_date: Some(payment.transaction_date),
+        paid_amount: payment.amount.abs(),
+        bill_total: -rows.iter().map(|row| row.amount).sum::<Decimal>(),
+        installments: CashflowCategoryGroup {
+            category_id: "compras-parceladas".to_string(),
+            subtotal: installment_items.iter().map(|item| item.amount).sum(),
+            transactions: installment_items.len(),
+            items: installment_items,
+        },
+        subscriptions: CashflowCategoryGroup {
+            category_id: "assinaturas".to_string(),
+            subtotal: subscription_items.iter().map(|item| item.amount).sum(),
+            transactions: subscription_items.len(),
+            items: subscription_items,
+        },
+        other_categories: sorted_cashflow_groups(other_groups),
+    }
+}
+
+async fn cashflow_card_bill_details(
+    context: CashflowCardBillContext<'_>,
+    card_payments: &[TransactionRecord],
+) -> Result<Vec<CashflowCardBillDetail>> {
+    if card_payments.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bills = cashflow_card_bill_rows(&context).await?;
+    let account_owners = context
+        .accounts
+        .iter()
+        .map(|account| (account.account_id.clone(), account.owner.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut used_payments = BTreeSet::<String>::new();
+    let mut out = Vec::new();
+    for ((account_id, _cycle), rows) in bills {
+        let bill_total = -rows.iter().map(|row| row.amount).sum::<Decimal>();
+        if bill_total <= Decimal::ZERO {
+            continue;
+        }
+        let Some(payment) = matched_cashflow_card_payment(
+            &account_id,
+            bill_total,
+            context.month_start,
+            card_payments,
+            &used_payments,
+            &account_owners,
+        ) else {
+            continue;
+        };
+        used_payments.insert(payment.transaction_id.clone());
+        out.push(cashflow_card_bill_detail(account_id, rows, payment));
+    }
+
+    out.sort_by(|a, b| {
+        b.bill_total
+            .cmp(&a.bill_total)
+            .then_with(|| a.account_id.cmp(&b.account_id))
+    });
+    Ok(out)
+}
+
+fn card_bill_expense_groups(card_bills: &[CashflowCardBillDetail]) -> Vec<CashflowCategoryGroup> {
+    let mut groups = BTreeMap::<String, CashflowCategoryGroup>::new();
+    for bill in card_bills {
+        add_card_bill_itemized_groups(&mut groups, bill);
+        add_card_bill_category_groups(&mut groups, bill);
+    }
+    sorted_cashflow_groups(groups)
+}
+
+fn add_card_bill_itemized_groups(
+    groups: &mut BTreeMap<String, CashflowCategoryGroup>,
+    bill: &CashflowCardBillDetail,
+) {
+    for group in [&bill.installments, &bill.subscriptions] {
+        if group.transactions == 0 {
+            continue;
+        }
+        for item in &group.items {
+            add_cashflow_group_item(groups, group.category_id.clone(), item.clone());
+        }
+    }
+}
+
+fn add_card_bill_category_groups(
+    groups: &mut BTreeMap<String, CashflowCategoryGroup>,
+    bill: &CashflowCardBillDetail,
+) {
+    for group in &bill.other_categories {
+        let entry =
+            groups
+                .entry(group.category_id.clone())
+                .or_insert_with(|| CashflowCategoryGroup {
+                    category_id: group.category_id.clone(),
+                    subtotal: Decimal::ZERO,
+                    transactions: 0,
+                    items: Vec::new(),
+                });
+        entry.subtotal += group.subtotal;
+        entry.transactions += group.transactions;
+    }
+}
+
+fn installment_marker_is_final(marker: &str) -> bool {
+    let Some((left, right)) = marker.split_once('/') else {
+        return false;
+    };
+    let Ok(current) = left.parse::<u32>() else {
+        return false;
+    };
+    let Ok(total) = right.parse::<u32>() else {
+        return false;
+    };
+    current > 0 && current == total
+}
+
+fn cashflow_card_summary(card_bills: &[CashflowCardBillDetail]) -> CashflowCardSummary {
+    CashflowCardSummary {
+        total: cashflow_card_summary_total(card_bills),
+        paid_on: cashflow_card_paid_dates(card_bills),
+        installments_total: card_bills
+            .iter()
+            .map(|bill| bill.installments.subtotal.abs())
+            .sum(),
+        installment_transactions: card_bills
+            .iter()
+            .map(|bill| bill.installments.transactions)
+            .sum(),
+        installments_released_this_month: cashflow_installments_released_this_month(card_bills),
+    }
+}
+
+fn cashflow_card_paid_dates(card_bills: &[CashflowCardBillDetail]) -> Vec<NaiveDate> {
+    card_bills
+        .iter()
+        .filter_map(|bill| bill.payment_date)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn cashflow_installments_released_this_month(card_bills: &[CashflowCardBillDetail]) -> Decimal {
+    card_bills
+        .iter()
+        .flat_map(|bill| bill.installments.items.iter())
+        .filter(|item| cashflow_installment_item_is_final(item))
+        .map(|item| item.amount.abs())
+        .sum()
+}
+
+fn cashflow_installment_item_is_final(item: &CashflowDetailItem) -> bool {
+    item.description.split_whitespace().any(|token| {
+        installment_marker_is_final(token.trim_matches(|c: char| !c.is_ascii_digit() && c != '/'))
+    })
+}
+
+fn cashflow_card_summary_total(card_bills: &[CashflowCardBillDetail]) -> Decimal {
+    let paid_total: Decimal = card_bills
+        .iter()
+        .map(|bill| bill.paid_amount)
+        .filter(|amount| *amount > Decimal::ZERO)
+        .sum();
+    if paid_total > Decimal::ZERO {
+        paid_total
+    } else {
+        card_bills.iter().map(|bill| bill.bill_total).sum()
+    }
+}
+
+fn cashflow_account_balances(
+    accounts: &[AccountRecord],
+    snapshots: &[finance_core::models::AccountSnapshotRecord],
+) -> Vec<CashflowAccountBalance> {
+    let account_by_id: BTreeMap<&str, &AccountRecord> = accounts
+        .iter()
+        .filter(|account| account.account_type == "checking")
+        .map(|account| (account.account_id.as_str(), account))
+        .collect();
+    let mut balances = snapshots
+        .iter()
+        .filter_map(|snapshot| {
+            let account = account_by_id.get(snapshot.account_id.as_str())?;
+            Some(CashflowAccountBalance {
+                account_id: account.account_id.clone(),
+                owner: account.owner.clone(),
+                label: if account.label.is_empty() {
+                    account.account_id.clone()
+                } else {
+                    account.label.clone()
+                },
+                balance: snapshot.balance,
+                snapshot_date: snapshot.snapshot_date,
+            })
+        })
+        .collect::<Vec<_>>();
+    balances.sort_by(|a, b| {
+        a.owner
+            .cmp(&b.owner)
+            .then_with(|| a.label.cmp(&b.label))
+            .then_with(|| a.account_id.cmp(&b.account_id))
+    });
+    balances
+}
+
+fn empty_cashflow_card_summary() -> CashflowCardSummary {
+    CashflowCardSummary {
+        total: Decimal::ZERO,
+        paid_on: Vec::new(),
+        installments_total: Decimal::ZERO,
+        installment_transactions: 0,
+        installments_released_this_month: Decimal::ZERO,
+    }
+}
+
+async fn cashflow_forecast_groups(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    include_forecast: bool,
+) -> Result<Vec<CashflowCategoryGroup>> {
+    if !include_forecast {
+        return Ok(Vec::new());
+    }
+
+    let mut groups = BTreeMap::<String, CashflowCategoryGroup>::new();
+    for row in store.forecast_vs_actual(Some(month_ref)).await? {
+        let Some((category, item)) = cashflow_forecast_group_item(row) else {
+            continue;
+        };
+        add_cashflow_group_item(&mut groups, category, item);
+    }
+    Ok(sorted_cashflow_groups(groups))
+}
+
+fn cashflow_forecast_group_item(row: ForecastVsActualRow) -> Option<(String, CashflowDetailItem)> {
+    if inactive_forecast_status(&row.status) {
+        return None;
+    }
+    let remaining = row.forecast_amount.abs() - row.actual_amount.abs();
+    if remaining <= Decimal::ZERO {
+        return None;
+    }
+    let category = cashflow_category_id(row.category_id.as_deref());
+    let amount = signed_forecast_remaining(row.category_id.as_deref(), remaining);
+    Some((
+        category,
+        CashflowDetailItem {
+            description: row.description,
+            amount,
+            category_id: row.category_id,
+            account_id: row.account_id,
+            transaction_id: Some(row.forecast_id),
+            transaction_date: row.due_date,
+            source: "forecast".to_string(),
+        },
+    ))
+}
+
+fn inactive_forecast_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "cancelled" | "canceled" | "inactive" | "deleted"
+    )
+}
+
+fn signed_forecast_remaining(category_id: Option<&str>, remaining: Decimal) -> Decimal {
+    if is_income_category(category_id) {
+        remaining
+    } else {
+        -remaining
+    }
+}
+
+async fn build_cashflow_month_report(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    include_details: bool,
+    include_forecast: bool,
+    actual_summary: CashflowRow,
+) -> Result<CashflowMonthReport> {
+    let accounts = store.get_accounts().await?;
+    let snapshots = store.latest_account_snapshots().await?;
+    let details =
+        cashflow_details_for_report(store, month_ref, include_details, include_forecast).await?;
+    let forecast_summary = cashflow_report_forecast_summary(month_ref, include_forecast, &details);
+    let summary = cashflow_report_summary(month_ref, &actual_summary, forecast_summary.as_ref());
+    let previous_details = cashflow_previous_details(store, month_ref, include_details).await?;
+    let card_summary = details
+        .as_ref()
+        .map(|d| cashflow_card_summary(&d.card_bills))
+        .unwrap_or_else(empty_cashflow_card_summary);
+
+    Ok(CashflowMonthReport {
+        month_ref: month_ref.to_string(),
+        actual_summary,
+        forecast_summary,
+        summary,
+        account_balances: cashflow_account_balances(&accounts, &snapshots),
+        previous_details,
+        card_summary,
+        details: include_details.then_some(details).flatten(),
+    })
+}
+
+async fn cashflow_details_for_report(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    include_details: bool,
+    include_forecast: bool,
+) -> Result<Option<CashflowDetailSections>> {
+    if include_details || include_forecast {
+        Ok(Some(
+            build_cashflow_detail_sections(store, month_ref, include_forecast).await?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn cashflow_report_forecast_summary(
+    month_ref: &str,
+    include_forecast: bool,
+    details: &Option<CashflowDetailSections>,
+) -> Option<CashflowRow> {
+    let forecast = details
+        .as_ref()
+        .map(|d| d.forecast.as_slice())
+        .unwrap_or(&[]);
+    include_forecast.then(|| summarize_forecast_groups(month_ref, forecast))
+}
+
+fn cashflow_report_summary(
+    month_ref: &str,
+    actual_summary: &CashflowRow,
+    forecast_summary: Option<&CashflowRow>,
+) -> CashflowRow {
+    forecast_summary
+        .map(|forecast_row| combine_cashflow_rows(month_ref, actual_summary, forecast_row))
+        .unwrap_or_else(|| actual_summary.clone())
+}
+
+async fn cashflow_previous_details(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    include_details: bool,
+) -> Result<Option<CashflowDetailSections>> {
+    if !include_details {
+        return Ok(None);
+    }
+    let previous_month = month_ref_for(shift_month(parse_month_ref(month_ref)?, -1)?);
+    Ok(Some(
+        build_cashflow_detail_sections(store, &previous_month, false).await?,
+    ))
+}
+
+async fn build_cashflow_detail_sections(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    include_forecast: bool,
+) -> Result<CashflowDetailSections> {
+    let (month_start, month_end) = month_bounds(month_ref)?;
+    let accounts = store.get_accounts().await?;
+    let account_types = accounts
+        .iter()
+        .map(|account| (account.account_id.clone(), account.account_type.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let internal_categories = store.internal_categories().await?;
+    let actual_rows = store
+        .effective_transactions_window(month_start, month_end)
+        .await?;
+    let mut actual_parts =
+        collect_cashflow_actual_parts(actual_rows, &account_types, &internal_categories);
+
+    let card_bills = cashflow_card_bill_details(
+        CashflowCardBillContext {
+            store,
+            month_ref,
+            month_start,
+            month_end,
+            account_types: &account_types,
+            accounts: &accounts,
+            internal_categories: &internal_categories,
+        },
+        &actual_parts.card_payments,
+    )
+    .await?;
+    merge_card_bill_expense_groups(&mut actual_parts, &card_bills);
+
+    let income = sorted_cashflow_groups(actual_parts.income_groups);
+    let expenses = sorted_cashflow_groups(actual_parts.expense_groups);
+    let forecast = cashflow_forecast_groups(store, month_ref, include_forecast).await?;
+
+    Ok(CashflowDetailSections {
+        income,
+        expenses,
+        card_bills,
+        forecast,
+    })
+}
+
+fn merge_card_bill_expense_groups(
+    actual_parts: &mut CashflowActualParts,
+    card_bills: &[CashflowCardBillDetail],
+) {
+    for group in card_bill_expense_groups(card_bills) {
+        let entry = actual_parts
+            .expense_groups
+            .entry(group.category_id.clone())
+            .or_insert_with(|| CashflowCategoryGroup {
+                category_id: group.category_id.clone(),
+                subtotal: Decimal::ZERO,
+                transactions: 0,
+                items: Vec::new(),
+            });
+        entry.subtotal += group.subtotal;
+        entry.transactions += group.transactions;
+        entry.items.extend(group.items);
+    }
+}
+
 async fn report_cashflow(args: CashflowArgs) -> Result<()> {
-    let (_, config) = load_config().await?;
-    let store = open_store(&config).await?;
-    run_migrations(store.as_ref(), &config).await?;
+    let store = migrated_finance_store().await?;
 
     // Default to the current month so a bare `finance report cashflow`
     // answers "como tô agora?" without arguments.
     let today = chrono::Local::now().date_naive();
+    let month_ref = cashflow_month_arg(&args, today)?;
+    let effective_details = cashflow_effective_details(&args);
+    let progress = cashflow_should_show_progress(&args, effective_details);
+
+    let (row, accounts_considered, snapshot_anchor) =
+        cashflow_basic_summary(store.as_ref(), &month_ref, today, progress).await?;
+
+    if cashflow_uses_month_report(&args, effective_details) {
+        return report_cashflow_detailed(
+            store.as_ref(),
+            &args,
+            &month_ref,
+            effective_details,
+            progress,
+            row,
+        )
+        .await;
+    }
+
+    render_basic_cashflow(&args, &row, accounts_considered, snapshot_anchor)?;
+    Ok(())
+}
+
+fn cashflow_effective_details(args: &CashflowArgs) -> bool {
+    args.details || args.tui
+}
+
+fn cashflow_uses_month_report(args: &CashflowArgs, effective_details: bool) -> bool {
+    effective_details || args.forecast
+}
+
+fn cashflow_should_show_progress(args: &CashflowArgs, effective_details: bool) -> bool {
+    !args.structured_output() && cashflow_uses_month_report(args, effective_details)
+}
+
+async fn migrated_finance_store() -> Result<Box<dyn FinanceStore>> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    Ok(store)
+}
+
+fn cashflow_month_arg(args: &CashflowArgs, today: NaiveDate) -> Result<String> {
     let month_ref = args.month.clone().unwrap_or_else(|| month_ref_for(today));
     parse_month_ref(&month_ref)?;
+    Ok(month_ref)
+}
 
-    let row = store.cashflow_month(&month_ref).await?;
+fn render_basic_cashflow(
+    args: &CashflowArgs,
+    row: &CashflowRow,
+    accounts_considered: usize,
+    snapshot_anchor: Option<NaiveDate>,
+) -> Result<()> {
+    if args.structured_output() {
+        print_cashflow_summary_json(row, accounts_considered, snapshot_anchor)
+    } else {
+        print_cashflow_human(row, accounts_considered, snapshot_anchor);
+        Ok(())
+    }
+}
+
+async fn cashflow_basic_summary(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    today: NaiveDate,
+    progress: bool,
+) -> Result<(CashflowRow, usize, Option<NaiveDate>)> {
+    cashflow_progress(progress, "calculando resumo cash-basis");
+    let row = store.cashflow_month(month_ref).await?;
+    cashflow_progress(progress, "carregando saldos das contas correntes");
     let today_balance = store.checking_balance_at(today).await?;
     let snapshot_anchor = today_balance.as_ref().and_then(|b| b.snapshot_anchor_date);
     let accounts_considered = today_balance
@@ -3594,25 +4630,1360 @@ async fn report_cashflow(args: CashflowArgs) -> Result<()> {
         .map(|b| b.accounts_considered)
         .unwrap_or(0);
 
+    Ok((row, accounts_considered, snapshot_anchor))
+}
+
+async fn report_cashflow_detailed(
+    store: &dyn FinanceStore,
+    args: &CashflowArgs,
+    month_ref: &str,
+    effective_details: bool,
+    progress: bool,
+    row: CashflowRow,
+) -> Result<()> {
+    cashflow_progress(progress, "agrupando conta corrente, cartões e forecast");
+    let report =
+        build_cashflow_month_report(store, month_ref, effective_details, args.forecast, row)
+            .await?;
+
     if args.structured_output() {
-        let payload = serde_json::json!({
-            "month_ref": row.month_ref,
-            "opening_balance": row.opening_balance.as_ref().map(|d| d.to_string()),
-            "inflows": row.income.to_string(),
-            "outflows": row.expenses.to_string(),
-            "expense_reduction": row.expense_reduction.to_string(),
-            "closing_balance": row.closing_balance.as_ref().map(|d| d.to_string()),
-            "net": row.net.to_string(),
-            "accounts_considered": accounts_considered,
-            "snapshot_anchor_date": snapshot_anchor,
-            "snapshot_complete": row.opening_balance.is_some() && row.closing_balance.is_some(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
 
-    print_cashflow_human(&row, accounts_considered, snapshot_anchor);
+    if args.tui && io::stdout().is_terminal() {
+        launch_cashflow_tui(&report, args.forecast)?;
+        return Ok(());
+    }
+
+    cashflow_progress(progress, "renderizando visão de terminal");
+    print_cashflow_month_human(&report, effective_details, args.forecast);
     Ok(())
+}
+
+fn print_cashflow_summary_json(
+    row: &CashflowRow,
+    accounts_considered: usize,
+    snapshot_anchor: Option<NaiveDate>,
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "month_ref": row.month_ref,
+        "opening_balance": row.opening_balance.as_ref().map(|d| d.to_string()),
+        "inflows": row.income.to_string(),
+        "outflows": row.expenses.to_string(),
+        "expense_reduction": row.expense_reduction.to_string(),
+        "closing_balance": row.closing_balance.as_ref().map(|d| d.to_string()),
+        "net": row.net.to_string(),
+        "accounts_considered": accounts_considered,
+        "snapshot_anchor_date": snapshot_anchor,
+        "snapshot_complete": row.opening_balance.is_some() && row.closing_balance.is_some(),
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+#[derive(Default)]
+struct CashflowTerminalSubcategory {
+    family: String,
+    subcategory: String,
+    actual: Decimal,
+    forecast: Decimal,
+    previous: Decimal,
+    transactions: usize,
+    forecast_names: BTreeSet<String>,
+}
+
+struct CashflowTerminalFamily {
+    family: String,
+    total: Decimal,
+    forecast: Decimal,
+    previous: Decimal,
+    subcategories: Vec<CashflowTerminalSubcategory>,
+}
+
+fn add_terminal_group<'a>(
+    map: &'a mut BTreeMap<(String, String), CashflowTerminalSubcategory>,
+    group: &CashflowCategoryGroup,
+) -> &'a mut CashflowTerminalSubcategory {
+    let family = category_family_key(&group.category_id);
+    let subcategory = category_subcategory_key(&group.category_id);
+    map.entry((family.clone(), subcategory.clone()))
+        .or_insert_with(|| CashflowTerminalSubcategory {
+            family,
+            subcategory,
+            ..CashflowTerminalSubcategory::default()
+        })
+}
+
+fn add_terminal_actual_group(
+    map: &mut BTreeMap<(String, String), CashflowTerminalSubcategory>,
+    group: &CashflowCategoryGroup,
+) {
+    let entry = add_terminal_group(map, group);
+    entry.actual += group.subtotal;
+    entry.transactions += group.transactions;
+}
+
+fn add_terminal_forecast_group(
+    map: &mut BTreeMap<(String, String), CashflowTerminalSubcategory>,
+    group: &CashflowCategoryGroup,
+) {
+    let entry = add_terminal_group(map, group);
+    entry.forecast += group.subtotal;
+    entry.forecast_names.extend(group.items.iter().map(|item| {
+        human_format::truncate_with_ellipsis(
+            &human_format::short_description(&item.description),
+            24,
+        )
+    }));
+}
+
+fn add_terminal_previous_group(
+    map: &mut BTreeMap<(String, String), CashflowTerminalSubcategory>,
+    group: &CashflowCategoryGroup,
+) {
+    add_terminal_group(map, group).previous += group.subtotal;
+}
+
+fn terminal_families_for(
+    details: &CashflowDetailSections,
+    previous: Option<&CashflowDetailSections>,
+    income: bool,
+) -> Vec<CashflowTerminalFamily> {
+    let map = terminal_subcategory_map(details, previous, income);
+    let mut families = terminal_family_groups(map)
+        .into_iter()
+        .map(|(family, mut subcategories)| {
+            sort_terminal_subcategories(&mut subcategories);
+            cashflow_terminal_family(family, subcategories)
+        })
+        .collect::<Vec<_>>();
+    families.sort_by(|a, b| {
+        b.total
+            .abs()
+            .cmp(&a.total.abs())
+            .then_with(|| a.family.cmp(&b.family))
+    });
+    families
+}
+
+fn terminal_subcategory_map(
+    details: &CashflowDetailSections,
+    previous: Option<&CashflowDetailSections>,
+    income: bool,
+) -> BTreeMap<(String, String), CashflowTerminalSubcategory> {
+    let mut map = BTreeMap::<(String, String), CashflowTerminalSubcategory>::new();
+    add_terminal_actual_groups(&mut map, details, income);
+    add_terminal_forecast_groups(&mut map, details, income);
+    add_terminal_previous_groups(&mut map, previous, income);
+    map
+}
+
+fn terminal_actual_groups(
+    details: &CashflowDetailSections,
+    income: bool,
+) -> &[CashflowCategoryGroup] {
+    if income {
+        details.income.as_slice()
+    } else {
+        details.expenses.as_slice()
+    }
+}
+
+fn add_terminal_actual_groups(
+    map: &mut BTreeMap<(String, String), CashflowTerminalSubcategory>,
+    details: &CashflowDetailSections,
+    income: bool,
+) {
+    for group in terminal_actual_groups(details, income) {
+        add_terminal_actual_group(map, group);
+    }
+}
+
+fn add_terminal_forecast_groups(
+    map: &mut BTreeMap<(String, String), CashflowTerminalSubcategory>,
+    details: &CashflowDetailSections,
+    income: bool,
+) {
+    for group in details
+        .forecast
+        .iter()
+        .filter(|group| (group.subtotal >= Decimal::ZERO) == income)
+    {
+        add_terminal_forecast_group(map, group);
+    }
+}
+
+fn add_terminal_previous_groups(
+    map: &mut BTreeMap<(String, String), CashflowTerminalSubcategory>,
+    previous: Option<&CashflowDetailSections>,
+    income: bool,
+) {
+    let Some(previous) = previous else {
+        return;
+    };
+    for group in terminal_actual_groups(previous, income) {
+        add_terminal_previous_group(map, group);
+    }
+}
+
+fn terminal_family_groups(
+    map: BTreeMap<(String, String), CashflowTerminalSubcategory>,
+) -> BTreeMap<String, Vec<CashflowTerminalSubcategory>> {
+    let mut by_family = BTreeMap::<String, Vec<CashflowTerminalSubcategory>>::new();
+    for subcategory in map.into_values() {
+        if terminal_subcategory_is_empty(&subcategory) {
+            continue;
+        }
+        by_family
+            .entry(subcategory.family.clone())
+            .or_default()
+            .push(subcategory);
+    }
+    by_family
+}
+
+fn terminal_subcategory_is_empty(subcategory: &CashflowTerminalSubcategory) -> bool {
+    subcategory.actual == Decimal::ZERO
+        && subcategory.forecast == Decimal::ZERO
+        && subcategory.previous == Decimal::ZERO
+}
+
+fn sort_terminal_subcategories(subcategories: &mut [CashflowTerminalSubcategory]) {
+    subcategories.sort_by(|a, b| {
+        (b.actual + b.forecast)
+            .abs()
+            .cmp(&(a.actual + a.forecast).abs())
+            .then_with(|| a.subcategory.cmp(&b.subcategory))
+    });
+}
+
+fn cashflow_terminal_family(
+    family: String,
+    subcategories: Vec<CashflowTerminalSubcategory>,
+) -> CashflowTerminalFamily {
+    CashflowTerminalFamily {
+        total: subcategories
+            .iter()
+            .map(|subcategory| subcategory.actual + subcategory.forecast)
+            .sum(),
+        forecast: subcategories
+            .iter()
+            .map(|subcategory| subcategory.forecast)
+            .sum(),
+        previous: subcategories
+            .iter()
+            .map(|subcategory| subcategory.previous)
+            .sum(),
+        family,
+        subcategories,
+    }
+}
+
+fn change_label(current: Decimal, previous: Decimal) -> String {
+    let current_abs = current.abs();
+    let previous_abs = previous.abs();
+    if previous_abs == Decimal::ZERO {
+        return if current_abs == Decimal::ZERO {
+            dim("0%")
+        } else {
+            cyan("novo")
+        };
+    }
+    let delta_pct = (current_abs - previous_abs) / previous_abs * Decimal::from(100u32);
+    let rounded = delta_pct.round_dp(0);
+    let label = format!("{rounded:+}%");
+    if delta_pct > Decimal::ZERO {
+        red(label)
+    } else if delta_pct < Decimal::ZERO {
+        green(label)
+    } else {
+        dim(label)
+    }
+}
+
+fn share_pct(amount: Decimal, total: Decimal) -> i64 {
+    if total == Decimal::ZERO {
+        return 0;
+    }
+    (amount.abs() / total.abs() * Decimal::from(100u32))
+        .round_dp(0)
+        .to_string()
+        .parse::<i64>()
+        .unwrap_or(0)
+}
+
+fn print_terminal_family_section(title: &str, families: &[CashflowTerminalFamily]) {
+    if families.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", bold_terminal(title));
+    for family in families {
+        print_terminal_family(family);
+    }
+}
+
+fn print_terminal_family(family: &CashflowTerminalFamily) {
+    let emoji = human_format::category_emoji(Some(&family.family), Some(family.total));
+    println!(
+        "\n{} {}  {}{}  {}",
+        emoji,
+        bold_terminal(human_format::family_label(&family.family)),
+        signed_money_color(family.total),
+        terminal_forecast_label(family.forecast),
+        dim(format!(
+            "vs mês ant. {}",
+            change_label(family.total, family.previous)
+        ))
+    );
+    for subcategory in &family.subcategories {
+        print_terminal_subcategory(family, subcategory);
+    }
+}
+
+fn terminal_forecast_label(amount: Decimal) -> String {
+    if amount == Decimal::ZERO {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            yellow(format!("({})", human_format::brl_signed(amount)))
+        )
+    }
+}
+
+fn print_terminal_subcategory(
+    family: &CashflowTerminalFamily,
+    subcategory: &CashflowTerminalSubcategory,
+) {
+    let total = subcategory.actual + subcategory.forecast;
+    println!(
+        "  {:<24} {:>18}{}  {:>10}  {}",
+        display_token(&subcategory.subcategory),
+        signed_money_color(total),
+        terminal_forecast_label(subcategory.forecast),
+        change_label(total, subcategory.previous),
+        human_format::progress_bar(share_pct(total, family.total))
+    );
+    print_terminal_forecast_names(subcategory);
+}
+
+fn print_terminal_forecast_names(subcategory: &CashflowTerminalSubcategory) {
+    if subcategory.forecast_names.is_empty() {
+        return;
+    }
+    let names = subcategory
+        .forecast_names
+        .iter()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("    {} {}", yellow("forecast:"), dim(names));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CashflowTuiTab {
+    Income,
+    Expenses,
+    Cards,
+}
+
+impl CashflowTuiTab {
+    fn label(self) -> &'static str {
+        match self {
+            CashflowTuiTab::Income => "Entradas",
+            CashflowTuiTab::Expenses => "Saídas",
+            CashflowTuiTab::Cards => "Cartões",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            CashflowTuiTab::Income => CashflowTuiTab::Expenses,
+            CashflowTuiTab::Expenses => CashflowTuiTab::Cards,
+            CashflowTuiTab::Cards => CashflowTuiTab::Income,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            CashflowTuiTab::Income => CashflowTuiTab::Cards,
+            CashflowTuiTab::Expenses => CashflowTuiTab::Income,
+            CashflowTuiTab::Cards => CashflowTuiTab::Expenses,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CashflowTuiState {
+    tab: CashflowTuiTab,
+    income_index: usize,
+    expense_index: usize,
+    card_scroll: usize,
+}
+
+impl Default for CashflowTuiState {
+    fn default() -> Self {
+        Self {
+            tab: CashflowTuiTab::Expenses,
+            income_index: 0,
+            expense_index: 0,
+            card_scroll: 0,
+        }
+    }
+}
+
+struct CashflowTuiView<'a> {
+    report: &'a CashflowMonthReport,
+    income_families: &'a [CashflowTerminalFamily],
+    expense_families: &'a [CashflowTerminalFamily],
+    state: &'a CashflowTuiState,
+    include_forecast: bool,
+}
+
+struct CashflowTerminal {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+impl CashflowTerminal {
+    fn enter() -> Result<Self> {
+        use crossterm::{execute, terminal};
+        terminal::enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, terminal::EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.clear()?;
+        Ok(Self { terminal })
+    }
+
+    fn draw(&mut self, view: CashflowTuiView<'_>) -> Result<()> {
+        self.terminal
+            .draw(|frame| draw_cashflow_tui_frame(frame, &view))?;
+        Ok(())
+    }
+}
+
+impl Drop for CashflowTerminal {
+    fn drop(&mut self) {
+        use crossterm::{execute, terminal};
+        let _ = self.terminal.show_cursor();
+        let _ = execute!(self.terminal.backend_mut(), terminal::LeaveAlternateScreen);
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+fn launch_cashflow_tui(report: &CashflowMonthReport, include_forecast: bool) -> Result<()> {
+    use crossterm::event::{self, Event};
+
+    let Some(details) = &report.details else {
+        print_cashflow_month_human(report, true, include_forecast);
+        return Ok(());
+    };
+
+    let income_families = terminal_families_for(details, report.previous_details.as_ref(), true);
+    let expense_families = terminal_families_for(details, report.previous_details.as_ref(), false);
+    let mut state = CashflowTuiState::default();
+    let mut terminal = CashflowTerminal::enter()?;
+
+    loop {
+        terminal.draw(CashflowTuiView {
+            report,
+            income_families: &income_families,
+            expense_families: &expense_families,
+            state: &state,
+            include_forecast,
+        })?;
+
+        if !event::poll(StdDuration::from_millis(250))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if handle_cashflow_tui_key(
+            key,
+            &mut state,
+            &income_families,
+            &expense_families,
+            details.card_bills.len(),
+        ) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn handle_cashflow_tui_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut CashflowTuiState,
+    income_families: &[CashflowTerminalFamily],
+    expense_families: &[CashflowTerminalFamily],
+    card_bill_count: usize,
+) -> bool {
+    if cashflow_tui_exit_key(key) {
+        return true;
+    }
+    if let Some(tab) = cashflow_tui_direct_tab_key(key) {
+        state.tab = tab;
+        return false;
+    }
+    if let Some(next_tab) = cashflow_tui_step_tab_key(key, state.tab) {
+        state.tab = next_tab;
+        return false;
+    }
+    if let Some(delta) = cashflow_tui_move_delta_key(key) {
+        move_cashflow_tui_selection(
+            state,
+            income_families,
+            expense_families,
+            card_bill_count,
+            delta,
+        );
+    }
+    false
+}
+
+fn cashflow_tui_exit_key(key: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+}
+
+fn cashflow_tui_direct_tab_key(key: crossterm::event::KeyEvent) -> Option<CashflowTuiTab> {
+    use crossterm::event::KeyCode;
+    [
+        (KeyCode::Char('1'), CashflowTuiTab::Income),
+        (KeyCode::Char('2'), CashflowTuiTab::Expenses),
+        (KeyCode::Char('3'), CashflowTuiTab::Cards),
+    ]
+    .into_iter()
+    .find_map(|(code, tab)| (key.code == code).then_some(tab))
+}
+
+fn cashflow_tui_step_tab_key(
+    key: crossterm::event::KeyEvent,
+    current: CashflowTuiTab,
+) -> Option<CashflowTuiTab> {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Tab | KeyCode::Right => Some(current.next()),
+        KeyCode::BackTab | KeyCode::Left => Some(current.previous()),
+        _ => None,
+    }
+}
+
+fn cashflow_tui_move_delta_key(key: crossterm::event::KeyEvent) -> Option<isize> {
+    use crossterm::event::KeyCode;
+    [
+        (KeyCode::Up, -1),
+        (KeyCode::Down, 1),
+        (KeyCode::PageUp, -8),
+        (KeyCode::PageDown, 8),
+    ]
+    .into_iter()
+    .find_map(|(code, delta)| (key.code == code).then_some(delta))
+}
+
+fn move_cashflow_tui_selection(
+    state: &mut CashflowTuiState,
+    income_families: &[CashflowTerminalFamily],
+    expense_families: &[CashflowTerminalFamily],
+    card_bill_count: usize,
+    delta: isize,
+) {
+    match state.tab {
+        CashflowTuiTab::Income => {
+            move_bounded_index(&mut state.income_index, income_families.len(), delta);
+        }
+        CashflowTuiTab::Expenses => {
+            move_bounded_index(&mut state.expense_index, expense_families.len(), delta);
+        }
+        CashflowTuiTab::Cards => {
+            move_bounded_index(&mut state.card_scroll, card_bill_count, delta);
+        }
+    }
+}
+
+fn move_bounded_index(index: &mut usize, len: usize, delta: isize) {
+    if len == 0 {
+        *index = 0;
+        return;
+    }
+    let next = (*index as isize + delta).clamp(0, len.saturating_sub(1) as isize);
+    *index = next as usize;
+}
+
+fn draw_cashflow_tui_frame(frame: &mut Frame<'_>, view: &CashflowTuiView<'_>) {
+    let root = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(TuiColor::Black)),
+        root,
+    );
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8),
+            Constraint::Min(10),
+            Constraint::Length(2),
+        ])
+        .split(root);
+
+    draw_cashflow_tui_header(frame, vertical[0], view);
+    draw_cashflow_tui_body(frame, vertical[1], view);
+    draw_cashflow_tui_footer(frame, vertical[2], view);
+}
+
+fn draw_cashflow_tui_header(frame: &mut Frame<'_>, area: Rect, view: &CashflowTuiView<'_>) {
+    frame.render_widget(
+        Paragraph::new(Text::from(cashflow_tui_header_lines(area, view)))
+            .block(Block::default().borders(Borders::BOTTOM)),
+        area,
+    );
+}
+
+fn cashflow_tui_header_lines(area: Rect, view: &CashflowTuiView<'_>) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        cashflow_tui_title_line(view),
+        cashflow_tui_actual_summary_line(view),
+    ];
+    if let Some(forecast) = &view.report.forecast_summary {
+        lines.push(cashflow_tui_forecast_summary_line(view, forecast));
+    }
+    lines.push(cashflow_tui_balance_line(view));
+    lines.push(Line::from(cashflow_tui_account_spans(
+        &view.report.account_balances,
+        area.width as usize,
+    )));
+    lines
+}
+
+fn cashflow_tui_title_line(view: &CashflowTuiView<'_>) -> Line<'static> {
+    use human_format::month_label;
+
+    let forecast_badge = if view.include_forecast {
+        Span::styled(
+            " forecast ",
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" sem forecast ", Style::default().fg(TuiColor::DarkGray))
+    };
+    Line::from(vec![
+        Span::styled(
+            " fin cashflow ",
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            month_label(&view.report.month_ref),
+            Style::default()
+                .fg(TuiColor::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        forecast_badge,
+    ])
+}
+
+fn cashflow_tui_actual_summary_line(view: &CashflowTuiView<'_>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" Entradas ", Style::default().fg(TuiColor::DarkGray)),
+        cashflow_tui_money_span(view.report.actual_summary.income),
+        Span::raw("   "),
+        Span::styled(" Saídas ", Style::default().fg(TuiColor::DarkGray)),
+        cashflow_tui_money_span(-view.report.actual_summary.expenses),
+        Span::raw("   "),
+        Span::styled(" Resultado ", Style::default().fg(TuiColor::DarkGray)),
+        cashflow_tui_money_span(view.report.actual_summary.net),
+    ])
+}
+
+fn cashflow_tui_forecast_summary_line(
+    view: &CashflowTuiView<'_>,
+    forecast: &CashflowRow,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" Forecast + ", Style::default().fg(TuiColor::DarkGray)),
+        cashflow_tui_money_span(forecast.income),
+        Span::raw("   "),
+        Span::styled(" Forecast - ", Style::default().fg(TuiColor::DarkGray)),
+        cashflow_tui_money_span(-forecast.expenses),
+        Span::raw("   "),
+        Span::styled(" Projetado ", Style::default().fg(TuiColor::DarkGray)),
+        cashflow_tui_money_span(view.report.summary.net),
+    ])
+}
+
+fn cashflow_tui_balance_line(view: &CashflowTuiView<'_>) -> Line<'static> {
+    use human_format::brl;
+    let opening = view
+        .report
+        .summary
+        .opening_balance
+        .map(brl)
+        .unwrap_or_else(|| "—".to_string());
+    let closing = view
+        .report
+        .summary
+        .closing_balance
+        .map(brl)
+        .unwrap_or_else(|| "—".to_string());
+    Line::from(vec![
+        Span::styled(" Saldo inicial ", Style::default().fg(TuiColor::DarkGray)),
+        Span::raw(opening),
+        Span::raw("   "),
+        Span::styled(" Saldo final ", Style::default().fg(TuiColor::DarkGray)),
+        Span::raw(closing),
+    ])
+}
+
+fn draw_cashflow_tui_body(frame: &mut Frame<'_>, area: Rect, view: &CashflowTuiView<'_>) {
+    if area.width >= 110 {
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(46), Constraint::Min(54)])
+            .split(area);
+        draw_cashflow_tui_family_list(frame, horizontal[0], view);
+        draw_cashflow_tui_detail_panel(frame, horizontal[1], view);
+    } else {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(area.height.min(12)), Constraint::Min(8)])
+            .split(area);
+        draw_cashflow_tui_family_list(frame, vertical[0], view);
+        draw_cashflow_tui_detail_panel(frame, vertical[1], view);
+    }
+}
+
+fn draw_cashflow_tui_family_list(frame: &mut Frame<'_>, area: Rect, view: &CashflowTuiView<'_>) {
+    if view.state.tab == CashflowTuiTab::Cards {
+        draw_cashflow_tui_card_overview(frame, area, view);
+        return;
+    }
+
+    let (families, selected) = cashflow_tui_active_families(view);
+    let visible = area.height.saturating_sub(2).max(1) as usize;
+    let start = selected.saturating_sub(visible / 2);
+    let end = (start + visible).min(families.len());
+    let items = families[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, family)| cashflow_tui_family_item(family, start + offset == selected))
+        .collect::<Vec<_>>();
+    let title = format!(" {} · categorias ", view.state.tab.label());
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(TuiColor::Cyan)),
+        ),
+        area,
+    );
+}
+
+fn cashflow_tui_family_item(
+    family: &CashflowTerminalFamily,
+    selected_row: bool,
+) -> ListItem<'static> {
+    ListItem::new(cashflow_tui_family_line(family, selected_row))
+        .style(cashflow_tui_family_style(selected_row))
+}
+
+fn cashflow_tui_family_line(family: &CashflowTerminalFamily, selected_row: bool) -> Line<'static> {
+    let marker = if selected_row { ">" } else { " " };
+    let emoji = category_emoji(Some(&family.family), Some(family.total));
+    let label = clip_tui_text(&human_format::family_label(&family.family), 18);
+    let change = cashflow_tui_change_text(family.total, family.previous);
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(TuiColor::Cyan)),
+        Span::raw(" "),
+        Span::raw(emoji),
+        Span::raw(" "),
+        Span::raw(format!("{label:<18}")),
+        Span::raw(" "),
+        cashflow_tui_money_span(family.total),
+        Span::raw(" "),
+        Span::styled(
+            change,
+            cashflow_tui_change_style(family.total, family.previous),
+        ),
+    ])
+}
+
+fn cashflow_tui_family_style(selected_row: bool) -> Style {
+    if selected_row {
+        Style::default()
+            .bg(TuiColor::Rgb(34, 48, 64))
+            .fg(TuiColor::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TuiColor::Gray)
+    }
+}
+
+fn draw_cashflow_tui_detail_panel(frame: &mut Frame<'_>, area: Rect, view: &CashflowTuiView<'_>) {
+    if view.state.tab == CashflowTuiTab::Cards {
+        draw_cashflow_tui_cards_detail(frame, area, view);
+        return;
+    }
+
+    let lines = cashflow_tui_detail_lines(area, view);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .title(" Detalhe ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(TuiColor::Blue)),
+            ),
+        area,
+    );
+}
+
+fn cashflow_tui_detail_lines(area: Rect, view: &CashflowTuiView<'_>) -> Vec<Line<'static>> {
+    let (families, selected) = cashflow_tui_active_families(view);
+    families
+        .get(selected)
+        .map(|family| cashflow_tui_family_detail_lines(family, area.width))
+        .unwrap_or_else(|| {
+            vec![Line::from(Span::styled(
+                "sem dados para esta seção",
+                Style::default().fg(TuiColor::DarkGray),
+            ))]
+        })
+}
+
+fn cashflow_tui_family_detail_lines(
+    family: &CashflowTerminalFamily,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![cashflow_tui_family_title_line(family)];
+    if family.forecast != Decimal::ZERO {
+        lines.push(Line::from(vec![
+            Span::styled("forecast incluído ", Style::default().fg(TuiColor::Yellow)),
+            cashflow_tui_money_span(family.forecast),
+        ]));
+    }
+    lines.push(Line::from(""));
+    for subcategory in &family.subcategories {
+        lines.extend(cashflow_tui_subcategory_lines(
+            family.total,
+            subcategory,
+            width,
+        ));
+    }
+    lines
+}
+
+fn cashflow_tui_family_title_line(family: &CashflowTerminalFamily) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            human_format::family_label(&family.family),
+            Style::default()
+                .fg(TuiColor::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        cashflow_tui_money_span(family.total),
+        Span::raw("  "),
+        Span::styled(
+            format!(
+                "vs mês ant. {}",
+                cashflow_tui_change_text(family.total, family.previous)
+            ),
+            cashflow_tui_change_style(family.total, family.previous),
+        ),
+    ])
+}
+
+fn cashflow_tui_subcategory_lines(
+    family_total: Decimal,
+    subcategory: &CashflowTerminalSubcategory,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let total = subcategory.actual + subcategory.forecast;
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("{:<24}", display_token(&subcategory.subcategory)),
+            Style::default().fg(TuiColor::Gray),
+        ),
+        Span::raw(" "),
+        cashflow_tui_money_span(total),
+        Span::raw("  "),
+        Span::styled(
+            cashflow_tui_change_text(total, subcategory.previous),
+            cashflow_tui_change_style(total, subcategory.previous),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            human_format::progress_bar(share_pct(total, family_total)),
+            Style::default().fg(TuiColor::DarkGray),
+        ),
+    ])];
+    if subcategory.forecast != Decimal::ZERO {
+        lines.push(cashflow_tui_forecast_names_line(subcategory, width));
+    }
+    lines
+}
+
+fn cashflow_tui_forecast_names_line(
+    subcategory: &CashflowTerminalSubcategory,
+    width: u16,
+) -> Line<'static> {
+    let names = subcategory
+        .forecast_names
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Line::from(vec![
+        Span::styled("  forecast: ", Style::default().fg(TuiColor::Yellow)),
+        Span::styled(
+            clip_tui_text(&names, width.saturating_sub(14) as usize),
+            Style::default().fg(TuiColor::DarkGray),
+        ),
+    ])
+}
+
+fn draw_cashflow_tui_card_overview(frame: &mut Frame<'_>, area: Rect, view: &CashflowTuiView<'_>) {
+    use human_format::brl;
+
+    let summary = &view.report.card_summary;
+    let paid = cashflow_tui_paid_label(summary);
+    let items = [
+        Line::from(vec![
+            Span::raw("total de cartão de crédito "),
+            cashflow_tui_money_span(-summary.total),
+        ]),
+        Line::from(Span::styled(paid, Style::default().fg(TuiColor::DarkGray))),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("total de compra parcelada "),
+            cashflow_tui_money_span(-summary.installments_total),
+        ]),
+        Line::from(Span::styled(
+            format!(
+                "{} compras · liberou este mês {}",
+                summary.installment_transactions,
+                brl(summary.installments_released_this_month)
+            ),
+            Style::default().fg(TuiColor::DarkGray),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(items.into_iter().collect::<Vec<_>>())).block(
+            Block::default()
+                .title(" Cartões · resumo ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(TuiColor::Cyan)),
+        ),
+        area,
+    );
+}
+
+fn cashflow_tui_paid_label(summary: &CashflowCardSummary) -> String {
+    if summary.total <= Decimal::ZERO {
+        return "sem fatura paga no período".to_string();
+    }
+    if summary.paid_on.is_empty() {
+        return "pagamento não encontrado".to_string();
+    }
+    format!(
+        "pago em {}",
+        summary
+            .paid_on
+            .iter()
+            .map(|date| human_format::short_date(*date))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn draw_cashflow_tui_cards_detail(frame: &mut Frame<'_>, area: Rect, view: &CashflowTuiView<'_>) {
+    let lines = cashflow_tui_cards_detail_lines(area, view);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .title(" Cartões · faturas substituindo pagamentos ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(TuiColor::Blue)),
+            ),
+        area,
+    );
+}
+
+fn cashflow_tui_cards_detail_lines(area: Rect, view: &CashflowTuiView<'_>) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Cartões de crédito",
+                Style::default()
+                    .fg(TuiColor::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            cashflow_tui_money_span(-view.report.card_summary.total),
+        ]),
+        Line::from(""),
+    ];
+    let bills = view
+        .report
+        .details
+        .as_ref()
+        .map(|details| details.card_bills.as_slice())
+        .unwrap_or(&[]);
+    if bills.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "sem dados para esta seção",
+            Style::default().fg(TuiColor::DarkGray),
+        )));
+        return lines;
+    }
+    for bill in bills
+        .iter()
+        .skip(view.state.card_scroll)
+        .take(area.height as usize)
+    {
+        lines.extend(cashflow_tui_bill_lines(bill));
+    }
+    lines
+}
+
+fn cashflow_tui_bill_lines(bill: &CashflowCardBillDetail) -> Vec<Line<'static>> {
+    let paid = bill
+        .payment_date
+        .map(human_format::short_date)
+        .unwrap_or_else(|| "sem pagamento".to_string());
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            clip_tui_text(&bill.account_id, 24),
+            Style::default().fg(TuiColor::Cyan),
+        ),
+        Span::raw("  "),
+        cashflow_tui_money_span(-bill.bill_total),
+        Span::raw("  "),
+        Span::styled(paid, Style::default().fg(TuiColor::DarkGray)),
+    ])];
+    cashflow_tui_card_group_lines(&mut lines, "compras parceladas", &bill.installments);
+    cashflow_tui_card_group_lines(&mut lines, "assinaturas", &bill.subscriptions);
+    for group in &bill.other_categories {
+        cashflow_tui_card_group_lines(&mut lines, &display_token(&group.category_id), group);
+    }
+    lines.push(Line::from(""));
+    lines
+}
+
+fn cashflow_tui_card_group_lines(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    group: &CashflowCategoryGroup,
+) {
+    if group.subtotal == Decimal::ZERO && group.transactions == 0 {
+        return;
+    }
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {label:<22}"),
+            Style::default().fg(TuiColor::Gray),
+        ),
+        cashflow_tui_money_span(group.subtotal),
+        Span::styled(
+            format!("  {} transações", group.transactions),
+            Style::default().fg(TuiColor::DarkGray),
+        ),
+    ]));
+}
+
+fn cashflow_tui_active_families<'a>(
+    view: &'a CashflowTuiView<'a>,
+) -> (&'a [CashflowTerminalFamily], usize) {
+    match view.state.tab {
+        CashflowTuiTab::Income => (
+            view.income_families,
+            view.state
+                .income_index
+                .min(view.income_families.len().saturating_sub(1)),
+        ),
+        CashflowTuiTab::Expenses => (
+            view.expense_families,
+            view.state
+                .expense_index
+                .min(view.expense_families.len().saturating_sub(1)),
+        ),
+        CashflowTuiTab::Cards => (&[], 0),
+    }
+}
+
+fn cashflow_tui_account_spans(
+    balances: &[CashflowAccountBalance],
+    max_width: usize,
+) -> Vec<Span<'static>> {
+    if balances.is_empty() {
+        return vec![Span::styled(
+            " Contas correntes: sem snapshot",
+            Style::default().fg(TuiColor::DarkGray),
+        )];
+    }
+    let joined = balances
+        .iter()
+        .map(|balance| {
+            let amount = balance
+                .balance
+                .map(human_format::brl_signed)
+                .unwrap_or_else(|| "—".to_string());
+            format!("{} {}", balance.label, amount)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    vec![
+        Span::styled(
+            " Contas correntes: ",
+            Style::default().fg(TuiColor::DarkGray),
+        ),
+        Span::raw(clip_tui_text(&joined, max_width.saturating_sub(20))),
+    ]
+}
+
+fn cashflow_tui_money_span(amount: Decimal) -> Span<'static> {
+    Span::styled(human_format::brl_signed(amount), amount_tui_style(amount))
+}
+
+fn cashflow_tui_change_text(current: Decimal, previous: Decimal) -> String {
+    let current_abs = current.abs();
+    let previous_abs = previous.abs();
+    if previous_abs == Decimal::ZERO {
+        return if current_abs == Decimal::ZERO {
+            "0%".to_string()
+        } else {
+            "novo".to_string()
+        };
+    }
+    let delta_pct = (current_abs - previous_abs) / previous_abs * Decimal::from(100u32);
+    format!("{:+}%", delta_pct.round_dp(0))
+}
+
+fn cashflow_tui_change_style(current: Decimal, previous: Decimal) -> Style {
+    let current_abs = current.abs();
+    let previous_abs = previous.abs();
+    if previous_abs == Decimal::ZERO {
+        return if current_abs == Decimal::ZERO {
+            Style::default().fg(TuiColor::DarkGray)
+        } else {
+            Style::default()
+                .fg(TuiColor::Cyan)
+                .add_modifier(Modifier::BOLD)
+        };
+    }
+    let delta = current_abs - previous_abs;
+    if delta > Decimal::ZERO {
+        Style::default().fg(TuiColor::LightRed)
+    } else if delta < Decimal::ZERO {
+        Style::default().fg(TuiColor::LightGreen)
+    } else {
+        Style::default().fg(TuiColor::DarkGray)
+    }
+}
+
+fn draw_cashflow_tui_footer(frame: &mut Frame<'_>, area: Rect, view: &CashflowTuiView<'_>) {
+    let tab_line = [
+        CashflowTuiTab::Income,
+        CashflowTuiTab::Expenses,
+        CashflowTuiTab::Cards,
+    ]
+    .into_iter()
+    .map(|tab| {
+        let style = if tab == view.state.tab {
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TuiColor::DarkGray)
+        };
+        Span::styled(format!(" {} ", tab.label()), style)
+    })
+    .collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    spans.extend(tab_line);
+    spans.extend([
+        Span::raw("   "),
+        Span::styled("Tab/←/→", Style::default().fg(TuiColor::Yellow)),
+        Span::raw(" troca seção   "),
+        Span::styled("↑/↓", Style::default().fg(TuiColor::Yellow)),
+        Span::raw(" navega   "),
+        Span::styled("q/Esc", Style::default().fg(TuiColor::Yellow)),
+        Span::raw(" sai"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::TOP)),
+        area,
+    );
+}
+
+fn print_cashflow_month_human(
+    report: &CashflowMonthReport,
+    show_details: bool,
+    include_forecast: bool,
+) {
+    print_cashflow_month_header(report, show_details, include_forecast);
+    print_cashflow_account_balances(report);
+    let Some(details) = &report.details else {
+        return;
+    };
+    print_cashflow_detail_sections(report, details);
+    print_cashflow_card_summary(report);
+}
+
+fn print_cashflow_month_header(
+    report: &CashflowMonthReport,
+    show_details: bool,
+    include_forecast: bool,
+) {
+    use human_format::month_label;
+
+    let suffix = cashflow_header_suffix(show_details, include_forecast);
+    println!(
+        "{}",
+        bold_terminal(format!(
+            "💵 Cashflow · {}{}",
+            month_label(&report.month_ref),
+            suffix
+        ))
+    );
+    println!();
+
+    let opening = optional_balance_label(report.summary.opening_balance);
+    let closing = optional_balance_label(report.summary.closing_balance);
+    println!(
+        "  {:<15} {}    {:<15} {}",
+        "Saldo inicial", opening, "Saldo final", closing
+    );
+    print_cashflow_actual_header(report);
+    print_cashflow_forecast_header(report);
+}
+
+fn cashflow_header_suffix(show_details: bool, include_forecast: bool) -> &'static str {
+    [
+        (show_details && include_forecast, " · detalhes + forecast"),
+        (show_details, " · detalhes"),
+        (include_forecast, " · forecast"),
+    ]
+    .into_iter()
+    .find_map(|(enabled, suffix)| enabled.then_some(suffix))
+    .unwrap_or("")
+}
+
+fn optional_balance_label(amount: Option<Decimal>) -> String {
+    amount
+        .map(human_format::brl)
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn print_cashflow_actual_header(report: &CashflowMonthReport) {
+    println!(
+        "  {:<15} {}    {:<15} {}    {:<15} {}",
+        "Entradas",
+        unsigned_money_color(report.actual_summary.income, true),
+        "Saídas",
+        unsigned_money_color(report.actual_summary.expenses, false),
+        "Resultado",
+        signed_money_color(report.actual_summary.net)
+    );
+}
+
+fn print_cashflow_forecast_header(report: &CashflowMonthReport) {
+    if let Some(forecast) = &report.forecast_summary {
+        println!(
+            "  {:<15} {}    {:<15} {}    {:<15} {}",
+            "Forecast +",
+            unsigned_money_color(forecast.income, true),
+            "Forecast -",
+            unsigned_money_color(forecast.expenses, false),
+            "Projetado",
+            signed_money_color(report.summary.net)
+        );
+    }
+}
+
+fn print_cashflow_account_balances(report: &CashflowMonthReport) {
+    if report.account_balances.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", dim("Contas correntes sincronizadas"));
+    for balance in &report.account_balances {
+        let amount = balance
+            .balance
+            .map(signed_money_color)
+            .unwrap_or_else(|| "—".to_string());
+        println!(
+            "  {}  {}  {}",
+            balance.label,
+            amount,
+            dim(human_format::short_date(balance.snapshot_date))
+        );
+    }
+}
+
+fn print_cashflow_detail_sections(report: &CashflowMonthReport, details: &CashflowDetailSections) {
+    let income_families = terminal_families_for(details, report.previous_details.as_ref(), true);
+    let expense_families = terminal_families_for(details, report.previous_details.as_ref(), false);
+
+    print_terminal_family_section("Entradas por categoria", &income_families);
+    print_terminal_family_section("Saídas por categoria", &expense_families);
+}
+
+fn print_cashflow_card_summary(report: &CashflowMonthReport) {
+    use human_format::brl;
+
+    let paid = cashflow_card_paid_label(&report.card_summary);
+    println!();
+    println!("{}", bold_terminal("Cartões"));
+    println!(
+        "  total de cartão de crédito: {} {}",
+        red(brl(report.card_summary.total)),
+        dim(paid)
+    );
+    println!(
+        "  total de compra parcelada: {} {}",
+        red(brl(report.card_summary.installments_total)),
+        dim(format!(
+            "({} compras, liberou este mês {})",
+            report.card_summary.installment_transactions,
+            brl(report.card_summary.installments_released_this_month)
+        ))
+    );
+}
+
+fn cashflow_card_paid_label(summary: &CashflowCardSummary) -> String {
+    if summary.total <= Decimal::ZERO {
+        return "sem fatura paga no período".to_string();
+    }
+    if summary.paid_on.is_empty() {
+        return "pagamento não encontrado".to_string();
+    }
+    format!(
+        "pago em {}",
+        summary
+            .paid_on
+            .iter()
+            .map(|date| human_format::short_date(*date))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn print_cashflow_human(
@@ -3620,7 +5991,7 @@ fn print_cashflow_human(
     accounts_considered: usize,
     snapshot_anchor: Option<chrono::NaiveDate>,
 ) {
-    use human_format::{bold, brl, brl_signed, month_label};
+    use human_format::{bold, brl, month_label};
 
     println!(
         "💵 {}",
@@ -3628,22 +5999,28 @@ fn print_cashflow_human(
     );
     println!();
 
-    let opening_str = row
-        .opening_balance
-        .map(brl)
-        .unwrap_or_else(|| "—".to_string());
-    let closing_str = row
-        .closing_balance
-        .map(brl)
-        .unwrap_or_else(|| "—".to_string());
-
-    println!("  Saldo inicial   {}", opening_str);
+    println!(
+        "  Saldo inicial   {}",
+        optional_balance_label(row.opening_balance)
+    );
     println!("  Entradas      + {}", brl(row.income));
     println!("  Saídas        − {}", brl(row.expenses));
-    if row.expense_reduction > Decimal::ZERO {
-        println!("  Cashback      + {}", brl(row.expense_reduction));
-    }
+    print_cashflow_reduction(row.expense_reduction);
     println!("  ─────────────────────────────");
+
+    print_cashflow_closing_balance(row);
+    println!();
+    print_cashflow_snapshot_label(accounts_considered, snapshot_anchor);
+}
+
+fn print_cashflow_reduction(expense_reduction: Decimal) {
+    if expense_reduction > Decimal::ZERO {
+        println!("  Cashback      + {}", human_format::brl(expense_reduction));
+    }
+}
+
+fn print_cashflow_closing_balance(row: &finance_core::models::CashflowRow) {
+    use human_format::{brl, brl_signed};
 
     match (row.opening_balance, row.closing_balance) {
         (Some(open), Some(close)) => {
@@ -3654,23 +6031,32 @@ fn print_cashflow_human(
                 brl_signed(delta),
             );
         }
-        _ => {
-            println!("  Saldo final     {}", closing_str);
-        }
+        _ => println!(
+            "  Saldo final     {}",
+            optional_balance_label(row.closing_balance)
+        ),
     }
+}
 
-    println!();
-    let accounts_label = if accounts_considered == 1 {
-        "1 conta corrente".to_string()
-    } else {
-        format!("{accounts_considered} contas correntes")
-    };
+fn print_cashflow_snapshot_label(
+    accounts_considered: usize,
+    snapshot_anchor: Option<chrono::NaiveDate>,
+) {
+    let accounts_label = cashflow_accounts_label(accounts_considered);
     match snapshot_anchor {
         Some(date) => println!(
             "  _{accounts_label} · âncora: snapshot {}_",
             human_format::short_date(date)
         ),
         None => println!("  _{accounts_label} · snapshot incompleto: rode `finance sync pluggy`_"),
+    }
+}
+
+fn cashflow_accounts_label(accounts_considered: usize) -> String {
+    if accounts_considered == 1 {
+        "1 conta corrente".to_string()
+    } else {
+        format!("{accounts_considered} contas correntes")
     }
 }
 
@@ -3693,18 +6079,9 @@ fn print_forecast_vs_actual_human(
     rows: &[finance_core::models::ForecastVsActualRow],
     month: Option<&str>,
 ) {
-    use human_format::{
-        bold, brl, brl_signed, category_emoji, category_family, family_label, month_label,
-        short_description,
-    };
-    use std::cmp::Reverse;
-    use std::collections::HashMap;
+    use human_format::bold;
 
-    let month_display = month
-        .map(month_label)
-        .or_else(|| rows.first().map(|r| month_label(&r.month_ref)))
-        .unwrap_or_else(|| "—".to_string());
-
+    let month_display = forecast_month_display(rows, month);
     println!(
         "📊 {}",
         bold(&format!("Previsto vs Realizado · {month_display}"))
@@ -3714,16 +6091,47 @@ fn print_forecast_vs_actual_human(
         return;
     }
 
-    // Group by category family
-    let mut family_rows: HashMap<String, Vec<&finance_core::models::ForecastVsActualRow>> =
-        HashMap::new();
-    for row in rows {
-        let family =
-            category_family(row.category_id.as_deref()).unwrap_or_else(|| "outros".to_string());
-        family_rows.entry(family).or_default().push(row);
+    let family_rows = forecast_rows_by_family(rows);
+    let families = sorted_forecast_families(&family_rows);
+
+    println!();
+    for family in &families {
+        print_forecast_family(family, &family_rows[family]);
     }
 
-    // Sort families by absolute variance descending
+    print_forecast_totals(rows);
+}
+
+fn forecast_month_display(
+    rows: &[finance_core::models::ForecastVsActualRow],
+    month: Option<&str>,
+) -> String {
+    month
+        .map(month_label)
+        .or_else(|| rows.first().map(|r| month_label(&r.month_ref)))
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn forecast_rows_by_family(
+    rows: &[finance_core::models::ForecastVsActualRow],
+) -> std::collections::HashMap<String, Vec<&finance_core::models::ForecastVsActualRow>> {
+    let mut family_rows = std::collections::HashMap::new();
+    for row in rows {
+        let family = human_format::category_family(row.category_id.as_deref())
+            .unwrap_or_else(|| "outros".to_string());
+        family_rows.entry(family).or_insert_with(Vec::new).push(row);
+    }
+    family_rows
+}
+
+fn sorted_forecast_families(
+    family_rows: &std::collections::HashMap<
+        String,
+        Vec<&finance_core::models::ForecastVsActualRow>,
+    >,
+) -> Vec<String> {
+    use std::cmp::Reverse;
+
     let mut families: Vec<String> = family_rows.keys().cloned().collect();
     families.sort_by_key(|f| {
         Reverse(
@@ -3733,53 +6141,64 @@ fn print_forecast_vs_actual_human(
                 .fold(Decimal::ZERO, |acc, v| acc + v),
         )
     });
+    families
+}
 
-    println!();
-    for family in &families {
-        let fam_rows = &family_rows[family];
-        let emoji = category_emoji(Some(family), None);
-        let label = family_label(family);
-        println!("{emoji} *{}*", label);
+fn print_forecast_family(family: &str, rows: &[&finance_core::models::ForecastVsActualRow]) {
+    let emoji = category_emoji(Some(family), None);
+    let label = human_format::family_label(family);
+    println!("{emoji} *{}*", label);
 
-        // Sort items within family by absolute variance descending
-        let mut sorted: Vec<&&finance_core::models::ForecastVsActualRow> =
-            fam_rows.iter().collect();
-        sorted.sort_by_key(|r| Reverse(r.variance.abs()));
-
-        for row in sorted {
-            let forecast = -row.forecast_amount;
-            let actual = -row.actual_amount;
-            let variance = -row.variance;
-
-            // variance > 0 means over budget (spent more than forecast).
-            // Treat |variance| < 0.01 as exact match regardless of sign — tiny
-            // rounding deltas from BigQuery should not produce ⚠️ or -R$ 0,00.
-            let near_zero = variance.abs() < Decimal::new(1, 2);
-            let indicator = if !near_zero && variance > Decimal::ZERO {
-                "🔻"
-            } else if near_zero {
-                "✅"
-            } else if actual.abs() > forecast.abs() * Decimal::from(80u32) / Decimal::from(100u32) {
-                "⚠️"
-            } else {
-                "✅"
-            };
-
-            let due_label = match row.due_date {
-                Some(d) => format!("({})", d.format("%d/%m")),
-                None => String::new(),
-            };
-            println!(
-                "  {} {due_label} {indicator}  previsto {}  realizado {}  variação {}",
-                short_description(&row.description),
-                brl(forecast),
-                brl(actual),
-                brl_signed(variance),
-            );
-        }
+    for row in sorted_forecast_family_rows(rows) {
+        print_forecast_row(row);
     }
+}
 
-    // Footer totals
+fn sorted_forecast_family_rows<'a>(
+    rows: &'a [&finance_core::models::ForecastVsActualRow],
+) -> Vec<&'a finance_core::models::ForecastVsActualRow> {
+    use std::cmp::Reverse;
+
+    let mut sorted = rows.to_vec();
+    sorted.sort_by_key(|r| Reverse(r.variance.abs()));
+    sorted
+}
+
+fn print_forecast_row(row: &finance_core::models::ForecastVsActualRow) {
+    let forecast = -row.forecast_amount;
+    let actual = -row.actual_amount;
+    let variance = -row.variance;
+    println!(
+        "  {} {} {}  previsto {}  realizado {}  variação {}",
+        human_format::short_description(&row.description),
+        forecast_due_label(row.due_date),
+        forecast_indicator(forecast, actual, variance),
+        hf_brl(forecast),
+        hf_brl(actual),
+        human_format::brl_signed(variance),
+    );
+}
+
+fn forecast_indicator(forecast: Decimal, actual: Decimal, variance: Decimal) -> &'static str {
+    let near_zero = variance.abs() < Decimal::new(1, 2);
+    if !near_zero && variance > Decimal::ZERO {
+        "🔻"
+    } else if near_zero {
+        "✅"
+    } else if actual.abs() > forecast.abs() * Decimal::from(80u32) / Decimal::from(100u32) {
+        "⚠️"
+    } else {
+        "✅"
+    }
+}
+
+fn forecast_due_label(due_date: Option<NaiveDate>) -> String {
+    due_date
+        .map(|date| format!("({})", date.format("%d/%m")))
+        .unwrap_or_default()
+}
+
+fn print_forecast_totals(rows: &[finance_core::models::ForecastVsActualRow]) {
     let total_forecast: Decimal = rows.iter().map(|r| -r.forecast_amount).sum();
     let total_actual: Decimal = rows.iter().map(|r| -r.actual_amount).sum();
     let total_variance: Decimal = rows.iter().map(|r| -r.variance).sum();
@@ -3787,9 +6206,9 @@ fn print_forecast_vs_actual_human(
     println!();
     println!(
         "*Total*  previsto {}  realizado {}  variação {}",
-        brl(total_forecast),
-        brl(total_actual),
-        brl_signed(total_variance)
+        hf_brl(total_forecast),
+        hf_brl(total_actual),
+        human_format::brl_signed(total_variance)
     );
 }
 
@@ -9963,15 +12382,44 @@ fn compute_bill_id(date: NaiveDate, closing_day: u32) -> String {
 }
 
 /// Parse `billing_closing_day` from account metadata JSON (stored as a string
-/// or integer for forward compat).  Only values in 1..=28 are accepted.
+/// or integer for forward compat). When only the due day is known, infer the
+/// closing day as seven days before the due date, matching Nubank's observed
+/// cycle shape. Only values in 1..=28 are accepted.
 fn parse_closing_day(metadata: &serde_json::Value) -> Option<u32> {
-    let v = metadata.get("billing_closing_day")?;
-    match v {
+    metadata_billing_day(metadata.get("billing_closing_day"))
+        .or_else(|| metadata_due_day(metadata).and_then(closing_day_from_due_day))
+}
+
+fn metadata_billing_day(value: Option<&serde_json::Value>) -> Option<u32> {
+    let value = value?;
+    match value {
         serde_json::Value::String(s) => s.parse::<u32>().ok(),
         serde_json::Value::Number(n) => n.as_u64().map(|d| d as u32),
         _ => None,
     }
     .filter(|d| (1..=28).contains(d))
+}
+
+fn metadata_due_day(metadata: &serde_json::Value) -> Option<u32> {
+    metadata_billing_day(metadata.get("billing_due_day")).or_else(|| {
+        metadata
+            .pointer("/raw/creditData/balanceDueDate")
+            .and_then(|value| value.as_str())
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+            .map(|date| date.day())
+            .filter(|day| (1..=28).contains(day))
+    })
+}
+
+fn closing_day_from_due_day(due_day: u32) -> Option<u32> {
+    if !(1..=28).contains(&due_day) {
+        return None;
+    }
+    Some(if due_day > 7 {
+        due_day - 7
+    } else {
+        due_day + 21
+    })
 }
 
 /// Infer the account's billing closing day by inspecting Pluggy-supplied
@@ -10727,8 +13175,10 @@ impl NaiveDateSat for NaiveDate {
 mod tests {
     use super::{
         apply_review_tui_category_pick, category_matches, changed_text,
-        effective_review_human_limit, resolve_sync_from, review_tui_filters_from_menu_key,
-        review_tui_plain_skip_requested, ReviewFilters, ReviewTuiDraft, ReviewTuiField,
+        effective_review_human_limit, handle_cashflow_tui_key, parse_closing_day,
+        resolve_sync_from, review_tui_filters_from_menu_key, review_tui_plain_skip_requested,
+        CashflowTerminalFamily, CashflowTuiState, CashflowTuiTab, ReviewFilters, ReviewTuiDraft,
+        ReviewTuiField,
     };
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -10784,6 +13234,97 @@ mod tests {
         assert_eq!(effective_review_human_limit(None, false), 10);
         assert_eq!(effective_review_human_limit(None, true), 500);
         assert_eq!(effective_review_human_limit(Some(42), true), 42);
+    }
+
+    #[test]
+    fn parse_closing_day_derives_from_due_date_metadata() {
+        assert_eq!(
+            parse_closing_day(&json!({
+                "raw": {
+                    "creditData": {
+                        "balanceDueDate": "2026-05-18"
+                    }
+                }
+            })),
+            Some(11)
+        );
+        assert_eq!(
+            parse_closing_day(&json!({
+                "billing_due_day": 5
+            })),
+            Some(26)
+        );
+        assert_eq!(
+            parse_closing_day(&json!({
+                "billing_closing_day": "10",
+                "billing_due_day": 18
+            })),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn cashflow_tui_navigation_switches_tabs_and_bounds_selection() {
+        let income = vec![cashflow_test_family("receitas")];
+        let expenses = vec![
+            cashflow_test_family("moradia"),
+            cashflow_test_family("alimentacao"),
+        ];
+        let mut state = CashflowTuiState::default();
+
+        assert_eq!(state.tab, CashflowTuiTab::Expenses);
+        assert!(!handle_cashflow_tui_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut state,
+            &income,
+            &expenses,
+            0
+        ));
+        assert_eq!(state.expense_index, 1);
+
+        assert!(!handle_cashflow_tui_key(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &mut state,
+            &income,
+            &expenses,
+            0
+        ));
+        assert_eq!(state.expense_index, 1);
+
+        assert!(!handle_cashflow_tui_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut state,
+            &income,
+            &expenses,
+            0
+        ));
+        assert_eq!(state.tab, CashflowTuiTab::Cards);
+
+        assert!(!handle_cashflow_tui_key(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &mut state,
+            &income,
+            &expenses,
+            0
+        ));
+        assert_eq!(state.tab, CashflowTuiTab::Income);
+        assert!(handle_cashflow_tui_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut state,
+            &income,
+            &expenses,
+            0
+        ));
+    }
+
+    fn cashflow_test_family(family: &str) -> CashflowTerminalFamily {
+        CashflowTerminalFamily {
+            family: family.to_string(),
+            total: Decimal::new(100, 0),
+            forecast: Decimal::ZERO,
+            previous: Decimal::ZERO,
+            subcategories: Vec::new(),
+        }
     }
 
     #[test]
