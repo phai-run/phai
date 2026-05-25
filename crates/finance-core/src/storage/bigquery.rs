@@ -251,7 +251,12 @@ fn sql_date(value: NaiveDate) -> String {
 }
 
 fn sql_optional_date(value: Option<NaiveDate>) -> String {
-    value.map(sql_date).unwrap_or_else(|| "NULL".to_string())
+    // Bare "NULL" makes BigQuery default to INT64 when all rows in a
+    // UNION ALL source carry NULL (e.g. envelope templates with no
+    // end_date). Cast explicitly so the inferred column type stays DATE.
+    value
+        .map(sql_date)
+        .unwrap_or_else(|| "CAST(NULL AS DATE)".to_string())
 }
 
 fn sql_timestamp(value: chrono::DateTime<Utc>) -> String {
