@@ -494,18 +494,22 @@ impl CashflowArgs {
 
 #[derive(Args)]
 struct CashflowChartArgs {
-    /// Janela em meses incluindo o mês atual (default: 6, mín: 2, máx: 24).
+    /// Janela "para trás" em meses (incluindo o mês atual). Default 6, mín 2, máx 24.
     #[arg(long, default_value_t = 6)]
     months: usize,
+    /// Meses "para a frente" a incluir (forecast-only). Quando `--forecast` é
+    /// passado e este flag é omitido, o default é 6.
+    #[arg(long)]
+    months_ahead: Option<usize>,
     /// Caminho do arquivo SVG de saída. Default: ./finance-cashflow.svg
     #[arg(long)]
     output: Option<std::path::PathBuf>,
     /// Também imprime um sparkline ASCII no stdout (útil em terminal).
     #[arg(long)]
     text: bool,
-    /// Sobrepõe linhas tracejadas com totais de entradas/saídas previstos por
-    /// mês a partir da tabela `forecasts` (somatório dos `amount` ativos com
-    /// `due_date` no respectivo mês).
+    /// Empilha o forecast restante (entrada/saída ainda não realizada) em
+    /// cima da barra realizada como extensão hachurada, e desenha o saldo
+    /// projetado como continuação tracejada da linha de saldo.
     #[arg(long)]
     forecast: bool,
     /// Não escreve o SVG (útil junto com --text para sair só o sparkline).
