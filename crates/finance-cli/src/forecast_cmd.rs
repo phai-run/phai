@@ -485,6 +485,146 @@ fn decimal_from_f64(v: f64) -> Decimal {
         .round_dp(2)
 }
 
+/// Per-category envelope detector (Layer 4 of ADR-0016). Groups outflows
+/// by `category_id` over the lookback window, requires ≥4 months of data,
+/// and a coefficient of variation ≤ 0.40 on the monthly totals — envelopes
+/// are inherently noisier than subscriptions, so the threshold is wider.
+///
+/// To avoid double-counting with already-active subscription / fixed
+/// templates, transactions whose normalized merchant matches one of those
+/// templates (within the same account) are excluded before aggregation.
+pub(crate) fn detect_envelope_candidates(
+    txs: &[TransactionRecord],
+    today: NaiveDate,
+    lookback_months: u32,
+    excluded_merchants_per_account: &std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<String>,
+    >,
+) -> Vec<RecurringCandidate> {
+    use std::collections::BTreeMap;
+
+    let cutoff = shift_months(today, -(lookback_months as i32)).unwrap_or(today);
+
+    // Per (category_id) → per (year,month) → sum of outflow magnitudes.
+    let mut buckets: BTreeMap<String, BTreeMap<(i32, u32), f64>> = BTreeMap::new();
+    // Track the most recent label per category for the description field.
+    let mut latest_label: BTreeMap<String, String> = BTreeMap::new();
+
+    for tx in txs {
+        if tx.amount >= Decimal::ZERO {
+            continue;
+        }
+        if tx.transaction_date < cutoff {
+            continue;
+        }
+        let raw = enrich_description_from_metadata(&tx.raw_description, &tx.metadata_json);
+        if finance_core::parse_installment_description(&raw).is_some() {
+            continue;
+        }
+        let category_id = match tx.category_id.as_ref().filter(|c| !c.is_empty()) {
+            Some(c) => c.clone(),
+            None => continue,
+        };
+        // Skip pseudo-categories that aren't real spend.
+        if matches!(
+            category_id.as_str(),
+            "transfer-internal" | "credit-card-payment" | "cashback"
+        ) {
+            continue;
+        }
+        // Skip transactions already covered by an accepted subscription/fixed
+        // template — those are accounted for separately and would otherwise
+        // inflate the envelope estimate.
+        if let Some(account_id) = tx.account_id.as_ref() {
+            let label = tx
+                .description
+                .clone()
+                .or(tx.merchant_name.clone())
+                .unwrap_or_else(|| raw.clone());
+            let key = merchant_key_from_label(&label);
+            if let Some(excluded) = excluded_merchants_per_account.get(account_id) {
+                if excluded.contains(&key) {
+                    continue;
+                }
+            }
+        }
+
+        let month = (tx.transaction_date.year(), tx.transaction_date.month());
+        let amount = tx.amount.abs().to_f64().unwrap_or(0.0);
+        *buckets
+            .entry(category_id.clone())
+            .or_default()
+            .entry(month)
+            .or_default() += amount;
+        latest_label.insert(category_id, format_category_label(&tx.category_id));
+    }
+
+    let mut out = Vec::new();
+    for (category_id, months) in buckets {
+        if months.len() < 4 {
+            continue;
+        }
+        let totals: Vec<f64> = months.values().copied().collect();
+        let median = median_f64(&totals);
+        if median < 50.0 {
+            // Skip noise: categories that barely register a small amount
+            // per month aren't worth materialising into the chart.
+            continue;
+        }
+        let stddev = stddev_f64(&totals);
+        let cv = stddev / median;
+        if !cv.is_finite() || cv > 0.40 {
+            continue;
+        }
+        let confidence = (0.7 - cv).clamp(0.3, 0.7);
+        let last_month_key = months
+            .keys()
+            .max()
+            .copied()
+            .unwrap_or((today.year(), today.month()));
+        let last_seen =
+            NaiveDate::from_ymd_opt(last_month_key.0, last_month_key.1, 15).unwrap_or(today);
+        let median_amount = -decimal_from_f64(median);
+        let band_half = decimal_from_f64(stddev);
+        let label = latest_label
+            .get(&category_id)
+            .cloned()
+            .unwrap_or_else(|| category_id.clone());
+        out.push(RecurringCandidate {
+            kind: "envelope".to_string(),
+            // Envelopes are not account-scoped (they're a category total
+            // across the whole household). We still use a marker so the
+            // idempotency hash is unique per category.
+            account_id: "any".to_string(),
+            merchant_key: format!("envelope:{category_id}"),
+            label,
+            category_id: Some(category_id),
+            median_amount,
+            amount_lower: median_amount - band_half,
+            amount_upper: median_amount + band_half,
+            months_seen: months.len(),
+            last_seen,
+            typical_day_of_month: 15,
+            coefficient_of_variation: cv,
+            confidence,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+fn format_category_label(category_id: &Option<String>) -> String {
+    category_id
+        .clone()
+        .unwrap_or_else(|| "(sem categoria)".to_string())
+}
+
 /// CLI entry: `fin forecast suggest`. Detects new candidates, persists them
 /// as `status='proposto'` templates (so the user can later accept / dismiss
 /// without us re-suggesting), and lists pending proposals.
@@ -500,7 +640,31 @@ pub(crate) async fn run_suggest(args: ForecastSuggestArgs) -> Result<()> {
         .transactions_in_date_range(None, from, today)
         .await
         .context("falha ao carregar transações")?;
-    let candidates = detect_recurring_candidates(&txs, today, lookback);
+
+    // Layers 2 + 3 first — these are merchant-scoped.
+    let mut candidates = detect_recurring_candidates(&txs, today, lookback);
+
+    // Layer 4 (envelopes) — fed with the set of merchants already covered
+    // by active subscription/fixed templates so we don't double-count.
+    let active = store.list_forecast_templates(None, Some("ativo")).await?;
+    let mut excluded_merchants: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<String>,
+    > = std::collections::BTreeMap::new();
+    for tpl in &active {
+        if tpl.kind != "subscription" && tpl.kind != "fixed" {
+            continue;
+        }
+        if let (Some(account), Some(merchant)) = (&tpl.account_id, &tpl.merchant_pattern) {
+            excluded_merchants
+                .entry(account.clone())
+                .or_default()
+                .insert(merchant.clone());
+        }
+    }
+    let envelope_candidates =
+        detect_envelope_candidates(&txs, today, lookback, &excluded_merchants);
+    candidates.extend(envelope_candidates);
 
     // Skip any candidate whose template_id already exists (in any status —
     // proposto/ativo/descartado). That's the "remember-the-rejection"
@@ -508,7 +672,7 @@ pub(crate) async fn run_suggest(args: ForecastSuggestArgs) -> Result<()> {
     let existing_proposto = store
         .list_forecast_templates(None, Some("proposto"))
         .await?;
-    let existing_ativo = store.list_forecast_templates(None, Some("ativo")).await?;
+    let existing_ativo = active;
     let existing_descartado = store
         .list_forecast_templates(None, Some("descartado"))
         .await?;
@@ -558,6 +722,8 @@ fn template_from_candidate(
     actor_id: &str,
     now: chrono::DateTime<Utc>,
 ) -> ForecastTemplateRecord {
+    // Subscriptions are tight (single value, no band). Fixed bills and
+    // envelopes carry the ±σ band so the chart can surface variance.
     let amount_lower = if cand.kind == "subscription" {
         None
     } else {
@@ -568,13 +734,26 @@ fn template_from_candidate(
     } else {
         Some(cand.amount_upper)
     };
+    // Envelopes span the whole household (no specific account) — the
+    // detector marks them with the "any" sentinel.
+    let account_id = if cand.account_id == "any" {
+        None
+    } else {
+        Some(cand.account_id.clone())
+    };
+    // Envelopes pattern by category, not merchant.
+    let merchant_pattern = if cand.kind == "envelope" {
+        None
+    } else {
+        Some(cand.merchant_key.clone())
+    };
     ForecastTemplateRecord {
         template_id: template_id.clone(),
         kind: cand.kind.clone(),
         description: cand.label.clone(),
-        merchant_pattern: Some(cand.merchant_key.clone()),
+        merchant_pattern,
         category_id: cand.category_id.clone(),
-        account_id: Some(cand.account_id.clone()),
+        account_id,
         amount: cand.median_amount,
         amount_lower,
         amount_upper,

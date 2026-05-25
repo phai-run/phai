@@ -4995,3 +4995,121 @@ fn forecast_suggest_accept_dismiss_subscription_round_trip() {
         "Academia must not reappear as proposto after dismiss"
     );
 }
+
+#[test]
+fn forecast_suggest_envelope_groups_by_category() {
+    // Layer 4 (ADR-0016): a category with 4+ months of varied-merchant
+    // spend should produce an envelope candidate (kind='envelope',
+    // merchant_pattern=NULL, category_id set, account_id=NULL).
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("chk_test")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("checking")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Checking"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // 5 months × 3 merchants per month, all in category 'mercado'. Totals
+    // stable around R$ 800 (low CV).
+    let today = chrono::Local::now().date_naive();
+    let merchants_per_month = [
+        ("Mercado A", "-280.00"),
+        ("Mercado B", "-260.00"),
+        ("Padaria C", "-260.00"),
+    ];
+    for month_offset in 1..=5_i64 {
+        let date = today - chrono::Duration::days(month_offset * 30);
+        for (i, (merchant, amount)) in merchants_per_month.iter().enumerate() {
+            envs(
+                cargo_bin()
+                    .arg("tx")
+                    .arg("upsert-manual")
+                    .arg("--transaction-id")
+                    .arg(format!("mkt-{month_offset}-{i}"))
+                    .arg("--account-id")
+                    .arg("chk_test")
+                    .arg("--date")
+                    .arg(date.format("%Y-%m-%d").to_string())
+                    .arg("--description")
+                    .arg(*merchant)
+                    .arg(format!("--amount={amount}"))
+                    .arg("--category")
+                    .arg("mercado"),
+                &config_dir,
+                &data_dir,
+            )
+            .assert()
+            .success();
+        }
+    }
+
+    let stdout = envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("suggest")
+            .arg("--raw")
+            .arg("--lookback-months")
+            .arg("6"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let templates: Value = serde_json::from_slice(&stdout).expect("valid json");
+    let envelope = templates
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["kind"].as_str() == Some("envelope"))
+        .expect("expected envelope candidate");
+    assert_eq!(envelope["category_id"].as_str(), Some("mercado"));
+    assert!(envelope["merchant_pattern"].is_null());
+    assert!(envelope["account_id"].is_null());
+
+    // Accept the envelope → must materialise 6 monthly forecasts.
+    let envelope_id = envelope["template_id"].as_str().unwrap().to_string();
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("accept")
+            .arg("--template-id")
+            .arg(&envelope_id)
+            .arg("--materialize-months")
+            .arg("6"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let fc_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id = ?1",
+            [&envelope_id],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(fc_count, 6, "6 monthly envelope forecasts");
+}
