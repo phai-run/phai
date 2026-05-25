@@ -522,6 +522,20 @@ struct CashflowChartArgs {
     /// Não escreve o SVG (útil junto com --text para sair só o sparkline).
     #[arg(long)]
     no_svg: bool,
+    /// Sobrepõe um cenário hipotético no chart: linha pontilhada adicional
+    /// e callout com o saldo final projetado. Aceita valor mensal (positivo
+    /// = entrada extra, negativo = saída). Requer --forecast.
+    #[arg(long, value_name = "BRL")]
+    scenario_amount: Option<String>,
+    /// Descrição livre do cenário para legenda/callout, ex.: "terapia 2x/mês".
+    #[arg(long, value_name = "TEXTO", requires = "scenario_amount")]
+    scenario_description: Option<String>,
+    /// Mês de início do cenário no formato YYYY-MM. Default: próximo mês.
+    #[arg(long, value_name = "YYYY-MM", requires = "scenario_amount")]
+    scenario_start: Option<String>,
+    /// Duração do cenário em meses. Default: usa todos os meses futuros do chart.
+    #[arg(long, requires = "scenario_amount")]
+    scenario_months: Option<u32>,
 }
 
 #[derive(Args)]

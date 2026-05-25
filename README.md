@@ -93,7 +93,7 @@ All reports produce a human-readable output by default and accept `--raw` for JS
 | `report daily-pulse` | Recent transactions, grouped by category |
 | `report monthly-spend` | Current month broken down by category |
 | `report cashflow` | Cash-basis monthly summary for checking accounts; use `--details`, `--forecast`, and `--tui` for the interactive month dashboard |
-| `report cashflow-chart` | SVG chart of cash-basis evolution (last N months) with optional `--forecast` overlay |
+| `report cashflow-chart` | SVG chart of cash-basis evolution (last N months) with optional `--forecast` overlay and `--scenario-amount` what-if line |
 | `report card-summary` | Current credit-card cycle (open + closed bills) |
 | `report card-closed-insights` | What changed in the most recent closed bill |
 | `report budget-status` | Budget vs actual per category, with alerts |
