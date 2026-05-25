@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/feliperun/finance-os/compare/finance-core-v1.0.0...finance-core-v1.0.1) (2026-05-25)
+
+
+### Bug Fixes
+
+* trigger release-please after non-CC squash merge of [#67](https://github.com/feliperun/finance-os/issues/67) ([2d5f6ba](https://github.com/feliperun/finance-os/commit/2d5f6ba2c42ce03d10c2ecc8fcdc4a2a9f3643fe))
+
 ## [1.0.0](https://github.com/feliperun/finance-os/compare/finance-core-v0.3.0...finance-core-v1.0.0) (2026-05-25)
 
 

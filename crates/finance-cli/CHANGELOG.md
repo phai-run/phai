@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.2](https://github.com/feliperun/finance-os/compare/v2.3.1...v2.3.2) (2026-05-25)
+
+
+### Bug Fixes
+
+* trigger release-please after non-CC squash merge of [#67](https://github.com/feliperun/finance-os/issues/67) ([2d5f6ba](https://github.com/feliperun/finance-os/commit/2d5f6ba2c42ce03d10c2ecc8fcdc4a2a9f3643fe))
+
 ## [2.3.1](https://github.com/feliperun/finance-os/compare/v2.3.0...v2.3.1) (2026-05-25)
 
 
