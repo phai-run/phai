@@ -3188,8 +3188,8 @@ async fn admin_reclassify(args: ReclassifyArgs) -> Result<()> {
         return Ok(());
     }
 
-    let since = NaiveDate::from_ymd_opt(2020, 1, 1)
-        .context("invalid reclassify epoch (2020-01-01)")?;
+    let since =
+        NaiveDate::from_ymd_opt(2020, 1, 1).context("invalid reclassify epoch (2020-01-01)")?;
     let today = Utc::now().date_naive();
     let items = store.transactions_in_date_range(None, since, today).await?;
     println!("Transações encontradas: {}", items.len());

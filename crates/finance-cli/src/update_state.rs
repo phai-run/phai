@@ -32,9 +32,8 @@ impl UpdateState {
             )
         })?;
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create directory {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
         let json = serde_json::to_string_pretty(self)?;
         // NamedTempFile gives us a per-process unique name in the same
