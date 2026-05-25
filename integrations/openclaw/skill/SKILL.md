@@ -109,6 +109,34 @@ bash skills/finance-os/finance.sh forecast accept --template-id <id>
 bash skills/finance-os/finance.sh forecast dismiss --template-id <id>
 ```
 
+Simulação what-if (read-only — não grava nada):
+
+```bash
+# "Posso comprometer R$ 250/mês com algo novo a partir de ago/2026?"
+#  Mostra saldo projetado baseline vs com cenário, delta total no horizonte,
+#  e (se passar --minimum-balance) o primeiro mês em que o saldo cairia
+#  abaixo do limite.
+bash skills/finance-os/finance.sh forecast scenario \
+  --amount=-250 \
+  --description "atividade extra" \
+  --start 2026-08 \
+  --months 12 \
+  --minimum-balance 3000 \
+  --raw
+```
+
+Trigger conversacional: quando o usuário perguntar coisas como "posso afford X?",
+"e se eu colocar Y?", "quando acabam meus parcelamentos?", "quanto sobra por mês?",
+o agente deve:
+
+1. Para "posso afford?": rodar `forecast scenario` com o valor e período mencionados
+   e responder com base no `delta_total` e `first_breach_month` retornados.
+2. Para "quando acabam parcelamentos?": rodar `report installments` (já existente)
+   e listar `projected_end` por cadeia. Alternativamente, listar templates ativos
+   com `kind='installment'` e `end_date`.
+3. Para visão geral: rodar `report cashflow-chart --forecast --text` e usar o
+   sparkline + Hoje/Projetado pra contextualizar.
+
 Forecast vs realizado:
 
 ```bash

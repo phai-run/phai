@@ -5113,3 +5113,97 @@ fn forecast_suggest_envelope_groups_by_category() {
         .expect("count");
     assert_eq!(fc_count, 6, "6 monthly envelope forecasts");
 }
+
+#[test]
+fn forecast_scenario_eval_projects_with_and_without_commitment() {
+    // Layer 5 (ADR-0016): scenario eval — read-only what-if. Seeds a
+    // current saldo and a few future outflow forecasts, then runs the
+    // scenario command and checks the baseline / scenario / delta /
+    // breach detection.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("chk_test")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("checking")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Checking"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Seed today's snapshot at R$ 10.000.
+    let today = chrono::Local::now().date_naive();
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO account_snapshots (
+            snapshot_id, account_id, snapshot_date, balance, credit_limit,
+            currency_code, source, actor_id, idempotency_key, metadata_json, created_at
+         ) VALUES (
+            'snap-1', 'chk_test', ?1, '10000.00', NULL,
+            'BRL', 'manual', 'test', 'snap-1-key', '{}', '2025-01-01T12:00:00Z'
+         )",
+        [today.format("%Y-%m-%d").to_string()],
+    )
+    .expect("insert snapshot");
+
+    // Run scenario: -R$ 500/mês por 6 meses, com minimum-balance = 8000.
+    // Baseline saldo final stays at ~R$ 10.000; com cenário cai ~R$ 3.000
+    // (6 × R$ 500) → eventually deve quebrar abaixo de R$ 8.000.
+    let stdout = envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("scenario")
+            .arg("--amount=-500")
+            .arg("--description")
+            .arg("hypothetical recurring expense")
+            .arg("--start")
+            .arg(today.format("%Y-%m").to_string())
+            .arg("--months")
+            .arg("6")
+            .arg("--project-months")
+            .arg("6")
+            .arg("--minimum-balance")
+            .arg("8000")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let payload: Value = serde_json::from_slice(&stdout).expect("valid json");
+
+    assert_eq!(payload["initial_balance"].as_str(), Some("10000.00"));
+    assert_eq!(
+        payload["baseline_final_balance"].as_str(),
+        Some("10000.00"),
+        "no forecasts seeded → baseline stays put"
+    );
+    // 6 months × -500 = -3000 → 10000 - 3000 = 7000.
+    assert_eq!(payload["scenario_final_balance"].as_str(), Some("7000.00"));
+    assert_eq!(payload["delta_total"].as_str(), Some("-3000.00"));
+    // Saldo cai abaixo de 8.000 em algum momento — campo deve ser preenchido.
+    assert!(
+        !payload["first_breach_month"].is_null(),
+        "expected a breach month when saldo dips below minimum"
+    );
+
+    drop(conn);
+}
