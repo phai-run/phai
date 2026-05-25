@@ -2,7 +2,8 @@
 type: ADR
 id: "0007"
 title: "Atomic self-update with SHA-256 verification"
-status: active
+status: superseded
+superseded_by: "0017"
 date: 2026-02-02
 ---
 
