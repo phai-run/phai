@@ -15,8 +15,7 @@ use finance_core::{
 };
 use rust_decimal::Decimal;
 use serde_json::json;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use sha2::{Digest, Sha256};
 
 use crate::{
     enrich_description_from_metadata, load_config, normalize_description, strip_installment_marker,
@@ -208,12 +207,23 @@ fn build_template_and_instances(
 
 /// Stable hash of the chain's identity (account + base description + total)
 /// so the template_id is deterministic across runs.
+///
+/// SHA-256 (truncated) — `DefaultHasher` is not stable across Rust
+/// versions/platforms, so upgrading the toolchain would change all
+/// template_ids and break the idempotency guarantee callers rely on
+/// to avoid duplicate forecast templates.
 fn chain_idempotency_key(chain: &InstallmentChain) -> String {
-    let mut hasher = DefaultHasher::new();
-    chain.account_id.hash(&mut hasher);
-    chain.base_description.to_lowercase().hash(&mut hasher);
-    chain.total.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(chain.account_id.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(chain.base_description.to_lowercase().as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(chain.total.to_string().as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    )
 }
 
 fn shift_months_back(date: NaiveDate, n: i32) -> Result<NaiveDate> {
@@ -277,11 +287,17 @@ pub(crate) struct RecurringCandidate {
 
 impl RecurringCandidate {
     fn idempotency_hash(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        self.account_id.hash(&mut hasher);
-        self.merchant_key.hash(&mut hasher);
-        self.kind.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        let mut hasher = Sha256::new();
+        hasher.update(self.account_id.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(self.merchant_key.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(self.kind.as_bytes());
+        let digest = hasher.finalize();
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+        )
     }
 }
 
@@ -1142,5 +1158,45 @@ mod tests {
         let mut c = a.clone();
         c.total = 24;
         assert_ne!(chain_idempotency_key(&a), chain_idempotency_key(&c));
+    }
+
+    #[test]
+    fn chain_idempotency_key_is_stable_across_builds() {
+        // Frozen value — if this assertion ever fails it means upgrading
+        // some dependency changed the persisted template_id format, which
+        // would orphan every forecast_template row already in production.
+        let chain = InstallmentChain {
+            account_id: "acc-frozen".into(),
+            base_description: "Compra Parcelada".into(),
+            total: 6,
+            current: 1,
+            installments: Vec::new(),
+            first_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            projected_end: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            remaining: 5,
+            released_next_month: false,
+            total_amount: Decimal::from(600),
+        };
+        assert_eq!(chain_idempotency_key(&chain), "30e6c2ca1c2b5901");
+    }
+
+    #[test]
+    fn recurring_candidate_idempotency_hash_is_stable_across_builds() {
+        let c = RecurringCandidate {
+            kind: "subscription".into(),
+            account_id: "acc-frozen".into(),
+            merchant_key: "netflix".into(),
+            label: "Netflix".into(),
+            category_id: None,
+            median_amount: Decimal::ZERO,
+            amount_lower: Decimal::ZERO,
+            amount_upper: Decimal::ZERO,
+            months_seen: 0,
+            last_seen: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            typical_day_of_month: 1,
+            coefficient_of_variation: 0.0,
+            confidence: 0.0,
+        };
+        assert_eq!(c.idempotency_hash(), "f25d52649954089b");
     }
 }
