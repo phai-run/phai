@@ -2700,8 +2700,19 @@ async fn dedup_pluggy_duplicates(
     if incoming.is_empty() {
         return Ok((incoming, Vec::new()));
     }
-    let date_min = incoming.iter().map(|t| t.transaction_date).min().unwrap();
-    let date_max = incoming.iter().map(|t| t.transaction_date).max().unwrap();
+    // Safe: `incoming.is_empty()` was checked above, so the iterator has
+    // at least one element. Using a guarded fallback instead of `.unwrap()`
+    // keeps us aligned with the project's no-unwrap-in-prod-paths rule.
+    let (date_min, date_max) = incoming
+        .iter()
+        .map(|t| t.transaction_date)
+        .fold(None::<(NaiveDate, NaiveDate)>, |acc, d| {
+            Some(match acc {
+                None => (d, d),
+                Some((lo, hi)) => (lo.min(d), hi.max(d)),
+            })
+        })
+        .context("incoming batch unexpectedly empty after non-empty check")?;
     // Existing rows in the window. Per-account filtering happens in-Rust so
     // we only need a single query.
     let existing = store
@@ -3177,7 +3188,8 @@ async fn admin_reclassify(args: ReclassifyArgs) -> Result<()> {
         return Ok(());
     }
 
-    let since = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+    let since = NaiveDate::from_ymd_opt(2020, 1, 1)
+        .context("invalid reclassify epoch (2020-01-01)")?;
     let today = Utc::now().date_naive();
     let items = store.transactions_in_date_range(None, since, today).await?;
     println!("Transações encontradas: {}", items.len());
