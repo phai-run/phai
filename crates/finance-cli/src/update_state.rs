@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 
 const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
@@ -23,10 +25,37 @@ impl UpdateState {
     }
 
     pub fn write_atomic(&self, path: &Path) -> Result<()> {
-        let tmp = path.with_extension("tmp");
+        let parent = path.parent().with_context(|| {
+            format!(
+                "Update state path has no parent directory: {}",
+                path.display()
+            )
+        })?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create directory {}", parent.display())
+            })?;
+        }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&tmp, &json)?;
-        std::fs::rename(&tmp, path)?;
+        // NamedTempFile gives us a per-process unique name in the same
+        // directory as the target, eliminating the TOCTOU race that the
+        // previous `path.with_extension("tmp")` had when two finance-cli
+        // processes wrote update state concurrently.
+        let dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let mut tmp = NamedTempFile::new_in(dir)
+            .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
+        tmp.write_all(json.as_bytes())
+            .context("Failed to write update state")?;
+        tmp.as_file_mut()
+            .sync_all()
+            .context("Failed to fsync update state")?;
+        tmp.persist(path)
+            .map_err(|e| e.error)
+            .with_context(|| format!("Failed to persist {}", path.display()))?;
         Ok(())
     }
 
@@ -224,6 +253,40 @@ mod tests {
         assert!(state.last_check.is_some(), "last_check should be advanced");
         // last_seen_version is preserved
         assert_eq!(state.last_seen_version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn write_atomic_handles_concurrent_writers() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(state_file_path(dir.path()));
+
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                thread::spawn(move || {
+                    let state = UpdateState {
+                        last_check: Some(recent_rfc3339()),
+                        last_seen_version: Some(format!("1.0.{i}")),
+                        last_error: None,
+                        exe_path_hash: Some(HASH_A.into()),
+                    };
+                    state.write_atomic(&path).unwrap();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final file must be a valid, complete JSON write from one of the
+        // threads (no partial/truncated content from a clobbered temp).
+        let loaded = UpdateState::read(&path);
+        assert!(loaded.last_seen_version.is_some());
+        assert_eq!(loaded.exe_path_hash.as_deref(), Some(HASH_A));
     }
 
     #[test]
