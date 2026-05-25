@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 33] = [
+const SQLITE_MIGRATIONS: [Migration; 34] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -120,6 +120,10 @@ const SQLITE_MIGRATIONS: [Migration; 33] = [
     (
         "029_dedup_cashflow_card_summary",
         include_str!("../../../schema/sqlite/029_dedup_cashflow_card_summary.sql"),
+    ),
+    (
+        "030_dedup_cashflow_card_summary",
+        include_str!("../../../schema/sqlite/030_dedup_cashflow_card_summary.sql"),
     ),
     (
         "031_amount_cents_views_fix",

@@ -11,12 +11,12 @@ use chrono::{Datelike, NaiveDate, Utc};
 use finance_core::migrations::run_migrations;
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{
-    group_into_chains, AppConfig, ForecastRecord, ForecastTemplateRecord, InstallmentChain,
+    group_into_chains, AppConfig, AuditEvent, ForecastRecord, ForecastTemplateRecord,
+    InstallmentChain,
 };
 use rust_decimal::Decimal;
 use serde_json::json;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use sha2::{Digest, Sha256};
 
 use crate::{
     enrich_description_from_metadata, load_config, normalize_description, strip_installment_marker,
@@ -105,12 +105,52 @@ pub async fn refresh_installments(
 
     if !templates.is_empty() {
         report.templates_upserted = store.upsert_forecast_templates(&templates).await?;
+        let events = templates
+            .iter()
+            .map(|t| audit_event_for_template(t, "upsert", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
     }
     if !forecasts.is_empty() {
         report.forecasts_upserted = store.upsert_forecasts(&forecasts).await?;
+        let events = forecasts
+            .iter()
+            .map(|f| audit_event_for_forecast(f, "upsert", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
     }
 
     Ok(report)
+}
+
+fn audit_event_for_template(
+    row: &ForecastTemplateRecord,
+    action: &str,
+    actor_id: &str,
+) -> Result<AuditEvent> {
+    Ok(AuditEvent::from_entity(
+        "forecast_template",
+        &row.template_id,
+        action,
+        actor_id,
+        &row.idempotency_key,
+        serde_json::to_value(row)?,
+    ))
+}
+
+fn audit_event_for_forecast(
+    row: &ForecastRecord,
+    action: &str,
+    actor_id: &str,
+) -> Result<AuditEvent> {
+    Ok(AuditEvent::from_entity(
+        "forecast",
+        &row.forecast_id,
+        action,
+        actor_id,
+        &row.idempotency_key,
+        serde_json::to_value(row)?,
+    ))
 }
 
 /// Build the `forecast_template` row plus one forecast per remaining parcela
@@ -208,12 +248,23 @@ fn build_template_and_instances(
 
 /// Stable hash of the chain's identity (account + base description + total)
 /// so the template_id is deterministic across runs.
+///
+/// SHA-256 (truncated) — `DefaultHasher` is not stable across Rust
+/// versions/platforms, so upgrading the toolchain would change all
+/// template_ids and break the idempotency guarantee callers rely on
+/// to avoid duplicate forecast templates.
 fn chain_idempotency_key(chain: &InstallmentChain) -> String {
-    let mut hasher = DefaultHasher::new();
-    chain.account_id.hash(&mut hasher);
-    chain.base_description.to_lowercase().hash(&mut hasher);
-    chain.total.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(chain.account_id.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(chain.base_description.to_lowercase().as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(chain.total.to_string().as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    )
 }
 
 fn shift_months_back(date: NaiveDate, n: i32) -> Result<NaiveDate> {
@@ -255,6 +306,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 
 use finance_core::TransactionRecord;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::MathematicalOps;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RecurringCandidate {
@@ -277,11 +329,17 @@ pub(crate) struct RecurringCandidate {
 
 impl RecurringCandidate {
     fn idempotency_hash(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        self.account_id.hash(&mut hasher);
-        self.merchant_key.hash(&mut hasher);
-        self.kind.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        let mut hasher = Sha256::new();
+        hasher.update(self.account_id.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(self.merchant_key.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(self.kind.as_bytes());
+        let digest = hasher.finalize();
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+        )
     }
 }
 
@@ -357,16 +415,16 @@ pub(crate) fn detect_recurring_candidates(
             }
         }
 
-        let amounts: Vec<f64> = group
-            .iter()
-            .map(|tx| tx.amount.abs().to_f64().unwrap_or(0.0))
-            .collect();
-        let median = median_f64(&amounts);
-        if median <= 0.0 {
+        let amounts: Vec<Decimal> = group.iter().map(|tx| tx.amount.abs()).collect();
+        let median = median_decimal(&amounts);
+        if median <= Decimal::ZERO {
             continue;
         }
-        let stddev = stddev_f64(&amounts);
-        let cv = stddev / median; // coefficient of variation
+        let stddev = stddev_decimal(&amounts);
+        // Coefficient of variation isn't monetary — it's a dimensionless
+        // ratio used only for the thresholds below, so an f64 cast at the
+        // boundary is fine. The amounts themselves stay in Decimal.
+        let cv = (stddev / median).to_f64().unwrap_or(f64::INFINITY);
 
         let (kind, confidence) = match cv {
             c if c.is_finite() && c <= 0.10 => ("subscription", (1.0 - c).max(0.6)),
@@ -408,8 +466,8 @@ pub(crate) fn detect_recurring_candidates(
             .map(|(c, _)| c);
 
         let last_seen = group.last().expect("non-empty group").transaction_date;
-        let median_amount = -decimal_from_f64(median);
-        let band_half = decimal_from_f64(stddev);
+        let median_amount = -median.round_dp(2);
+        let band_half = stddev.round_dp(2);
         candidates.push(RecurringCandidate {
             kind: kind.to_string(),
             account_id,
@@ -440,15 +498,15 @@ fn merchant_key_from_label(label: &str) -> String {
     normalize_description(&strip_installment_marker(label))
 }
 
-fn median_f64(values: &[f64]) -> f64 {
+fn median_decimal(values: &[Decimal]) -> Decimal {
     if values.is_empty() {
-        return 0.0;
+        return Decimal::ZERO;
     }
-    let mut sorted: Vec<f64> = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sorted = values.to_vec();
+    sorted.sort();
     let mid = sorted.len() / 2;
     if sorted.len().is_multiple_of(2) {
-        (sorted[mid - 1] + sorted[mid]) / 2.0
+        (sorted[mid - 1] + sorted[mid]) / Decimal::TWO
     } else {
         sorted[mid]
     }
@@ -463,13 +521,25 @@ fn median_i64(values: &[i64]) -> i64 {
     sorted[sorted.len() / 2]
 }
 
-fn stddev_f64(values: &[f64]) -> f64 {
+/// Population standard deviation of `values`, computed entirely in
+/// `Decimal`. Returns `Decimal::ZERO` when the input has fewer than two
+/// samples or when `sqrt` fails (e.g. on a negative variance produced
+/// by accumulated rounding — shouldn't happen here but stays defensive).
+fn stddev_decimal(values: &[Decimal]) -> Decimal {
     if values.len() < 2 {
-        return 0.0;
+        return Decimal::ZERO;
     }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-    var.sqrt()
+    let count = Decimal::from(values.len());
+    let mean = values.iter().sum::<Decimal>() / count;
+    let var = values
+        .iter()
+        .map(|v| {
+            let diff = *v - mean;
+            diff * diff
+        })
+        .sum::<Decimal>()
+        / count;
+    var.sqrt().unwrap_or(Decimal::ZERO)
 }
 
 fn mode_u32(values: &[u32]) -> Option<u32> {
@@ -479,12 +549,6 @@ fn mode_u32(values: &[u32]) -> Option<u32> {
         *counts.entry(*v).or_default() += 1;
     }
     counts.into_iter().max_by_key(|(_, n)| *n).map(|(v, _)| v)
-}
-
-fn decimal_from_f64(v: f64) -> Decimal {
-    Decimal::from_f64_retain(v)
-        .unwrap_or(Decimal::ZERO)
-        .round_dp(2)
 }
 
 /// Per-category envelope detector (Layer 4 of ADR-0016). Groups outflows
@@ -509,7 +573,7 @@ pub(crate) fn detect_envelope_candidates(
     let cutoff = shift_months(today, -(lookback_months as i32)).unwrap_or(today);
 
     // Per (category_id) → per (year,month) → sum of outflow magnitudes.
-    let mut buckets: BTreeMap<String, BTreeMap<(i32, u32), f64>> = BTreeMap::new();
+    let mut buckets: BTreeMap<String, BTreeMap<(i32, u32), Decimal>> = BTreeMap::new();
     // Track the most recent label per category for the description field.
     let mut latest_label: BTreeMap<String, String> = BTreeMap::new();
 
@@ -553,7 +617,7 @@ pub(crate) fn detect_envelope_candidates(
         }
 
         let month = (tx.transaction_date.year(), tx.transaction_date.month());
-        let amount = tx.amount.abs().to_f64().unwrap_or(0.0);
+        let amount = tx.amount.abs();
         *buckets
             .entry(category_id.clone())
             .or_default()
@@ -567,15 +631,15 @@ pub(crate) fn detect_envelope_candidates(
         if months.len() < 4 {
             continue;
         }
-        let totals: Vec<f64> = months.values().copied().collect();
-        let median = median_f64(&totals);
-        if median < 50.0 {
+        let totals: Vec<Decimal> = months.values().copied().collect();
+        let median = median_decimal(&totals);
+        if median < Decimal::from(50) {
             // Skip noise: categories that barely register a small amount
             // per month aren't worth materialising into the chart.
             continue;
         }
-        let stddev = stddev_f64(&totals);
-        let cv = stddev / median;
+        let stddev = stddev_decimal(&totals);
+        let cv = (stddev / median).to_f64().unwrap_or(f64::INFINITY);
         if !cv.is_finite() || cv > 0.40 {
             continue;
         }
@@ -587,8 +651,8 @@ pub(crate) fn detect_envelope_candidates(
             .unwrap_or((today.year(), today.month()));
         let last_seen =
             NaiveDate::from_ymd_opt(last_month_key.0, last_month_key.1, 15).unwrap_or(today);
-        let median_amount = -decimal_from_f64(median);
-        let band_half = decimal_from_f64(stddev);
+        let median_amount = -median.round_dp(2);
+        let band_half = stddev.round_dp(2);
         let label = latest_label
             .get(&category_id)
             .cloned()
@@ -704,6 +768,11 @@ pub(crate) async fn run_suggest(args: ForecastSuggestArgs) -> Result<()> {
 
     if !new_proposals.is_empty() {
         store.upsert_forecast_templates(&new_proposals).await?;
+        let events = new_proposals
+            .iter()
+            .map(|t| audit_event_for_template(t, "upsert", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
     }
 
     // Re-read the full proposto list so we can print it.
@@ -835,6 +904,13 @@ pub(crate) async fn run_accept(args: ForecastAcceptArgs) -> Result<()> {
     store
         .upsert_forecast_templates(std::slice::from_ref(&updated))
         .await?;
+    store
+        .insert_audit_events(&[audit_event_for_template(
+            &updated,
+            "accept",
+            &config.actor_id,
+        )?])
+        .await?;
 
     // Materialise next N months of instances right away.
     let materialised = materialise_template_forecasts(
@@ -871,6 +947,13 @@ pub(crate) async fn run_dismiss(args: ForecastDismissArgs) -> Result<()> {
     updated.updated_at = Utc::now();
     store
         .upsert_forecast_templates(std::slice::from_ref(&updated))
+        .await?;
+    store
+        .insert_audit_events(&[audit_event_for_template(
+            &updated,
+            "dismiss",
+            &config.actor_id,
+        )?])
         .await?;
     println!("🗑  Descartado: {}", updated.description);
     Ok(())
@@ -926,7 +1009,13 @@ async fn materialise_template_forecasts(
     if instances.is_empty() {
         return Ok(0);
     }
-    store.upsert_forecasts(&instances).await
+    let upserted = store.upsert_forecasts(&instances).await?;
+    let events = instances
+        .iter()
+        .map(|f| audit_event_for_forecast(f, "upsert", actor_id))
+        .collect::<Result<Vec<_>>>()?;
+    store.insert_audit_events(&events).await?;
+    Ok(upserted)
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,5 +1231,45 @@ mod tests {
         let mut c = a.clone();
         c.total = 24;
         assert_ne!(chain_idempotency_key(&a), chain_idempotency_key(&c));
+    }
+
+    #[test]
+    fn chain_idempotency_key_is_stable_across_builds() {
+        // Frozen value — if this assertion ever fails it means upgrading
+        // some dependency changed the persisted template_id format, which
+        // would orphan every forecast_template row already in production.
+        let chain = InstallmentChain {
+            account_id: "acc-frozen".into(),
+            base_description: "Compra Parcelada".into(),
+            total: 6,
+            current: 1,
+            installments: Vec::new(),
+            first_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            projected_end: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            remaining: 5,
+            released_next_month: false,
+            total_amount: Decimal::from(600),
+        };
+        assert_eq!(chain_idempotency_key(&chain), "30e6c2ca1c2b5901");
+    }
+
+    #[test]
+    fn recurring_candidate_idempotency_hash_is_stable_across_builds() {
+        let c = RecurringCandidate {
+            kind: "subscription".into(),
+            account_id: "acc-frozen".into(),
+            merchant_key: "netflix".into(),
+            label: "Netflix".into(),
+            category_id: None,
+            median_amount: Decimal::ZERO,
+            amount_lower: Decimal::ZERO,
+            amount_upper: Decimal::ZERO,
+            months_seen: 0,
+            last_seen: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            typical_day_of_month: 1,
+            coefficient_of_variation: 0.0,
+            confidence: 0.0,
+        };
+        assert_eq!(c.idempotency_hash(), "f25d52649954089b");
     }
 }

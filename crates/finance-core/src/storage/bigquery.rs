@@ -73,6 +73,265 @@ struct QueryRequest<'a> {
     query: &'a str,
     use_legacy_sql: bool,
     timeout_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameter_mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    query_parameters: Vec<Value>,
+}
+
+/// BigQuery query parameter type declaration, mirroring the REST schema at
+/// https://cloud.google.com/bigquery/docs/reference/rest/v2/QueryParameterType.
+/// Only the subset used by Finance OS write paths is modelled; expand on
+/// demand. `Bool` is intentionally part of the surface so callers can opt
+/// in without touching this module.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum BqType {
+    String,
+    Numeric,
+    Date,
+    Timestamp,
+    Json,
+    Int64,
+    Float64,
+    Bool,
+    Struct(Vec<(String, BqType)>),
+    Array(Box<BqType>),
+}
+
+impl BqType {
+    fn to_json(&self) -> Value {
+        match self {
+            BqType::String => json!({"type": "STRING"}),
+            BqType::Numeric => json!({"type": "NUMERIC"}),
+            BqType::Date => json!({"type": "DATE"}),
+            BqType::Timestamp => json!({"type": "TIMESTAMP"}),
+            BqType::Json => json!({"type": "JSON"}),
+            BqType::Int64 => json!({"type": "INT64"}),
+            BqType::Float64 => json!({"type": "FLOAT64"}),
+            BqType::Bool => json!({"type": "BOOL"}),
+            BqType::Struct(fields) => {
+                let struct_types: Vec<Value> = fields
+                    .iter()
+                    .map(|(name, ty)| json!({"name": name, "type": ty.to_json()}))
+                    .collect();
+                json!({"type": "STRUCT", "structTypes": struct_types})
+            }
+            BqType::Array(inner) => {
+                json!({"type": "ARRAY", "arrayType": inner.to_json()})
+            }
+        }
+    }
+}
+
+/// BigQuery query parameter value, typed to match `BqType`. `Null` is paired
+/// with the spec's declared type at the `Param` level.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum BqValue {
+    String(String),
+    Numeric(String),
+    Date(NaiveDate),
+    Timestamp(chrono::DateTime<Utc>),
+    Json(String),
+    Int64(i64),
+    Float64(f64),
+    Bool(bool),
+    Null,
+    Struct(Vec<(String, BqValue)>),
+    Array(Vec<BqValue>),
+}
+
+impl BqValue {
+    fn to_json(&self) -> Value {
+        match self {
+            // BigQuery's REST API uses an empty parameterValue object to
+            // signal NULL; sending JSON `null` here returns
+            // `"Missing query parameter value"`.
+            BqValue::Null => json!({}),
+            BqValue::String(s) => json!({"value": s}),
+            BqValue::Numeric(s) => json!({"value": s}),
+            BqValue::Date(d) => json!({"value": d.format("%Y-%m-%d").to_string()}),
+            BqValue::Timestamp(t) => json!({"value": t.to_rfc3339()}),
+            BqValue::Json(s) => json!({"value": s}),
+            BqValue::Int64(i) => json!({"value": i.to_string()}),
+            BqValue::Float64(f) => json!({"value": f.to_string()}),
+            BqValue::Bool(b) => json!({"value": if *b { "true" } else { "false" }}),
+            BqValue::Struct(fields) => {
+                let mut obj = serde_json::Map::new();
+                for (name, value) in fields {
+                    obj.insert(name.clone(), value.to_json());
+                }
+                json!({"structValues": Value::Object(obj)})
+            }
+            BqValue::Array(values) => {
+                let array_values: Vec<Value> = values.iter().map(|v| v.to_json()).collect();
+                json!({"arrayValues": array_values})
+            }
+        }
+    }
+}
+
+/// A single named query parameter passed to BigQuery via `queryParameters`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct Param {
+    name: String,
+    ty: BqType,
+    value: BqValue,
+}
+
+#[allow(dead_code)]
+impl Param {
+    fn new(name: &str, ty: BqType, value: BqValue) -> Self {
+        Self {
+            name: name.to_string(),
+            ty,
+            value,
+        }
+    }
+
+    fn string(name: &str, value: impl Into<String>) -> Self {
+        Self::new(name, BqType::String, BqValue::String(value.into()))
+    }
+
+    fn optional_string<S: Into<String>>(name: &str, value: Option<S>) -> Self {
+        match value {
+            Some(v) => Self::new(name, BqType::String, BqValue::String(v.into())),
+            None => Self::new(name, BqType::String, BqValue::Null),
+        }
+    }
+
+    fn decimal(name: &str, value: Decimal) -> Self {
+        Self::new(
+            name,
+            BqType::Numeric,
+            BqValue::Numeric(value.round_dp(2).to_string()),
+        )
+    }
+
+    fn optional_decimal(name: &str, value: Option<Decimal>) -> Self {
+        match value {
+            Some(v) => Self::decimal(name, v),
+            None => Self::new(name, BqType::Numeric, BqValue::Null),
+        }
+    }
+
+    fn date(name: &str, value: NaiveDate) -> Self {
+        Self::new(name, BqType::Date, BqValue::Date(value))
+    }
+
+    fn optional_date(name: &str, value: Option<NaiveDate>) -> Self {
+        match value {
+            Some(v) => Self::date(name, v),
+            None => Self::new(name, BqType::Date, BqValue::Null),
+        }
+    }
+
+    fn timestamp(name: &str, value: chrono::DateTime<Utc>) -> Self {
+        Self::new(name, BqType::Timestamp, BqValue::Timestamp(value))
+    }
+
+    fn json(name: &str, value: &Value) -> Self {
+        Self::new(
+            name,
+            BqType::Json,
+            BqValue::Json(serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())),
+        )
+    }
+
+    fn int64(name: &str, value: i64) -> Self {
+        Self::new(name, BqType::Int64, BqValue::Int64(value))
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "parameterType": self.ty.to_json(),
+            "parameterValue": self.value.to_json(),
+        })
+    }
+}
+
+// Compact constructors used inside batch struct rows.
+fn bv_str<S: Into<String>>(value: S) -> BqValue {
+    BqValue::String(value.into())
+}
+
+fn bv_opt_str(value: Option<&str>) -> BqValue {
+    match value {
+        Some(s) => BqValue::String(s.to_string()),
+        None => BqValue::Null,
+    }
+}
+
+fn bv_dec(value: Decimal) -> BqValue {
+    BqValue::Numeric(value.round_dp(2).to_string())
+}
+
+fn bv_opt_dec(value: Option<Decimal>) -> BqValue {
+    match value {
+        Some(v) => bv_dec(v),
+        None => BqValue::Null,
+    }
+}
+
+fn bv_date(value: NaiveDate) -> BqValue {
+    BqValue::Date(value)
+}
+
+fn bv_opt_date(value: Option<NaiveDate>) -> BqValue {
+    match value {
+        Some(v) => bv_date(v),
+        None => BqValue::Null,
+    }
+}
+
+fn bv_ts(value: chrono::DateTime<Utc>) -> BqValue {
+    BqValue::Timestamp(value)
+}
+
+fn bv_json(value: &Value) -> BqValue {
+    BqValue::Json(serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()))
+}
+
+fn bv_int(value: i64) -> BqValue {
+    BqValue::Int64(value)
+}
+
+fn bv_opt_int(value: Option<i64>) -> BqValue {
+    match value {
+        Some(v) => BqValue::Int64(v),
+        None => BqValue::Null,
+    }
+}
+
+fn bv_opt_float(value: Option<f64>) -> BqValue {
+    match value {
+        Some(v) => BqValue::Float64(v),
+        None => BqValue::Null,
+    }
+}
+
+fn field<S: Into<String>>(name: S, value: BqValue) -> (String, BqValue) {
+    (name.into(), value)
+}
+
+fn batch_array_param(
+    name: &str,
+    fields: Vec<(&str, BqType)>,
+    rows: Vec<Vec<(String, BqValue)>>,
+) -> Param {
+    let struct_fields: Vec<(String, BqType)> = fields
+        .into_iter()
+        .map(|(n, t)| (n.to_string(), t))
+        .collect();
+    let array = BqValue::Array(rows.into_iter().map(BqValue::Struct).collect());
+    Param::new(
+        name,
+        BqType::Array(Box::new(BqType::Struct(struct_fields))),
+        array,
+    )
 }
 
 impl BigQueryStore {
@@ -141,7 +400,19 @@ impl BigQueryStore {
     }
 
     async fn run_query(&self, sql: &str) -> Result<QueryResponse> {
+        self.run_query_with_params(sql, &[]).await
+    }
+
+    async fn run_query_with_params(&self, sql: &str, params: &[Param]) -> Result<QueryResponse> {
         let token = self.bearer_token().await?;
+        let (parameter_mode, query_parameters) = if params.is_empty() {
+            (None, Vec::new())
+        } else {
+            (
+                Some("NAMED"),
+                params.iter().map(|p| p.to_json()).collect::<Vec<_>>(),
+            )
+        };
         let response = self
             .client
             .post(self.query_endpoint()?)
@@ -150,6 +421,8 @@ impl BigQueryStore {
                 query: sql,
                 use_legacy_sql: false,
                 timeout_ms: 30_000,
+                parameter_mode,
+                query_parameters,
             })
             .send()
             .await
@@ -203,19 +476,6 @@ impl BigQueryStore {
     }
 }
 
-fn escape_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\0', "")
-}
-
-fn sql_string(value: &str) -> String {
-    format!("'{}'", escape_string(value))
-}
-
 /// Mirror of `local::last_day_of_target_month`: last calendar day of the
 /// month at `month_start`, capped at `today` so the current month's
 /// closing anchor is "now".
@@ -231,40 +491,6 @@ fn bq_last_day_of_target_month(month_start: NaiveDate, today: NaiveDate) -> Resu
         .checked_sub_days(Days::new(1))
         .context("Falha ao calcular último dia do mês")?;
     Ok(if last_day > today { today } else { last_day })
-}
-
-fn sql_optional_string(value: Option<&str>) -> String {
-    value
-        .map(|text| format!("CAST({} AS STRING)", sql_string(text)))
-        .unwrap_or_else(|| "CAST(NULL AS STRING)".to_string())
-}
-
-fn sql_decimal(value: &Decimal) -> String {
-    format!(
-        "CAST({} AS NUMERIC)",
-        sql_string(&value.round_dp(2).to_string())
-    )
-}
-
-fn sql_date(value: NaiveDate) -> String {
-    format!("DATE '{}'", value.format("%Y-%m-%d"))
-}
-
-fn sql_optional_date(value: Option<NaiveDate>) -> String {
-    // Bare "NULL" makes BigQuery default to INT64 when all rows in a
-    // UNION ALL source carry NULL (e.g. envelope templates with no
-    // end_date). Cast explicitly so the inferred column type stays DATE.
-    value
-        .map(sql_date)
-        .unwrap_or_else(|| "CAST(NULL AS DATE)".to_string())
-}
-
-fn sql_timestamp(value: chrono::DateTime<Utc>) -> String {
-    format!("TIMESTAMP({})", sql_string(&value.to_rfc3339()))
-}
-
-fn sql_json(value: &Value) -> String {
-    format!("PARSE_JSON({})", sql_string(&value.to_string()))
 }
 
 fn parse_scalar_string(value: &Value) -> Option<String> {
@@ -544,15 +770,15 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             MERGE {} target
-            USING (SELECT {} AS version, CURRENT_TIMESTAMP() AS applied_at) source
+            USING (SELECT @version AS version, CURRENT_TIMESTAMP() AS applied_at) source
             ON target.version = source.version
             WHEN MATCHED THEN UPDATE SET applied_at = source.applied_at
             WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (source.version, source.applied_at)
             ",
             self.qualified_table("schema_versions")?,
-            sql_string(version),
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[Param::string("version", version)])
+            .await?;
         Ok(())
     }
 
@@ -560,33 +786,51 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS account_id, {} AS owner, {} AS account_type, {} AS bank, {} AS label, {} AS pluggy_account_id, {} AS pluggy_item_id, {} AS status, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
-                    sql_string(&row.account_id),
-                    sql_string(&row.owner),
-                    sql_string(&row.account_type),
-                    sql_string(&row.bank),
-                    sql_string(&row.label),
-                    sql_optional_string(row.pluggy_account_id.as_deref()),
-                    sql_optional_string(row.pluggy_item_id.as_deref()),
-                    sql_string(&row.status),
-                    sql_string(&row.actor_id),
-                    sql_string(&row.idempotency_key),
-                    sql_json(&row.metadata_json),
-                    sql_timestamp(row.created_at),
-                    sql_timestamp(row.updated_at),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("account_id", BqType::String),
+                ("owner", BqType::String),
+                ("account_type", BqType::String),
+                ("bank", BqType::String),
+                ("label", BqType::String),
+                ("pluggy_account_id", BqType::String),
+                ("pluggy_item_id", BqType::String),
+                ("status", BqType::String),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("account_id", bv_str(&r.account_id)),
+                        field("owner", bv_str(&r.owner)),
+                        field("account_type", bv_str(&r.account_type)),
+                        field("bank", bv_str(&r.bank)),
+                        field("label", bv_str(&r.label)),
+                        field(
+                            "pluggy_account_id",
+                            bv_opt_str(r.pluggy_account_id.as_deref()),
+                        ),
+                        field("pluggy_item_id", bv_opt_str(r.pluggy_item_id.as_deref())),
+                        field("status", bv_str(&r.status)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                    ]
+                })
+                .collect(),
+        );
 
         let sql = format!(
             "
             MERGE {} target
-            USING ({source}) source
+            USING (SELECT * FROM UNNEST(@batch)) source
             ON target.account_id = source.account_id
             WHEN MATCHED THEN UPDATE SET
               owner = source.owner,
@@ -610,7 +854,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("accounts")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -640,31 +884,44 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS snapshot_id, {} AS account_id, {} AS snapshot_date, {} AS balance, {} AS credit_limit, {} AS currency_code, {} AS source, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at",
-                    sql_string(&row.snapshot_id),
-                    sql_string(&row.account_id),
-                    sql_date(row.snapshot_date),
-                    row.balance.as_ref().map(sql_decimal).unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
-                    row.credit_limit.as_ref().map(sql_decimal).unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
-                    sql_optional_string(row.currency_code.as_deref()),
-                    sql_string(&row.source),
-                    sql_string(&row.actor_id),
-                    sql_string(&row.idempotency_key),
-                    sql_json(&row.metadata_json),
-                    sql_timestamp(row.created_at),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("snapshot_id", BqType::String),
+                ("account_id", BqType::String),
+                ("snapshot_date", BqType::Date),
+                ("balance", BqType::Numeric),
+                ("credit_limit", BqType::Numeric),
+                ("currency_code", BqType::String),
+                ("source", BqType::String),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("created_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("snapshot_id", bv_str(&r.snapshot_id)),
+                        field("account_id", bv_str(&r.account_id)),
+                        field("snapshot_date", bv_date(r.snapshot_date)),
+                        field("balance", bv_opt_dec(r.balance)),
+                        field("credit_limit", bv_opt_dec(r.credit_limit)),
+                        field("currency_code", bv_opt_str(r.currency_code.as_deref())),
+                        field("source", bv_str(&r.source)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("created_at", bv_ts(r.created_at)),
+                    ]
+                })
+                .collect(),
+        );
 
         let sql = format!(
             "
             MERGE {} target
-            USING ({source}) source
+            USING (SELECT * FROM UNNEST(@batch)) source
             ON target.idempotency_key = source.idempotency_key
             WHEN NOT MATCHED THEN INSERT (
               snapshot_id, account_id, snapshot_date, balance, credit_limit, currency_code,
@@ -676,7 +933,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("account_snapshots")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -752,19 +1009,23 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
             FROM {}
-            WHERE LOWER(COALESCE(raw_description, '')) LIKE {}
-               OR LOWER(COALESCE(description, '')) LIKE {}
-               OR LOWER(COALESCE(merchant_name, '')) LIKE {}
+            WHERE LOWER(COALESCE(raw_description, '')) LIKE @pattern
+               OR LOWER(COALESCE(description, '')) LIKE @pattern
+               OR LOWER(COALESCE(merchant_name, '')) LIKE @pattern
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
-            LIMIT {}
+            LIMIT @lim
             ",
             self.qualified_table("transactions")?,
-            sql_string(&pattern),
-            sql_string(&pattern),
-            sql_string(&pattern),
-            limit,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::string("pattern", pattern),
+                    Param::int64("lim", limit as i64),
+                ],
+            )
+            .await?;
         response
             .rows
             .iter()
@@ -790,12 +1051,13 @@ impl FinanceStore for BigQueryStore {
             FROM {}
             WHERE context IS NULL
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
-            LIMIT {}
+            LIMIT @lim
             ",
             self.qualified_table("transactions")?,
-            limit,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::int64("lim", limit as i64)])
+            .await?;
         response
             .rows
             .iter()
@@ -819,12 +1081,13 @@ impl FinanceStore for BigQueryStore {
             WHERE (description IS NULL OR TRIM(description) = '')
               AND ABS(amount) > 0
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
-            LIMIT {}
+            LIMIT @lim
             ",
             self.qualified_table("transactions")?,
-            limit,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::int64("lim", limit as i64)])
+            .await?;
         response
             .rows
             .iter()
@@ -848,12 +1111,13 @@ impl FinanceStore for BigQueryStore {
             WHERE (merchant_name IS NULL OR TRIM(merchant_name) = '')
               AND category_source != 'unclassified'
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
-            LIMIT {}
+            LIMIT @lim
             ",
             self.qualified_table("transactions")?,
-            limit,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::int64("lim", limit as i64)])
+            .await?;
         response
             .rows
             .iter()
@@ -879,16 +1143,22 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at)
             FROM {}
             WHERE (purpose IS NULL OR TRIM(purpose) = '')
-              AND ABS(amount) >= {}
+              AND ABS(amount) >= @min_abs
               AND category_id IS NOT NULL
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
-            LIMIT {}
+            LIMIT @lim
             ",
             self.qualified_table("transactions")?,
-            sql_decimal(&min_abs_amount.abs()),
-            limit,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::decimal("min_abs", min_abs_amount.abs()),
+                    Param::int64("lim", limit as i64),
+                ],
+            )
+            .await?;
         response
             .rows
             .iter()
@@ -942,13 +1212,14 @@ impl FinanceStore for BigQueryStore {
             SELECT CAST(COUNT(*) AS STRING)
             FROM {}
             WHERE (purpose IS NULL OR TRIM(purpose) = '')
-              AND ABS(amount) >= {}
+              AND ABS(amount) >= @min_abs
               AND category_id IS NOT NULL
             ",
             self.qualified_table("transactions")?,
-            sql_decimal(&min_abs_amount.abs()),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::decimal("min_abs", min_abs_amount.abs())])
+            .await?;
         let count = response
             .rows
             .first()
@@ -962,44 +1233,79 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS transaction_id, {} AS account_id, {} AS transaction_date, {} AS raw_description, {} AS description, {} AS merchant_name, {} AS purpose, {} AS amount, {} AS amount_cents, {} AS tx_type, {} AS category_id, {} AS category_source, {} AS context, {} AS classifier_trace, {} AS payment_status, {} AS source, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at, {} AS enrichment_attempted_at",
-                    sql_string(&row.transaction_id),
-                    sql_optional_string(row.account_id.as_deref()),
-                    sql_date(row.transaction_date),
-                    sql_string(&row.raw_description),
-                    sql_optional_string(row.description.as_deref()),
-                    sql_optional_string(row.merchant_name.as_deref()),
-                    sql_optional_string(row.purpose.as_deref()),
-                    sql_decimal(&row.amount),
-                    (row.amount * Decimal::from(100_i64)).round().to_i64().unwrap_or(0),
-                    sql_string(&row.tx_type),
-                    sql_optional_string(row.category_id.as_deref()),
-                    sql_string(&row.category_source),
-                    sql_optional_string(row.context.as_deref()),
-                    sql_optional_string(row.classifier_trace.as_deref()),
-                    sql_string(&row.payment_status),
-                    sql_string(&row.source),
-                    sql_string(&row.actor_id),
-                    sql_string(&row.idempotency_key),
-                    sql_json(&row.metadata_json),
-                    sql_timestamp(row.created_at),
-                    sql_timestamp(row.updated_at),
-                    row.enrichment_attempted_at
-                        .map(sql_timestamp)
-                        .unwrap_or_else(|| "CAST(NULL AS TIMESTAMP)".to_string()),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("transaction_id", BqType::String),
+                ("account_id", BqType::String),
+                ("transaction_date", BqType::Date),
+                ("raw_description", BqType::String),
+                ("description", BqType::String),
+                ("merchant_name", BqType::String),
+                ("purpose", BqType::String),
+                ("amount", BqType::Numeric),
+                ("amount_cents", BqType::Int64),
+                ("tx_type", BqType::String),
+                ("category_id", BqType::String),
+                ("category_source", BqType::String),
+                ("context", BqType::String),
+                ("classifier_trace", BqType::String),
+                ("payment_status", BqType::String),
+                ("source", BqType::String),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+                ("enrichment_attempted_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    let cents = (r.amount * Decimal::from(100_i64))
+                        .round()
+                        .to_i64()
+                        .unwrap_or(0);
+                    vec![
+                        field("transaction_id", bv_str(&r.transaction_id)),
+                        field("account_id", bv_opt_str(r.account_id.as_deref())),
+                        field("transaction_date", bv_date(r.transaction_date)),
+                        field("raw_description", bv_str(&r.raw_description)),
+                        field("description", bv_opt_str(r.description.as_deref())),
+                        field("merchant_name", bv_opt_str(r.merchant_name.as_deref())),
+                        field("purpose", bv_opt_str(r.purpose.as_deref())),
+                        field("amount", bv_dec(r.amount)),
+                        field("amount_cents", bv_int(cents)),
+                        field("tx_type", bv_str(&r.tx_type)),
+                        field("category_id", bv_opt_str(r.category_id.as_deref())),
+                        field("category_source", bv_str(&r.category_source)),
+                        field("context", bv_opt_str(r.context.as_deref())),
+                        field(
+                            "classifier_trace",
+                            bv_opt_str(r.classifier_trace.as_deref()),
+                        ),
+                        field("payment_status", bv_str(&r.payment_status)),
+                        field("source", bv_str(&r.source)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                        field(
+                            "enrichment_attempted_at",
+                            match r.enrichment_attempted_at {
+                                Some(ts) => bv_ts(ts),
+                                None => BqValue::Null,
+                            },
+                        ),
+                    ]
+                })
+                .collect(),
+        );
 
         let sql = format!(
             "
             MERGE {} target
-            USING ({source}) source
+            USING (SELECT * FROM UNNEST(@batch)) source
             ON target.transaction_id = source.transaction_id
             WHEN MATCHED THEN UPDATE SET
               account_id = source.account_id,
@@ -1036,7 +1342,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("transactions")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -1044,26 +1350,35 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS rule_id, {} AS body, {} AS status, {} AS actor_id, {} AS idempotency_key, {} AS created_at, {} AS updated_at",
-                    sql_string(&row.rule_id),
-                    sql_string(&row.body),
-                    sql_string(&row.status),
-                    sql_string(&row.actor_id),
-                    sql_string(&row.idempotency_key),
-                    sql_timestamp(row.created_at),
-                    sql_timestamp(row.updated_at),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("rule_id", BqType::String),
+                ("body", BqType::String),
+                ("status", BqType::String),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("rule_id", bv_str(&r.rule_id)),
+                        field("body", bv_str(&r.body)),
+                        field("status", bv_str(&r.status)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                    ]
+                })
+                .collect(),
+        );
         let sql = format!(
             "
             MERGE {} target
-            USING ({source}) source
+            USING (SELECT * FROM UNNEST(@batch)) source
             ON target.rule_id = source.rule_id
             WHEN MATCHED THEN UPDATE SET
               body = source.body,
@@ -1079,7 +1394,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("rules")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -1087,25 +1402,36 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS category_id, {} AS name, {} AS parent_category_id, {} AS metadata_json, {} AS actor_id, {} AS updated_at",
-                    sql_string(&row.category_id),
-                    sql_string(&row.name),
-                    sql_optional_string(row.parent_category_id.as_deref()),
-                    sql_json(&row.metadata_json),
-                    sql_string(&row.actor_id),
-                    sql_timestamp(row.updated_at),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("category_id", BqType::String),
+                ("name", BqType::String),
+                ("parent_category_id", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("actor_id", BqType::String),
+                ("updated_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("category_id", bv_str(&r.category_id)),
+                        field("name", bv_str(&r.name)),
+                        field(
+                            "parent_category_id",
+                            bv_opt_str(r.parent_category_id.as_deref()),
+                        ),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                    ]
+                })
+                .collect(),
+        );
         let sql = format!(
             "
             MERGE {} target
-            USING ({source}) source
+            USING (SELECT * FROM UNNEST(@batch)) source
             ON target.category_id = source.category_id
             WHEN MATCHED THEN UPDATE SET
               name = source.name,
@@ -1121,7 +1447,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("categories")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -1129,37 +1455,62 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS forecast_id, {} AS due_date, {} AS description, {} AS amount, {} AS category_id, {} AS account_id, {} AS status, {} AS recurrence, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at, {} AS template_id, {} AS realized_transaction_id, {} AS realized_at",
-                    sql_string(&row.forecast_id),
-                    sql_optional_date(row.due_date),
-                    sql_string(&row.description),
-                    sql_decimal(&row.amount),
-                    sql_optional_string(row.category_id.as_deref()),
-                    sql_optional_string(row.account_id.as_deref()),
-                    sql_string(&row.status),
-                    sql_optional_string(row.recurrence.as_deref()),
-                    sql_string(&row.actor_id),
-                    sql_string(&row.idempotency_key),
-                    sql_json(&row.metadata_json),
-                    sql_timestamp(row.created_at),
-                    sql_timestamp(row.updated_at),
-                    sql_optional_string(row.template_id.as_deref()),
-                    sql_optional_string(row.realized_transaction_id.as_deref()),
-                    row.realized_at
-                        .map(sql_timestamp)
-                        .unwrap_or_else(|| "CAST(NULL AS TIMESTAMP)".to_string()),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("forecast_id", BqType::String),
+                ("due_date", BqType::Date),
+                ("description", BqType::String),
+                ("amount", BqType::Numeric),
+                ("category_id", BqType::String),
+                ("account_id", BqType::String),
+                ("status", BqType::String),
+                ("recurrence", BqType::String),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+                ("template_id", BqType::String),
+                ("realized_transaction_id", BqType::String),
+                ("realized_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("forecast_id", bv_str(&r.forecast_id)),
+                        field("due_date", bv_opt_date(r.due_date)),
+                        field("description", bv_str(&r.description)),
+                        field("amount", bv_dec(r.amount)),
+                        field("category_id", bv_opt_str(r.category_id.as_deref())),
+                        field("account_id", bv_opt_str(r.account_id.as_deref())),
+                        field("status", bv_str(&r.status)),
+                        field("recurrence", bv_opt_str(r.recurrence.as_deref())),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                        field("template_id", bv_opt_str(r.template_id.as_deref())),
+                        field(
+                            "realized_transaction_id",
+                            bv_opt_str(r.realized_transaction_id.as_deref()),
+                        ),
+                        field(
+                            "realized_at",
+                            match r.realized_at {
+                                Some(ts) => bv_ts(ts),
+                                None => BqValue::Null,
+                            },
+                        ),
+                    ]
+                })
+                .collect(),
+        );
         let sql = format!(
             "
             MERGE {} target
-            USING ({source}) source
+            USING (SELECT * FROM UNNEST(@batch)) source
             ON target.forecast_id = source.forecast_id
             WHEN MATCHED THEN UPDATE SET
               due_date = source.due_date,
@@ -1188,7 +1539,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("forecast")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -1196,53 +1547,71 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS template_id, {} AS kind, {} AS description, {} AS merchant_pattern, {} AS category_id, {} AS account_id, {} AS amount, {} AS amount_lower, {} AS amount_upper, {} AS cadence, {} AS next_due_day, DATE {} AS start_date, {} AS end_date, {} AS remaining_count, {} AS source, {} AS confidence, {} AS status, {} AS metadata_json, {} AS actor_id, {} AS idempotency_key, {} AS created_at, {} AS updated_at",
-                    sql_string(&row.template_id),
-                    sql_string(&row.kind),
-                    sql_string(&row.description),
-                    sql_optional_string(row.merchant_pattern.as_deref()),
-                    sql_optional_string(row.category_id.as_deref()),
-                    sql_optional_string(row.account_id.as_deref()),
-                    sql_decimal(&row.amount),
-                    row.amount_lower
-                        .as_ref()
-                        .map(|d| format!("NUMERIC '{d}'"))
-                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
-                    row.amount_upper
-                        .as_ref()
-                        .map(|d| format!("NUMERIC '{d}'"))
-                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
-                    sql_string(&row.cadence),
-                    row.next_due_day
-                        .map(|d| d.to_string())
-                        .unwrap_or_else(|| "CAST(NULL AS INT64)".to_string()),
-                    sql_string(&row.start_date.format("%Y-%m-%d").to_string()),
-                    sql_optional_date(row.end_date),
-                    row.remaining_count
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "CAST(NULL AS INT64)".to_string()),
-                    sql_string(&row.source),
-                    row.confidence
-                        .map(|c| format!("{c}"))
-                        .unwrap_or_else(|| "CAST(NULL AS FLOAT64)".to_string()),
-                    sql_string(&row.status),
-                    sql_json(&row.metadata_json),
-                    sql_string(&row.actor_id),
-                    sql_string(&row.idempotency_key),
-                    sql_timestamp(row.created_at),
-                    sql_timestamp(row.updated_at),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("template_id", BqType::String),
+                ("kind", BqType::String),
+                ("description", BqType::String),
+                ("merchant_pattern", BqType::String),
+                ("category_id", BqType::String),
+                ("account_id", BqType::String),
+                ("amount", BqType::Numeric),
+                ("amount_lower", BqType::Numeric),
+                ("amount_upper", BqType::Numeric),
+                ("cadence", BqType::String),
+                ("next_due_day", BqType::Int64),
+                ("start_date", BqType::Date),
+                ("end_date", BqType::Date),
+                ("remaining_count", BqType::Int64),
+                ("source", BqType::String),
+                ("confidence", BqType::Float64),
+                ("status", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("template_id", bv_str(&r.template_id)),
+                        field("kind", bv_str(&r.kind)),
+                        field("description", bv_str(&r.description)),
+                        field(
+                            "merchant_pattern",
+                            bv_opt_str(r.merchant_pattern.as_deref()),
+                        ),
+                        field("category_id", bv_opt_str(r.category_id.as_deref())),
+                        field("account_id", bv_opt_str(r.account_id.as_deref())),
+                        field("amount", bv_dec(r.amount)),
+                        field("amount_lower", bv_opt_dec(r.amount_lower)),
+                        field("amount_upper", bv_opt_dec(r.amount_upper)),
+                        field("cadence", bv_str(&r.cadence)),
+                        field("next_due_day", bv_opt_int(r.next_due_day.map(|d| d as i64))),
+                        field("start_date", bv_date(r.start_date)),
+                        field("end_date", bv_opt_date(r.end_date)),
+                        field(
+                            "remaining_count",
+                            bv_opt_int(r.remaining_count.map(|c| c as i64)),
+                        ),
+                        field("source", bv_str(&r.source)),
+                        field("confidence", bv_opt_float(r.confidence)),
+                        field("status", bv_str(&r.status)),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                    ]
+                })
+                .collect(),
+        );
         let sql = format!(
             "
             MERGE {} target
-            USING ({source}) source
+            USING (SELECT * FROM UNNEST(@batch)) source
             ON target.template_id = source.template_id
             WHEN MATCHED THEN UPDATE SET
               kind = source.kind,
@@ -1279,7 +1648,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("forecast_template")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -1289,11 +1658,14 @@ impl FinanceStore for BigQueryStore {
         status: Option<&str>,
     ) -> Result<Vec<ForecastTemplateRecord>> {
         let mut filters = Vec::new();
+        let mut params = Vec::new();
         if let Some(k) = kind {
-            filters.push(format!("kind = {}", sql_string(k)));
+            filters.push("kind = @kind");
+            params.push(Param::string("kind", k));
         }
         if let Some(s) = status {
-            filters.push(format!("status = {}", sql_string(s)));
+            filters.push("status = @status");
+            params.push(Param::string("status", s));
         }
         let where_sql = if filters.is_empty() {
             String::new()
@@ -1317,7 +1689,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("forecast_template")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -1342,13 +1714,14 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
               FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
             FROM {}
-            WHERE template_id = {}
+            WHERE template_id = @tid
             LIMIT 1
             ",
             self.qualified_table("forecast_template")?,
-            sql_string(template_id),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::string("tid", template_id)])
+            .await?;
         let Some(row) = response.rows.into_iter().next() else {
             return Ok(None);
         };
@@ -1383,14 +1756,17 @@ impl FinanceStore for BigQueryStore {
             FROM {}
             WHERE status = 'ativo'
               AND due_date IS NOT NULL
-              AND due_date BETWEEN DATE {} AND DATE {}
+              AND due_date BETWEEN @from AND @until
             ORDER BY due_date ASC, amount DESC
             ",
             self.qualified_table("forecast")?,
-            sql_string(&from.format("%Y-%m-%d").to_string()),
-            sql_string(&until.format("%Y-%m-%d").to_string()),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[Param::date("from", from), Param::date("until", until)],
+            )
+            .await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -1439,93 +1815,145 @@ impl FinanceStore for BigQueryStore {
             return Err(anyhow!("Split precisa ter pelo menos uma linha"));
         }
 
-        let split_source = format!(
-            "SELECT {} AS split_id, {} AS parent_transaction_id, {} AS payload_hash, {} AS status, {} AS source, {} AS notes, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
-            sql_string(&split.split_id),
-            sql_string(&split.parent_transaction_id),
-            sql_string(&split.payload_hash),
-            sql_string(&split.status),
-            sql_string(&split.source),
-            sql_optional_string(split.notes.as_deref()),
-            sql_string(&split.actor_id),
-            sql_string(&split.idempotency_key),
-            sql_json(&split.metadata_json),
-            sql_timestamp(split.created_at),
-            sql_timestamp(split.updated_at),
+        let split_param = batch_array_param(
+            "splits",
+            vec![
+                ("split_id", BqType::String),
+                ("parent_transaction_id", BqType::String),
+                ("payload_hash", BqType::String),
+                ("status", BqType::String),
+                ("source", BqType::String),
+                ("notes", BqType::String),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+            ],
+            vec![vec![
+                field("split_id", bv_str(&split.split_id)),
+                field(
+                    "parent_transaction_id",
+                    bv_str(&split.parent_transaction_id),
+                ),
+                field("payload_hash", bv_str(&split.payload_hash)),
+                field("status", bv_str(&split.status)),
+                field("source", bv_str(&split.source)),
+                field("notes", bv_opt_str(split.notes.as_deref())),
+                field("actor_id", bv_str(&split.actor_id)),
+                field("idempotency_key", bv_str(&split.idempotency_key)),
+                field("metadata_json", bv_json(&split.metadata_json)),
+                field("created_at", bv_ts(split.created_at)),
+                field("updated_at", bv_ts(split.updated_at)),
+            ]],
         );
-        let line_source = lines
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS split_line_id, {} AS split_id, {} AS parent_transaction_id, {} AS line_index, {} AS description, {} AS amount, {} AS category_id, {} AS category_source, {} AS context, {} AS status, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
-                    sql_string(&row.split_line_id),
-                    sql_string(&row.split_id),
-                    sql_string(&row.parent_transaction_id),
-                    row.line_index,
-                    sql_string(&row.description),
-                    sql_decimal(&row.amount),
-                    sql_optional_string(row.category_id.as_deref()),
-                    sql_string(&row.category_source),
-                    sql_optional_string(row.context.as_deref()),
-                    sql_string(&row.status),
-                    sql_string(&row.actor_id),
-                    sql_string(&row.idempotency_key),
-                    sql_json(&row.metadata_json),
-                    sql_timestamp(row.created_at),
-                    sql_timestamp(row.updated_at),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+
+        let lines_param = batch_array_param(
+            "lines",
+            vec![
+                ("split_line_id", BqType::String),
+                ("split_id", BqType::String),
+                ("parent_transaction_id", BqType::String),
+                ("line_index", BqType::Int64),
+                ("description", BqType::String),
+                ("amount", BqType::Numeric),
+                ("category_id", BqType::String),
+                ("category_source", BqType::String),
+                ("context", BqType::String),
+                ("status", BqType::String),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("metadata_json", BqType::Json),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+            ],
+            lines
+                .iter()
+                .map(|r| {
+                    vec![
+                        field("split_line_id", bv_str(&r.split_line_id)),
+                        field("split_id", bv_str(&r.split_id)),
+                        field("parent_transaction_id", bv_str(&r.parent_transaction_id)),
+                        field("line_index", bv_int(r.line_index)),
+                        field("description", bv_str(&r.description)),
+                        field("amount", bv_dec(r.amount)),
+                        field("category_id", bv_opt_str(r.category_id.as_deref())),
+                        field("category_source", bv_str(&r.category_source)),
+                        field("context", bv_opt_str(r.context.as_deref())),
+                        field("status", bv_str(&r.status)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                    ]
+                })
+                .collect(),
+        );
+
+        let mut params = vec![
+            Param::string("parent_id", &split.parent_transaction_id),
+            Param::string("split_id", &split.split_id),
+            split_param,
+            lines_param,
+        ];
+
         let item_statement = if items.is_empty() {
             String::new()
         } else {
-            let item_source = items
-                .iter()
-                .map(|row| {
-                    let quantity = row
-                        .quantity
-                        .as_ref()
-                        .map(sql_decimal)
-                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string());
-                    let unit_price = row
-                        .unit_price
-                        .as_ref()
-                        .map(sql_decimal)
-                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string());
-                    let total_price = row
-                        .total_price
-                        .as_ref()
-                        .map(sql_decimal)
-                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string());
-                    format!(
-                        "SELECT {} AS receipt_item_id, {} AS parent_transaction_id, {} AS split_id, {} AS split_line_id, {} AS item_index, {} AS description, {} AS quantity, {} AS unit, {} AS unit_price, {} AS total_price, {} AS code, {} AS store_name, {} AS status, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
-                        sql_string(&row.receipt_item_id),
-                        sql_string(&row.parent_transaction_id),
-                        sql_optional_string(row.split_id.as_deref()),
-                        sql_optional_string(row.split_line_id.as_deref()),
-                        row.item_index,
-                        sql_string(&row.description),
-                        quantity,
-                        sql_optional_string(row.unit.as_deref()),
-                        unit_price,
-                        total_price,
-                        sql_optional_string(row.code.as_deref()),
-                        sql_optional_string(row.store_name.as_deref()),
-                        sql_string(&row.status),
-                        sql_string(&row.actor_id),
-                        sql_string(&row.idempotency_key),
-                        sql_json(&row.metadata_json),
-                        sql_timestamp(row.created_at),
-                        sql_timestamp(row.updated_at),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\nUNION ALL\n");
+            let items_param = batch_array_param(
+                "items",
+                vec![
+                    ("receipt_item_id", BqType::String),
+                    ("parent_transaction_id", BqType::String),
+                    ("split_id", BqType::String),
+                    ("split_line_id", BqType::String),
+                    ("item_index", BqType::Int64),
+                    ("description", BqType::String),
+                    ("quantity", BqType::Numeric),
+                    ("unit", BqType::String),
+                    ("unit_price", BqType::Numeric),
+                    ("total_price", BqType::Numeric),
+                    ("code", BqType::String),
+                    ("store_name", BqType::String),
+                    ("status", BqType::String),
+                    ("actor_id", BqType::String),
+                    ("idempotency_key", BqType::String),
+                    ("metadata_json", BqType::Json),
+                    ("created_at", BqType::Timestamp),
+                    ("updated_at", BqType::Timestamp),
+                ],
+                items
+                    .iter()
+                    .map(|r| {
+                        vec![
+                            field("receipt_item_id", bv_str(&r.receipt_item_id)),
+                            field("parent_transaction_id", bv_str(&r.parent_transaction_id)),
+                            field("split_id", bv_opt_str(r.split_id.as_deref())),
+                            field("split_line_id", bv_opt_str(r.split_line_id.as_deref())),
+                            field("item_index", bv_int(r.item_index)),
+                            field("description", bv_str(&r.description)),
+                            field("quantity", bv_opt_dec(r.quantity)),
+                            field("unit", bv_opt_str(r.unit.as_deref())),
+                            field("unit_price", bv_opt_dec(r.unit_price)),
+                            field("total_price", bv_opt_dec(r.total_price)),
+                            field("code", bv_opt_str(r.code.as_deref())),
+                            field("store_name", bv_opt_str(r.store_name.as_deref())),
+                            field("status", bv_str(&r.status)),
+                            field("actor_id", bv_str(&r.actor_id)),
+                            field("idempotency_key", bv_str(&r.idempotency_key)),
+                            field("metadata_json", bv_json(&r.metadata_json)),
+                            field("created_at", bv_ts(r.created_at)),
+                            field("updated_at", bv_ts(r.updated_at)),
+                        ]
+                    })
+                    .collect(),
+            );
+            params.push(items_param);
             format!(
                 "
                 MERGE {} target
-                USING ({item_source}) source
+                USING (SELECT * FROM UNNEST(@items)) source
                 ON target.receipt_item_id = source.receipt_item_id
                 WHEN MATCHED THEN UPDATE SET
                   parent_transaction_id = source.parent_transaction_id,
@@ -1562,24 +1990,24 @@ impl FinanceStore for BigQueryStore {
             "
             UPDATE {}
             SET status = 'inactive', updated_at = CURRENT_TIMESTAMP()
-            WHERE parent_transaction_id = {}
+            WHERE parent_transaction_id = @parent_id
               AND status = 'active'
-              AND split_id != {};
+              AND split_id != @split_id;
 
             UPDATE {}
             SET status = 'inactive', updated_at = CURRENT_TIMESTAMP()
-            WHERE parent_transaction_id = {}
+            WHERE parent_transaction_id = @parent_id
               AND status = 'active'
-              AND split_id != {};
+              AND split_id != @split_id;
 
             UPDATE {}
             SET status = 'inactive', updated_at = CURRENT_TIMESTAMP()
-            WHERE parent_transaction_id = {}
+            WHERE parent_transaction_id = @parent_id
               AND status = 'active'
-              AND COALESCE(split_id, '') != {};
+              AND COALESCE(split_id, '') != @split_id;
 
             MERGE {} target
-            USING ({split_source}) source
+            USING (SELECT * FROM UNNEST(@splits)) source
             ON target.split_id = source.split_id
             WHEN MATCHED THEN UPDATE SET
               parent_transaction_id = source.parent_transaction_id,
@@ -1600,7 +2028,7 @@ impl FinanceStore for BigQueryStore {
             );
 
             MERGE {} target
-            USING ({line_source}) source
+            USING (SELECT * FROM UNNEST(@lines)) source
             ON target.split_line_id = source.split_line_id
             WHEN MATCHED THEN UPDATE SET
               split_id = source.split_id,
@@ -1629,18 +2057,12 @@ impl FinanceStore for BigQueryStore {
             {item_statement}
             ",
             self.qualified_table("transaction_splits")?,
-            sql_string(&split.parent_transaction_id),
-            sql_string(&split.split_id),
             self.qualified_table("transaction_split_lines")?,
-            sql_string(&split.parent_transaction_id),
-            sql_string(&split.split_id),
             self.qualified_table("receipt_items")?,
-            sql_string(&split.parent_transaction_id),
-            sql_string(&split.split_id),
             self.qualified_table("transaction_splits")?,
             self.qualified_table("transaction_split_lines")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &params).await?;
         Ok(())
     }
 
@@ -1648,31 +2070,42 @@ impl FinanceStore for BigQueryStore {
         if rows.is_empty() {
             return Ok(0);
         }
-        let source = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "SELECT {} AS event_id, {} AS entity_type, {} AS entity_id, {} AS action, {} AS actor_id, {} AS event_timestamp, {} AS idempotency_key, {} AS diff_json",
-                    sql_string(&row.event_id),
-                    sql_string(&row.entity_type),
-                    sql_string(&row.entity_id),
-                    sql_string(&row.action),
-                    sql_string(&row.actor_id),
-                    sql_timestamp(row.event_timestamp),
-                    sql_string(&row.idempotency_key),
-                    sql_json(&row.diff_json),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\nUNION ALL\n");
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("event_id", BqType::String),
+                ("entity_type", BqType::String),
+                ("entity_id", BqType::String),
+                ("action", BqType::String),
+                ("actor_id", BqType::String),
+                ("event_timestamp", BqType::Timestamp),
+                ("idempotency_key", BqType::String),
+                ("diff_json", BqType::Json),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("event_id", bv_str(&r.event_id)),
+                        field("entity_type", bv_str(&r.entity_type)),
+                        field("entity_id", bv_str(&r.entity_id)),
+                        field("action", bv_str(&r.action)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("event_timestamp", bv_ts(r.event_timestamp)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("diff_json", bv_json(&r.diff_json)),
+                    ]
+                })
+                .collect(),
+        );
         let sql = format!(
             "
             INSERT INTO {} (event_id, entity_type, entity_id, action, actor_id, event_timestamp, idempotency_key, diff_json)
-            {source}
+            SELECT event_id, entity_type, entity_id, action, actor_id, event_timestamp, idempotency_key, diff_json
+            FROM UNNEST(@batch)
             ",
             self.qualified_table("audit_log")?,
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[param]).await?;
         Ok(rows.len())
     }
 
@@ -1688,23 +2121,29 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             UPDATE {}
-            SET category_id = COALESCE({}, category_id),
-                category_source = COALESCE({}, category_source),
-                classifier_trace = COALESCE({}, classifier_trace),
-                actor_id = {},
-                idempotency_key = {},
+            SET category_id = COALESCE(@category_id, category_id),
+                category_source = COALESCE(@category_source, category_source),
+                classifier_trace = COALESCE(@classifier_trace, classifier_trace),
+                actor_id = @actor_id,
+                idempotency_key = @idempotency_key,
                 updated_at = CURRENT_TIMESTAMP()
-            WHERE transaction_id = {}
+            WHERE transaction_id = @transaction_id
             ",
             self.qualified_table("transactions")?,
-            sql_optional_string(category_id),
-            sql_optional_string(category_source),
-            sql_optional_string(classifier_trace),
-            sql_string(actor_id),
-            sql_string(idempotency_key),
-            sql_string(transaction_id),
         );
-        let resp = self.run_query(&sql).await?;
+        let resp = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::optional_string("category_id", category_id),
+                    Param::optional_string("category_source", category_source),
+                    Param::optional_string("classifier_trace", classifier_trace),
+                    Param::string("actor_id", actor_id),
+                    Param::string("idempotency_key", idempotency_key),
+                    Param::string("transaction_id", transaction_id),
+                ],
+            )
+            .await?;
         let affected: i64 = resp
             .num_dml_affected_rows
             .as_deref()
@@ -1727,27 +2166,33 @@ impl FinanceStore for BigQueryStore {
         let sql = format!(
             "
             UPDATE {}
-            SET description = COALESCE({}, description),
-                merchant_name = COALESCE({}, merchant_name),
-                purpose = COALESCE({}, purpose),
-                classifier_trace = COALESCE({}, classifier_trace),
-                context = COALESCE({}, context),
-                actor_id = {},
-                idempotency_key = {},
+            SET description = COALESCE(@description, description),
+                merchant_name = COALESCE(@merchant_name, merchant_name),
+                purpose = COALESCE(@purpose, purpose),
+                classifier_trace = COALESCE(@classifier_trace, classifier_trace),
+                context = COALESCE(@context, context),
+                actor_id = @actor_id,
+                idempotency_key = @idempotency_key,
                 updated_at = CURRENT_TIMESTAMP()
-            WHERE transaction_id = {}
+            WHERE transaction_id = @transaction_id
             ",
             self.qualified_table("transactions")?,
-            sql_optional_string(patch.description),
-            sql_optional_string(patch.merchant_name),
-            sql_optional_string(patch.purpose),
-            sql_optional_string(patch.classifier_trace),
-            sql_optional_string(patch.context),
-            sql_string(actor_id),
-            sql_string(idempotency_key),
-            sql_string(transaction_id),
         );
-        let resp = self.run_query(&sql).await?;
+        let resp = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::optional_string("description", patch.description),
+                    Param::optional_string("merchant_name", patch.merchant_name),
+                    Param::optional_string("purpose", patch.purpose),
+                    Param::optional_string("classifier_trace", patch.classifier_trace),
+                    Param::optional_string("context", patch.context),
+                    Param::string("actor_id", actor_id),
+                    Param::string("idempotency_key", idempotency_key),
+                    Param::string("transaction_id", transaction_id),
+                ],
+            )
+            .await?;
         let affected: i64 = resp
             .num_dml_affected_rows
             .as_deref()
@@ -1764,20 +2209,20 @@ impl FinanceStore for BigQueryStore {
         if ids.is_empty() {
             return Ok(BTreeSet::new());
         }
-        let id_array = ids
-            .iter()
-            .map(|value| sql_string(value))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let array_param = Param::new(
+            "ids",
+            BqType::Array(Box::new(BqType::String)),
+            BqValue::Array(ids.iter().map(bv_str).collect()),
+        );
         let sql = format!(
             "
             SELECT transaction_id
             FROM {}
-            WHERE transaction_id IN UNNEST([{id_array}])
+            WHERE transaction_id IN UNNEST(@ids)
             ",
             self.qualified_table("transactions")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &[array_param]).await?;
         let mut existing = BTreeSet::new();
         for row in response.rows {
             let values = row_values(&row);
@@ -1812,13 +2257,14 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
             FROM {}
-            WHERE transaction_id = {}
+            WHERE transaction_id = @tid
             LIMIT 1
             ",
             self.qualified_table("transactions")?,
-            sql_string(transaction_id),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::string("tid", transaction_id)])
+            .await?;
         let Some(row) = response.rows.first() else {
             return Ok(None);
         };
@@ -1849,15 +2295,16 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               COALESCE(TO_JSON_STRING(metadata_json), '{{}}')
             FROM {}
-            WHERE parent_transaction_id = {}
+            WHERE parent_transaction_id = @parent_id
               AND status = 'active'
             ORDER BY updated_at DESC, split_id DESC
             LIMIT 1
             ",
             self.qualified_table("transaction_splits")?,
-            sql_string(transaction_id),
         );
-        let split_response = self.run_query(&split_sql).await?;
+        let split_response = self
+            .run_query_with_params(&split_sql, &[Param::string("parent_id", transaction_id)])
+            .await?;
         let split = split_response
             .rows
             .first()
@@ -1891,14 +2338,18 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC')
             FROM {}
-            WHERE split_id = {}
+            WHERE split_id = @split_id
               AND status = 'active'
             ORDER BY line_index ASC
             ",
             self.qualified_table("transaction_split_lines")?,
-            sql_string(&active_split.split_id),
         );
-        let line_response = self.run_query(&lines_sql).await?;
+        let line_response = self
+            .run_query_with_params(
+                &lines_sql,
+                &[Param::string("split_id", &active_split.split_id)],
+            )
+            .await?;
         let mut lines = Vec::with_capacity(line_response.rows.len());
         for row in line_response.rows {
             lines.push(split_line_record_from_values(&row_values(&row))?);
@@ -1926,14 +2377,18 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               COALESCE(TO_JSON_STRING(metadata_json), '{{}}')
             FROM {}
-            WHERE split_id = {}
+            WHERE split_id = @split_id
               AND status = 'active'
             ORDER BY item_index ASC
             ",
             self.qualified_table("receipt_items")?,
-            sql_string(&active_split.split_id),
         );
-        let item_response = self.run_query(&items_sql).await?;
+        let item_response = self
+            .run_query_with_params(
+                &items_sql,
+                &[Param::string("split_id", &active_split.split_id)],
+            )
+            .await?;
         let mut items = Vec::with_capacity(item_response.rows.len());
         for row in item_response.rows {
             items.push(receipt_item_record_from_values(&row_values(&row))?);
@@ -1958,42 +2413,41 @@ impl FinanceStore for BigQueryStore {
             "
             UPDATE {}
             SET status = 'inactive',
-                actor_id = {},
-                idempotency_key = {},
+                actor_id = @actor_id,
+                idempotency_key = @idempotency_key,
                 updated_at = CURRENT_TIMESTAMP()
-            WHERE parent_transaction_id = {}
+            WHERE parent_transaction_id = @transaction_id
               AND status = 'active';
 
             UPDATE {}
             SET status = 'inactive',
-                actor_id = {},
-                idempotency_key = {},
+                actor_id = @actor_id,
+                idempotency_key = @idempotency_key,
                 updated_at = CURRENT_TIMESTAMP()
-            WHERE parent_transaction_id = {}
+            WHERE parent_transaction_id = @transaction_id
               AND status = 'active';
 
             UPDATE {}
             SET status = 'inactive',
-                actor_id = {},
-                idempotency_key = {},
+                actor_id = @actor_id,
+                idempotency_key = @idempotency_key,
                 updated_at = CURRENT_TIMESTAMP()
-            WHERE parent_transaction_id = {}
+            WHERE parent_transaction_id = @transaction_id
               AND status = 'active';
             ",
             self.qualified_table("transaction_splits")?,
-            sql_string(actor_id),
-            sql_string(idempotency_key),
-            sql_string(transaction_id),
             self.qualified_table("transaction_split_lines")?,
-            sql_string(actor_id),
-            sql_string(idempotency_key),
-            sql_string(transaction_id),
             self.qualified_table("receipt_items")?,
-            sql_string(actor_id),
-            sql_string(idempotency_key),
-            sql_string(transaction_id),
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(
+            &sql,
+            &[
+                Param::string("actor_id", actor_id),
+                Param::string("idempotency_key", idempotency_key),
+                Param::string("transaction_id", transaction_id),
+            ],
+        )
+        .await?;
         Ok(())
     }
 
@@ -2003,7 +2457,7 @@ impl FinanceStore for BigQueryStore {
             WITH unsplit_transactions AS (
               SELECT t.*
               FROM {} t
-              WHERE t.transaction_date >= {}
+              WHERE t.transaction_date >= @since
                 AND NOT EXISTS (
                   SELECT 1
                   FROM {} s
@@ -2035,11 +2489,12 @@ impl FinanceStore for BigQueryStore {
             LIMIT 100
             ",
             self.qualified_table("transactions")?,
-            sql_date(since),
             self.qualified_table("transaction_splits")?,
             self.qualified_table("split_review_policies")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::date("since", since)])
+            .await?;
         let mut rows = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2064,17 +2519,19 @@ impl FinanceStore for BigQueryStore {
         query: &str,
         since: Option<NaiveDate>,
     ) -> Result<Vec<ItemPriceRow>> {
+        let mut params = Vec::new();
         let query_filter = if query.trim().is_empty() {
             String::new()
         } else {
-            format!(
-                "AND STRPOS(LOWER(i.description), LOWER({})) > 0",
-                sql_string(query.trim())
-            )
+            params.push(Param::string("q", query.trim()));
+            "AND STRPOS(LOWER(i.description), LOWER(@q)) > 0".to_string()
         };
-        let since_filter = since
-            .map(|value| format!("AND t.transaction_date >= {}", sql_date(value)))
-            .unwrap_or_default();
+        let since_filter = if let Some(value) = since {
+            params.push(Param::date("since", value));
+            "AND t.transaction_date >= @since".to_string()
+        } else {
+            String::new()
+        };
         let sql = format!(
             "
             SELECT
@@ -2100,7 +2557,7 @@ impl FinanceStore for BigQueryStore {
             self.qualified_table("receipt_items")?,
             self.qualified_table("transactions")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut rows = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2312,13 +2769,14 @@ impl FinanceStore for BigQueryStore {
             SELECT transaction_id, CAST(transaction_date AS STRING), description, CAST(amount AS STRING),
                    category_id, source, payment_status, account_id
             FROM {}
-            WHERE transaction_date >= {}
+            WHERE transaction_date >= @since
             ORDER BY transaction_date DESC, amount ASC, transaction_id ASC
             ",
             self.qualified_table("v_daily_pulse")?,
-            sql_date(since),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::date("since", since)])
+            .await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2367,15 +2825,18 @@ impl FinanceStore for BigQueryStore {
               CAST(updated_at AS STRING),
               CAST(enrichment_attempted_at AS STRING)
             FROM {}
-            WHERE transaction_date >= {}
-              AND transaction_date <= {}
+            WHERE transaction_date >= @since
+              AND transaction_date <= @until
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             ",
             self.qualified_table("v_transactions_reportable")?,
-            sql_date(since),
-            sql_date(until),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[Param::date("since", since), Param::date("until", until)],
+            )
+            .await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2390,9 +2851,13 @@ impl FinanceStore for BigQueryStore {
         from: NaiveDate,
         to: NaiveDate,
     ) -> Result<Vec<TransactionRecord>> {
-        let account_clause = account_id
-            .map(|id| format!("AND account_id = {}", sql_string(id)))
-            .unwrap_or_default();
+        let mut params = vec![Param::date("from", from), Param::date("to", to)];
+        let account_clause = if let Some(id) = account_id {
+            params.push(Param::string("acc", id));
+            "AND account_id = @acc"
+        } else {
+            ""
+        };
         let sql = format!(
             "
             SELECT
@@ -2418,16 +2883,14 @@ impl FinanceStore for BigQueryStore {
               CAST(updated_at AS STRING),
               CAST(enrichment_attempted_at AS STRING)
             FROM {}
-            WHERE transaction_date >= {}
-              AND transaction_date <= {}
+            WHERE transaction_date >= @from
+              AND transaction_date <= @to
               {account_clause}
             ORDER BY transaction_date ASC, transaction_id ASC
             ",
             self.qualified_table("transactions")?,
-            sql_date(from),
-            sql_date(to),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2437,9 +2900,13 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn monthly_spend(&self, month_ref: Option<&str>) -> Result<Vec<MonthlySpendRow>> {
-        let where_clause = month_ref
-            .map(|value| format!("WHERE month_ref = {}", sql_string(value)))
-            .unwrap_or_default();
+        let mut params = Vec::new();
+        let where_clause = if let Some(value) = month_ref {
+            params.push(Param::string("month_ref", value));
+            "WHERE month_ref = @month_ref"
+        } else {
+            ""
+        };
         let sql = format!(
             "
             SELECT month_ref, category_id, account_id, CAST(expenses AS STRING), CAST(expense_count AS STRING)
@@ -2449,7 +2916,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("v_monthly_spend")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2522,7 +2989,7 @@ impl FinanceStore for BigQueryStore {
               JOIN {accounts} a ON a.account_id = t.account_id
               WHERE a.account_type = 'checking'
                 AND COALESCE(t.category_id, '') != 'transfer-internal'
-                AND FORMAT_DATE('%Y-%m', t.transaction_date) = {month}
+                AND FORMAT_DATE('%Y-%m', t.transaction_date) = @month_ref
             )
             SELECT
               CAST(COALESCE(SUM(CASE WHEN amount > 0 AND category_id != 'cashback' THEN amount ELSE 0 END), 0) AS STRING) AS income,
@@ -2533,9 +3000,10 @@ impl FinanceStore for BigQueryStore {
             ",
             tx = self.qualified_table("v_transactions_reportable")?,
             accounts = self.qualified_table("accounts")?,
-            month = sql_string(month_ref),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::string("month_ref", month_ref)])
+            .await?;
         let (income, expenses, expense_reduction, net) = response
             .rows
             .first()
@@ -2578,7 +3046,6 @@ impl FinanceStore for BigQueryStore {
         // snapshot ≤ target and add the sum of `amount` for transactions
         // strictly after snapshot_date and ≤ target. If any checking account
         // has no snapshot in range, return None.
-        let target_str = target.format("%Y-%m-%d").to_string();
         let sql = format!(
             "
             WITH checking AS (
@@ -2597,7 +3064,7 @@ impl FinanceStore for BigQueryStore {
               FROM checking c
               LEFT JOIN {snapshots} s
                 ON s.account_id = c.account_id
-               AND s.snapshot_date <= DATE {target}
+               AND s.snapshot_date <= @target
               GROUP BY c.account_id
             ),
             deltas AS (
@@ -2610,7 +3077,7 @@ impl FinanceStore for BigQueryStore {
                   FROM {tx} t
                   WHERE t.account_id = a.account_id
                     AND t.transaction_date > a.anchor.snapshot_date
-                    AND t.transaction_date <= DATE {target}
+                    AND t.transaction_date <= @target
                 ), 0) AS delta
               FROM anchors a
             )
@@ -2625,9 +3092,10 @@ impl FinanceStore for BigQueryStore {
             accounts = self.qualified_table("accounts")?,
             snapshots = self.qualified_table("account_snapshots")?,
             tx = self.qualified_table("v_transactions_reportable")?,
-            target = sql_string(&target_str),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::date("target", target)])
+            .await?;
 
         let mut total = Decimal::ZERO;
         let mut accounts_considered = 0usize;
@@ -2668,9 +3136,13 @@ impl FinanceStore for BigQueryStore {
         &self,
         month_ref: Option<&str>,
     ) -> Result<Vec<ForecastVsActualRow>> {
-        let where_clause = month_ref
-            .map(|value| format!("WHERE month_ref = {}", sql_string(value)))
-            .unwrap_or_default();
+        let mut params = Vec::new();
+        let where_clause = if let Some(value) = month_ref {
+            params.push(Param::string("month_ref", value));
+            "WHERE month_ref = @month_ref"
+        } else {
+            ""
+        };
         let sql = format!(
             "
             SELECT
@@ -2690,7 +3162,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("v_forecast_vs_actual")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2711,9 +3183,13 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn card_summary(&self, month_ref: Option<&str>) -> Result<Vec<CardSummaryRow>> {
-        let where_clause = month_ref
-            .map(|value| format!("WHERE month_ref = {}", sql_string(value)))
-            .unwrap_or_default();
+        let mut params = Vec::new();
+        let where_clause = if let Some(value) = month_ref {
+            params.push(Param::string("month_ref", value));
+            "WHERE month_ref = @month_ref"
+        } else {
+            ""
+        };
         let sql = format!(
             "
             SELECT
@@ -2729,7 +3205,7 @@ impl FinanceStore for BigQueryStore {
             ",
             self.qualified_table("v_card_summary")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2780,14 +3256,13 @@ impl FinanceStore for BigQueryStore {
         &self,
         month_ref: Option<&str>,
     ) -> Result<Vec<CardClosedTransactionRow>> {
-        let where_month = month_ref
-            .map(|value| {
-                format!(
-                    "AND FORMAT_DATE('%Y-%m', t.transaction_date) = {}",
-                    sql_string(value)
-                )
-            })
-            .unwrap_or_default();
+        let mut params = Vec::new();
+        let where_month = if let Some(value) = month_ref {
+            params.push(Param::string("month_ref", value));
+            "AND FORMAT_DATE('%Y-%m', t.transaction_date) = @month_ref"
+        } else {
+            ""
+        };
         // Returns every charge AND statement credit (IOF reversals,
         // merchant refunds, etc.) — credits net naturally against debits in
         // the bill total. The one credit type we exclude is the bill
@@ -2820,7 +3295,7 @@ impl FinanceStore for BigQueryStore {
             self.qualified_table("accounts")?,
             self.qualified_table("internal_categories")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2845,14 +3320,13 @@ impl FinanceStore for BigQueryStore {
         &self,
         month_ref: Option<&str>,
     ) -> Result<Vec<CardClosedTransactionRow>> {
-        let where_month = month_ref
-            .map(|value| {
-                format!(
-                    "AND FORMAT_DATE('%Y-%m', t.transaction_date) = {}",
-                    sql_string(value)
-                )
-            })
-            .unwrap_or_default();
+        let mut params = Vec::new();
+        let where_month = if let Some(value) = month_ref {
+            params.push(Param::string("month_ref", value));
+            "AND FORMAT_DATE('%Y-%m', t.transaction_date) = @month_ref"
+        } else {
+            ""
+        };
         let sql = format!(
             "
             SELECT
@@ -2879,7 +3353,7 @@ impl FinanceStore for BigQueryStore {
             self.qualified_table("accounts")?,
             self.qualified_table("internal_categories")?,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -2985,31 +3459,20 @@ impl FinanceStore for BigQueryStore {
 
     async fn upsert_category_budget(&self, record: &CategoryBudgetRecord) -> Result<()> {
         let table = self.qualified_table("category_budgets")?;
-        // BigQuery doesn't enforce UNIQUE; use MERGE for upsert by business key
-        let sub_key = record
-            .subcategory_id
-            .as_deref()
-            .map(sql_string)
-            .unwrap_or_else(|| "CAST(NULL AS STRING)".to_string());
-        let month_key = record
-            .month_ref
-            .as_deref()
-            .map(sql_string)
-            .unwrap_or_else(|| "CAST(NULL AS STRING)".to_string());
         let sql = format!(
             "
             MERGE {table} target
             USING (SELECT
-              {budget_id} AS budget_id,
-              {category_id} AS category_id,
-              {subcategory_id} AS subcategory_id,
-              {month_ref} AS month_ref,
-              {amount} AS amount,
-              {alert_threshold_pct} AS alert_threshold_pct,
-              {actor_id} AS actor_id,
-              {idempotency_key} AS idempotency_key,
-              {created_at} AS created_at,
-              {updated_at} AS updated_at
+              @budget_id AS budget_id,
+              @category_id AS category_id,
+              @subcategory_id AS subcategory_id,
+              @month_ref AS month_ref,
+              @amount AS amount,
+              @alert_threshold_pct AS alert_threshold_pct,
+              @actor_id AS actor_id,
+              @idempotency_key AS idempotency_key,
+              @created_at AS created_at,
+              @updated_at AS updated_at
             ) source
             ON (
               target.category_id = source.category_id
@@ -3033,18 +3496,23 @@ impl FinanceStore for BigQueryStore {
             )
             ",
             table = table,
-            budget_id = sql_string(&record.budget_id),
-            category_id = sql_string(&record.category_id),
-            subcategory_id = sub_key,
-            month_ref = month_key,
-            amount = sql_decimal(&record.amount),
-            alert_threshold_pct = record.alert_threshold_pct,
-            actor_id = sql_string(&record.actor_id),
-            idempotency_key = sql_string(&record.idempotency_key),
-            created_at = sql_timestamp(record.created_at),
-            updated_at = sql_timestamp(record.updated_at),
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(
+            &sql,
+            &[
+                Param::string("budget_id", &record.budget_id),
+                Param::string("category_id", &record.category_id),
+                Param::optional_string("subcategory_id", record.subcategory_id.as_deref()),
+                Param::optional_string("month_ref", record.month_ref.as_deref()),
+                Param::decimal("amount", record.amount),
+                Param::int64("alert_threshold_pct", record.alert_threshold_pct),
+                Param::string("actor_id", &record.actor_id),
+                Param::string("idempotency_key", &record.idempotency_key),
+                Param::timestamp("created_at", record.created_at),
+                Param::timestamp("updated_at", record.updated_at),
+            ],
+        )
+        .await?;
         Ok(())
     }
 
@@ -3053,9 +3521,13 @@ impl FinanceStore for BigQueryStore {
         month: Option<&str>,
     ) -> Result<Vec<CategoryBudgetRecord>> {
         let table = self.qualified_table("category_budgets")?;
+        let mut params = Vec::new();
         let month_filter = match month {
-            Some(m) => format!("month_ref = {} OR month_ref IS NULL", sql_string(m)),
-            None => "TRUE".to_string(),
+            Some(m) => {
+                params.push(Param::string("month", m));
+                "month_ref = @month OR month_ref IS NULL"
+            }
+            None => "TRUE",
         };
         let sql = format!(
             "
@@ -3070,7 +3542,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY category_id ASC, subcategory_id ASC, month_ref ASC
             ",
         );
-        let response = self.run_query(&sql).await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut records = Vec::new();
         for row in response.rows {
             let values = row_values(&row);
@@ -3101,12 +3573,13 @@ impl FinanceStore for BigQueryStore {
             "
             SELECT category_id, CAST(SUM(CAST(expenses AS NUMERIC)) AS STRING)
             FROM {spend_table}
-            WHERE month_ref = {month}
+            WHERE month_ref = @month
             GROUP BY category_id
             ",
-            month = sql_string(month),
         );
-        let spend_response = self.run_query(&spend_sql).await?;
+        let spend_response = self
+            .run_query_with_params(&spend_sql, &[Param::string("month", month)])
+            .await?;
         let mut spend_by_cat = std::collections::BTreeMap::<String, Decimal>::new();
         for row in spend_response.rows {
             let values = row_values(&row);
@@ -3128,13 +3601,14 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at)
             FROM {budget_table}
-            WHERE month_ref = {month} OR month_ref IS NULL
+            WHERE month_ref = @month OR month_ref IS NULL
             ORDER BY category_id ASC, subcategory_id ASC,
                      CASE WHEN month_ref IS NOT NULL THEN 0 ELSE 1 END ASC
             ",
-            month = sql_string(month),
         );
-        let budget_response = self.run_query(&budget_sql).await?;
+        let budget_response = self
+            .run_query_with_params(&budget_sql, &[Param::string("month", month)])
+            .await?;
         let mut all_records = Vec::new();
         for row in budget_response.rows {
             let values = row_values(&row);
@@ -3238,17 +3712,23 @@ impl FinanceStore for BigQueryStore {
               JSON_VALUE(metadata_json, '$.pluggy_category') AS pluggy_category,
               SAFE_CAST(JSON_VALUE(metadata_json, '$.raw.order') AS INT64) AS pluggy_order
             FROM {}
-            WHERE transaction_date = {}
-              AND account_id = {}
-              AND transaction_id != {}
+            WHERE transaction_date = @date
+              AND account_id = @account_id
+              AND transaction_id != @exclude_id
             ORDER BY pluggy_order IS NULL, pluggy_order ASC, raw_description ASC
             ",
             self.qualified_table("transactions")?,
-            sql_date(date),
-            sql_string(account_id),
-            sql_string(exclude_id),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::date("date", date),
+                    Param::string("account_id", account_id),
+                    Param::string("exclude_id", exclude_id),
+                ],
+            )
+            .await?;
         let mut out = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);
@@ -3284,8 +3764,8 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
             FROM {}
-            WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')))) = {}
-              AND transaction_id != {}
+            WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(merchant_name), ''), NULLIF(TRIM(raw_description), '')))) = @normalized
+              AND transaction_id != @exclude_id
               AND (
                 NULLIF(TRIM(COALESCE(description, '')), '') IS NOT NULL
                 OR NULLIF(TRIM(COALESCE(purpose, '')), '') IS NOT NULL
@@ -3294,10 +3774,16 @@ impl FinanceStore for BigQueryStore {
             LIMIT 5
             ",
             self.qualified_table("transactions")?,
-            sql_string(&normalized),
-            sql_string(exclude_id),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::string("normalized", normalized),
+                    Param::string("exclude_id", exclude_id),
+                ],
+            )
+            .await?;
         response
             .rows
             .iter()
@@ -3325,12 +3811,13 @@ impl FinanceStore for BigQueryStore {
               )
               AND category_id IS NOT NULL
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
-            LIMIT {}
+            LIMIT @lim
             ",
             self.qualified_table("transactions")?,
-            limit,
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(&sql, &[Param::int64("lim", limit as i64)])
+            .await?;
         response
             .rows
             .iter()
@@ -3362,16 +3849,22 @@ impl FinanceStore for BigQueryStore {
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', updated_at, 'UTC'),
               FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', enrichment_attempted_at, 'UTC')
             FROM {}
-            WHERE LOWER(COALESCE(raw_description, '')) LIKE {}
-              AND transaction_id != {}
+            WHERE LOWER(COALESCE(raw_description, '')) LIKE @pattern
+              AND transaction_id != @exclude_id
               {category_filter}
             ORDER BY transaction_date DESC, transaction_id ASC
             ",
             self.qualified_table("transactions")?,
-            sql_string(&pattern),
-            sql_string(exclude_id),
         );
-        let response = self.run_query(&sql).await?;
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::string("pattern", pattern),
+                    Param::string("exclude_id", exclude_id),
+                ],
+            )
+            .await?;
         response
             .rows
             .iter()
@@ -3386,11 +3879,11 @@ impl FinanceStore for BigQueryStore {
         idempotency_key: &str,
     ) -> Result<()> {
         let sql = format!(
-            "UPDATE {} SET enrichment_attempted_at = CURRENT_TIMESTAMP() WHERE transaction_id = {}",
+            "UPDATE {} SET enrichment_attempted_at = CURRENT_TIMESTAMP() WHERE transaction_id = @tid",
             self.qualified_table("transactions")?,
-            sql_string(transaction_id),
         );
-        self.run_query(&sql).await?;
+        self.run_query_with_params(&sql, &[Param::string("tid", transaction_id)])
+            .await?;
         let audit = crate::models::AuditEvent::from_entity(
             "transaction",
             transaction_id,
@@ -3401,5 +3894,129 @@ impl FinanceStore for BigQueryStore {
         );
         self.insert_audit_events(&[audit]).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod param_smoke {
+    //! Live BigQuery smoke tests for the typed-parameter path. Skipped by
+    //! default; run with:
+    //!
+    //!   FINANCE_OS_BQ_SMOKE=1 cargo test -p finance-core --test '*' -- --ignored bq_param
+    //!
+    //! …or simply `cargo test -p finance-core bq_param_smoke -- --ignored`
+    //! once `FINANCE_OS_BQ_SMOKE=1` is exported. Reads from `~/.config/finance-os/config.toml`.
+    use super::*;
+    use crate::config::AppConfig;
+
+    async fn store() -> Option<BigQueryStore> {
+        if std::env::var("FINANCE_OS_BQ_SMOKE").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let paths = crate::config::ConfigPaths::discover().ok()?;
+        let config = AppConfig::load(&paths).ok()?;
+        BigQueryStore::new(config).await.ok()
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn bq_param_scalars_roundtrip() {
+        let Some(store) = store().await else {
+            eprintln!("FINANCE_OS_BQ_SMOKE=1 not set or config missing; skipping");
+            return;
+        };
+        let params = vec![
+            Param::string("s", "hello \"world\" 'with' quotes"),
+            Param::optional_string::<&str>("ns", None),
+            Param::decimal("d", Decimal::new(12345, 2)),
+            Param::optional_decimal("nd", None),
+            Param::date("dt", NaiveDate::from_ymd_opt(2026, 5, 25).unwrap()),
+            Param::timestamp("ts", chrono::Utc::now()),
+            Param::int64("i", 42),
+            Param::json("j", &json!({"k": "v", "n": 1})),
+        ];
+        let resp = store
+            .run_query_with_params(
+                "SELECT @s AS s, @ns AS ns, @d AS d, @nd AS nd, @dt AS dt, @ts AS ts, @i AS i, @j AS j",
+                &params,
+            )
+            .await
+            .expect("scalar param query failed");
+        assert!(resp.job_complete);
+        assert_eq!(resp.rows.len(), 1, "expected one row, got {:?}", resp.rows);
+        let row = &resp.rows[0];
+        let vals: Vec<Option<String>> = row.f.iter().map(|c| parse_scalar_string(&c.v)).collect();
+        eprintln!("scalar roundtrip values = {vals:#?}");
+        assert_eq!(vals[0].as_deref(), Some("hello \"world\" 'with' quotes"));
+        assert_eq!(vals[1], None);
+        assert_eq!(vals[2].as_deref(), Some("123.45"));
+        assert_eq!(vals[3], None);
+        assert_eq!(vals[4].as_deref(), Some("2026-05-25"));
+        assert_eq!(vals[6].as_deref(), Some("42"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn bq_param_struct_array_unnest() {
+        let Some(store) = store().await else {
+            eprintln!("FINANCE_OS_BQ_SMOKE=1 not set; skipping");
+            return;
+        };
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("id", BqType::String),
+                ("amount", BqType::Numeric),
+                ("when", BqType::Date),
+                ("meta", BqType::Json),
+                ("opt", BqType::String),
+            ],
+            vec![
+                vec![
+                    ("id".to_string(), bv_str("row-1")),
+                    ("amount".to_string(), bv_dec(Decimal::new(1234, 2))),
+                    (
+                        "when".to_string(),
+                        bv_date(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap()),
+                    ),
+                    ("meta".to_string(), bv_json(&json!({"x": 1}))),
+                    ("opt".to_string(), bv_opt_str(None)),
+                ],
+                vec![
+                    ("id".to_string(), bv_str("row-2")),
+                    ("amount".to_string(), bv_dec(Decimal::new(98765, 2))),
+                    (
+                        "when".to_string(),
+                        bv_date(NaiveDate::from_ymd_opt(2026, 5, 2).unwrap()),
+                    ),
+                    ("meta".to_string(), bv_json(&json!({"x": 2}))),
+                    ("opt".to_string(), bv_opt_str(Some("here"))),
+                ],
+            ],
+        );
+        let resp = store
+            .run_query_with_params(
+                "SELECT id, amount, `when`, TO_JSON_STRING(meta) AS meta, opt FROM UNNEST(@batch) ORDER BY id",
+                &[param],
+            )
+            .await
+            .expect("UNNEST struct-array query failed");
+        assert!(resp.job_complete);
+        assert_eq!(resp.rows.len(), 2);
+        let r0: Vec<_> = resp.rows[0]
+            .f
+            .iter()
+            .map(|c| parse_scalar_string(&c.v))
+            .collect();
+        let r1: Vec<_> = resp.rows[1]
+            .f
+            .iter()
+            .map(|c| parse_scalar_string(&c.v))
+            .collect();
+        eprintln!("row0 = {r0:#?}\nrow1 = {r1:#?}");
+        assert_eq!(r0[0].as_deref(), Some("row-1"));
+        assert_eq!(r1[0].as_deref(), Some("row-2"));
+        assert_eq!(r0[4], None);
+        assert_eq!(r1[4].as_deref(), Some("here"));
     }
 }

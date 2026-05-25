@@ -605,6 +605,46 @@ fn build_transaction_record(
     })
 }
 
+/// Build the reqwest client used to talk to Pluggy, enforcing HTTPS for any
+/// non-loopback host. The previous code accepted whatever `api_base_url` the
+/// caller supplied, so a misconfigured `http://` endpoint would have leaked
+/// `PLUGGY_CLIENT_SECRET` in cleartext. Loopback addresses stay reachable
+/// over HTTP so the wiremock-based test suite can keep running.
+fn build_pluggy_client(base_url: &str) -> Result<Client> {
+    let (scheme, rest) = base_url.split_once("://").ok_or_else(|| {
+        anyhow::anyhow!("Pluggy api_base_url precisa de scheme (recebido: {base_url})")
+    })?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    let is_loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    let https_only = match scheme {
+        "https" => true,
+        "http" if is_loopback => false,
+        "http" => {
+            return Err(anyhow::anyhow!(
+                "Pluggy api_base_url precisa usar https:// (recebido: {base_url}); \
+                 HTTP só é permitido para hosts loopback em testes"
+            ));
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "Pluggy api_base_url usa scheme não suportado '{other}': {base_url}"
+            ));
+        }
+    };
+    Client::builder()
+        .https_only(https_only)
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .context("Falha ao construir cliente HTTP do Pluggy")
+}
+
 async fn authenticate(client: &Client, base_url: &str) -> Result<String> {
     let client_id = std::env::var("PLUGGY_CLIENT_ID").context("PLUGGY_CLIENT_ID ausente")?;
     let client_secret =
@@ -891,11 +931,7 @@ pub async fn sync_pluggy(
         return Ok((accounts, transactions, rebind_events));
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .build()
-        .context("Falha ao construir cliente HTTP do Pluggy")?;
+    let client = build_pluggy_client(base_url)?;
     let api_key = authenticate(&client, base_url).await?;
 
     // Phase 1: resolve every binding to a Pluggy account payload upfront.
@@ -1006,6 +1042,30 @@ pub async fn sync_pluggy(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn build_pluggy_client_accepts_https_production_url() {
+        assert!(build_pluggy_client("https://api.pluggy.ai").is_ok());
+    }
+
+    #[test]
+    fn build_pluggy_client_accepts_http_loopback_for_tests() {
+        assert!(build_pluggy_client("http://127.0.0.1:54321").is_ok());
+        assert!(build_pluggy_client("http://localhost:8080").is_ok());
+    }
+
+    #[test]
+    fn build_pluggy_client_rejects_http_non_loopback() {
+        let err = build_pluggy_client("http://api.evil.example/path").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("precisa usar https"), "got: {msg}");
+    }
+
+    #[test]
+    fn build_pluggy_client_rejects_unknown_scheme() {
+        assert!(build_pluggy_client("ftp://api.pluggy.ai").is_err());
+        assert!(build_pluggy_client("api.pluggy.ai").is_err());
+    }
 
     fn binding(id: &str, acc: &str, item: Option<&str>) -> PluggyBindingConfig {
         PluggyBindingConfig {

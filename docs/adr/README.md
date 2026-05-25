@@ -58,7 +58,7 @@ proposed → active → superseded
 | [0004](0004-pluggy-as-exclusive-aggregator.md) | Pluggy as the exclusive bank aggregator (Brazil-first) | active |
 | [0005](0005-append-only-audit-events.md) | Append-only `AuditEvent` log on every write | active |
 | [0006](0006-mirrored-idempotent-migrations.md) | Mirrored idempotent migrations across both backends | active |
-| [0007](0007-atomic-self-update.md) | Atomic self-update with SHA-256 verification | active |
+| [0007](0007-atomic-self-update.md) | Atomic self-update with SHA-256 verification | superseded by [0017](0017-release-signature-verification.md) |
 | [0008](0008-privacy-no-personal-data-in-shared-source.md) | Privacy: no personal data in shared source | active |
 | [0009](0009-proactive-pulse-and-closing-plan.md) | Pulse as a proactive closing-plan, not a retrospective transaction list | active |
 | [0010](0010-card-billing-cycle.md) | `v_card_summary` groups by billing cycle, not calendar month | active |
@@ -68,6 +68,7 @@ proposed → active → superseded
 | [0014](0014-transaction-anatomy.md) | Transaction anatomy separates raw, human, merchant, purpose, and trace fields | active |
 | [0015](0015-anatomy-replication.md) | Anatomy replication propagates human-curated description and purpose from prior same-merchant transactions | active |
 | [0016](0016-forecast-automation.md) | Forecast automation: templates, detection layers and reconciliation | proposed |
+| [0017](0017-release-signature-verification.md) | Release signature verification (minisign) on top of SHA-256 | active |
 
 ---
 

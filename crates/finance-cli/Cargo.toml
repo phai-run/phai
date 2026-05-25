@@ -19,6 +19,7 @@ rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 flate2 = "1.0"
+minisign-verify = "0.2"
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 tar = "0.4"

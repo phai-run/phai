@@ -43,7 +43,28 @@ const CHECKSUM_ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz.sha256
 #[cfg(not(target_os = "macos"))]
 const CHECKSUM_ASSET_NAME: &str = "finance-cli-unsupported.tar.gz.sha256";
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SIGNATURE_ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz.minisig";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SIGNATURE_ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz.minisig";
+#[cfg(not(target_os = "macos"))]
+const SIGNATURE_ASSET_NAME: &str = "finance-cli-unsupported.tar.gz.minisig";
+
 const BINARY_NAME: &str = "fin";
+
+/// Minisign public key matched against release tarball signatures. See
+/// [ADR-0017](../../docs/adr/0017-release-signature-verification.md) for the
+/// rotation plan and the rationale for verifying signatures on top of SHA-256.
+///
+/// Placeholder until the release CI starts signing. Verification stays
+/// best-effort while this is empty (or `REQUIRE_SIGNATURE` is `false`); once
+/// CI signs reliably for one cycle, flip `REQUIRE_SIGNATURE = true`.
+const SIGNING_PUBLIC_KEY: &str = "";
+
+/// Once CI ships `.minisig` sidecars consistently, flip this to `true` so a
+/// missing signature is rejected instead of warning. Until then the updater
+/// stays in transition mode (warns once per run if the sidecar is absent).
+const REQUIRE_SIGNATURE: bool = false;
 
 /// Release Please produces tags like `v0.3.1` (include-component-in-tag: false,
 /// include-v-in-tag: true). The updater strips the leading `v`.
@@ -250,6 +271,23 @@ fn validate_tarball_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
     Ok(())
 }
 
+/// Verify a minisign signature over `tarball` against the embedded
+/// `SIGNING_PUBLIC_KEY`. See ADR-0017.
+///
+/// Returns:
+/// - `Ok(())` if the signature parses and verifies.
+/// - `Err(_)` if the signature is present but invalid — callers MUST treat
+///   this as a hard failure regardless of `REQUIRE_SIGNATURE`.
+fn verify_minisign_signature(tarball: &[u8], signature_text: &str) -> Result<()> {
+    let public_key = minisign_verify::PublicKey::decode(SIGNING_PUBLIC_KEY)
+        .context("embedded signing public key failed to parse")?;
+    let signature = minisign_verify::Signature::decode(signature_text)
+        .context("release signature failed to parse")?;
+    public_key
+        .verify(tarball, &signature, false)
+        .context("release signature did not verify against the embedded public key")
+}
+
 fn extract_binary(tarball: &[u8], dest_dir: &Path) -> Result<PathBuf> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(tarball));
     let mut archive = tar::Archive::new(decoder);
@@ -330,6 +368,10 @@ pub(crate) async fn download_and_replace(
 ) -> Result<()> {
     let tarball_asset = find_asset(release, ASSET_NAME)?;
     let checksum_asset = find_asset(release, CHECKSUM_ASSET_NAME)?;
+    // Signature sidecar is optional during the transition phase described in
+    // ADR-0017. If the release ships one, we verify it; if it doesn't, we
+    // either warn (default) or fail (when REQUIRE_SIGNATURE is flipped on).
+    let signature_asset = find_asset(release, SIGNATURE_ASSET_NAME).ok();
 
     // Use a dedicated client for the download with a generous timeout. The
     // API-check client passed in by auto_check has a 2s timeout (tight to
@@ -337,7 +379,7 @@ pub(crate) async fn download_and_replace(
     // tarball on average networks.
     let download_client = http_client(30);
 
-    // Download in parallel
+    // Download tarball + checksum first (always required).
     let (tarball, checksum_text) = tokio::try_join!(
         download_tarball(&download_client, &tarball_asset.browser_download_url),
         download_checksum(&download_client, &checksum_asset.browser_download_url),
@@ -345,8 +387,38 @@ pub(crate) async fn download_and_replace(
 
     let expected_sha256 = parse_sha256(&checksum_text)?;
 
-    // Validate tarball checksum before unpacking
+    // Validate tarball checksum before any signature work or unpacking.
     validate_tarball_sha256(&tarball, &expected_sha256)?;
+
+    // Then verify the minisign signature (authenticity gate). See ADR-0017.
+    let skip_sig = std::env::var("FINANCE_OS_SKIP_SIG_VERIFY").ok().as_deref() == Some("1");
+    if skip_sig {
+        eprintln!(
+            "Warning: signature verification skipped via FINANCE_OS_SKIP_SIG_VERIFY=1 \
+             — only use this for break-glass scenarios."
+        );
+    } else {
+        match signature_asset {
+            Some(asset) => {
+                let sig_text =
+                    download_checksum(&download_client, &asset.browser_download_url).await?;
+                verify_minisign_signature(&tarball, &sig_text)?;
+            }
+            None if REQUIRE_SIGNATURE => {
+                bail!(
+                    "release {} does not ship a {} sidecar; refusing to update without a verifiable signature",
+                    release.tag_name,
+                    SIGNATURE_ASSET_NAME
+                );
+            }
+            None => {
+                eprintln!(
+                    "Warning: release {} ships no {} sidecar — falling back to SHA-256-only verification (ADR-0017 transition mode).",
+                    release.tag_name, SIGNATURE_ASSET_NAME
+                );
+            }
+        }
+    }
 
     // Create tempdir next to the current executable (same filesystem for atomic rename).
     // Canonicalize to resolve symlinks — otherwise the tempdir may land on a

@@ -51,12 +51,51 @@ fi
 export FINANCE_OS_CONFIG_DIR="${FINANCE_OS_CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
 export FINANCE_OS_DATA_DIR="${FINANCE_OS_DATA_DIR:-$DEFAULT_DATA_DIR}"
 
-if [[ -f "$FINANCE_OS_CONFIG_DIR/pluggy.env" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$FINANCE_OS_CONFIG_DIR/pluggy.env"
-  set +a
-fi
+load_pluggy_env() {
+  # Parse pluggy.env as `KEY=VALUE` pairs instead of `source`-ing it. The
+  # previous code executed the file in the current shell, so anything that
+  # could write to it (a stray script, a misconfigured mode, a tampered
+  # config sync) would have achieved arbitrary code execution with the
+  # user's privileges. The KEY=VALUE shape matches how the rest of the
+  # ecosystem (docker, systemd EnvironmentFile, dotenv) treats env files.
+  local env_path="$1"
+  [[ -f "$env_path" ]] || return 0
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip CR (CRLF files), leading/trailing whitespace, optional `export `.
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    line="${line#export }"
+    if [[ "$line" != *=* ]]; then
+      printf 'finance.sh: ignorando linha sem = em %s: %s\n' "$env_path" "$line" >&2
+      continue
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    # Validate the key looks like a shell-safe identifier so we never
+    # `export` something exotic from a malformed file.
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      printf 'finance.sh: ignorando chave inválida em %s: %s\n' "$env_path" "$key" >&2
+      continue
+    fi
+    # Strip a single matched pair of surrounding quotes — common in env
+    # files — without invoking the shell on the contents.
+    local vlen="${#value}"
+    if (( vlen >= 2 )); then
+      local first="${value:0:1}"
+      local last="${value:vlen-1:1}"
+      if [[ "$first" == "\"" && "$last" == "\"" ]] || \
+         [[ "$first" == "'"  && "$last" == "'"  ]]; then
+        value="${value:1:vlen-2}"
+      fi
+    fi
+    export "$key=$value"
+  done <"$env_path"
+}
+
+load_pluggy_env "$FINANCE_OS_CONFIG_DIR/pluggy.env"
 
 args=("$@")
 
