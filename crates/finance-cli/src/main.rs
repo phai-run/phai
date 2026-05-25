@@ -1618,6 +1618,30 @@ enum ForecastCommand {
                       sejam no-ops. Camada 1 do pipeline da ADR-0016."
     )]
     RefreshInstallments(ForecastRefreshInstallmentsArgs),
+    #[command(
+        about = "lista candidatos a forecasts recorrentes (subscriptions + fixed bills) detectados no histórico",
+        long_about = "Roda o detector de recorrentes (Camada 2/3 do ADR-0016): para cada \
+                      par (conta, merchant), exige ≥3 meses de ocorrências, cadência mensal e \
+                      coeficiente de variação ≤ 10% (subscription) ou ≤ 30% (fixed). Cada \
+                      candidato novo é persistido como forecast_template com status='proposto' \
+                      para que execuções futuras não o re-sugiram. Use `fin forecast accept` \
+                      ou `fin forecast dismiss` para resolver."
+    )]
+    Suggest(ForecastSuggestArgs),
+    #[command(
+        about = "aceita um template em status 'proposto' e materializa seus forecasts",
+        long_about = "Marca o forecast_template como 'ativo' e gera N forecasts futuros \
+                      (default 6 meses) ancorados no `next_due_day` do template. Idempotente: \
+                      re-executar não duplica forecasts."
+    )]
+    Accept(ForecastAcceptArgs),
+    #[command(
+        about = "descarta um template em status 'proposto' para que o detector não o re-sugira",
+        long_about = "Marca o forecast_template como 'descartado'. Em scans futuros do \
+                      detector, candidatos com o mesmo template_id (mesma conta+merchant+kind) \
+                      são pulados — útil quando o detector pega um falso positivo."
+    )]
+    Dismiss(ForecastDismissArgs),
 }
 
 #[derive(Args)]
@@ -1628,6 +1652,33 @@ pub(crate) struct ForecastRefreshInstallmentsArgs {
     /// Emite o resumo como JSON em vez do formato humano.
     #[arg(long)]
     pub raw: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastSuggestArgs {
+    /// Janela em meses para análise. Mín: 3, default: 6.
+    #[arg(long, default_value_t = 6)]
+    pub lookback_months: u32,
+    /// Emite o resumo como JSON em vez do formato humano.
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastAcceptArgs {
+    /// ID do template em status 'proposto' a ser aceito.
+    #[arg(long)]
+    pub template_id: String,
+    /// Quantos meses materializar imediatamente após aceitar. Default: 6.
+    #[arg(long, default_value_t = 6)]
+    pub materialize_months: u32,
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastDismissArgs {
+    /// ID do template em status 'proposto' a ser descartado.
+    #[arg(long)]
+    pub template_id: String,
 }
 
 #[derive(Args)]
@@ -2046,7 +2097,7 @@ fn is_flat_category(category_id: &str) -> bool {
     !category_id.contains(':')
 }
 
-fn normalize_description(value: &str) -> String {
+pub(crate) fn normalize_description(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut prev_space = false;
     for ch in value.chars().flat_map(char::to_lowercase) {
@@ -2115,7 +2166,7 @@ fn extract_installment_marker(value: &str) -> Option<String> {
     None
 }
 
-fn strip_installment_marker(value: &str) -> String {
+pub(crate) fn strip_installment_marker(value: &str) -> String {
     let tokens = value.split_whitespace().collect::<Vec<_>>();
     let mut kept = Vec::new();
     let mut idx = 0usize;
@@ -2886,6 +2937,9 @@ async fn main() -> Result<()> {
             ForecastCommand::RefreshInstallments(args) => {
                 forecast_cmd::run_refresh_installments(args).await
             }
+            ForecastCommand::Suggest(args) => forecast_cmd::run_suggest(args).await,
+            ForecastCommand::Accept(args) => forecast_cmd::run_accept(args).await,
+            ForecastCommand::Dismiss(args) => forecast_cmd::run_dismiss(args).await,
         },
         Some(Commands::Rule { command }) => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,

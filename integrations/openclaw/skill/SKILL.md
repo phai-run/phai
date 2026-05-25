@@ -90,6 +90,21 @@ bash skills/finance-os/finance.sh forecast refresh-installments
 bash skills/finance-os/finance.sh forecast refresh-installments --raw   # JSON
 ```
 
+Detectar e gerenciar templates recorrentes (subscriptions + contas fixas):
+
+```bash
+# Detecta candidatos no histórico (≥3 meses, mensal, variação ≤30%) e
+# persiste como status='proposto' para revisão. Idempotente — re-rodar
+# não re-sugere candidatos já em proposto/ativo/descartado.
+bash skills/finance-os/finance.sh forecast suggest --raw
+
+# Aceita um candidato → vira 'ativo' e materializa 6 forecasts futuros.
+bash skills/finance-os/finance.sh forecast accept --template-id <id>
+
+# Descarta um candidato → vira 'descartado' (não volta a ser sugerido).
+bash skills/finance-os/finance.sh forecast dismiss --template-id <id>
+```
+
 Forecast vs realizado:
 
 ```bash

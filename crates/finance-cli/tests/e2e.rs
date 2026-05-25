@@ -4760,3 +4760,238 @@ fn forecast_refresh_installments_materialises_remaining_parcelas() {
         .expect("count forecasts");
     assert_eq!(fc_count, 9, "second run must not duplicate forecasts");
 }
+
+#[test]
+fn forecast_suggest_accept_dismiss_subscription_round_trip() {
+    // Layer 2/3 (ADR-0016): seed three months of a stable monthly debit
+    // (Spotify-like), expect the detector to flag it, persist as
+    // 'proposto', then exercise accept → materialise + dismiss → status
+    // change.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("chk_test")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("checking")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Checking"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // 3 months of a stable monthly outflow (R$ 21.90 ± tiny rounding noise).
+    let today = chrono::Local::now().date_naive();
+    let amounts = ["-21.90", "-21.90", "-22.10"];
+    for (i, amount) in amounts.iter().enumerate() {
+        let date = today - chrono::Duration::days((i as i64 + 1) * 30);
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(format!("sub-{i}"))
+                .arg("--account-id")
+                .arg("chk_test")
+                .arg("--date")
+                .arg(date.format("%Y-%m-%d").to_string())
+                .arg("--description")
+                .arg("Streaming Service Monthly")
+                .arg(format!("--amount={amount}")),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    // First suggest run — produces one 'proposto' template.
+    let stdout = envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("suggest")
+            .arg("--raw")
+            .arg("--lookback-months")
+            .arg("6"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let templates: Value = serde_json::from_slice(&stdout).expect("valid suggest json");
+    let templates = templates.as_array().expect("array");
+    assert!(
+        !templates.is_empty(),
+        "expected at least one proposto template, got 0"
+    );
+    let template_id = templates[0]["template_id"]
+        .as_str()
+        .expect("template_id")
+        .to_string();
+    assert_eq!(templates[0]["status"].as_str(), Some("proposto"));
+    assert!(["subscription", "fixed"].contains(&templates[0]["kind"].as_str().unwrap_or("")));
+
+    // Re-running suggest must NOT create duplicates (idempotent on
+    // template_id derived from account+merchant+kind).
+    let stdout2 = envs(
+        cargo_bin().arg("forecast").arg("suggest").arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let templates2: Value = serde_json::from_slice(&stdout2).expect("valid json");
+    assert_eq!(
+        templates2.as_array().unwrap().len(),
+        templates.len(),
+        "second suggest should not duplicate"
+    );
+
+    // Accept the template — flips status to ativo, materialises 6 forecasts.
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("accept")
+            .arg("--template-id")
+            .arg(&template_id)
+            .arg("--materialize-months")
+            .arg("6"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM forecast_template WHERE template_id = ?1",
+            [&template_id],
+            |r| r.get(0),
+        )
+        .expect("read status");
+    assert_eq!(status, "ativo");
+    let fc_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id = ?1",
+            [&template_id],
+            |r| r.get(0),
+        )
+        .expect("count forecasts");
+    assert_eq!(fc_count, 6, "6 forecasts ahead");
+    drop(conn);
+
+    // Dismiss a new candidate (we re-seed a different merchant first so we
+    // have a proposto to dismiss).
+    for (i, amount) in ["-90.00", "-90.00", "-90.00"].iter().enumerate() {
+        let date = today - chrono::Duration::days((i as i64 + 1) * 30);
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(format!("gym-{i}"))
+                .arg("--account-id")
+                .arg("chk_test")
+                .arg("--date")
+                .arg(date.format("%Y-%m-%d").to_string())
+                .arg("--description")
+                .arg("Academia XYZ")
+                .arg(format!("--amount={amount}")),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+    let stdout3 = envs(
+        cargo_bin().arg("forecast").arg("suggest").arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let proposed: Value = serde_json::from_slice(&stdout3).expect("valid json");
+    let gym_template = proposed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| {
+            t["status"].as_str() == Some("proposto")
+                && t["description"]
+                    .as_str()
+                    .map(|s| s.contains("Academia"))
+                    .unwrap_or(false)
+        })
+        .expect("Academia proposto");
+    let gym_id = gym_template["template_id"].as_str().unwrap().to_string();
+
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("dismiss")
+            .arg("--template-id")
+            .arg(&gym_id),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let conn = Connection::open(&db_path).expect("open db");
+    let gym_status: String = conn
+        .query_row(
+            "SELECT status FROM forecast_template WHERE template_id = ?1",
+            [&gym_id],
+            |r| r.get(0),
+        )
+        .expect("read status");
+    assert_eq!(gym_status, "descartado");
+
+    // A subsequent suggest must NOT re-propose the dismissed merchant.
+    let stdout4 = envs(
+        cargo_bin().arg("forecast").arg("suggest").arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let after: Value = serde_json::from_slice(&stdout4).expect("valid json");
+    assert!(
+        !after
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["status"].as_str() == Some("proposto")
+                && t["description"]
+                    .as_str()
+                    .map(|s| s.contains("Academia"))
+                    .unwrap_or(false)),
+        "Academia must not reappear as proposto after dismiss"
+    );
+}
