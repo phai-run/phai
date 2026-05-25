@@ -18,7 +18,10 @@ use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::{enrich_description_from_metadata, load_config, ForecastRefreshInstallmentsArgs};
+use crate::{
+    enrich_description_from_metadata, load_config, normalize_description, strip_installment_marker,
+    ForecastAcceptArgs, ForecastDismissArgs, ForecastRefreshInstallmentsArgs, ForecastSuggestArgs,
+};
 
 /// Summary returned by [`refresh_installments`] for CLI / agent display.
 #[derive(Debug, Default)]
@@ -242,6 +245,507 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     let first_next = NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid date");
     let last = first_next - chrono::Duration::days(1);
     last.day()
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2/3 — subscriptions + fixed bills
+// ---------------------------------------------------------------------------
+
+use finance_core::TransactionRecord;
+use rust_decimal::prelude::ToPrimitive;
+
+#[derive(Debug, Clone)]
+pub(crate) struct RecurringCandidate {
+    /// `subscription` (variance ≤ 10%) or `fixed` (≤ 30%, with band).
+    pub kind: String,
+    pub account_id: String,
+    pub merchant_key: String,
+    pub label: String,
+    pub category_id: Option<String>,
+    /// Median absolute amount (signed negative since these are outflows).
+    pub median_amount: Decimal,
+    pub amount_lower: Decimal,
+    pub amount_upper: Decimal,
+    pub months_seen: usize,
+    pub last_seen: NaiveDate,
+    pub typical_day_of_month: u32,
+    pub coefficient_of_variation: f64,
+    pub confidence: f64,
+}
+
+impl RecurringCandidate {
+    fn idempotency_hash(&self) -> String {
+        let mut hasher = DefaultHasher::new();
+        self.account_id.hash(&mut hasher);
+        self.merchant_key.hash(&mut hasher);
+        self.kind.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+}
+
+/// Group transactions by (account, normalized merchant) and rank by
+/// "looks recurring": ≥3 months seen, monthly cadence, variance bound.
+/// Returns only the candidates that pass the heuristic.
+pub(crate) fn detect_recurring_candidates(
+    txs: &[TransactionRecord],
+    today: NaiveDate,
+    lookback_months: u32,
+) -> Vec<RecurringCandidate> {
+    use std::collections::BTreeMap;
+
+    let cutoff = shift_months(today, -(lookback_months as i32)).unwrap_or(today);
+    let mut groups: BTreeMap<(String, String), Vec<&TransactionRecord>> = BTreeMap::new();
+
+    for tx in txs {
+        // Layer 2/3 looks at outflows only. Installments are Layer 1's job.
+        if tx.amount >= Decimal::ZERO {
+            continue;
+        }
+        if tx.transaction_date < cutoff {
+            continue;
+        }
+        let raw = enrich_description_from_metadata(&tx.raw_description, &tx.metadata_json);
+        if finance_core::parse_installment_description(&raw).is_some() {
+            continue;
+        }
+        let label = tx
+            .description
+            .clone()
+            .or(tx.merchant_name.clone())
+            .unwrap_or_else(|| raw.clone());
+        let merchant_key = merchant_key_from_label(&label);
+        if merchant_key.is_empty() {
+            continue;
+        }
+        let account_id = tx.account_id.clone().unwrap_or_default();
+        if account_id.is_empty() {
+            continue;
+        }
+        groups
+            .entry((account_id, merchant_key))
+            .or_default()
+            .push(tx);
+    }
+
+    let mut candidates = Vec::new();
+    for ((account_id, merchant_key), group) in groups {
+        let mut group = group;
+        group.sort_by_key(|tx| tx.transaction_date);
+
+        // Count distinct (year, month) the merchant appeared in.
+        let mut months_set = std::collections::BTreeSet::new();
+        for tx in &group {
+            months_set.insert((tx.transaction_date.year(), tx.transaction_date.month()));
+        }
+        let months_seen = months_set.len();
+        if months_seen < 3 {
+            continue;
+        }
+
+        // Drop accounts where the cadence is clearly not monthly: median gap
+        // between consecutive transactions should be 25..=35 days.
+        if group.len() >= 2 {
+            let mut gaps: Vec<i64> = Vec::new();
+            for pair in group.windows(2) {
+                gaps.push((pair[1].transaction_date - pair[0].transaction_date).num_days());
+            }
+            let median_gap = median_i64(&gaps);
+            if !(20..=45).contains(&median_gap) {
+                continue;
+            }
+        }
+
+        let amounts: Vec<f64> = group
+            .iter()
+            .map(|tx| tx.amount.abs().to_f64().unwrap_or(0.0))
+            .collect();
+        let median = median_f64(&amounts);
+        if median <= 0.0 {
+            continue;
+        }
+        let stddev = stddev_f64(&amounts);
+        let cv = stddev / median; // coefficient of variation
+
+        let (kind, confidence) = match cv {
+            c if c.is_finite() && c <= 0.10 => ("subscription", (1.0 - c).max(0.6)),
+            c if c.is_finite() && c <= 0.30 => ("fixed", (0.9 - c).max(0.4)),
+            _ => continue,
+        };
+
+        // Pick the most frequent day-of-month from the seen records — that
+        // becomes `next_due_day` in the template.
+        let typical_day_of_month = mode_u32(
+            &group
+                .iter()
+                .map(|tx| tx.transaction_date.day())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|| {
+            group
+                .last()
+                .map(|tx| tx.transaction_date.day())
+                .unwrap_or(1)
+        });
+
+        // Pick the most recent label so it reads natural to the user.
+        let label = group
+            .last()
+            .and_then(|tx| tx.description.clone().or(tx.merchant_name.clone()))
+            .unwrap_or_else(|| merchant_key.clone());
+
+        // Pick the most frequent non-empty category seen on the chain.
+        let category_id = group
+            .iter()
+            .filter_map(|tx| tx.category_id.as_ref().filter(|c| !c.is_empty()).cloned())
+            .fold(BTreeMap::<String, usize>::new(), |mut acc, c| {
+                *acc.entry(c).or_default() += 1;
+                acc
+            })
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(c, _)| c);
+
+        let last_seen = group.last().expect("non-empty group").transaction_date;
+        let median_amount = -decimal_from_f64(median);
+        let band_half = decimal_from_f64(stddev);
+        candidates.push(RecurringCandidate {
+            kind: kind.to_string(),
+            account_id,
+            merchant_key,
+            label,
+            category_id,
+            median_amount,
+            amount_lower: median_amount - band_half,
+            amount_upper: median_amount + band_half,
+            months_seen,
+            last_seen,
+            typical_day_of_month,
+            coefficient_of_variation: cv,
+            confidence,
+        });
+    }
+
+    // Highest confidence first — what the user is most likely to confirm.
+    candidates.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates
+}
+
+fn merchant_key_from_label(label: &str) -> String {
+    normalize_description(&strip_installment_marker(label))
+}
+
+fn median_f64(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+fn median_i64(values: &[i64]) -> i64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    sorted[sorted.len() / 2]
+}
+
+fn stddev_f64(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    var.sqrt()
+}
+
+fn mode_u32(values: &[u32]) -> Option<u32> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for v in values {
+        *counts.entry(*v).or_default() += 1;
+    }
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(v, _)| v)
+}
+
+fn decimal_from_f64(v: f64) -> Decimal {
+    Decimal::from_f64_retain(v)
+        .unwrap_or(Decimal::ZERO)
+        .round_dp(2)
+}
+
+/// CLI entry: `fin forecast suggest`. Detects new candidates, persists them
+/// as `status='proposto'` templates (so the user can later accept / dismiss
+/// without us re-suggesting), and lists pending proposals.
+pub(crate) async fn run_suggest(args: ForecastSuggestArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let today = Utc::now().date_naive();
+    let lookback = args.lookback_months.max(3);
+    let from = shift_months_back(today, lookback as i32)?;
+    let txs = store
+        .transactions_in_date_range(None, from, today)
+        .await
+        .context("falha ao carregar transações")?;
+    let candidates = detect_recurring_candidates(&txs, today, lookback);
+
+    // Skip any candidate whose template_id already exists (in any status —
+    // proposto/ativo/descartado). That's the "remember-the-rejection"
+    // semantics from ADR-0016.
+    let existing_proposto = store
+        .list_forecast_templates(None, Some("proposto"))
+        .await?;
+    let existing_ativo = store.list_forecast_templates(None, Some("ativo")).await?;
+    let existing_descartado = store
+        .list_forecast_templates(None, Some("descartado"))
+        .await?;
+    let mut existing_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for t in existing_proposto
+        .iter()
+        .chain(existing_ativo.iter())
+        .chain(existing_descartado.iter())
+    {
+        existing_keys.insert(t.template_id.clone());
+    }
+
+    let now = Utc::now();
+    let mut new_proposals = Vec::new();
+    for cand in &candidates {
+        let template_id = format!("{}-{}", cand.kind, cand.idempotency_hash());
+        if existing_keys.contains(&template_id) {
+            continue;
+        }
+        new_proposals.push(template_from_candidate(
+            cand,
+            template_id,
+            &config.actor_id,
+            now,
+        ));
+    }
+
+    if !new_proposals.is_empty() {
+        store.upsert_forecast_templates(&new_proposals).await?;
+    }
+
+    // Re-read the full proposto list so we can print it.
+    let proposto_now = store
+        .list_forecast_templates(None, Some("proposto"))
+        .await?;
+    if args.raw {
+        println!("{}", serde_json::to_string_pretty(&proposto_now)?);
+    } else {
+        print_suggest_human(&proposto_now, new_proposals.len());
+    }
+    Ok(())
+}
+
+fn template_from_candidate(
+    cand: &RecurringCandidate,
+    template_id: String,
+    actor_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> ForecastTemplateRecord {
+    let amount_lower = if cand.kind == "subscription" {
+        None
+    } else {
+        Some(cand.amount_lower)
+    };
+    let amount_upper = if cand.kind == "subscription" {
+        None
+    } else {
+        Some(cand.amount_upper)
+    };
+    ForecastTemplateRecord {
+        template_id: template_id.clone(),
+        kind: cand.kind.clone(),
+        description: cand.label.clone(),
+        merchant_pattern: Some(cand.merchant_key.clone()),
+        category_id: cand.category_id.clone(),
+        account_id: Some(cand.account_id.clone()),
+        amount: cand.median_amount,
+        amount_lower,
+        amount_upper,
+        cadence: "monthly".to_string(),
+        next_due_day: Some(cand.typical_day_of_month as i32),
+        start_date: cand.last_seen,
+        end_date: None,
+        remaining_count: None,
+        source: "detected".to_string(),
+        confidence: Some(cand.confidence),
+        status: "proposto".to_string(),
+        metadata_json: json!({
+            "months_seen": cand.months_seen,
+            "coefficient_of_variation": cand.coefficient_of_variation,
+            "detector_version": 1,
+        }),
+        actor_id: actor_id.to_string(),
+        idempotency_key: format!("forecast-template-{template_id}"),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn print_suggest_human(templates: &[ForecastTemplateRecord], new_count: usize) {
+    if templates.is_empty() {
+        println!("🔎 Nenhum candidato recorrente em revisão.");
+        return;
+    }
+    println!(
+        "🔎 {} candidato(s) recorrente(s) em revisão ({new_count} novos)",
+        templates.len()
+    );
+    println!();
+    for t in templates {
+        let amount = crate::human_format::brl(t.amount.abs());
+        let cadence_label = format!("mensal · dia {}", t.next_due_day.unwrap_or(1));
+        let conf = t
+            .confidence
+            .map(|c| format!("{:.0}%", c * 100.0))
+            .unwrap_or_default();
+        let band = match (t.amount_lower, t.amount_upper) {
+            (Some(lo), Some(hi)) => format!(
+                " (±{})",
+                crate::human_format::brl((hi - lo) / Decimal::from(2))
+            ),
+            _ => String::new(),
+        };
+        println!("• [{}] {}", t.kind, t.description);
+        println!("   {amount}{band} · {cadence_label} · confiança {conf}");
+        println!("   id={}", t.template_id);
+    }
+    println!();
+    println!("Para aceitar: fin forecast accept --template-id <id>");
+    println!("Para descartar: fin forecast dismiss --template-id <id>");
+}
+
+pub(crate) async fn run_accept(args: ForecastAcceptArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let template = store
+        .get_forecast_template(&args.template_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("template não encontrado: {}", args.template_id))?;
+    if template.status != "proposto" {
+        anyhow::bail!(
+            "template {} não está em status 'proposto' (atual: {})",
+            template.template_id,
+            template.status
+        );
+    }
+    let now = Utc::now();
+    let mut updated = template.clone();
+    updated.status = "ativo".to_string();
+    updated.updated_at = now;
+    store
+        .upsert_forecast_templates(std::slice::from_ref(&updated))
+        .await?;
+
+    // Materialise next N months of instances right away.
+    let materialised = materialise_template_forecasts(
+        store.as_ref(),
+        &updated,
+        args.materialize_months,
+        &config.actor_id,
+        now,
+    )
+    .await?;
+
+    println!(
+        "✅ Aceito: {} · {} forecast(s) gravado(s) para os próximos {} meses.",
+        updated.description, materialised, args.materialize_months
+    );
+    Ok(())
+}
+
+pub(crate) async fn run_dismiss(args: ForecastDismissArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let template = store
+        .get_forecast_template(&args.template_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("template não encontrado: {}", args.template_id))?;
+    if template.status == "descartado" {
+        println!("ℹ️  Template já descartado: {}", template.template_id);
+        return Ok(());
+    }
+    let mut updated = template.clone();
+    updated.status = "descartado".to_string();
+    updated.updated_at = Utc::now();
+    store
+        .upsert_forecast_templates(std::slice::from_ref(&updated))
+        .await?;
+    println!("🗑  Descartado: {}", updated.description);
+    Ok(())
+}
+
+/// Materialise N monthly forecast instances ahead of `today` for a given
+/// template. Idempotent on `forecast_id` (`tpl-{template_id}-YYYYMM`).
+async fn materialise_template_forecasts(
+    store: &dyn FinanceStore,
+    template: &ForecastTemplateRecord,
+    months_ahead: u32,
+    actor_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<usize> {
+    let today = now.date_naive();
+    let day_of_month = template.next_due_day.unwrap_or(1).max(1) as u32;
+    let mut instances = Vec::with_capacity(months_ahead as usize);
+    for offset in 1..=months_ahead {
+        let base = shift_months(
+            NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+                .context("invalid current month")?,
+            offset as i32,
+        )
+        .context("month shift failed")?;
+        let last_day = days_in_month(base.year(), base.month());
+        let due_date =
+            NaiveDate::from_ymd_opt(base.year(), base.month(), day_of_month.min(last_day))
+                .context("invalid due_date")?;
+        let yyyymm = format!("{}{:02}", base.year(), base.month());
+        let forecast_id = format!("tpl-{}-{yyyymm}", template.template_id);
+        instances.push(ForecastRecord {
+            forecast_id: forecast_id.clone(),
+            due_date: Some(due_date),
+            description: template.description.clone(),
+            amount: template.amount,
+            category_id: template.category_id.clone(),
+            account_id: template.account_id.clone(),
+            status: "ativo".to_string(),
+            recurrence: Some("mensal".to_string()),
+            actor_id: actor_id.to_string(),
+            idempotency_key: format!("forecast-{forecast_id}"),
+            metadata_json: json!({
+                "source_template": template.template_id,
+                "template_kind": template.kind,
+            }),
+            created_at: now,
+            updated_at: now,
+            template_id: Some(template.template_id.clone()),
+            realized_transaction_id: None,
+            realized_at: None,
+        });
+    }
+    if instances.is_empty() {
+        return Ok(0);
+    }
+    store.upsert_forecasts(&instances).await
 }
 
 #[cfg(test)]
