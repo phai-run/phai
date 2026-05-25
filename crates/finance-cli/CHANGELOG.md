@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.1](https://github.com/feliperun/finance-os/compare/v2.3.0...v2.3.1) (2026-05-25)
+
+
+### Bug Fixes
+
+* **cli:** clarify forecast suggest covers envelopes (post-[#64](https://github.com/feliperun/finance-os/issues/64)) ([af7a34b](https://github.com/feliperun/finance-os/commit/af7a34b7605f3fe2b0a3441366f41eae237acd27))
+
 ## [2.3.0](https://github.com/feliperun/finance-os/compare/v2.2.0...v2.3.0) (2026-05-25)
 
 
