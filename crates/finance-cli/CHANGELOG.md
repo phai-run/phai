@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.3.0](https://github.com/feliperun/finance-os/compare/v2.2.0...v2.3.0) (2026-05-25)
+
+
+### Features
+
+* **forecast:** forecast_template schema + FinanceStore CRUD (ADR-0016 PR 1/5) ([#59](https://github.com/feliperun/finance-os/issues/59)) ([a3cd76a](https://github.com/feliperun/finance-os/commit/a3cd76a436971afa832847aac89598b34ff5d639))
+* **forecast:** Layer 1 — installments auto-forecast (ADR-0016 PR 2/5) ([#60](https://github.com/feliperun/finance-os/issues/60)) ([402b46f](https://github.com/feliperun/finance-os/commit/402b46f0b4a2edd0b5bd00ffb303158100b0f2f2))
+* **forecast:** Layer 2/3 — suggest/accept/dismiss recurring templates (ADR-0016 PR 3/5) ([#61](https://github.com/feliperun/finance-os/issues/61)) ([fabdf8a](https://github.com/feliperun/finance-os/commit/fabdf8ad07e491112b9fbcc4c7c617371b5f9c80))
+* **forecast:** Layer 4 — category envelopes (ADR-0016 PR 4/5) ([#62](https://github.com/feliperun/finance-os/issues/62)) ([3c3fe87](https://github.com/feliperun/finance-os/commit/3c3fe87826705919e21ce18d7896223ca3fe3d06))
+* **forecast:** scenario eval + OpenClaw skill triggers (ADR-0016 PR 5/5) ([#63](https://github.com/feliperun/finance-os/issues/63)) ([a03e819](https://github.com/feliperun/finance-os/commit/a03e8190d38f4456520c0890cb4b8c5074b11004))
+* **report:** cashflow-chart stacks forecast on bars + projects saldo into future ([#56](https://github.com/feliperun/finance-os/issues/56)) ([4c25ea1](https://github.com/feliperun/finance-os/commit/4c25ea124e69db35ec1e539858ef6079648cd174))
+
 ## [2.2.0](https://github.com/feliperun/finance-os/compare/v2.1.0...v2.2.0) (2026-05-24)
 
 
