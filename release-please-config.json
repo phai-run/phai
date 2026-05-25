@@ -7,6 +7,12 @@
     "crates/finance-cli": {
       "release-type": "rust",
       "package-name": "finance-cli"
+    },
+    "crates/finance-core": {
+      "release-type": "rust",
+      "package-name": "finance-core",
+      "include-component-in-tag": true,
+      "bootstrap-sha": "ae65802258a02614bb4cba3874dad41902278a00c"
     }
   }
 }

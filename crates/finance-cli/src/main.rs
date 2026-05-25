@@ -1619,13 +1619,15 @@ enum ForecastCommand {
     )]
     RefreshInstallments(ForecastRefreshInstallmentsArgs),
     #[command(
-        about = "lista candidatos a forecasts recorrentes (subscriptions + fixed bills) detectados no histórico",
-        long_about = "Roda o detector de recorrentes (Camada 2/3 do ADR-0016): para cada \
+        about = "lista candidatos a forecasts recorrentes (subscriptions + fixed bills + envelopes) detectados no histórico",
+        long_about = "Roda o detector de recorrentes (Camadas 2, 3 e 4 do ADR-0016): para cada \
                       par (conta, merchant), exige ≥3 meses de ocorrências, cadência mensal e \
-                      coeficiente de variação ≤ 10% (subscription) ou ≤ 30% (fixed). Cada \
-                      candidato novo é persistido como forecast_template com status='proposto' \
-                      para que execuções futuras não o re-sugiram. Use `fin forecast accept` \
-                      ou `fin forecast dismiss` para resolver."
+                      coeficiente de variação ≤ 10% (subscription) ou ≤ 30% (fixed). Também \
+                      detecta envelopes por categoria (Camada 4): ≥4 meses na categoria, \
+                      variação ≤ 40%, excluindo merchants já cobertos por subscriptions/fixed \
+                      ativos. Cada candidato novo é persistido como forecast_template com \
+                      status='proposto' para que execuções futuras não o re-sugiram. Use \
+                      `fin forecast accept` ou `fin forecast dismiss` para resolver."
     )]
     Suggest(ForecastSuggestArgs),
     #[command(
