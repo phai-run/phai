@@ -2082,9 +2082,13 @@ impl FinanceStore for LocalStore {
     }
 
     async fn count_rows(&self, table: &str) -> Result<i64> {
+        // `validate_table_name` enforces the allowlist, so interpolation is
+        // safe; SQLite identifier quoting uses double quotes per the SQL
+        // standard, not the SQL-Server-style brackets the previous code
+        // borrowed.
         super::validate_table_name(table)?;
         let conn = self.connection()?;
-        let sql = format!("SELECT COUNT(*) FROM [{table}]");
+        let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         let count = conn.query_row(&sql, [], |row| row.get(0))?;
         Ok(count)
     }
