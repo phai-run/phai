@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     enrich_description_from_metadata, load_config, normalize_description, strip_installment_marker,
-    ForecastAcceptArgs, ForecastDismissArgs, ForecastRefreshInstallmentsArgs, ForecastScenarioArgs,
-    ForecastSuggestArgs,
+    ForecastAcceptArgs, ForecastDismissArgs, ForecastReconcileArgs,
+    ForecastRefreshInstallmentsArgs, ForecastScenarioArgs, ForecastSuggestArgs,
 };
 use std::str::FromStr;
 
@@ -1185,6 +1185,158 @@ fn month_within_scenario(month: NaiveDate, start: NaiveDate, months: u32) -> Res
     Ok(month <= end)
 }
 
+// ---------------------------------------------------------------------------
+// Reconciliation (forecast → realizado)
+// ---------------------------------------------------------------------------
+
+/// Day window around the forecast's due_date in which a candidate
+/// transaction must fall to be considered a match.
+const RECONCILE_DATE_TOLERANCE_DAYS: i64 = 3;
+
+/// Relative tolerance on the amount magnitude (5%).
+const RECONCILE_AMOUNT_TOLERANCE: f64 = 0.05;
+
+#[derive(Debug, Default, Clone)]
+pub struct ReconcileReport {
+    pub forecasts_scanned: usize,
+    pub matched: usize,
+    pub ambiguous: usize,
+    pub no_match: usize,
+}
+
+pub(crate) async fn run_reconcile(args: ForecastReconcileArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let report = reconcile_forecasts(store.as_ref(), &config, args.lookback_days).await?;
+
+    if args.raw {
+        let payload = json!({
+            "forecasts_scanned": report.forecasts_scanned,
+            "matched": report.matched,
+            "ambiguous": report.ambiguous,
+            "no_match": report.no_match,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("🔗 Forecast · reconciliação");
+        println!("  Forecasts varridos:   {}", report.forecasts_scanned);
+        println!("  Realizados:           {}", report.matched);
+        println!("  Ambíguos (pulados):   {}", report.ambiguous);
+        println!("  Sem match:            {}", report.no_match);
+    }
+    Ok(())
+}
+
+/// Core reconciler: for each ativo forecast with due_date in the lookback
+/// window, find a candidate transaction on the same account within
+/// ±[`RECONCILE_DATE_TOLERANCE_DAYS`] whose amount is within ±5% of the
+/// forecast amount (and same sign). On a unique match, flip the forecast
+/// to `realizado` and record the FK + timestamp. Emits a `reconcile` audit
+/// event per realized forecast.
+pub async fn reconcile_forecasts(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    lookback_days: i64,
+) -> Result<ReconcileReport> {
+    let today = Utc::now().date_naive();
+    let lookback = lookback_days.max(1);
+    let from = today
+        .checked_sub_signed(chrono::Duration::days(lookback))
+        .unwrap_or(today);
+
+    let candidates = store.upcoming_forecasts(from, today).await?;
+    let mut report = ReconcileReport {
+        forecasts_scanned: candidates.len(),
+        ..Default::default()
+    };
+
+    let mut to_update: Vec<ForecastRecord> = Vec::new();
+    let now = Utc::now();
+
+    for forecast in candidates {
+        // Already realised (defensive — upcoming_forecasts filters by ativo).
+        if forecast.realized_transaction_id.is_some() {
+            continue;
+        }
+        let Some(due) = forecast.due_date else {
+            report.no_match += 1;
+            continue;
+        };
+        let Some(account_id) = forecast.account_id.clone() else {
+            report.no_match += 1;
+            continue;
+        };
+        let from_date = due
+            .checked_sub_signed(chrono::Duration::days(RECONCILE_DATE_TOLERANCE_DAYS))
+            .unwrap_or(due);
+        let to_date = due
+            .checked_add_signed(chrono::Duration::days(RECONCILE_DATE_TOLERANCE_DAYS))
+            .unwrap_or(due);
+        let txs = store
+            .transactions_in_date_range(Some(&account_id), from_date, to_date)
+            .await
+            .context("falha ao carregar transações para reconciliar forecast")?;
+
+        let matches: Vec<&TransactionRecord> = txs
+            .iter()
+            .filter(|tx| amount_matches(forecast.amount, tx.amount))
+            .collect();
+
+        match matches.len() {
+            0 => report.no_match += 1,
+            1 => {
+                let tx = matches[0];
+                let mut updated = forecast.clone();
+                updated.status = "realizado".to_string();
+                updated.realized_transaction_id = Some(tx.transaction_id.clone());
+                updated.realized_at = Some(now);
+                updated.updated_at = now;
+                to_update.push(updated);
+                report.matched += 1;
+            }
+            _ => {
+                // Multiple candidate transactions match — bail rather than
+                // guess which one fulfilled the forecast. The user can
+                // disambiguate manually if needed.
+                report.ambiguous += 1;
+            }
+        }
+    }
+
+    if !to_update.is_empty() {
+        store.upsert_forecasts(&to_update).await?;
+        let events = to_update
+            .iter()
+            .map(|f| audit_event_for_forecast(f, "reconcile", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
+    }
+
+    Ok(report)
+}
+
+/// True when `tx_amount` matches `forecast_amount` in sign and magnitude
+/// (within [`RECONCILE_AMOUNT_TOLERANCE`]). Returns false when the forecast
+/// amount is zero — we never auto-realise a zero forecast.
+fn amount_matches(forecast_amount: Decimal, tx_amount: Decimal) -> bool {
+    if forecast_amount.is_zero() {
+        return false;
+    }
+    // Same sign required (an outflow forecast doesn't match an inflow tx).
+    if (forecast_amount > Decimal::ZERO) != (tx_amount > Decimal::ZERO) {
+        return false;
+    }
+    let expected = forecast_amount.abs().to_f64().unwrap_or(0.0);
+    let actual = tx_amount.abs().to_f64().unwrap_or(0.0);
+    if expected <= 0.0 {
+        return false;
+    }
+    let rel = (actual - expected).abs() / expected;
+    rel <= RECONCILE_AMOUNT_TOLERANCE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,6 +1403,18 @@ mod tests {
             total_amount: Decimal::from(600),
         };
         assert_eq!(chain_idempotency_key(&chain), "30e6c2ca1c2b5901");
+    }
+
+    #[test]
+    fn reconciliation_match_amount_within_tolerance() {
+        let forecast = Decimal::from(-100);
+        // 95 → 5% off, accepted; 94 → 6% off, rejected.
+        assert!(amount_matches(forecast, Decimal::from(-95)));
+        assert!(!amount_matches(forecast, Decimal::from(-94)));
+        // Sign mismatch always rejects.
+        assert!(!amount_matches(forecast, Decimal::from(100)));
+        // Zero forecast never matches (defensive).
+        assert!(!amount_matches(Decimal::ZERO, Decimal::ZERO));
     }
 
     #[test]

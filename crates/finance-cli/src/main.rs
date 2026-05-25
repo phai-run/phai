@@ -1619,6 +1619,16 @@ enum ForecastCommand {
     )]
     RefreshInstallments(ForecastRefreshInstallmentsArgs),
     #[command(
+        about = "reconcilia forecasts ativos com as transações reais já presentes no banco",
+        long_about = "Para cada forecast em status='ativo' com due_date nos últimos N dias, \
+                      procura uma transação na mesma conta dentro de ±3 dias da due_date e com \
+                      o valor dentro de ±5%. Se houver match único, marca o forecast como \
+                      `realizado` e popula `realized_transaction_id` + `realized_at`. \
+                      Matches ambíguos (mais de um candidato) são pulados — o usuário pode \
+                      resolver manualmente via `fin forecast upsert`."
+    )]
+    Reconcile(ForecastReconcileArgs),
+    #[command(
         about = "lista candidatos a forecasts recorrentes (subscriptions + fixed bills + envelopes) detectados no histórico",
         long_about = "Roda o detector de recorrentes (Camadas 2, 3 e 4 do ADR-0016): para cada \
                       par (conta, merchant), exige ≥3 meses de ocorrências, cadência mensal e \
@@ -1660,6 +1670,17 @@ pub(crate) struct ForecastRefreshInstallmentsArgs {
     /// Quantos meses olhar para trás ao detectar cadeias. Default: 12.
     #[arg(long, default_value_t = 12)]
     pub lookback_months: u32,
+    /// Emite o resumo como JSON em vez do formato humano.
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastReconcileArgs {
+    /// Quantos dias para trás varrer atrás de forecasts ativos com due_date
+    /// no passado. Default: 45.
+    #[arg(long, default_value_t = 45)]
+    pub lookback_days: i64,
     /// Emite o resumo como JSON em vez do formato humano.
     #[arg(long)]
     pub raw: bool,
@@ -2986,6 +3007,7 @@ async fn main() -> Result<()> {
             ForecastCommand::RefreshInstallments(args) => {
                 forecast_cmd::run_refresh_installments(args).await
             }
+            ForecastCommand::Reconcile(args) => forecast_cmd::run_reconcile(args).await,
             ForecastCommand::Suggest(args) => forecast_cmd::run_suggest(args).await,
             ForecastCommand::Accept(args) => forecast_cmd::run_accept(args).await,
             ForecastCommand::Dismiss(args) => forecast_cmd::run_dismiss(args).await,
