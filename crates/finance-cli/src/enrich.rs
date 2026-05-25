@@ -1677,6 +1677,25 @@ mod test_support {
         async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> {
             Ok(0)
         }
+        async fn upsert_forecast_templates(
+            &self,
+            _: &[finance_core::ForecastTemplateRecord],
+        ) -> Result<usize> {
+            Ok(0)
+        }
+        async fn list_forecast_templates(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Vec<finance_core::ForecastTemplateRecord>> {
+            Ok(vec![])
+        }
+        async fn get_forecast_template(
+            &self,
+            _: &str,
+        ) -> Result<Option<finance_core::ForecastTemplateRecord>> {
+            Ok(None)
+        }
         async fn upcoming_forecasts(
             &self,
             _: NaiveDate,

@@ -486,6 +486,25 @@ mod tests {
         async fn upsert_forecasts(&self, _: &[ForecastRecord]) -> Result<usize> {
             Ok(0)
         }
+        async fn upsert_forecast_templates(
+            &self,
+            _: &[crate::models::ForecastTemplateRecord],
+        ) -> Result<usize> {
+            Ok(0)
+        }
+        async fn list_forecast_templates(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Vec<crate::models::ForecastTemplateRecord>> {
+            Ok(vec![])
+        }
+        async fn get_forecast_template(
+            &self,
+            _: &str,
+        ) -> Result<Option<crate::models::ForecastTemplateRecord>> {
+            Ok(None)
+        }
         async fn upcoming_forecasts(
             &self,
             _: NaiveDate,

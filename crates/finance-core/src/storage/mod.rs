@@ -2,8 +2,8 @@ use crate::config::{AppConfig, BackendKind};
 use crate::models::{
     AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow, CardClosedTransactionRow,
     CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, CheckingBalance,
-    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    TransactionContextRow, TransactionRecord, UncategorizedRow,
+    DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow,
+    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -71,6 +71,21 @@ pub trait FinanceStore {
     async fn upsert_rules(&self, rows: &[RuleRecord]) -> Result<usize>;
     async fn upsert_categories(&self, rows: &[CategoryRecord]) -> Result<usize>;
     async fn upsert_forecasts(&self, rows: &[ForecastRecord]) -> Result<usize>;
+    /// Insert or update forecast templates (ADR-0016). Uses
+    /// `idempotency_key` as the merge key, like the other upserts.
+    async fn upsert_forecast_templates(&self, rows: &[ForecastTemplateRecord]) -> Result<usize>;
+    /// List forecast templates, optionally filtered by kind and/or status.
+    /// `None` filters disable the corresponding `WHERE` clause.
+    async fn list_forecast_templates(
+        &self,
+        kind: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<ForecastTemplateRecord>>;
+    /// Look up a single template by its primary key. `Ok(None)` when missing.
+    async fn get_forecast_template(
+        &self,
+        template_id: &str,
+    ) -> Result<Option<ForecastTemplateRecord>>;
     /// Active forecasts whose `due_date` falls in `[from, until]` (inclusive).
     /// Only `status = 'ativo'` rows are returned. Ordered by due_date ascending,
     /// then by amount descending so the biggest commitments lead within a day.

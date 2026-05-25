@@ -3,8 +3,8 @@ use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
-    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
-    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow,
+    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -326,6 +326,55 @@ fn optional_json(values: &[Option<String>], index: usize, field: &str) -> Result
                 .with_context(|| format!("Falha ao parsear {field} do BigQuery"))
         })
         .transpose()
+}
+
+fn forecast_template_from_bq(values: &[Option<String>]) -> Result<ForecastTemplateRecord> {
+    let amount = required_decimal(values, 6, "amount")?;
+    let amount_lower = optional_string(values, 7)
+        .map(|s| Decimal::from_str(&s).with_context(|| "amount_lower"))
+        .transpose()?;
+    let amount_upper = optional_string(values, 8)
+        .map(|s| Decimal::from_str(&s).with_context(|| "amount_upper"))
+        .transpose()?;
+    let next_due_day = optional_string(values, 10)
+        .map(|s| s.parse::<i32>().with_context(|| "next_due_day"))
+        .transpose()?;
+    let start_date = required_date(values, 11, "start_date")?;
+    let end_date = optional_date(values, 12, "end_date")?;
+    let remaining_count = optional_string(values, 13)
+        .map(|s| s.parse::<i32>().with_context(|| "remaining_count"))
+        .transpose()?;
+    let confidence = optional_string(values, 15)
+        .map(|s| s.parse::<f64>().with_context(|| "confidence"))
+        .transpose()?;
+    let metadata_json = optional_json(values, 17, "metadata_json")?
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let created_str = required_string(values, 20, "created_at")?;
+    let updated_str = required_string(values, 21, "updated_at")?;
+    Ok(ForecastTemplateRecord {
+        template_id: required_string(values, 0, "template_id")?,
+        kind: required_string(values, 1, "kind")?,
+        description: required_string(values, 2, "description")?,
+        merchant_pattern: optional_string(values, 3),
+        category_id: optional_string(values, 4),
+        account_id: optional_string(values, 5),
+        amount,
+        amount_lower,
+        amount_upper,
+        cadence: required_string(values, 9, "cadence")?,
+        next_due_day,
+        start_date,
+        end_date,
+        remaining_count,
+        source: required_string(values, 14, "source")?,
+        confidence,
+        status: required_string(values, 16, "status")?,
+        metadata_json,
+        actor_id: required_string(values, 18, "actor_id")?,
+        idempotency_key: required_string(values, 19, "idempotency_key")?,
+        created_at: parse_datetime_or_now(Some(&created_str)),
+        updated_at: parse_datetime_or_now(Some(&updated_str)),
+    })
 }
 
 fn transaction_record_from_values(values: &[Option<String>]) -> Result<TransactionRecord> {
@@ -1128,6 +1177,170 @@ impl FinanceStore for BigQueryStore {
         Ok(rows.len())
     }
 
+    async fn upsert_forecast_templates(&self, rows: &[ForecastTemplateRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let source = rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "SELECT {} AS template_id, {} AS kind, {} AS description, {} AS merchant_pattern, {} AS category_id, {} AS account_id, {} AS amount, {} AS amount_lower, {} AS amount_upper, {} AS cadence, {} AS next_due_day, DATE {} AS start_date, {} AS end_date, {} AS remaining_count, {} AS source, {} AS confidence, {} AS status, {} AS metadata_json, {} AS actor_id, {} AS idempotency_key, {} AS created_at, {} AS updated_at",
+                    sql_string(&row.template_id),
+                    sql_string(&row.kind),
+                    sql_string(&row.description),
+                    sql_optional_string(row.merchant_pattern.as_deref()),
+                    sql_optional_string(row.category_id.as_deref()),
+                    sql_optional_string(row.account_id.as_deref()),
+                    sql_decimal(&row.amount),
+                    row.amount_lower
+                        .as_ref()
+                        .map(|d| format!("NUMERIC '{d}'"))
+                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
+                    row.amount_upper
+                        .as_ref()
+                        .map(|d| format!("NUMERIC '{d}'"))
+                        .unwrap_or_else(|| "CAST(NULL AS NUMERIC)".to_string()),
+                    sql_string(&row.cadence),
+                    row.next_due_day
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "CAST(NULL AS INT64)".to_string()),
+                    sql_string(&row.start_date.format("%Y-%m-%d").to_string()),
+                    sql_optional_date(row.end_date),
+                    row.remaining_count
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "CAST(NULL AS INT64)".to_string()),
+                    sql_string(&row.source),
+                    row.confidence
+                        .map(|c| format!("{c}"))
+                        .unwrap_or_else(|| "CAST(NULL AS FLOAT64)".to_string()),
+                    sql_string(&row.status),
+                    sql_json(&row.metadata_json),
+                    sql_string(&row.actor_id),
+                    sql_string(&row.idempotency_key),
+                    sql_timestamp(row.created_at),
+                    sql_timestamp(row.updated_at),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\nUNION ALL\n");
+        let sql = format!(
+            "
+            MERGE {} target
+            USING ({source}) source
+            ON target.template_id = source.template_id
+            WHEN MATCHED THEN UPDATE SET
+              kind = source.kind,
+              description = source.description,
+              merchant_pattern = source.merchant_pattern,
+              category_id = source.category_id,
+              account_id = source.account_id,
+              amount = source.amount,
+              amount_lower = source.amount_lower,
+              amount_upper = source.amount_upper,
+              cadence = source.cadence,
+              next_due_day = source.next_due_day,
+              start_date = source.start_date,
+              end_date = source.end_date,
+              remaining_count = source.remaining_count,
+              source = source.source,
+              confidence = source.confidence,
+              status = source.status,
+              metadata_json = source.metadata_json,
+              actor_id = source.actor_id,
+              idempotency_key = source.idempotency_key,
+              updated_at = source.updated_at
+            WHEN NOT MATCHED THEN INSERT (
+              template_id, kind, description, merchant_pattern, category_id, account_id,
+              amount, amount_lower, amount_upper, cadence, next_due_day,
+              start_date, end_date, remaining_count, source, confidence,
+              status, metadata_json, actor_id, idempotency_key, created_at, updated_at
+            ) VALUES (
+              source.template_id, source.kind, source.description, source.merchant_pattern, source.category_id, source.account_id,
+              source.amount, source.amount_lower, source.amount_upper, source.cadence, source.next_due_day,
+              source.start_date, source.end_date, source.remaining_count, source.source, source.confidence,
+              source.status, source.metadata_json, source.actor_id, source.idempotency_key, source.created_at, source.updated_at
+            )
+            ",
+            self.qualified_table("forecast_template")?,
+        );
+        self.run_query(&sql).await?;
+        Ok(rows.len())
+    }
+
+    async fn list_forecast_templates(
+        &self,
+        kind: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<ForecastTemplateRecord>> {
+        let mut filters = Vec::new();
+        if let Some(k) = kind {
+            filters.push(format!("kind = {}", sql_string(k)));
+        }
+        if let Some(s) = status {
+            filters.push(format!("status = {}", sql_string(s)));
+        }
+        let where_sql = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", filters.join(" AND "))
+        };
+        let sql = format!(
+            "
+            SELECT
+              template_id, kind, description, merchant_pattern, category_id, account_id,
+              CAST(amount AS STRING), CAST(amount_lower AS STRING), CAST(amount_upper AS STRING),
+              cadence, next_due_day,
+              CAST(start_date AS STRING), CAST(end_date AS STRING), remaining_count,
+              source, confidence, status, TO_JSON_STRING(metadata_json),
+              actor_id, idempotency_key,
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            {where_sql}
+            ORDER BY created_at DESC
+            ",
+            self.qualified_table("forecast_template")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(forecast_template_from_bq(&values)?);
+        }
+        Ok(items)
+    }
+
+    async fn get_forecast_template(
+        &self,
+        template_id: &str,
+    ) -> Result<Option<ForecastTemplateRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              template_id, kind, description, merchant_pattern, category_id, account_id,
+              CAST(amount AS STRING), CAST(amount_lower AS STRING), CAST(amount_upper AS STRING),
+              cadence, next_due_day,
+              CAST(start_date AS STRING), CAST(end_date AS STRING), remaining_count,
+              source, confidence, status, TO_JSON_STRING(metadata_json),
+              actor_id, idempotency_key,
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            WHERE template_id = {}
+            LIMIT 1
+            ",
+            self.qualified_table("forecast_template")?,
+            sql_string(template_id),
+        );
+        let response = self.run_query(&sql).await?;
+        let Some(row) = response.rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let values = row_values(&row);
+        Ok(Some(forecast_template_from_bq(&values)?))
+    }
+
     async fn upcoming_forecasts(
         &self,
         from: NaiveDate,
@@ -1148,7 +1361,10 @@ impl FinanceStore for BigQueryStore {
               idempotency_key,
               TO_JSON_STRING(metadata_json),
               FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
-              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at),
+              template_id,
+              realized_transaction_id,
+              FORMAT_TIMESTAMP('%FT%T%Ez', realized_at)
             FROM {}
             WHERE status = 'ativo'
               AND due_date IS NOT NULL
@@ -1186,6 +1402,13 @@ impl FinanceStore for BigQueryStore {
                 updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
                     .map(|d| d.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                template_id: optional_string(&values, 13),
+                realized_transaction_id: optional_string(&values, 14),
+                realized_at: optional_string(&values, 15).and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .ok()
+                }),
             });
         }
         Ok(items)
