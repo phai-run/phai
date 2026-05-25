@@ -1128,7 +1128,7 @@ impl FinanceStore for BigQueryStore {
             .iter()
             .map(|row| {
                 format!(
-                    "SELECT {} AS forecast_id, {} AS due_date, {} AS description, {} AS amount, {} AS category_id, {} AS account_id, {} AS status, {} AS recurrence, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at",
+                    "SELECT {} AS forecast_id, {} AS due_date, {} AS description, {} AS amount, {} AS category_id, {} AS account_id, {} AS status, {} AS recurrence, {} AS actor_id, {} AS idempotency_key, {} AS metadata_json, {} AS created_at, {} AS updated_at, {} AS template_id, {} AS realized_transaction_id, {} AS realized_at",
                     sql_string(&row.forecast_id),
                     sql_optional_date(row.due_date),
                     sql_string(&row.description),
@@ -1142,6 +1142,11 @@ impl FinanceStore for BigQueryStore {
                     sql_json(&row.metadata_json),
                     sql_timestamp(row.created_at),
                     sql_timestamp(row.updated_at),
+                    sql_optional_string(row.template_id.as_deref()),
+                    sql_optional_string(row.realized_transaction_id.as_deref()),
+                    row.realized_at
+                        .map(sql_timestamp)
+                        .unwrap_or_else(|| "CAST(NULL AS TIMESTAMP)".to_string()),
                 )
             })
             .collect::<Vec<_>>()
@@ -1162,13 +1167,18 @@ impl FinanceStore for BigQueryStore {
               actor_id = source.actor_id,
               idempotency_key = source.idempotency_key,
               metadata_json = source.metadata_json,
-              updated_at = source.updated_at
+              updated_at = source.updated_at,
+              template_id = source.template_id,
+              realized_transaction_id = source.realized_transaction_id,
+              realized_at = source.realized_at
             WHEN NOT MATCHED THEN INSERT (
               forecast_id, due_date, description, amount, category_id, account_id, status,
-              recurrence, actor_id, idempotency_key, metadata_json, created_at, updated_at
+              recurrence, actor_id, idempotency_key, metadata_json, created_at, updated_at,
+              template_id, realized_transaction_id, realized_at
             ) VALUES (
               source.forecast_id, source.due_date, source.description, source.amount, source.category_id, source.account_id, source.status,
-              source.recurrence, source.actor_id, source.idempotency_key, source.metadata_json, source.created_at, source.updated_at
+              source.recurrence, source.actor_id, source.idempotency_key, source.metadata_json, source.created_at, source.updated_at,
+              source.template_id, source.realized_transaction_id, source.realized_at
             )
             ",
             self.qualified_table("forecast")?,

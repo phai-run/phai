@@ -599,8 +599,9 @@ impl FinanceStore for LocalStore {
             "
             INSERT INTO forecast (
               forecast_id, due_date, description, amount, category_id, account_id,
-              status, recurrence, actor_id, idempotency_key, metadata_json, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+              status, recurrence, actor_id, idempotency_key, metadata_json, created_at, updated_at,
+              template_id, realized_transaction_id, realized_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(forecast_id) DO UPDATE SET
               due_date = excluded.due_date,
               description = excluded.description,
@@ -612,7 +613,10 @@ impl FinanceStore for LocalStore {
               actor_id = excluded.actor_id,
               idempotency_key = excluded.idempotency_key,
               metadata_json = excluded.metadata_json,
-              updated_at = excluded.updated_at
+              updated_at = excluded.updated_at,
+              template_id = excluded.template_id,
+              realized_transaction_id = excluded.realized_transaction_id,
+              realized_at = excluded.realized_at
             ",
         )?;
         for row in rows {
@@ -631,6 +635,9 @@ impl FinanceStore for LocalStore {
                 row.metadata_json.to_string(),
                 row.created_at.to_rfc3339(),
                 row.updated_at.to_rfc3339(),
+                row.template_id,
+                row.realized_transaction_id,
+                row.realized_at.map(|d| d.to_rfc3339()),
             ])?;
         }
         drop(stmt);
