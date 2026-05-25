@@ -47,6 +47,7 @@ use uuid::Uuid;
 
 mod cashflow_chart;
 mod enrich;
+mod forecast_cmd;
 mod human_format;
 mod pulse;
 mod review;
@@ -1606,7 +1607,27 @@ struct TxSplitClearArgs {
 
 #[derive(Subcommand)]
 enum ForecastCommand {
-    Upsert(ForecastUpsertArgs),
+    Upsert(Box<ForecastUpsertArgs>),
+    #[command(
+        name = "refresh-installments",
+        about = "detecta cadeias de parcelamento ativas e gera os forecasts restantes",
+        long_about = "Detecta cadeias de parcelamento (X/N) na janela de --lookback-months \
+                      via finance-core::installments, agrupa por (account, descrição base, total), \
+                      e materializa: 1 forecast_template por cadeia + N forecasts (um por parcela \
+                      restante), ambos com idempotency keys estáveis para que execuções repetidas \
+                      sejam no-ops. Camada 1 do pipeline da ADR-0016."
+    )]
+    RefreshInstallments(ForecastRefreshInstallmentsArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastRefreshInstallmentsArgs {
+    /// Quantos meses olhar para trás ao detectar cadeias. Default: 12.
+    #[arg(long, default_value_t = 12)]
+    pub lookback_months: u32,
+    /// Emite o resumo como JSON em vez do formato humano.
+    #[arg(long)]
+    pub raw: bool,
 }
 
 #[derive(Args)]
@@ -2166,7 +2187,7 @@ fn detect_installment_marker(row: &CardClosedTransactionRow) -> Option<String> {
 /// Returns the description enriched with an installment marker sourced from
 /// Pluggy metadata when the stored description text lacks one. Used to make
 /// `report installments` work with data synced before the Pluggy fix landed.
-fn enrich_description_from_metadata(description: &str, metadata: &Value) -> String {
+pub(crate) fn enrich_description_from_metadata(description: &str, metadata: &Value) -> String {
     if finance_core::installments::parse_installment_description(description).is_some() {
         return description.to_string();
     }
@@ -2861,7 +2882,10 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::Forecast { command }) => match command {
-            ForecastCommand::Upsert(args) => forecast_upsert(args).await,
+            ForecastCommand::Upsert(args) => forecast_upsert(*args).await,
+            ForecastCommand::RefreshInstallments(args) => {
+                forecast_cmd::run_refresh_installments(args).await
+            }
         },
         Some(Commands::Rule { command }) => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,

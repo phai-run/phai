@@ -4639,3 +4639,124 @@ fn cashflow_chart_emits_svg_and_optional_sparkline() {
     .assert()
     .failure();
 }
+
+#[test]
+fn forecast_refresh_installments_materialises_remaining_parcelas() {
+    // End-to-end: seed a credit account with three parcelas of a 12-month
+    // chain (3/12), run `fin forecast refresh-installments`, then assert
+    // that one template + nine forecasts (one per remaining parcela) got
+    // upserted with stable IDs (running twice must be a no-op).
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("card_a")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Card A"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Three parcelas of a 12-month chain — Pluggy descriptions carry the
+    // "X/N" marker so the detector picks them up.
+    for (n, day) in [(1u32, 5u32), (2, 5), (3, 5)] {
+        let date = format!("2026-0{n}-{day:02}");
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(format!("parcel-{n:02}"))
+                .arg("--account-id")
+                .arg("card_a")
+                .arg("--date")
+                .arg(&date)
+                .arg("--description")
+                .arg(format!("Magazine Luiza Notebook XYZ {n}/12"))
+                .arg("--amount=-300.00"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    // First run — produces 1 template + 9 forecasts.
+    let stdout = envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("refresh-installments")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let report: Value = serde_json::from_slice(&stdout).expect("valid refresh json");
+    assert_eq!(report["chains_seen"].as_u64(), Some(1));
+    assert_eq!(report["chains_active"].as_u64(), Some(1));
+    assert_eq!(report["templates_upserted"].as_u64(), Some(1));
+    assert_eq!(report["forecasts_upserted"].as_u64(), Some(9));
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let tpl_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast_template WHERE kind = 'installment'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count templates");
+    assert_eq!(tpl_count, 1);
+    let fc_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count forecasts");
+    assert_eq!(fc_count, 9, "9 remaining parcelas (4..=12)");
+    drop(conn);
+
+    // Second run — idempotent: same counts, no duplicates.
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("refresh-installments")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    let conn = Connection::open(&db_path).expect("open db");
+    let tpl_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM forecast_template", [], |r| r.get(0))
+        .expect("count templates");
+    assert_eq!(tpl_count, 1, "second run must not duplicate templates");
+    let fc_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count forecasts");
+    assert_eq!(fc_count, 9, "second run must not duplicate forecasts");
+}

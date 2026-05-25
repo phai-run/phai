@@ -83,6 +83,13 @@ bash skills/finance-os/finance.sh report cashflow-chart \
 bash skills/finance-os/finance.sh report cashflow-chart --forecast
 ```
 
+Auto-gerar forecasts de parcelamentos ativos (idempotente — pode ser rodado depois de cada sync):
+
+```bash
+bash skills/finance-os/finance.sh forecast refresh-installments
+bash skills/finance-os/finance.sh forecast refresh-installments --raw   # JSON
+```
+
 Forecast vs realizado:
 
 ```bash
