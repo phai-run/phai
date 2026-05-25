@@ -1642,6 +1642,15 @@ enum ForecastCommand {
                       são pulados — útil quando o detector pega um falso positivo."
     )]
     Dismiss(ForecastDismissArgs),
+    #[command(
+        about = "simula o impacto de um compromisso recorrente hipotético sobre o saldo projetado",
+        long_about = "Pergunta what-if read-only: sem escrever no banco, calcula a projeção \
+                      de saldo (cashflow-chart --forecast) considerando um compromisso recorrente \
+                      adicional. Retorna o saldo projetado com e sem o cenário, o delta, e — quando \
+                      --minimum-balance é passado — o primeiro mês em que o saldo cairia abaixo \
+                      do limite. Usado pelo agente para responder 'posso afford esse gasto?'."
+    )]
+    Scenario(ForecastScenarioArgs),
 }
 
 #[derive(Args)]
@@ -1679,6 +1688,33 @@ pub(crate) struct ForecastDismissArgs {
     /// ID do template em status 'proposto' a ser descartado.
     #[arg(long)]
     pub template_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastScenarioArgs {
+    /// Valor mensal do compromisso (positivo = entrada extra, negativo =
+    /// saída). Aceita formato livre `"250"` ou `"250.00"`.
+    #[arg(long)]
+    pub amount: String,
+    /// Descrição livre do cenário, ex.: "atividade extracurricular".
+    #[arg(long)]
+    pub description: String,
+    /// Mês de início no formato YYYY-MM. Default: próximo mês.
+    #[arg(long)]
+    pub start: Option<String>,
+    /// Quantos meses o compromisso dura. Default: 12.
+    #[arg(long, default_value_t = 12)]
+    pub months: u32,
+    /// Saldo mínimo aceitável; se passado, retorna o primeiro mês em que
+    /// o saldo projetado cairia abaixo deste valor.
+    #[arg(long)]
+    pub minimum_balance: Option<String>,
+    /// Janela "para a frente" para projetar (default 12 meses incluindo o atual).
+    #[arg(long, default_value_t = 12)]
+    pub project_months: u32,
+    /// Emite o resultado como JSON.
+    #[arg(long)]
+    pub raw: bool,
 }
 
 #[derive(Args)]
@@ -2940,6 +2976,7 @@ async fn main() -> Result<()> {
             ForecastCommand::Suggest(args) => forecast_cmd::run_suggest(args).await,
             ForecastCommand::Accept(args) => forecast_cmd::run_accept(args).await,
             ForecastCommand::Dismiss(args) => forecast_cmd::run_dismiss(args).await,
+            ForecastCommand::Scenario(args) => forecast_cmd::run_scenario(args).await,
         },
         Some(Commands::Rule { command }) => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,

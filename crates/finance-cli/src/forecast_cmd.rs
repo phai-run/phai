@@ -20,8 +20,10 @@ use std::hash::{Hash, Hasher};
 
 use crate::{
     enrich_description_from_metadata, load_config, normalize_description, strip_installment_marker,
-    ForecastAcceptArgs, ForecastDismissArgs, ForecastRefreshInstallmentsArgs, ForecastSuggestArgs,
+    ForecastAcceptArgs, ForecastDismissArgs, ForecastRefreshInstallmentsArgs, ForecastScenarioArgs,
+    ForecastSuggestArgs,
 };
+use std::str::FromStr;
 
 /// Summary returned by [`refresh_installments`] for CLI / agent display.
 #[derive(Debug, Default)]
@@ -925,6 +927,173 @@ async fn materialise_template_forecasts(
         return Ok(0);
     }
     store.upsert_forecasts(&instances).await
+}
+
+// ---------------------------------------------------------------------------
+// Scenario evaluation (Layer 5 — read-only what-if)
+// ---------------------------------------------------------------------------
+
+/// CLI entry: `fin forecast scenario`. Pure compute, no DB writes. Projects
+/// the saldo trajectory for the next N months with and without a hypothetical
+/// recurring commitment, returns the deltas and (optionally) the first
+/// month the projected saldo would fall below `--minimum-balance`.
+pub(crate) async fn run_scenario(args: ForecastScenarioArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let today = Utc::now().date_naive();
+    let amount = Decimal::from_str(&args.amount)
+        .with_context(|| format!("--amount inválido: {}", args.amount))?;
+    let minimum_balance = match &args.minimum_balance {
+        Some(s) => {
+            Some(Decimal::from_str(s).with_context(|| format!("--minimum-balance inválido: {s}"))?)
+        }
+        None => None,
+    };
+    let start_month = match &args.start {
+        Some(s) => parse_month_start(s)?,
+        None => shift_months(first_of_month(today)?, 1).context("falha ao calcular próximo mês")?,
+    };
+    let project_months = args.project_months.clamp(1, 36);
+    let scenario_months = args.months.max(1);
+
+    // Anchor today's balance.
+    let initial = store
+        .checking_balance_at(today)
+        .await?
+        .map(|b| b.balance)
+        .context(
+            "Saldo atual não pôde ser ancorado — rode `finance sync pluggy` ou \
+             cheque se há snapshot recente para todas as contas correntes.",
+        )?;
+
+    // Walk projection: each month we add forecast_net_remaining for that month.
+    let mut baseline = initial;
+    let mut with_scenario = initial;
+    let mut current_month = first_of_month(today)?;
+    let mut first_breach: Option<NaiveDate> = None;
+    let mut by_month_baseline: Vec<(NaiveDate, Decimal)> = Vec::new();
+    let mut by_month_scenario: Vec<(NaiveDate, Decimal)> = Vec::new();
+
+    for _ in 0..project_months {
+        let last_day = last_day_of_month(current_month)?;
+        let lower = today.succ_opt().unwrap_or(today).max(current_month);
+        let mut forecast_net = Decimal::ZERO;
+        if lower <= last_day {
+            let fcs = store.upcoming_forecasts(lower, last_day).await?;
+            for f in &fcs {
+                forecast_net += f.amount;
+            }
+        }
+        baseline += forecast_net;
+        with_scenario += forecast_net;
+        if month_within_scenario(current_month, start_month, scenario_months)? {
+            with_scenario += amount;
+        }
+        by_month_baseline.push((current_month, baseline));
+        by_month_scenario.push((current_month, with_scenario));
+        if let Some(min) = minimum_balance {
+            if first_breach.is_none() && with_scenario < min {
+                first_breach = Some(current_month);
+            }
+        }
+        current_month = shift_months(current_month, 1).context("month shift")?;
+    }
+
+    let final_baseline = baseline;
+    let final_scenario = with_scenario;
+    let delta = final_scenario - final_baseline;
+    let last_month = current_month.pred_opt().unwrap_or(current_month);
+
+    if args.raw {
+        let payload = json!({
+            "scenario_description": args.description,
+            "scenario_amount": amount.to_string(),
+            "scenario_start": start_month.format("%Y-%m").to_string(),
+            "scenario_months": scenario_months,
+            "project_months": project_months,
+            "initial_balance": initial.to_string(),
+            "baseline_final_balance": final_baseline.to_string(),
+            "scenario_final_balance": final_scenario.to_string(),
+            "delta_total": delta.to_string(),
+            "first_breach_month": first_breach.map(|d| d.format("%Y-%m").to_string()),
+            "minimum_balance": minimum_balance.map(|d| d.to_string()),
+            "monthly_baseline": by_month_baseline
+                .iter()
+                .map(|(d, v)| json!({"month": d.format("%Y-%m").to_string(), "balance": v.to_string()}))
+                .collect::<Vec<_>>(),
+            "monthly_scenario": by_month_scenario
+                .iter()
+                .map(|(d, v)| json!({"month": d.format("%Y-%m").to_string(), "balance": v.to_string()}))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "🔮 Cenário: {} ({}/mês por {} meses, início {})",
+            args.description,
+            crate::human_format::brl_signed(amount),
+            scenario_months,
+            start_month.format("%Y-%m"),
+        );
+        println!();
+        println!(
+            "  Saldo hoje                {}",
+            crate::human_format::brl(initial)
+        );
+        println!(
+            "  Saldo projetado em {}   {} (baseline)",
+            last_month.format("%Y-%m"),
+            crate::human_format::brl(final_baseline)
+        );
+        println!(
+            "  Saldo projetado em {}   {} (com cenário)",
+            last_month.format("%Y-%m"),
+            crate::human_format::brl(final_scenario)
+        );
+        println!(
+            "  Δ total no horizonte      {}",
+            crate::human_format::brl_signed(delta)
+        );
+        if let Some(min) = minimum_balance {
+            match first_breach {
+                Some(month) => println!(
+                    "  ⚠️  Saldo cairia abaixo de {} em {}",
+                    crate::human_format::brl(min),
+                    month.format("%Y-%m")
+                ),
+                None => println!(
+                    "  ✅ Saldo permanece ≥ {} durante todo o horizonte.",
+                    crate::human_format::brl(min)
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn first_of_month(date: NaiveDate) -> Result<NaiveDate> {
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+        .context("data inválida ao calcular primeiro dia do mês")
+}
+
+fn last_day_of_month(first: NaiveDate) -> Result<NaiveDate> {
+    let next = shift_months(first, 1).context("month shift")?;
+    next.pred_opt().context("last day calc")
+}
+
+fn parse_month_start(value: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d")
+        .with_context(|| format!("--start inválido: {value} (esperado YYYY-MM)"))
+}
+
+fn month_within_scenario(month: NaiveDate, start: NaiveDate, months: u32) -> Result<bool> {
+    if month < start {
+        return Ok(false);
+    }
+    let end = shift_months(start, months as i32 - 1).context("falha ao calcular fim do cenário")?;
+    Ok(month <= end)
 }
 
 #[cfg(test)]
