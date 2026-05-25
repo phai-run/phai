@@ -11994,6 +11994,9 @@ async fn forecast_upsert(args: ForecastUpsertArgs) -> Result<()> {
         metadata_json: json!({"origin": "finance-cli"}),
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        template_id: None,
+        realized_transaction_id: None,
+        realized_at: None,
     };
     ensure_forecast_idempotency(&mut row)?;
     store.upsert_forecasts(&[row.clone()]).await?;

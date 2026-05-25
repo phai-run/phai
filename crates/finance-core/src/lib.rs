@@ -17,6 +17,6 @@ pub use installments::{
 };
 pub use models::{
     AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, CheckingBalance,
-    DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    RuntimeMetadata, TransactionRecord, UncategorizedRow,
+    DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow,
+    RuleRecord, RuntimeMetadata, TransactionRecord, UncategorizedRow,
 };

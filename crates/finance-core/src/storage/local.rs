@@ -3,8 +3,8 @@ use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
-    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastVsActualRow, MonthlySpendRow,
-    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow,
+    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -141,6 +141,73 @@ fn parse_sql_decimal(
             Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
         )
     })
+}
+
+fn forecast_template_row_from_local(row: &Row<'_>) -> rusqlite::Result<ForecastTemplateRecord> {
+    let amount_str: String = row.get(6)?;
+    let amount = parse_decimal(amount_str).map_err(parse_decimal_err)?;
+    let amount_lower = row
+        .get::<_, Option<String>>(7)?
+        .map(parse_decimal)
+        .transpose()
+        .map_err(parse_decimal_err)?;
+    let amount_upper = row
+        .get::<_, Option<String>>(8)?
+        .map(parse_decimal)
+        .transpose()
+        .map_err(parse_decimal_err)?;
+    let start_date: String = row.get(11)?;
+    let start_date = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d").map_err(parse_date_err)?;
+    let end_date = row
+        .get::<_, Option<String>>(12)?
+        .map(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d"))
+        .transpose()
+        .map_err(parse_date_err)?;
+    let metadata_str: String = row.get(17)?;
+    let metadata_json: serde_json::Value = serde_json::from_str(&metadata_str)
+        .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+    let created_str: String = row.get(20)?;
+    let updated_str: String = row.get(21)?;
+    Ok(ForecastTemplateRecord {
+        template_id: row.get(0)?,
+        kind: row.get(1)?,
+        description: row.get(2)?,
+        merchant_pattern: row.get(3)?,
+        category_id: row.get(4)?,
+        account_id: row.get(5)?,
+        amount,
+        amount_lower,
+        amount_upper,
+        cadence: row.get(9)?,
+        next_due_day: row.get(10)?,
+        start_date,
+        end_date,
+        remaining_count: row.get(13)?,
+        source: row.get(14)?,
+        confidence: row.get(15)?,
+        status: row.get(16)?,
+        metadata_json,
+        actor_id: row.get(18)?,
+        idempotency_key: row.get(19)?,
+        created_at: parse_datetime_or_now(Some(&created_str)),
+        updated_at: parse_datetime_or_now(Some(&updated_str)),
+    })
+}
+
+fn parse_decimal_err(err: rust_decimal::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+    )
+}
+
+fn parse_date_err(err: chrono::ParseError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+    )
 }
 
 fn transaction_record_from_row(row: &Row<'_>) -> rusqlite::Result<TransactionRecord> {
@@ -571,6 +638,141 @@ impl FinanceStore for LocalStore {
         Ok(rows.len())
     }
 
+    async fn upsert_forecast_templates(&self, rows: &[ForecastTemplateRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "
+            INSERT INTO forecast_template (
+              template_id, kind, description, merchant_pattern, category_id, account_id,
+              amount, amount_lower, amount_upper, cadence, next_due_day,
+              start_date, end_date, remaining_count, source, confidence,
+              status, metadata_json, actor_id, idempotency_key, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+            ON CONFLICT(template_id) DO UPDATE SET
+              kind = excluded.kind,
+              description = excluded.description,
+              merchant_pattern = excluded.merchant_pattern,
+              category_id = excluded.category_id,
+              account_id = excluded.account_id,
+              amount = excluded.amount,
+              amount_lower = excluded.amount_lower,
+              amount_upper = excluded.amount_upper,
+              cadence = excluded.cadence,
+              next_due_day = excluded.next_due_day,
+              start_date = excluded.start_date,
+              end_date = excluded.end_date,
+              remaining_count = excluded.remaining_count,
+              source = excluded.source,
+              confidence = excluded.confidence,
+              status = excluded.status,
+              metadata_json = excluded.metadata_json,
+              actor_id = excluded.actor_id,
+              idempotency_key = excluded.idempotency_key,
+              updated_at = excluded.updated_at
+            ",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                row.template_id,
+                row.kind,
+                row.description,
+                row.merchant_pattern,
+                row.category_id,
+                row.account_id,
+                decimal_to_sql(&row.amount),
+                row.amount_lower.as_ref().map(decimal_to_sql),
+                row.amount_upper.as_ref().map(decimal_to_sql),
+                row.cadence,
+                row.next_due_day,
+                row.start_date.format("%Y-%m-%d").to_string(),
+                row.end_date.map(|d| d.format("%Y-%m-%d").to_string()),
+                row.remaining_count,
+                row.source,
+                row.confidence,
+                row.status,
+                row.metadata_json.to_string(),
+                row.actor_id,
+                row.idempotency_key,
+                row.created_at.to_rfc3339(),
+                row.updated_at.to_rfc3339(),
+            ])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    async fn list_forecast_templates(
+        &self,
+        kind: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<ForecastTemplateRecord>> {
+        let conn = self.connection()?;
+        // Build the params as owned Strings so they live as long as the
+        // query call. The filter SQL fragments are also built once here.
+        let mut filters: Vec<&'static str> = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        if let Some(k) = kind {
+            filters.push("kind = ?");
+            params.push(k.to_string());
+        }
+        if let Some(s) = status {
+            filters.push("status = ?");
+            params.push(s.to_string());
+        }
+        let where_sql = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", filters.join(" AND "))
+        };
+        let sql = format!(
+            "
+            SELECT template_id, kind, description, merchant_pattern, category_id, account_id,
+                   amount, amount_lower, amount_upper, cadence, next_due_day,
+                   start_date, end_date, remaining_count, source, confidence,
+                   status, metadata_json, actor_id, idempotency_key, created_at, updated_at
+            FROM forecast_template
+            {where_sql}
+            ORDER BY datetime(created_at) DESC
+            "
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_dyn: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_dyn.as_slice(), forecast_template_row_from_local)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn get_forecast_template(
+        &self,
+        template_id: &str,
+    ) -> Result<Option<ForecastTemplateRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT template_id, kind, description, merchant_pattern, category_id, account_id,
+                   amount, amount_lower, amount_upper, cadence, next_due_day,
+                   start_date, end_date, remaining_count, source, confidence,
+                   status, metadata_json, actor_id, idempotency_key, created_at, updated_at
+            FROM forecast_template
+            WHERE template_id = ?1
+            ",
+        )?;
+        let mut rows = stmt.query_map([template_id], forecast_template_row_from_local)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     async fn upcoming_forecasts(
         &self,
         from: NaiveDate,
@@ -581,7 +783,8 @@ impl FinanceStore for LocalStore {
             "
             SELECT forecast_id, due_date, description, amount, category_id, account_id,
                    status, recurrence, actor_id, idempotency_key, metadata_json,
-                   created_at, updated_at
+                   created_at, updated_at,
+                   template_id, realized_transaction_id, realized_at
             FROM forecast
             WHERE status = 'ativo'
               AND due_date IS NOT NULL
@@ -589,43 +792,55 @@ impl FinanceStore for LocalStore {
             ORDER BY date(due_date) ASC, CAST(amount AS REAL) DESC
             ",
         )?;
-        let rows = stmt.query_map(
-            params![
-                from.format("%Y-%m-%d").to_string(),
-                until.format("%Y-%m-%d").to_string()
-            ],
-            |row| {
-                let due_str: Option<String> = row.get(1)?;
-                let due_date = due_str
-                    .as_deref()
-                    .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-                let amount_str: String = row.get(3)?;
-                let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
-                let metadata_str: String = row.get(10)?;
-                let metadata_json = parse_sql_json(metadata_str, 10)?;
-                let created_str: String = row.get(11)?;
-                let updated_str: String = row.get(12)?;
-                Ok(ForecastRecord {
-                    forecast_id: row.get(0)?,
-                    due_date,
-                    description: row.get(2)?,
-                    amount,
-                    category_id: row.get(4)?,
-                    account_id: row.get(5)?,
-                    status: row.get(6)?,
-                    recurrence: row.get(7)?,
-                    actor_id: row.get(8)?,
-                    idempotency_key: row.get(9)?,
-                    metadata_json,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
-                        .map(|d| d.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now()),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
-                        .map(|d| d.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now()),
-                })
-            },
-        )?;
+        let rows =
+            stmt.query_map(
+                params![
+                    from.format("%Y-%m-%d").to_string(),
+                    until.format("%Y-%m-%d").to_string()
+                ],
+                |row| {
+                    let due_str: Option<String> = row.get(1)?;
+                    let due_date = due_str
+                        .as_deref()
+                        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+                    let amount_str: String = row.get(3)?;
+                    let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
+                    let metadata_str: String = row.get(10)?;
+                    let metadata_json = parse_sql_json(metadata_str, 10)?;
+                    let created_str: String = row.get(11)?;
+                    let updated_str: String = row.get(12)?;
+                    Ok(ForecastRecord {
+                        forecast_id: row.get(0)?,
+                        due_date,
+                        description: row.get(2)?,
+                        amount,
+                        category_id: row.get(4)?,
+                        account_id: row.get(5)?,
+                        status: row.get(6)?,
+                        recurrence: row.get(7)?,
+                        actor_id: row.get(8)?,
+                        idempotency_key: row.get(9)?,
+                        metadata_json,
+                        created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                        // Columns 13-15 are nullable optional FKs (added by
+                        // migration 034 — ADR-0016). Older callers can ignore.
+                        template_id: row.get::<_, Option<String>>(13).unwrap_or(None),
+                        realized_transaction_id: row.get::<_, Option<String>>(14).unwrap_or(None),
+                        realized_at: row.get::<_, Option<String>>(15).ok().flatten().and_then(
+                            |s| {
+                                chrono::DateTime::parse_from_rfc3339(&s)
+                                    .map(|d| d.with_timezone(&chrono::Utc))
+                                    .ok()
+                            },
+                        ),
+                    })
+                },
+            )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);

@@ -213,6 +213,52 @@ pub struct ForecastRecord {
     pub metadata_json: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// FK to `forecast_template.template_id` when the row was materialised by
+    /// the automation pipeline (ADR-0016). `None` for manual one-shot
+    /// forecasts.
+    #[serde(default)]
+    pub template_id: Option<String>,
+    /// Set by the reconciler when a transaction satisfies this forecast.
+    #[serde(default)]
+    pub realized_transaction_id: Option<String>,
+    #[serde(default)]
+    pub realized_at: Option<DateTime<Utc>>,
+}
+
+/// Template that drives forecast instances. See ADR-0016.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForecastTemplateRecord {
+    pub template_id: String,
+    /// `installment` | `subscription` | `fixed` | `envelope`.
+    pub kind: String,
+    pub description: String,
+    /// Normalised merchant key (e.g. lower-cased + collapsed whitespace).
+    /// `None` for envelope templates (category-only).
+    pub merchant_pattern: Option<String>,
+    pub category_id: Option<String>,
+    pub account_id: Option<String>,
+    /// Signed magnitude — positive = inflow, negative = outflow (ADR-0016).
+    pub amount: Decimal,
+    pub amount_lower: Option<Decimal>,
+    pub amount_upper: Option<Decimal>,
+    /// `monthly` | `weekly` | `one-shot` | `card-cycle`.
+    pub cadence: String,
+    pub next_due_day: Option<i32>,
+    pub start_date: NaiveDate,
+    pub end_date: Option<NaiveDate>,
+    /// Number of materialisations remaining for finite chains (installments).
+    /// `None` for open-ended templates.
+    pub remaining_count: Option<i32>,
+    /// `detected` (machine) or `manual` (human-confirmed).
+    pub source: String,
+    pub confidence: Option<f64>,
+    /// `ativo` | `pausado` | `descartado`.
+    pub status: String,
+    pub metadata_json: Value,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

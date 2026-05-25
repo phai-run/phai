@@ -455,6 +455,9 @@ pub fn load_legacy_bundle(finance_root: &Path, actor_id: &str) -> Result<LegacyI
                 }),
                 created_at: now,
                 updated_at: now,
+                template_id: None,
+                realized_transaction_id: None,
+                realized_at: None,
             };
             ensure_forecast_idempotency(&mut forecast)?;
             bundle.forecasts.push(forecast);
