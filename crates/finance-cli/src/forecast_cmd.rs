@@ -11,7 +11,8 @@ use chrono::{Datelike, NaiveDate, Utc};
 use finance_core::migrations::run_migrations;
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{
-    group_into_chains, AppConfig, ForecastRecord, ForecastTemplateRecord, InstallmentChain,
+    group_into_chains, AppConfig, AuditEvent, ForecastRecord, ForecastTemplateRecord,
+    InstallmentChain,
 };
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -104,12 +105,52 @@ pub async fn refresh_installments(
 
     if !templates.is_empty() {
         report.templates_upserted = store.upsert_forecast_templates(&templates).await?;
+        let events = templates
+            .iter()
+            .map(|t| audit_event_for_template(t, "upsert", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
     }
     if !forecasts.is_empty() {
         report.forecasts_upserted = store.upsert_forecasts(&forecasts).await?;
+        let events = forecasts
+            .iter()
+            .map(|f| audit_event_for_forecast(f, "upsert", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
     }
 
     Ok(report)
+}
+
+fn audit_event_for_template(
+    row: &ForecastTemplateRecord,
+    action: &str,
+    actor_id: &str,
+) -> Result<AuditEvent> {
+    Ok(AuditEvent::from_entity(
+        "forecast_template",
+        &row.template_id,
+        action,
+        actor_id,
+        &row.idempotency_key,
+        serde_json::to_value(row)?,
+    ))
+}
+
+fn audit_event_for_forecast(
+    row: &ForecastRecord,
+    action: &str,
+    actor_id: &str,
+) -> Result<AuditEvent> {
+    Ok(AuditEvent::from_entity(
+        "forecast",
+        &row.forecast_id,
+        action,
+        actor_id,
+        &row.idempotency_key,
+        serde_json::to_value(row)?,
+    ))
 }
 
 /// Build the `forecast_template` row plus one forecast per remaining parcela
@@ -727,6 +768,11 @@ pub(crate) async fn run_suggest(args: ForecastSuggestArgs) -> Result<()> {
 
     if !new_proposals.is_empty() {
         store.upsert_forecast_templates(&new_proposals).await?;
+        let events = new_proposals
+            .iter()
+            .map(|t| audit_event_for_template(t, "upsert", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
     }
 
     // Re-read the full proposto list so we can print it.
@@ -858,6 +904,13 @@ pub(crate) async fn run_accept(args: ForecastAcceptArgs) -> Result<()> {
     store
         .upsert_forecast_templates(std::slice::from_ref(&updated))
         .await?;
+    store
+        .insert_audit_events(&[audit_event_for_template(
+            &updated,
+            "accept",
+            &config.actor_id,
+        )?])
+        .await?;
 
     // Materialise next N months of instances right away.
     let materialised = materialise_template_forecasts(
@@ -894,6 +947,13 @@ pub(crate) async fn run_dismiss(args: ForecastDismissArgs) -> Result<()> {
     updated.updated_at = Utc::now();
     store
         .upsert_forecast_templates(std::slice::from_ref(&updated))
+        .await?;
+    store
+        .insert_audit_events(&[audit_event_for_template(
+            &updated,
+            "dismiss",
+            &config.actor_id,
+        )?])
         .await?;
     println!("🗑  Descartado: {}", updated.description);
     Ok(())
@@ -949,7 +1009,13 @@ async fn materialise_template_forecasts(
     if instances.is_empty() {
         return Ok(0);
     }
-    store.upsert_forecasts(&instances).await
+    let upserted = store.upsert_forecasts(&instances).await?;
+    let events = instances
+        .iter()
+        .map(|f| audit_event_for_forecast(f, "upsert", actor_id))
+        .collect::<Result<Vec<_>>>()?;
+    store.insert_audit_events(&events).await?;
+    Ok(upserted)
 }
 
 // ---------------------------------------------------------------------------
