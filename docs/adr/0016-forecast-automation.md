@@ -17,9 +17,10 @@ all need to land in the same table for the cashflow projection (introduced
 in [`report cashflow-chart --forecast`](../../crates/finance-cli/src/cashflow_chart.rs))
 to be useful.
 
-The end goal is conversational scenario analysis — *"posso colocar a Elis
-no ballet?"*, *"que mês acabam os parcelamentos?"* — which only works when
-the forecast table reliably reflects every known future commitment.
+The end goal is conversational scenario analysis — *"can we afford a new
+$X/month recurring activity?"*, *"when do my current installment chains
+end?"* — which only works when the forecast table reliably reflects every
+known future commitment.
 
 What we already have:
 
@@ -202,10 +203,11 @@ The pipeline is idempotent at every step:
 
 ### OpenClaw skill (future PR)
 
-- *"posso colocar a Elis no ballet?"* → `scenario add-recurring ballet 250
-  start 2026-08` + `cashflow-chart --forecast` projection diff.
-- *"quando acabam os parcelamentos?"* → query templates `kind=installment`
-  and report `end_date`s grouped by month.
+- *"can we afford a new $X/month recurring expense starting in N months?"*
+  → `scenario add-recurring --amount X --description … --start YYYY-MM`
+  + `cashflow-chart --forecast` projection diff.
+- *"when do my current installment chains end?"* → query templates with
+  `kind='installment'` and report `end_date`s grouped by month.
 
 ## Consequences
 
@@ -229,10 +231,10 @@ The pipeline is idempotent at every step:
   - If the heuristic for layers 2–3 produces too many false positives or
     misses common patterns, we may need a richer signal (e.g. fuzzy
     merchant clustering, weekly cadence).
-  - If users want to share templates between owners (Felipe + Aline), the
-    template schema may grow an `owner` column and the orchestrator may
-    need per-owner scoping (analogous to the `--owner` filtering in
-    `tx review-human`).
+  - If users want to share templates across multiple `accounts.owner`
+    values, the template schema may grow an `owner` column and the
+    orchestrator may need per-owner scoping (analogous to the `--owner`
+    filtering in `tx review-human`).
 
 ## Rollout plan
 
