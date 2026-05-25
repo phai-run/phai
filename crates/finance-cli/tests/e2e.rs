@@ -5207,3 +5207,217 @@ fn forecast_scenario_eval_projects_with_and_without_commitment() {
 
     drop(conn);
 }
+
+/// End-to-end coverage for the post-`sync pluggy` forecast orchestrator
+/// (ADR-0016 Phase 6). The fixture seeds a credit-card installment chain
+/// (`Notebook XYZ 3/6`), runs `sync pluggy`, and asserts that:
+///
+/// - the orchestrator's one-line summary prints to stdout,
+/// - `forecast_template` got one detected installment row,
+/// - `forecast` got 3 materialised parcelas (current=3, total=6 → 3 remaining),
+/// - the materialised rows carry the template's FK and are in status `ativo`,
+/// - `--no-forecast-refresh` on a subsequent sync prints the opt-out line
+///   and does not re-materialise anything.
+#[test]
+fn sync_pluggy_runs_forecast_orchestrator_on_installments() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    // Local fixture with a parcelamento chain so Layer 1 (installments) has
+    // something to detect. Two installments out of 6 → orchestrator must
+    // materialise 3 remaining parcelas.
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-02-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" },
+    { "id": "shared_credit", "pluggyAccountId": "fixture-credit" }
+  ]
+}"#,
+    );
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\n\
+         primary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\n\
+         shared_credit,secondary,credit,fintech,Shared Credit Card,fixture-credit,item-2,3,10\n",
+    );
+
+    let fixture = temp.path().join("installment-fixture.json");
+    write_file(
+        &fixture,
+        r#"{
+  "accounts": [
+    {
+      "id": "fixture-checking",
+      "item_id": "item-1",
+      "name": "Primary Checking",
+      "type": "checking",
+      "status": "ACTIVE",
+      "balance": 5000.00,
+      "currency_code": "BRL",
+      "updated_at": "2026-03-27T09:00:00Z"
+    },
+    {
+      "id": "fixture-credit",
+      "item_id": "item-2",
+      "name": "Shared Credit Card",
+      "type": "credit",
+      "status": "ACTIVE",
+      "balance": -1200.00,
+      "currency_code": "BRL",
+      "updated_at": "2026-03-27T09:00:00Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "pluggy-installment-001",
+      "accountId": "fixture-credit",
+      "date": "2026-02-12",
+      "description": "Notebook XYZ 2/6",
+      "amount": -200.00,
+      "type": "debit",
+      "status": "posted",
+      "category": "electronics",
+      "created_at": "2026-02-12T10:00:00Z",
+      "updated_at": "2026-02-12T10:00:00Z"
+    },
+    {
+      "id": "pluggy-installment-002",
+      "accountId": "fixture-credit",
+      "date": "2026-03-12",
+      "description": "Notebook XYZ 3/6",
+      "amount": -200.00,
+      "type": "debit",
+      "status": "posted",
+      "category": "electronics",
+      "created_at": "2026-03-12T10:00:00Z",
+      "updated_at": "2026-03-12T10:00:00Z"
+    }
+  ]
+}"#,
+    );
+
+    // First sync: orchestrator runs by default.
+    let output = envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture)
+            .arg("--to")
+            .arg("2026-03-31")
+            .arg("--no-enrich"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("sync output");
+    assert!(output.status.success(), "sync failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Forecast: "),
+        "expected the orchestrator one-liner in stdout, got:\n{stdout}"
+    );
+
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+
+    // Exactly one installment template was detected and persisted.
+    let (template_id, kind, source, account_id): (String, String, String, Option<String>) = conn
+        .query_row(
+            "SELECT template_id, kind, source, account_id
+             FROM forecast_template
+             WHERE kind = 'installment'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("installment template row");
+    assert_eq!(kind, "installment");
+    assert_eq!(source, "detected");
+    assert_eq!(account_id.as_deref(), Some("shared_credit"));
+
+    // Three materialised forecasts (parcelas 4, 5, 6), all tied to that template
+    // and in status `ativo`.
+    let materialised_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id = ?1 AND status = 'ativo'",
+            rusqlite::params![&template_id],
+            |row| row.get(0),
+        )
+        .expect("count materialised forecasts");
+    assert_eq!(
+        materialised_count, 3,
+        "expected 3 remaining parcelas materialised (current=3, total=6)"
+    );
+
+    // Audit log saw the orchestrator's writes — `installment` template upsert
+    // plus per-forecast upserts. Exact counts depend on the orchestrator,
+    // but at least one event of each kind must be present.
+    let template_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log
+             WHERE entity_type = 'forecast_template' AND entity_id = ?1",
+            rusqlite::params![&template_id],
+            |row| row.get(0),
+        )
+        .expect("count template audit events");
+    assert!(
+        template_events >= 1,
+        "expected at least one audit event for the installment template"
+    );
+
+    drop(conn);
+
+    // Second sync, with the opt-out: no orchestrator one-liner, no new
+    // forecasts. Re-running with no new transactions must remain idempotent.
+    let opt_out = envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            .arg("--accounts-csv")
+            .arg(&accounts_csv)
+            .arg("--fixture")
+            .arg(&fixture)
+            .arg("--to")
+            .arg("2026-03-31")
+            .arg("--no-enrich")
+            .arg("--no-forecast-refresh"),
+        &config_dir,
+        &data_dir,
+    )
+    .output()
+    .expect("sync output");
+    assert!(opt_out.status.success(), "opt-out sync failed: {opt_out:?}");
+    let opt_out_stdout = String::from_utf8_lossy(&opt_out.stdout);
+    assert!(
+        opt_out_stdout.contains("Forecast refresh automático: pulado"),
+        "expected opt-out line in stdout, got:\n{opt_out_stdout}"
+    );
+    assert!(
+        !opt_out_stdout.contains("Forecast: "),
+        "opt-out sync should not print the orchestrator one-liner"
+    );
+
+    // No-op idempotency: re-counting the materialised parcelas yields the same 3.
+    let conn = Connection::open(&db_path).expect("reopen db");
+    let still_three: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id = ?1 AND status = 'ativo'",
+            rusqlite::params![&template_id],
+            |row| row.get(0),
+        )
+        .expect("re-count materialised forecasts");
+    assert_eq!(still_three, 3);
+    drop(conn);
+}

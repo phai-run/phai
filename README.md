@@ -127,6 +127,7 @@ finance-cli tx review-human         TUI/OpenClaw review of human fields and cate
 finance-cli tx set-context-by-desc  Deprecated alias for setting descriptions by raw match
 finance-cli tx split <subcommand>   Split a transaction into multiple lines
 finance-cli forecast upsert         Create or update a forecast entry
+finance-cli forecast refresh        Full pipeline: installments + reconcile + materialise + suggest
 finance-cli forecast reconcile      Match active forecasts to recent transactions (sets realizado)
 finance-cli rule upsert/list/inspect Classification rule management
 finance-cli account upsert          Create or update an account

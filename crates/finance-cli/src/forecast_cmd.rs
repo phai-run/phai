@@ -20,13 +20,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     enrich_description_from_metadata, load_config, normalize_description, strip_installment_marker,
-    ForecastAcceptArgs, ForecastDismissArgs, ForecastReconcileArgs,
+    ForecastAcceptArgs, ForecastDismissArgs, ForecastReconcileArgs, ForecastRefreshArgs,
     ForecastRefreshInstallmentsArgs, ForecastScenarioArgs, ForecastSuggestArgs,
 };
 use std::str::FromStr;
 
 /// Summary returned by [`refresh_installments`] for CLI / agent display.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct InstallmentsRefreshReport {
     pub chains_seen: usize,
     pub chains_active: usize,
@@ -1189,6 +1189,12 @@ fn month_within_scenario(month: NaiveDate, start: NaiveDate, months: u32) -> Res
 // Reconciliation (forecast → realizado)
 // ---------------------------------------------------------------------------
 
+/// Default lookback window for the reconciler: how far back to scan for
+/// `status='ativo'` forecasts whose due_date is already in the past. Past
+/// this window, an active forecast is treated as "missed" and left alone —
+/// the user can still flip it manually.
+pub const RECONCILE_DEFAULT_LOOKBACK_DAYS: i64 = 45;
+
 /// Day window around the forecast's due_date in which a candidate
 /// transaction must fall to be considered a match.
 const RECONCILE_DATE_TOLERANCE_DAYS: i64 = 3;
@@ -1335,6 +1341,231 @@ fn amount_matches(forecast_amount: Decimal, tx_amount: Decimal) -> bool {
     }
     let rel = (actual - expected).abs() / expected;
     rel <= RECONCILE_AMOUNT_TOLERANCE
+}
+
+// ---------------------------------------------------------------------------
+// Refresh orchestrator (full pipeline)
+// ---------------------------------------------------------------------------
+
+/// Summary of one full `refresh` pass — what the orchestrator did across the
+/// 4 layers + reconciliation. Returned both to the CLI and to the
+/// post-`sync pluggy` hook so the user sees a single line of feedback.
+#[derive(Debug, Default, Clone)]
+pub struct RefreshReport {
+    pub installments: InstallmentsRefreshReport,
+    pub reconcile: ReconcileReport,
+    pub templates_materialised: usize,
+    pub forecasts_materialised: usize,
+    pub new_suggestions: usize,
+}
+
+pub(crate) async fn run_refresh(args: ForecastRefreshArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let report = refresh_all(
+        store.as_ref(),
+        &config,
+        args.lookback_months,
+        args.materialize_months,
+        args.skip_suggest,
+    )
+    .await?;
+
+    if args.raw {
+        let payload = json!({
+            "installments": {
+                "chains_seen": report.installments.chains_seen,
+                "chains_active": report.installments.chains_active,
+                "templates_upserted": report.installments.templates_upserted,
+                "forecasts_upserted": report.installments.forecasts_upserted,
+            },
+            "reconcile": {
+                "forecasts_scanned": report.reconcile.forecasts_scanned,
+                "matched": report.reconcile.matched,
+                "ambiguous": report.reconcile.ambiguous,
+                "no_match": report.reconcile.no_match,
+            },
+            "templates_materialised": report.templates_materialised,
+            "forecasts_materialised": report.forecasts_materialised,
+            "new_suggestions": report.new_suggestions,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        print_refresh_report(&report);
+    }
+    Ok(())
+}
+
+/// Full orchestrator. Wraps Layer 1 (installments), reconciliation,
+/// materialisation of N months ahead for every ativo template, and
+/// (optionally) a fresh `suggest` pass that surfaces new Layer 2/3/4
+/// candidates as `proposto` templates.
+pub async fn refresh_all(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    lookback_months: u32,
+    materialize_months: u32,
+    skip_suggest: bool,
+) -> Result<RefreshReport> {
+    let installments = refresh_installments(store, config, lookback_months).await?;
+    let reconcile = reconcile_forecasts(store, config, RECONCILE_DEFAULT_LOOKBACK_DAYS).await?;
+
+    // For every accepted template (subscription / fixed / envelope) ensure
+    // the next N months of instances exist. Idempotent on forecast_id.
+    let active = store.list_forecast_templates(None, Some("ativo")).await?;
+    let now = Utc::now();
+    let mut templates_materialised = 0usize;
+    let mut forecasts_materialised = 0usize;
+    for tpl in &active {
+        // Installment templates already materialise their own remaining
+        // parcelas in `refresh_installments` — skip them here to avoid
+        // double-emitting audit events for the same forecast rows.
+        if tpl.kind == "installment" {
+            continue;
+        }
+        let count =
+            materialise_template_forecasts(store, tpl, materialize_months, &config.actor_id, now)
+                .await?;
+        if count > 0 {
+            templates_materialised += 1;
+            forecasts_materialised += count;
+        }
+    }
+
+    let new_suggestions = if skip_suggest {
+        0
+    } else {
+        run_suggest_silent(store, config, lookback_months).await?
+    };
+
+    Ok(RefreshReport {
+        installments,
+        reconcile,
+        templates_materialised,
+        forecasts_materialised,
+        new_suggestions,
+    })
+}
+
+/// Same detection logic as `run_suggest`, but returns the count of new
+/// `proposto` templates persisted (no stdout). Used by the orchestrator and
+/// the post-sync hook so the noisy listing doesn't fire on every sync.
+async fn run_suggest_silent(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    lookback_months: u32,
+) -> Result<usize> {
+    let today = Utc::now().date_naive();
+    let lookback = lookback_months.max(3);
+    let from = shift_months_back(today, lookback as i32)?;
+    let txs = store
+        .transactions_in_date_range(None, from, today)
+        .await
+        .context("falha ao carregar transações")?;
+
+    let mut candidates = detect_recurring_candidates(&txs, today, lookback);
+
+    let active = store.list_forecast_templates(None, Some("ativo")).await?;
+    let mut excluded_merchants: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<String>,
+    > = std::collections::BTreeMap::new();
+    for tpl in &active {
+        if tpl.kind != "subscription" && tpl.kind != "fixed" {
+            continue;
+        }
+        if let (Some(account), Some(merchant)) = (&tpl.account_id, &tpl.merchant_pattern) {
+            excluded_merchants
+                .entry(account.clone())
+                .or_default()
+                .insert(merchant.clone());
+        }
+    }
+    candidates.extend(detect_envelope_candidates(
+        &txs,
+        today,
+        lookback,
+        &excluded_merchants,
+    ));
+
+    let existing_proposto = store
+        .list_forecast_templates(None, Some("proposto"))
+        .await?;
+    let existing_descartado = store
+        .list_forecast_templates(None, Some("descartado"))
+        .await?;
+    let mut existing_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for t in existing_proposto
+        .iter()
+        .chain(active.iter())
+        .chain(existing_descartado.iter())
+    {
+        existing_keys.insert(t.template_id.clone());
+    }
+
+    let now = Utc::now();
+    let mut new_proposals = Vec::new();
+    for cand in &candidates {
+        let template_id = format!("{}-{}", cand.kind, cand.idempotency_hash());
+        if existing_keys.contains(&template_id) {
+            continue;
+        }
+        new_proposals.push(template_from_candidate(
+            cand,
+            template_id,
+            &config.actor_id,
+            now,
+        ));
+    }
+
+    if !new_proposals.is_empty() {
+        store.upsert_forecast_templates(&new_proposals).await?;
+        let events = new_proposals
+            .iter()
+            .map(|t| audit_event_for_template(t, "upsert", &config.actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
+    }
+    Ok(new_proposals.len())
+}
+
+fn print_refresh_report(report: &RefreshReport) {
+    println!("🔁 Forecast · refresh completo");
+    println!(
+        "  Parcelamentos  · cadeias ativas {} · templates {} · forecasts {}",
+        report.installments.chains_active,
+        report.installments.templates_upserted,
+        report.installments.forecasts_upserted,
+    );
+    println!(
+        "  Reconciliação  · varridos {} · realizados {} · ambíguos {}",
+        report.reconcile.forecasts_scanned, report.reconcile.matched, report.reconcile.ambiguous,
+    );
+    println!(
+        "  Recorrentes    · templates materializados {} · forecasts {}",
+        report.templates_materialised, report.forecasts_materialised,
+    );
+    if report.new_suggestions > 0 {
+        println!(
+            "  Sugestões      · {} novo(s) candidato(s) — rode `fin forecast suggest`",
+            report.new_suggestions,
+        );
+    } else {
+        println!("  Sugestões      · sem novos candidatos");
+    }
+}
+
+/// One-line summary of a refresh run, used by the post-`sync pluggy` hook
+/// where verbose multi-line output would drown out the sync's own report.
+pub fn refresh_one_line(report: &RefreshReport) -> String {
+    format!(
+        "Forecast: {} realizado(s), {} forecast(s) novo(s), {} sugestão(ões) pendente(s).",
+        report.reconcile.matched,
+        report.installments.forecasts_upserted + report.forecasts_materialised,
+        report.new_suggestions,
+    )
 }
 
 #[cfg(test)]
