@@ -4488,13 +4488,17 @@ fn cashflow_chart_emits_svg_and_optional_sparkline() {
     assert!(svg.starts_with("<svg"), "SVG should open with <svg");
     assert!(svg.ends_with("</svg>"), "SVG should close with </svg>");
     assert!(svg.contains("Evolução de caixa"), "expected title");
-    assert!(svg.contains("Saldo final do mês"), "expected legend");
-    assert!(svg.contains("Entradas"), "expected entradas legend");
-    assert!(svg.contains("Saídas"), "expected saidas legend");
-    // No forecast overlay
+    assert!(svg.contains("Saldo realizado"), "expected legend");
     assert!(
-        !svg.contains("Forecast"),
-        "no --forecast → no forecast legend"
+        svg.contains("Entradas realizadas"),
+        "expected entradas legend"
+    );
+    assert!(svg.contains("Saídas realizadas"), "expected saidas legend");
+    // No forecast → no hatched overlay or projected line
+    assert!(!svg.contains("url(#hatch-in)"), "no --forecast → no hatch");
+    assert!(
+        !svg.contains("Saldo projetado"),
+        "no --forecast → no projection"
     );
 
     // ── --text mode: sparkline shows up on stdout ──
@@ -4570,12 +4574,58 @@ fn cashflow_chart_emits_svg_and_optional_sparkline() {
     .assert()
     .success();
     let svg3 = fs::read_to_string(&svg_path3).expect("svg file exists");
+    // Hatched forecast extension stacked on top of inflow/outflow bars.
     assert!(
-        svg3.contains("stroke-dasharray"),
-        "--forecast → dashed lines in SVG"
+        svg3.contains("url(#hatch-in)"),
+        "--forecast → hatched extension on entradas"
     );
-    assert!(svg3.contains("Forecast entradas"));
-    assert!(svg3.contains("Forecast saídas"));
+    assert!(
+        svg3.contains("url(#hatch-out)"),
+        "--forecast → hatched extension on saídas"
+    );
+    // Projected (dashed) saldo line.
+    assert!(svg3.contains("stroke-dasharray=\"6 4\""));
+    // Legend gains the three forecast entries.
+    assert!(svg3.contains("Entradas previstas"));
+    assert!(svg3.contains("Saídas previstas"));
+    assert!(svg3.contains("Saldo projetado"));
+
+    // ── --months-ahead requires --forecast ──
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow-chart")
+            .arg("--months-ahead")
+            .arg("3"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure();
+
+    // ── --months-ahead with --forecast extends the window with future months ──
+    let svg_path4 = temp.path().join("out4.svg");
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow-chart")
+            .arg("--months")
+            .arg("3")
+            .arg("--months-ahead")
+            .arg("3")
+            .arg("--output")
+            .arg(&svg_path4)
+            .arg("--forecast"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    let svg4 = fs::read_to_string(&svg_path4).expect("svg file exists");
+    // Future band callout
+    assert!(svg4.contains(">projetado<"));
+    // Subtitle shows realized + projected split
+    assert!(svg4.contains("realizados +"));
 
     // ── --no-svg without --text should fail ──
     envs(
