@@ -2,7 +2,7 @@
 type: ADR
 id: "0016"
 title: "Forecast automation: templates, detection layers and reconciliation"
-status: proposed
+status: accepted
 date: 2026-05-25
 ---
 

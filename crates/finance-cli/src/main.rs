@@ -249,6 +249,12 @@ struct SyncPluggyArgs {
     /// unavailable. Defaults to false — enrichment runs by default.
     #[arg(long)]
     no_enrich: bool,
+    /// Skip the automatic post-sync forecast orchestrator
+    /// (`fin forecast refresh`). Defaults to false — the orchestrator
+    /// runs by default, but a non-zero exit from the refresh never
+    /// fails the sync itself.
+    #[arg(long)]
+    no_forecast_refresh: bool,
 }
 
 #[derive(Subcommand)]
@@ -516,6 +522,20 @@ struct CashflowChartArgs {
     /// Não escreve o SVG (útil junto com --text para sair só o sparkline).
     #[arg(long)]
     no_svg: bool,
+    /// Sobrepõe um cenário hipotético no chart: linha pontilhada adicional
+    /// e callout com o saldo final projetado. Aceita valor mensal (positivo
+    /// = entrada extra, negativo = saída). Requer --forecast.
+    #[arg(long, value_name = "BRL")]
+    scenario_amount: Option<String>,
+    /// Descrição livre do cenário para legenda/callout, ex.: "terapia 2x/mês".
+    #[arg(long, value_name = "TEXTO", requires = "scenario_amount")]
+    scenario_description: Option<String>,
+    /// Mês de início do cenário no formato YYYY-MM. Default: próximo mês.
+    #[arg(long, value_name = "YYYY-MM", requires = "scenario_amount")]
+    scenario_start: Option<String>,
+    /// Duração do cenário em meses. Default: usa todos os meses futuros do chart.
+    #[arg(long, requires = "scenario_amount")]
+    scenario_months: Option<u32>,
 }
 
 #[derive(Args)]
@@ -1619,6 +1639,27 @@ enum ForecastCommand {
     )]
     RefreshInstallments(ForecastRefreshInstallmentsArgs),
     #[command(
+        about = "orquestrador completo: parcelamentos + reconciliação + materializa próximos meses + detecta novos recorrentes",
+        long_about = "Roda o pipeline completo do ADR-0016 em uma passada: \
+                      (1) `refresh-installments` (Layer 1), \
+                      (2) reconciliação dos forecasts ativos com as transações reais já presentes no banco, \
+                      (3) materialização de N meses de forecasts para cada template ativo (subscription / fixed / envelope), \
+                      (4) detecção silenciosa de novos candidatos recorrentes (Layer 2/3/4) — \
+                      eles ficam em status `proposto` aguardando `fin forecast suggest` ou `accept`. \
+                      Use `--skip-suggest` para pular a detecção e fazer apenas a manutenção."
+    )]
+    Refresh(ForecastRefreshArgs),
+    #[command(
+        about = "reconcilia forecasts ativos com as transações reais já presentes no banco",
+        long_about = "Para cada forecast em status='ativo' com due_date nos últimos N dias, \
+                      procura uma transação na mesma conta dentro de ±3 dias da due_date e com \
+                      o valor dentro de ±5%. Se houver match único, marca o forecast como \
+                      `realizado` e popula `realized_transaction_id` + `realized_at`. \
+                      Matches ambíguos (mais de um candidato) são pulados — o usuário pode \
+                      resolver manualmente via `fin forecast upsert`."
+    )]
+    Reconcile(ForecastReconcileArgs),
+    #[command(
         about = "lista candidatos a forecasts recorrentes (subscriptions + fixed bills + envelopes) detectados no histórico",
         long_about = "Roda o detector de recorrentes (Camadas 2, 3 e 4 do ADR-0016): para cada \
                       par (conta, merchant), exige ≥3 meses de ocorrências, cadência mensal e \
@@ -1660,6 +1701,36 @@ pub(crate) struct ForecastRefreshInstallmentsArgs {
     /// Quantos meses olhar para trás ao detectar cadeias. Default: 12.
     #[arg(long, default_value_t = 12)]
     pub lookback_months: u32,
+    /// Emite o resumo como JSON em vez do formato humano.
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastRefreshArgs {
+    /// Janela em meses usada por todas as camadas: detecção de cadeias de
+    /// parcelamento e detecção de novos recorrentes. Default: 12.
+    #[arg(long, default_value_t = 12)]
+    pub lookback_months: u32,
+    /// Quantos meses materializar à frente para cada template ativo
+    /// (subscriptions, fixed bills, envelopes). Default: 6.
+    #[arg(long, default_value_t = 6)]
+    pub materialize_months: u32,
+    /// Pula a detecção de novos candidatos (Layer 2/3/4); só faz a
+    /// manutenção dos templates existentes + reconciliação.
+    #[arg(long)]
+    pub skip_suggest: bool,
+    /// Emite o resumo como JSON em vez do formato humano.
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct ForecastReconcileArgs {
+    /// Quantos dias para trás varrer atrás de forecasts ativos com due_date
+    /// no passado. Default: 45.
+    #[arg(long, default_value_t = 45)]
+    pub lookback_days: i64,
     /// Emite o resumo como JSON em vez do formato humano.
     #[arg(long)]
     pub raw: bool,
@@ -2986,6 +3057,8 @@ async fn main() -> Result<()> {
             ForecastCommand::RefreshInstallments(args) => {
                 forecast_cmd::run_refresh_installments(args).await
             }
+            ForecastCommand::Refresh(args) => forecast_cmd::run_refresh(args).await,
+            ForecastCommand::Reconcile(args) => forecast_cmd::run_reconcile(args).await,
             ForecastCommand::Suggest(args) => forecast_cmd::run_suggest(args).await,
             ForecastCommand::Accept(args) => forecast_cmd::run_accept(args).await,
             ForecastCommand::Dismiss(args) => forecast_cmd::run_dismiss(args).await,
@@ -3454,6 +3527,15 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         })
         .collect::<Vec<_>>();
     if args.json_summary || args.notify_summary {
+        // Run the forecast orchestrator silently so the pending_summary
+        // reflects fresh, reconciled forecast state. Failure is non-fatal —
+        // the summary just sees yesterday's forecast view.
+        if !args.no_forecast_refresh {
+            if let Err(err) = forecast_cmd::refresh_all(store.as_ref(), &config, 12, 6, false).await
+            {
+                eprintln!("⚠️  Forecast refresh falhou (sync ainda OK): {err:#}");
+            }
+        }
         let pending_summary = load_sync_pending_summary(
             store.as_ref(),
             &transactions,
@@ -3524,6 +3606,31 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         println!("{}", summary.format_summary());
         if summary.deferred > 0 {
             println!("Para revisar as adiadas: finance tx enrich --days 7");
+        }
+    }
+
+    // Phase 6 — post-sync forecast orchestrator (ADR-0016).
+    // Runs the full pipeline (installments → reconcile → materialise →
+    // detect new candidates) so the chart and `scenario` reports always
+    // see an up-to-date forecast table. Non-fatal: a failure is logged
+    // and the sync result is preserved.
+    if args.no_forecast_refresh {
+        println!("Forecast refresh automático: pulado (--no-forecast-refresh).");
+    } else {
+        match forecast_cmd::refresh_all(store.as_ref(), &config, 12, 6, false).await {
+            Ok(report) => {
+                println!("{}", forecast_cmd::refresh_one_line(&report));
+                if report.new_suggestions > 0 {
+                    println!(
+                        "Há {} candidato(s) recorrente(s) aguardando revisão — \
+                         rode `fin forecast suggest` para ver e aceitar/descartar.",
+                        report.new_suggestions
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!("⚠️  Forecast refresh falhou (sync ainda OK): {err:#}");
+            }
         }
     }
     Ok(())

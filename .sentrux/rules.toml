@@ -1,0 +1,29 @@
+# Sentrux architectural constraints for finance-os.
+#
+# Picked to ratchet against the current state of the repo (May 2026) without
+# blocking work in flight. Tighten thresholds in a follow-up PR once the
+# main.rs split is done (see CLAUDE.md / AGENTS.md for the long-term plan).
+#
+# Run `sentrux check .` locally before pushing. Run `sentrux gate --save .`
+# before starting a refactor and `sentrux gate .` before committing it.
+
+[constraints]
+# Zero import cycles. Trivially enforced today — keep it that way.
+max_cycles = 0
+
+# Aggregate coupling grade across the workspace. "B" is the current
+# headroom: tighter (A) would block a few modules that are intentionally
+# multi-responsibility (main.rs, sync_notify.rs).
+max_coupling = "B"
+
+# Per-function cyclomatic complexity ceiling. Today's worst offenders sit
+# in main.rs at ~73 (Commands dispatch) and report_cards at ~65. The 75
+# ceiling captures them as-is and prevents *new* worse functions from
+# landing — boy-scout rule keeps moving the bar down. Drop to 60 after
+# the main.rs split lands.
+max_cc = 75
+
+# Don't enforce no_god_files yet: main.rs is the known elephant (~13k LOC)
+# and breaking it out is a separate PR. Flip to `true` once the dispatcher
+# is extracted (tracked: project_legacy_migration memory).
+no_god_files = false

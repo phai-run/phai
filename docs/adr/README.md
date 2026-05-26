@@ -67,7 +67,7 @@ proposed → active → superseded
 | [0013](0013-auto-migrate-on-every-command.md) | Auto-apply pending migrations on every command invocation | active |
 | [0014](0014-transaction-anatomy.md) | Transaction anatomy separates raw, human, merchant, purpose, and trace fields | active |
 | [0015](0015-anatomy-replication.md) | Anatomy replication propagates human-curated description and purpose from prior same-merchant transactions | active |
-| [0016](0016-forecast-automation.md) | Forecast automation: templates, detection layers and reconciliation | proposed |
+| [0016](0016-forecast-automation.md) | Forecast automation: templates, detection layers and reconciliation | accepted |
 | [0017](0017-release-signature-verification.md) | Release signature verification (minisign) on top of SHA-256 | active |
 
 ---

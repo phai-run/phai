@@ -66,14 +66,24 @@ const SIGNING_PUBLIC_KEY: &str = "";
 /// stays in transition mode (warns once per run if the sidecar is absent).
 const REQUIRE_SIGNATURE: bool = false;
 
-/// Release Please produces tags like `v0.3.1` (include-component-in-tag: false,
-/// include-v-in-tag: true). The updater strips the leading `v`.
-/// This is also robust to component-prefixed tags like
-/// `finance-cli-v0.3.1` in case the config changes.
+/// Release Please produces tags like `v0.3.1` for `finance-cli`
+/// (include-component-in-tag: false, include-v-in-tag: true) and
+/// `finance-core-v1.0.0` for the auxiliary crate (component prefix on).
+/// The updater strips the leading `v` and tolerates either component prefix.
 pub fn strip_tag_prefix(tag: &str) -> &str {
     tag.trim_start_matches("finance-cli-")
+        .trim_start_matches("finance-core-")
         .trim_start_matches('v')
         .trim_start_matches('V')
+}
+
+/// True for release tags that belong to the `finance-cli` binary (i.e. the
+/// only releases the self-updater should ever try to download). Today this
+/// means: the tag must NOT start with another component prefix like
+/// `finance-core-`. Component-less tags (`v0.3.1`, `0.3.1`) belong to
+/// finance-cli per the release-please config.
+fn is_finance_cli_tag(tag: &str) -> bool {
+    !tag.starts_with("finance-core-")
 }
 
 // ---------------------------------------------------------------------------
@@ -174,13 +184,20 @@ pub(crate) fn http_client(timeout_secs: u64) -> reqwest::Client {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn get_latest_release(client: &reqwest::Client) -> Result<GitHubRelease> {
-    let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");
+    // We can't use `/releases/latest` directly because the monorepo also
+    // publishes `finance-core-vX.Y.Z` releases via release-please. If one of
+    // those gets flagged as `latest`, `/releases/latest` returns a tag the
+    // self-updater can't act on (no `finance-cli-*.tar.gz` assets) and
+    // `strip_tag_prefix` would feed a `finance-core` version into the
+    // semver-newer check. Instead, list recent releases and pick the most
+    // recent one whose tag belongs to `finance-cli`.
+    let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases?per_page=20");
     let resp = client
         .get(&url)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .context("failed to fetch latest release")?;
+        .context("failed to fetch releases")?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -188,9 +205,13 @@ pub(crate) async fn get_latest_release(client: &reqwest::Client) -> Result<GitHu
         bail!("GitHub API returned {status}: {body}");
     }
 
-    resp.json::<GitHubRelease>()
-        .await
-        .context("failed to parse release JSON")
+    let releases: Vec<GitHubRelease> =
+        resp.json().await.context("failed to parse releases JSON")?;
+
+    releases
+        .into_iter()
+        .find(|r| is_finance_cli_tag(&r.tag_name))
+        .context("no finance-cli release found in the 20 most recent — investigate via `gh release list`")
 }
 
 fn find_asset<'a>(release: &'a GitHubRelease, name: &str) -> Result<&'a GitHubAsset> {
@@ -747,6 +768,22 @@ mod tests {
     fn strip_tag_prefix_component_only_no_v() {
         // e.g. "finance-cli-0.3.1" — strips the component prefix, no v to strip
         assert_eq!(strip_tag_prefix("finance-cli-0.3.1"), "0.3.1");
+    }
+
+    #[test]
+    fn strip_tag_prefix_finance_core_component() {
+        // finance-core releases use the component-in-tag form.
+        assert_eq!(strip_tag_prefix("finance-core-v1.0.0"), "1.0.0");
+        assert_eq!(strip_tag_prefix("finance-core-1.0.0"), "1.0.0");
+    }
+
+    #[test]
+    fn is_finance_cli_tag_filters_finance_core() {
+        assert!(is_finance_cli_tag("v0.3.1"));
+        assert!(is_finance_cli_tag("0.3.1"));
+        assert!(is_finance_cli_tag("finance-cli-v0.3.1"));
+        assert!(!is_finance_cli_tag("finance-core-v1.0.0"));
+        assert!(!is_finance_cli_tag("finance-core-1.0.0"));
     }
 
     // -----------------------------------------------------------------------

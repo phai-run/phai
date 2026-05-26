@@ -17,6 +17,7 @@ use finance_core::migrations::run_migrations;
 use finance_core::storage::open_store;
 use rust_decimal::Decimal;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::human_format;
 use crate::{load_config, month_ref_for, parse_month_ref, shift_month, CashflowChartArgs};
@@ -59,6 +60,24 @@ pub(crate) struct ChartData {
     /// purely future). Used by the renderer to split solid vs dashed
     /// segments of the saldo line.
     pub realized_count: usize,
+    /// Optional what-if overlay: per-month projected saldo *with* a
+    /// hypothetical recurring commitment added on top of the forecast
+    /// baseline. `None` when `--scenario-amount` was not passed. When
+    /// present, has exactly one entry per `months` and lines up by index.
+    pub scenario: Option<ScenarioOverlay>,
+}
+
+/// What-if scenario overlay (see ADR-0016 Layer 5).
+#[derive(Debug, Clone)]
+pub(crate) struct ScenarioOverlay {
+    pub label: String,
+    /// Signed monthly amount of the hypothetical commitment.
+    pub amount: Decimal,
+    pub start_month: NaiveDate,
+    pub months: u32,
+    /// Per-month projected balance with the scenario applied. Same length
+    /// and ordering as `ChartData.months`.
+    pub projected_balance: Vec<Option<Decimal>>,
 }
 
 pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()> {
@@ -190,11 +209,19 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
         });
     }
 
+    let scenario = build_scenario_overlay(&args, &data, realized_count)?;
+    if scenario.is_some() && !args.forecast {
+        anyhow::bail!(
+            "--scenario-amount requer --forecast (a sobreposição parte do saldo projetado)"
+        );
+    }
+
     let chart = ChartData {
         months: data,
         initial_balance,
         with_forecast: args.forecast,
         realized_count,
+        scenario,
     };
 
     if !args.no_svg {
@@ -216,6 +243,118 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
 
 fn write_svg(path: &Path, body: &str) -> Result<()> {
     std::fs::write(path, body).with_context(|| format!("falha ao escrever {}", path.display()))
+}
+
+/// Build the optional scenario overlay from CLI args + the already-computed
+/// per-month baseline projection. Returns `Ok(None)` when no scenario was
+/// requested. The overlay walks the same window as `data`, starting from the
+/// month's baseline projection and adding the scenario amount in every month
+/// inside `[start_month, start_month + months - 1]`.
+fn build_scenario_overlay(
+    args: &CashflowChartArgs,
+    data: &[MonthDatum],
+    realized_count: usize,
+) -> Result<Option<ScenarioOverlay>> {
+    let Some(amount_str) = args.scenario_amount.as_deref() else {
+        return Ok(None);
+    };
+    let amount = Decimal::from_str(amount_str.trim())
+        .with_context(|| format!("--scenario-amount inválido: {amount_str}"))?;
+    let label = args
+        .scenario_description
+        .clone()
+        .unwrap_or_else(|| "cenário".to_string());
+
+    // Default start = first future month in the chart (which is
+    // `realized_count` — the first index that's `is_future`). When all months
+    // are realised (no future), fall back to the first month of the window.
+    let default_start_idx = realized_count.min(data.len().saturating_sub(1));
+    let default_start = month_label_to_first_day(&data[default_start_idx].label)?;
+    let start_month = match &args.scenario_start {
+        Some(s) => parse_scenario_start(s)?,
+        None => default_start,
+    };
+    // Default months: the remaining horizon from start_month to end of chart.
+    let chart_end = month_label_to_first_day(&data[data.len() - 1].label)?;
+    let default_months = months_between_inclusive(start_month, chart_end).max(1);
+    let months = args.scenario_months.unwrap_or(default_months);
+
+    // Per-month walk: each entry copies the baseline `projected_closing_balance`
+    // and adds `amount` for every month that's within the scenario window.
+    let mut projected_balance: Vec<Option<Decimal>> = Vec::with_capacity(data.len());
+    let mut applied_so_far = Decimal::ZERO;
+    for m in data {
+        let month_first = month_label_to_first_day(&m.label)?;
+        if month_within(month_first, start_month, months) {
+            applied_so_far += amount;
+        }
+        projected_balance.push(m.projected_closing_balance.map(|b| b + applied_so_far));
+    }
+
+    Ok(Some(ScenarioOverlay {
+        label,
+        amount,
+        start_month,
+        months,
+        projected_balance,
+    }))
+}
+
+/// Convert the chart's "mai/26" short label back to a NaiveDate at the 1st
+/// of the month. Returns an error for labels that don't parse — defensive
+/// only; renderers produce these labels themselves so the inverse should
+/// always succeed.
+fn month_label_to_first_day(label: &str) -> Result<NaiveDate> {
+    let mut parts = label.split('/');
+    let month_str = parts.next().context("invalid month label")?;
+    let year_str = parts.next().context("invalid month label")?;
+    let month = match month_str {
+        "jan" => 1,
+        "fev" => 2,
+        "mar" => 3,
+        "abr" => 4,
+        "mai" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "ago" => 8,
+        "set" => 9,
+        "out" => 10,
+        "nov" => 11,
+        "dez" => 12,
+        other => anyhow::bail!("unknown month abbrev: {other}"),
+    };
+    let yy: i32 = year_str.parse().context("invalid year in month label")?;
+    let year = 2000 + yy;
+    NaiveDate::from_ymd_opt(year, month, 1).context("invalid date for month label")
+}
+
+fn parse_scenario_start(value: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d")
+        .with_context(|| format!("--scenario-start inválido: {value} (esperado YYYY-MM)"))
+}
+
+fn month_within(month: NaiveDate, start: NaiveDate, months: u32) -> bool {
+    if month < start {
+        return false;
+    }
+    let span = months as i32 - 1;
+    let mut end_year = start.year();
+    let mut end_month = start.month() as i32 + span;
+    while end_month > 12 {
+        end_year += 1;
+        end_month -= 12;
+    }
+    let end = NaiveDate::from_ymd_opt(end_year, end_month as u32, 1).unwrap_or(start);
+    month <= end
+}
+
+fn months_between_inclusive(start: NaiveDate, end: NaiveDate) -> u32 {
+    if end < start {
+        return 0;
+    }
+    let years = end.year() - start.year();
+    let months = end.month() as i32 - start.month() as i32 + years * 12 + 1;
+    months.max(0) as u32
 }
 
 fn first_of_month(date: NaiveDate) -> Result<NaiveDate> {
@@ -278,6 +417,7 @@ const COL_GRID: &str = "#e5e7eb";
 const COL_AXIS: &str = "#374151";
 const COL_TXT: &str = "#111827";
 const COL_MUTED: &str = "#6b7280";
+const COL_SCENARIO: &str = "#f59e0b";
 
 pub(crate) fn render_svg(chart: &ChartData) -> String {
     let plot_w = W - PAD_L - PAD_R;
@@ -288,6 +428,16 @@ pub(crate) fn render_svg(chart: &ChartData) -> String {
     let slot_center = |i: usize| PAD_L + slot_w * (i as f64 + 0.5);
 
     // Y scale: max of all stacked series.
+    let scenario_max = chart
+        .scenario
+        .as_ref()
+        .map(|s| {
+            s.projected_balance
+                .iter()
+                .filter_map(|v| v.map(decimal_to_f64))
+                .fold(0.0_f64, f64::max)
+        })
+        .unwrap_or(0.0);
     let max_val = chart
         .months
         .iter()
@@ -310,7 +460,8 @@ pub(crate) fn render_svg(chart: &ChartData) -> String {
             ]
         })
         .fold(0.0_f64, f64::max)
-        .max(chart.initial_balance.map(decimal_to_f64).unwrap_or(0.0));
+        .max(chart.initial_balance.map(decimal_to_f64).unwrap_or(0.0))
+        .max(scenario_max);
     let y_max = if max_val <= 0.0 {
         10_000.0
     } else {
@@ -570,6 +721,61 @@ pub(crate) fn render_svg(chart: &ChartData) -> String {
             }
         }
 
+        // Scenario overlay: a second dashed line in COL_SCENARIO sharing
+        // the same anchor as the baseline projection (so the eye reads the
+        // delta as "what the line *would* do if I added X/mo").
+        if let Some(scenario) = chart.scenario.as_ref() {
+            let mut scen_pts: Vec<(f64, f64, f64, bool)> = Vec::new();
+            if let Some(&(x, y, v)) = realized_pts.last() {
+                scen_pts.push((x, y, v, false)); // anchor
+            }
+            for (i, balance) in scenario.projected_balance.iter().enumerate() {
+                let Some(b) = balance else {
+                    continue;
+                };
+                let v = decimal_to_f64(*b);
+                let m = &chart.months[i];
+                // Skip points where the scenario equals the baseline (no
+                // delta accumulated yet) to keep the line clean.
+                if let Some(p) = m.projected_closing_balance {
+                    if (decimal_to_f64(p) - v).abs() < 0.005 {
+                        continue;
+                    }
+                }
+                scen_pts.push((slot_center(i + 1), y_for(v), v, true));
+            }
+            if scen_pts.len() >= 2 {
+                let path = scen_pts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (x, y, _, _))| {
+                        format!("{} {:.1},{:.1}", if i == 0 { "M" } else { "L" }, x, y)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                svg.push_str(&format!(
+                    r#"<path d="{path}" fill="none" stroke="{COL_SCENARIO}" stroke-width="2" stroke-dasharray="3 3" opacity="0.9"/>"#
+                ));
+                for (x, y, _v, draw) in scen_pts.iter().skip(1) {
+                    if !draw {
+                        continue;
+                    }
+                    svg.push_str(&format!(
+                        r##"<circle cx="{x:.1}" cy="{y:.1}" r="3.5" fill="#ffffff" stroke="{COL_SCENARIO}" stroke-width="1.5"/>"##
+                    ));
+                }
+                // Label the last scenario point so the delta vs baseline is
+                // readable at a glance.
+                if let Some((x, y, v, _)) = scen_pts.last() {
+                    svg.push_str(&format!(
+                        r#"<text x="{x:.1}" y="{y2:.1}" text-anchor="middle" font-size="10" font-weight="700" fill="{COL_SCENARIO}">{lbl}</text>"#,
+                        y2 = y + 14.0,
+                        lbl = brl_no_sign(*v)
+                    ));
+                }
+            }
+        }
+
         // "Hoje" + "Projetado" callouts in the top-right corner
         let hoje = realized_pts.last().map(|(_, _, v)| *v);
         let projetado = chart
@@ -577,9 +783,14 @@ pub(crate) fn render_svg(chart: &ChartData) -> String {
             .last()
             .and_then(|m| m.projected_closing_balance)
             .map(decimal_to_f64);
-        let mut callouts: Vec<(String, String, bool)> = Vec::new();
+        let projetado_scenario = chart
+            .scenario
+            .as_ref()
+            .and_then(|s| s.projected_balance.last().copied().flatten())
+            .map(decimal_to_f64);
+        let mut callouts: Vec<(String, String, CalloutStyle)> = Vec::new();
         if let Some(v) = hoje {
-            callouts.push(("Hoje".into(), brl_no_sign(v), false));
+            callouts.push(("Hoje".into(), brl_no_sign(v), CalloutStyle::Solid));
         }
         if let Some(v) = projetado {
             callouts.push((
@@ -592,20 +803,33 @@ pub(crate) fn render_svg(chart: &ChartData) -> String {
                         .unwrap_or_default()
                 ),
                 brl_no_sign(v),
-                true,
+                CalloutStyle::DashedBlue,
             ));
         }
-        let cx0 = W - PAD_R - 200.0;
+        if let (Some(v), Some(scenario)) = (projetado_scenario, chart.scenario.as_ref()) {
+            let delta = projetado.map(|p| v - p).unwrap_or(0.0);
+            callouts.push((
+                format!(
+                    "{} (Δ {sign}{deltav})",
+                    scenario.label,
+                    sign = if delta >= 0.0 { "+" } else { "" },
+                    deltav = brl_no_sign(delta)
+                ),
+                brl_no_sign(v),
+                CalloutStyle::DashedScenario,
+            ));
+        }
+        let cx0 = W - PAD_R - 240.0;
         let cy0 = PAD_T - 12.0;
-        for (i, (lbl, val, dashed)) in callouts.iter().enumerate() {
+        for (i, (lbl, val, style)) in callouts.iter().enumerate() {
             let y = cy0 - (callouts.len() as f64 - 1.0 - i as f64) * 18.0;
-            let stroke_attr = if *dashed {
-                r#" stroke-dasharray="3 2""#
-            } else {
-                ""
+            let (stroke_color, stroke_attr) = match style {
+                CalloutStyle::Solid => (COL_BAL, ""),
+                CalloutStyle::DashedBlue => (COL_BAL, r#" stroke-dasharray="3 2""#),
+                CalloutStyle::DashedScenario => (COL_SCENARIO, r#" stroke-dasharray="3 3""#),
             };
             svg.push_str(&format!(
-                r#"<line x1="{cx0:.1}" y1="{y2:.1}" x2="{x2:.1}" y2="{y2:.1}" stroke="{COL_BAL}" stroke-width="2"{stroke_attr}/>"#,
+                r#"<line x1="{cx0:.1}" y1="{y2:.1}" x2="{x2:.1}" y2="{y2:.1}" stroke="{stroke_color}" stroke-width="2"{stroke_attr}/>"#,
                 x2 = cx0 + 18.0,
                 y2 = y - 4.0,
             ));
@@ -628,6 +852,9 @@ pub(crate) fn render_svg(chart: &ChartData) -> String {
         legend_items.push((COL_IN, "Entradas previstas", LegendStyle::Hatched));
         legend_items.push((COL_OUT, "Saídas previstas", LegendStyle::Hatched));
         legend_items.push((COL_BAL, "Saldo projetado", LegendStyle::Dashed));
+        if chart.scenario.is_some() {
+            legend_items.push((COL_SCENARIO, "Saldo c/ cenário", LegendStyle::ScenarioLine));
+        }
     }
     for (color, label, style) in legend_items {
         match style {
@@ -652,6 +879,11 @@ pub(crate) fn render_svg(chart: &ChartData) -> String {
                 y = ly - 3.0,
                 x2 = lx + 14.0
             )),
+            LegendStyle::ScenarioLine => svg.push_str(&format!(
+                r#"<line x1="{lx}" y1="{y}" x2="{x2}" y2="{y}" stroke="{color}" stroke-width="2" stroke-dasharray="3 3"/>"#,
+                y = ly - 3.0,
+                x2 = lx + 14.0
+            )),
         }
         svg.push_str(&format!(
             r#"<text x="{x}" y="{y}" fill="{COL_TXT}">{label}</text>"#,
@@ -671,6 +903,14 @@ enum LegendStyle {
     Hatched,
     Line,
     Dashed,
+    ScenarioLine,
+}
+
+#[derive(Clone, Copy)]
+enum CalloutStyle {
+    Solid,
+    DashedBlue,
+    DashedScenario,
 }
 
 fn build_subtitle(chart: &ChartData) -> String {
@@ -694,6 +934,19 @@ fn build_subtitle(chart: &ChartData) -> String {
     };
     if chart.with_forecast {
         s.push_str(" · forecast empilhado");
+    }
+    if let Some(scenario) = chart.scenario.as_ref() {
+        s.push_str(&format!(
+            " · cenário “{}” {}/mês por {}m a partir de {}",
+            scenario.label,
+            human_format::brl_signed(scenario.amount),
+            scenario.months,
+            short_month_label(&format!(
+                "{}-{:02}",
+                scenario.start_month.year(),
+                scenario.start_month.month()
+            ))
+        ));
     }
     s
 }
@@ -884,6 +1137,7 @@ mod tests {
             initial_balance: Some(dec!(10000)),
             with_forecast: false,
             realized_count: 2,
+            scenario: None,
         }
     }
 
@@ -925,7 +1179,33 @@ mod tests {
             initial_balance: Some(dec!(10000)),
             with_forecast: true,
             realized_count: 2,
+            scenario: None,
         }
+    }
+
+    fn realized_plus_future_with_scenario() -> ChartData {
+        let mut base = realized_plus_future();
+        let mut balances: Vec<Option<Decimal>> = base
+            .months
+            .iter()
+            .map(|m| m.projected_closing_balance)
+            .collect();
+        // Scenario: -R$ 500/month starting at index 1 (current month).
+        let mut applied = Decimal::ZERO;
+        for (i, b) in balances.iter_mut().enumerate() {
+            if i >= 1 {
+                applied += dec!(-500);
+            }
+            *b = b.map(|v| v + applied);
+        }
+        base.scenario = Some(ScenarioOverlay {
+            label: "academia extra".to_string(),
+            amount: dec!(-500),
+            start_month: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+            months: 12,
+            projected_balance: balances,
+        });
+        base
     }
 
     #[test]
@@ -959,6 +1239,22 @@ mod tests {
         // Hoje + Projetado callouts
         assert!(svg.contains("Hoje:"));
         assert!(svg.contains("Projetado ("));
+    }
+
+    #[test]
+    fn svg_scenario_overlay_draws_extra_line_and_callout() {
+        let svg = render_svg(&realized_plus_future_with_scenario());
+        // scenario dashed line (3 3 pattern) + amber color
+        assert!(
+            svg.contains("stroke-dasharray=\"3 3\"") && svg.contains(COL_SCENARIO),
+            "expected dashed scenario line in amber"
+        );
+        // legend entry + callout with delta
+        assert!(svg.contains("Saldo c/ cenário"));
+        assert!(svg.contains("academia extra"));
+        assert!(svg.contains("(Δ "));
+        // subtitle should mention the scenario
+        assert!(svg.contains("cenário"));
     }
 
     #[test]
