@@ -31,10 +31,10 @@ use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-
-const STORE_CHANNEL_CAP: usize = 64;
 use tokio::task::LocalSet;
 use uuid::Uuid;
+
+const STORE_CHANNEL_CAP: usize = 64;
 
 use crate::cashflow_chart::{build_chart_data, ChartData};
 use crate::forecast_cmd::materialise_template_forecasts;
