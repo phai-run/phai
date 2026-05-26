@@ -5421,3 +5421,137 @@ fn sync_pluggy_runs_forecast_orchestrator_on_installments() {
     assert_eq!(still_three, 3);
     drop(conn);
 }
+
+#[test]
+fn forecast_refresh_materialises_open_card_bill() {
+    // End-to-end: a credit card with billing_closing_day=3 / billing_due_day=10
+    // has a pending purchase on 2026-06-15 (after closing day 3 → cycle "2026-07").
+    // `fin forecast refresh` must create one forecast row with:
+    //   due_date = 2026-07-10, amount = -150.00, recurrence = card-cycle
+    // Running twice must be idempotent (no duplicate rows).
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    // Create a credit account.
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("cc-bill-test")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Test Card"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Inject billing metadata directly (account upsert has no billing-day flags).
+    let db_path = data_dir.join("finance-os.local.db");
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    conn.execute(
+        "UPDATE accounts SET metadata_json = json_set(metadata_json, \
+         '$.billing_closing_day', '3', '$.billing_due_day', '10') \
+         WHERE account_id = 'cc-bill-test'",
+        [],
+    )
+    .expect("inject billing metadata");
+    drop(conn);
+
+    // Purchase on 2026-06-15: D=15 > C=3 → cycle_ref = 2026-07.
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("open-purchase-01")
+            .arg("--account-id")
+            .arg("cc-bill-test")
+            .arg("--date")
+            .arg("2026-06-15")
+            .arg("--description")
+            .arg("Supermercado XYZ")
+            .arg("--amount=-150.00")
+            .arg("--payment-status")
+            .arg("pending"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // First refresh — must report 1 open-bill forecast.
+    let stdout = envs(
+        cargo_bin().arg("forecast").arg("refresh").arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let report: Value = serde_json::from_slice(&stdout).expect("valid refresh json");
+    assert_eq!(
+        report["open_bill_forecasts"].as_u64(),
+        Some(1),
+        "first refresh must produce 1 open-bill forecast",
+    );
+
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    let (due_date, amount_cents, recurrence): (String, f64, String) = conn
+        .query_row(
+            "SELECT due_date, CAST(amount AS REAL) * 100, recurrence \
+             FROM forecast \
+             WHERE recurrence = 'card-cycle' AND account_id = 'cc-bill-test'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("open-bill forecast row");
+    assert_eq!(due_date, "2026-07-10");
+    assert!(
+        (amount_cents - (-15000.0_f64)).abs() < 1.0,
+        "amount should be -15000 cents, got {amount_cents}"
+    );
+    assert_eq!(recurrence, "card-cycle");
+
+    // Count total rows with this recurrence — must be exactly 1.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE recurrence = 'card-cycle'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count card-cycle forecasts");
+    assert_eq!(count, 1);
+    drop(conn);
+
+    // Second refresh — idempotent: same 1 row, no duplicates.
+    envs(
+        cargo_bin().arg("forecast").arg("refresh").arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let conn = Connection::open(&db_path).expect("reopen sqlite");
+    let count_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE recurrence = 'card-cycle'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count after second refresh");
+    assert_eq!(count_after, 1, "second refresh must not duplicate forecast");
+    drop(conn);
+}
