@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.0](https://github.com/feliperun/finance-os/compare/v2.4.0...v2.5.0) (2026-05-26)
+
+
+### Features
+
+* **serve:** web dashboard com WebSocket API para forecast interativo ([#71](https://github.com/feliperun/finance-os/issues/71)) ([b416273](https://github.com/feliperun/finance-os/commit/b4162739553f45bb6336f1b89f8637e95a038309))
+
 ## [2.4.0](https://github.com/feliperun/finance-os/compare/v2.3.2...v2.4.0) (2026-05-26)
 
 
