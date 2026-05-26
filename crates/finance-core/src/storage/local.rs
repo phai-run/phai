@@ -855,6 +855,193 @@ impl FinanceStore for LocalStore {
         Ok(out)
     }
 
+    async fn list_forecasts(
+        &self,
+        status: Option<&str>,
+        from: Option<NaiveDate>,
+        until: Option<NaiveDate>,
+    ) -> Result<Vec<ForecastRecord>> {
+        let conn = self.connection()?;
+        let mut filters: Vec<&'static str> = Vec::new();
+        let mut params_vec: Vec<String> = Vec::new();
+        if let Some(s) = status {
+            filters.push("status = ?");
+            params_vec.push(s.to_string());
+        }
+        if let Some(d) = from {
+            filters.push("date(due_date) >= date(?)");
+            params_vec.push(d.format("%Y-%m-%d").to_string());
+        }
+        if let Some(d) = until {
+            filters.push("date(due_date) <= date(?)");
+            params_vec.push(d.format("%Y-%m-%d").to_string());
+        }
+        let where_sql = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", filters.join(" AND "))
+        };
+        let sql = format!(
+            "
+            SELECT forecast_id, due_date, description, amount, category_id, account_id,
+                   status, recurrence, actor_id, idempotency_key, metadata_json,
+                   created_at, updated_at,
+                   template_id, realized_transaction_id, realized_at
+            FROM forecast
+            {where_sql}
+            ORDER BY date(due_date) ASC, CAST(amount AS REAL) DESC
+            "
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_dyn: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(params_dyn.as_slice(), |row| {
+            let due_str: Option<String> = row.get(1)?;
+            let due_date = due_str
+                .as_deref()
+                .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+            let amount_str: String = row.get(3)?;
+            let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
+            let metadata_str: String = row.get(10)?;
+            let metadata_json = parse_sql_json(metadata_str, 10)?;
+            let created_str: String = row.get(11)?;
+            let updated_str: String = row.get(12)?;
+            Ok(ForecastRecord {
+                forecast_id: row.get(0)?,
+                due_date,
+                description: row.get(2)?,
+                amount,
+                category_id: row.get(4)?,
+                account_id: row.get(5)?,
+                status: row.get(6)?,
+                recurrence: row.get(7)?,
+                actor_id: row.get(8)?,
+                idempotency_key: row.get(9)?,
+                metadata_json,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                template_id: row.get::<_, Option<String>>(13).unwrap_or(None),
+                realized_transaction_id: row.get::<_, Option<String>>(14).unwrap_or(None),
+                realized_at: row
+                    .get::<_, Option<String>>(15)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn get_forecast(&self, forecast_id: &str) -> Result<Option<ForecastRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT forecast_id, due_date, description, amount, category_id, account_id,
+                   status, recurrence, actor_id, idempotency_key, metadata_json,
+                   created_at, updated_at,
+                   template_id, realized_transaction_id, realized_at
+            FROM forecast
+            WHERE forecast_id = ?1
+            ",
+        )?;
+        let mut rows = stmt.query_map([forecast_id], |row| {
+            let due_str: Option<String> = row.get(1)?;
+            let due_date = due_str
+                .as_deref()
+                .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+            let amount_str: String = row.get(3)?;
+            let amount = parse_decimal(amount_str).unwrap_or(Decimal::ZERO);
+            let metadata_str: String = row.get(10)?;
+            let metadata_json = parse_sql_json(metadata_str, 10)?;
+            let created_str: String = row.get(11)?;
+            let updated_str: String = row.get(12)?;
+            Ok(ForecastRecord {
+                forecast_id: row.get(0)?,
+                due_date,
+                description: row.get(2)?,
+                amount,
+                category_id: row.get(4)?,
+                account_id: row.get(5)?,
+                status: row.get(6)?,
+                recurrence: row.get(7)?,
+                actor_id: row.get(8)?,
+                idempotency_key: row.get(9)?,
+                metadata_json,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                template_id: row.get::<_, Option<String>>(13).unwrap_or(None),
+                realized_transaction_id: row.get::<_, Option<String>>(14).unwrap_or(None),
+                realized_at: row
+                    .get::<_, Option<String>>(15)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_categories(&self) -> Result<Vec<CategoryRecord>> {
+        let conn = self.connection()?;
+        let exists = Self::table_exists(&conn, "categories")?;
+        if !exists {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn.prepare(
+            "
+            SELECT category_id, name, parent_category_id, metadata_json, actor_id, updated_at
+            FROM categories
+            ORDER BY category_id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let metadata_str: String = row.get(3)?;
+            let metadata_json =
+                serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+            let updated_str: String = row.get(5)?;
+            Ok(CategoryRecord {
+                category_id: row.get(0)?,
+                name: row.get(1)?,
+                parent_category_id: row.get(2)?,
+                metadata_json,
+                actor_id: row.get(4)?,
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     async fn apply_transaction_split(
         &self,
         _split: &TransactionSplitRecord,

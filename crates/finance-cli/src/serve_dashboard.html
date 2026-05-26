@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finance OS — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+<style>
+  :root {
+    --bg: #f8fafc; --card: #ffffff; --text: #1e293b; --muted: #64748b;
+    --green: #16a34a; --red: #dc2626; --blue: #2563eb;
+    --border: #e2e8f0; --accent: #f1f5f9;
+    --radius: 10px; --shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  header { background: var(--blue); color: #fff; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 20px; font-weight: 700; }
+  #ws-status { font-size: 12px; padding: 4px 10px; border-radius: 12px; background: rgba(255,255,255,.15); }
+  #ws-status.connected { background: rgba(255,255,255,.25); }
+  #ws-status.disconnected { background: rgba(220,38,38,.4); }
+
+  nav { display: flex; gap: 0; background: var(--card); border-bottom: 1px solid var(--border); padding: 0 24px; }
+  nav a { padding: 12px 20px; font-size: 13px; font-weight: 600; cursor: pointer; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; transition: all .15s; }
+  nav a:hover { color: var(--text); }
+  nav a.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+  section { display: none; }
+  section.active { display: block; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow); }
+  .card h2 { font-size: 16px; margin-bottom: 12px; }
+
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .controls label { font-size: 12px; color: var(--muted); }
+  .controls input, .controls select { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  button, .btn { background: var(--blue); color: #fff; border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+  button:hover { opacity: .9; }
+  button.danger { background: var(--red); }
+  button.success { background: var(--green); }
+  button.muted { background: var(--muted); }
+
+  #chart-container { position: relative; width: 100%; max-width: 1050px; margin: 0 auto; }
+  #chart-container canvas { width: 100% !important; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .amount { text-align: right; font-variant-numeric: tabular-nums; }
+  .inflow { color: var(--green); }
+  .outflow { color: var(--red); }
+
+  .template-card { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .template-card .info { flex: 1; min-width: 200px; }
+  .template-card .label { font-weight: 600; }
+  .template-card .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .template-card .actions { display: flex; gap: 8px; }
+
+  .tx-group { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+  .tx-group .cat-header { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  .tx-group .cat-name { font-weight: 600; }
+  .tx-group .cat-total { font-size: 14px; font-weight: 700; }
+  .tx-group .tx-list { display: none; margin-top: 8px; }
+  .tx-group.open .tx-list { display: block; }
+
+  form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  form label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+  form input, form select { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 13px; }
+  form button { grid-column: 1 / -1; }
+
+  .filter-bar { display: flex; gap: 12px; margin-bottom: 12px; }
+  .filter-bar select { border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 13px; }
+
+  .loading { text-align: center; padding: 40px; color: var(--muted); font-size: 14px; }
+
+  @media (max-width: 600px) {
+    main { padding: 12px; }
+    form { grid-template-columns: 1fr; }
+    .template-card { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Finance OS</h1>
+  <span id="ws-status">Conectando...</span>
+</header>
+
+<nav>
+  <a data-tab="chart" class="active">Cashflow</a>
+  <a data-tab="templates">Templates</a>
+  <a data-tab="forecasts">Forecasts</a>
+  <a data-tab="add">Adicionar</a>
+</nav>
+
+<main>
+  <!-- Cashflow Chart -->
+  <section id="tab-chart" class="active">
+    <div class="card">
+      <h2>Evolução de Caixa</h2>
+      <div class="controls">
+        <label>Meses: <input type="number" id="months-back" value="6" min="2" max="24" style="width:70px"></label>
+        <label>Projeção: <input type="number" id="months-ahead" value="6" min="0" max="24" style="width:70px"></label>
+        <button onclick="loadChart()">Atualizar</button>
+      </div>
+      <div id="chart-container"><canvas id="cashflowChart"></canvas></div>
+    </div>
+    <div class="card" id="tx-detail" style="display:none">
+      <h2>Transações: <span id="tx-month-label"></span></h2>
+      <div id="transactions-list"></div>
+    </div>
+  </section>
+
+  <!-- Templates -->
+  <section id="tab-templates">
+    <div class="card">
+      <h2>Modelos de Previsão</h2>
+      <div class="filter-bar">
+        <select id="tpl-status-filter" onchange="loadTemplates()">
+          <option value="">Todos</option>
+          <option value="proposto" selected>Propostos</option>
+          <option value="ativo">Ativos</option>
+          <option value="descartado">Descartados</option>
+        </select>
+        <select id="tpl-kind-filter" onchange="loadTemplates()">
+          <option value="">Todos os tipos</option>
+          <option value="installment">Parcelamentos</option>
+          <option value="subscription">Assinaturas</option>
+          <option value="fixed">Fixos</option>
+          <option value="envelope">Envelopes</option>
+        </select>
+      </div>
+      <div id="templates-list"><div class="loading">Carregando...</div></div>
+    </div>
+  </section>
+
+  <!-- Forecasts -->
+  <section id="tab-forecasts">
+    <div class="card">
+      <h2>Forecasts</h2>
+      <div class="filter-bar">
+        <select id="fc-status-filter" onchange="loadForecasts()">
+          <option value="ativo" selected>Ativos</option>
+          <option value="">Todos</option>
+          <option value="realizado">Realizados</option>
+          <option value="descartado">Descartados</option>
+        </select>
+        <label>De: <input type="date" id="fc-from" onchange="loadForecasts()"></label>
+        <label>Até: <input type="date" id="fc-until" onchange="loadForecasts()"></label>
+      </div>
+      <div id="forecasts-list"><div class="loading">Carregando...</div></div>
+    </div>
+  </section>
+
+  <!-- Add Forecast -->
+  <section id="tab-add">
+    <div class="card">
+      <h2>Adicionar Previsão Manual</h2>
+      <form id="add-forecast-form" onsubmit="submitForecast(event)">
+        <label>Descrição: <input type="text" id="fc-desc" required></label>
+        <label>Valor (negativo = saída): <input type="text" id="fc-amount" placeholder="-250.00" required></label>
+        <label>Data: <input type="date" id="fc-date"></label>
+        <label>Categoria: <select id="fc-category"><option value="">--</option></select></label>
+        <label>Conta: <select id="fc-account"><option value="">--</option></select></label>
+        <button type="submit">Salvar</button>
+      </form>
+    </div>
+  </section>
+</main>
+
+<script>
+// ── Helpers ──
+function toNum(v) { if (v === null || v === undefined) return 0; return typeof v === 'string' ? parseFloat(v) : v; }
+function fmtBRL(n) { return 'R$ ' + Math.abs(n).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
+function fmtBRL0(n) { return n === 0 ? 'R$ 0' : fmtBRL(n); }
+function monthLabel(label) { return label; }
+
+// ── WebSocket ──
+let ws = null;
+let reqId = 0;
+const pending = new Map();
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws.onopen = () => {
+    document.getElementById('ws-status').textContent = 'Conectado';
+    document.getElementById('ws-status').className = 'connected';
+    loadChart();
+    loadTemplates();
+    loadForecasts();
+    loadCategories();
+    loadAccounts();
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-status').textContent = 'Desconectado';
+    document.getElementById('ws-status').className = 'disconnected';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => { ws.close(); };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    const cb = pending.get(msg.id);
+    if (cb) { pending.delete(msg.id); cb(msg); }
+  };
+}
+
+function send(type, payload) {
+  return new Promise((resolve, reject) => {
+    const id = 'r' + (++reqId);
+    pending.set(id, resolve);
+    if (ws.readyState !== WebSocket.OPEN) { reject(new Error('ws closed')); return; }
+    ws.send(JSON.stringify({ id, type, payload }));
+  });
+}
+
+// ── Chart ──
+let chartInstance = null;
+
+async function loadChart() {
+  const mb = parseInt(document.getElementById('months-back').value) || 6;
+  const ma = parseInt(document.getElementById('months-ahead').value) || 6;
+  try {
+    const resp = await send('get_chart_data', { months_back: mb, months_ahead: ma });
+    if (resp.error) { console.error(resp.error); return; }
+    renderChart(resp.payload);
+  } catch (e) { console.error(e); }
+}
+
+function renderChart(data) {
+  const months = data.months || [];
+  const labels = months.map(m => m.label);
+  const inflows = months.map(m => toNum(m.inflows) + toNum(m.forecast_inflows_remaining));
+  const outflows = months.map(m => toNum(m.outflows) + toNum(m.forecast_outflows_remaining));
+  const closing = months.map(m => toNum(m.projected_closing_balance ?? m.closing_balance));
+  const realized = months.map(m => !m.is_future);
+
+  // Split realized/forecast at the boundary
+  const realizedLabels = labels.map((l, i) => realized[i] ? l : '');
+  const futureStart = realized.lastIndexOf(true) + 1;
+
+  const ctx = document.getElementById('cashflowChart').getContext('2d');
+  if (chartInstance) chartInstance.destroy();
+
+  Chart.register(ChartDataLabels);
+
+  chartInstance = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Entradas',
+          data: inflows,
+          backgroundColor: months.map((m, i) => m.is_future ? 'rgba(22,163,74,0.35)' : 'rgba(22,163,74,0.8)'),
+          borderColor: '#16a34a',
+          borderWidth: 0,
+          borderRadius: 4,
+          order: 2,
+        },
+        {
+          label: 'Saídas',
+          data: outflows,
+          backgroundColor: months.map((m, i) => m.is_future ? 'rgba(220,38,38,0.35)' : 'rgba(220,38,38,0.8)'),
+          borderColor: '#dc2626',
+          borderWidth: 0,
+          borderRadius: 4,
+          order: 2,
+        },
+        {
+          label: 'Saldo',
+          data: closing,
+          type: 'line',
+          borderColor: '#2563eb',
+          backgroundColor: '#2563eb',
+          pointRadius: 4,
+          pointBackgroundColor: (ctx) => {
+            const i = ctx.dataIndex;
+            return i < futureStart ? '#2563eb' : '#ffffff';
+          },
+          pointBorderColor: '#2563eb',
+          pointBorderWidth: 2,
+          borderWidth: 2.5,
+          segment: {
+            borderDash: (ctx) => {
+              return ctx.p0DataIndex >= futureStart - 1 ? [6, 4] : undefined;
+            }
+          },
+          tension: 0.1,
+          order: 1,
+          datalabels: { display: false },
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      aspectRatio: 2,
+      onClick: (e, elements) => {
+        if (elements.length > 0) {
+          const idx = elements[0].index;
+          const m = months[idx];
+          if (m) showTransactionsForMonth(m);
+        }
+      },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { usePointStyle: true, padding: 24, font: { size: 12 } }
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.raw;
+              return ctx.dataset.label + ': ' + fmtBRL(v);
+            }
+          }
+        },
+        datalabels: {
+          anchor: 'end',
+          align: 'end',
+          offset: 2,
+          font: { size: 11, weight: '700' },
+          formatter: (v) => v > 0 ? fmtBRL(v) : '',
+          color: (ctx) => ctx.dataset.borderColor,
+          display: (ctx) => ctx.dataset.type !== 'line' && ctx.raw > 0,
+        }
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+        y: {
+          grid: { color: '#e5e7eb' },
+          ticks: {
+            font: { size: 11 },
+            callback: (v) => v >= 0 ? (v / 1000) + 'k' : ''
+          }
+        }
+      }
+    }
+  });
+
+  // Click handler on the chart to show transactions
+  document.getElementById('cashflowChart').onclick = (e) => {
+    const points = chartInstance.getElementsAtEventForMode(e, 'index', { intersect: false }, true);
+    if (points.length > 0) {
+      const idx = points[0].index;
+      const m = months[idx];
+      if (m) showTransactionsForMonth(m);
+    }
+  };
+}
+
+async function showTransactionsForMonth(month) {
+  const label = month.label; // e.g. "mai/26"
+  // Parse to get YYYY-MM range
+  const parts = label.split('/');
+  if (parts.length !== 2) return;
+  const monthNames = { jan:'01', fev:'02', mar:'03', abr:'04', mai:'05', jun:'06', jul:'07', ago:'08', set:'09', out:'10', nov:'11', dez:'12' };
+  const mm = monthNames[parts[0].toLowerCase()];
+  if (!mm) return;
+  const yy = '20' + parts[1];
+  const from = yy + '-' + mm + '-01';
+  // last day of month
+  const lastDay = new Date(parseInt(yy), parseInt(mm), 0).getDate();
+  const to = yy + '-' + mm + '-' + String(lastDay).padStart(2, '0');
+
+  document.getElementById('tx-month-label').textContent = label;
+  document.getElementById('tx-detail').style.display = 'block';
+  document.getElementById('transactions-list').innerHTML = '<div class="loading">Carregando transações...</div>';
+
+  try {
+    const resp = await send('get_transactions', { from, to });
+    if (resp.error) { console.error(resp.error); return; }
+    renderTransactions(resp.payload.transactions || [], from, to);
+  } catch (e) { console.error(e); }
+}
+
+function renderTransactions(txs, from, to) {
+  const container = document.getElementById('transactions-list');
+  if (!txs.length) {
+    container.innerHTML = '<p style="color:var(--muted)">Nenhuma transação neste período.</p>';
+    return;
+  }
+  // Group by category_id
+  const groups = new Map();
+  for (const tx of txs) {
+    const cat = tx.category_id || 'sem-categoria';
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(tx);
+  }
+  // Sort groups by total amount
+  const sorted = [...groups.entries()].sort((a, b) => {
+    const ta = a[1].reduce((s, t) => s + toNum(t.amount), 0);
+    const tb = b[1].reduce((s, t) => s + toNum(t.amount), 0);
+    return tb - ta;
+  });
+
+  let html = '';
+  for (const [cat, catTxs] of sorted) {
+    const total = catTxs.reduce((s, t) => s + toNum(t.amount), 0);
+    html += `<div class="tx-group" onclick="this.classList.toggle('open')">
+      <div class="cat-header">
+        <span class="cat-name">${escHtml(cat)} (${catTxs.length})</span>
+        <span class="cat-total ${total >= 0 ? 'inflow' : 'outflow'}">${fmtBRL0(total)}</span>
+      </div>
+      <div class="tx-list">
+        <table><tbody>`;
+    for (const tx of catTxs.sort((a, b) => toNum(b.amount) - toNum(a.amount))) {
+      html += `<tr>
+        <td>${tx.transaction_date}</td>
+        <td>${escHtml(tx.description || tx.raw_description || '—')}</td>
+        <td class="amount ${toNum(tx.amount) >= 0 ? 'inflow' : 'outflow'}">${fmtBRL0(toNum(tx.amount))}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div></div>';
+  }
+  container.innerHTML = html;
+}
+
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ── Templates ──
+async function loadTemplates() {
+  const status = document.getElementById('tpl-status-filter').value || null;
+  const kind = document.getElementById('tpl-kind-filter').value || null;
+  const container = document.getElementById('templates-list');
+  container.innerHTML = '<div class="loading">Carregando...</div>';
+  try {
+    const resp = await send('list_forecast_templates', { kind, status });
+    if (resp.error) { container.innerHTML = '<p>Erro: ' + escHtml(resp.error) + '</p>'; return; }
+    renderTemplates(resp.payload.templates || []);
+  } catch (e) { container.innerHTML = '<p>Erro de conexão</p>'; }
+}
+
+function renderTemplates(templates) {
+  const container = document.getElementById('templates-list');
+  if (!templates.length) {
+    container.innerHTML = '<p style="color:var(--muted)">Nenhum template encontrado.</p>';
+    return;
+  }
+  let html = '';
+  for (const t of templates) {
+    const isProposto = t.status === 'proposto';
+    const amount = toNum(t.amount);
+    const kindLabel = { installment: 'Parcelamento', subscription: 'Assinatura', fixed: 'Fixo', envelope: 'Envelope' }[t.kind] || t.kind;
+    html += `<div class="template-card">
+      <div class="info">
+        <div class="label">${escHtml(t.description)}</div>
+        <div class="meta">${kindLabel} · ${t.cadence} · ${amount < 0 ? 'Saída' : 'Entrada'} de ${fmtBRL(amount)} · <span style="color:${t.status === 'ativo' ? 'var(--green)' : t.status === 'descartado' ? 'var(--muted)' : '#d97706'}">${t.status}</span></div>
+        ${t.confidence != null ? `<div class="meta">Confiança: ${(t.confidence * 100).toFixed(0)}%</div>` : ''}
+      </div>`;
+    if (isProposto) {
+      html += `<div class="actions">
+        <button class="success" onclick="event.stopPropagation(); acceptTemplate('${escHtml(t.template_id)}')">Aceitar</button>
+        <button class="muted" onclick="event.stopPropagation(); dismissTemplate('${escHtml(t.template_id)}')">Recusar</button>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  container.innerHTML = html;
+}
+
+async function acceptTemplate(templateId) {
+  try {
+    const resp = await send('accept_template', { template_id: templateId, materialize_months: 6 });
+    if (resp.error) { alert('Erro: ' + resp.error); return; }
+    loadTemplates();
+  } catch (e) { alert('Erro de conexão'); }
+}
+
+async function dismissTemplate(templateId) {
+  try {
+    const resp = await send('dismiss_template', { template_id: templateId });
+    if (resp.error) { alert('Erro: ' + resp.error); return; }
+    loadTemplates();
+  } catch (e) { alert('Erro de conexão'); }
+}
+
+// ── Forecasts ──
+async function loadForecasts() {
+  const status = document.getElementById('fc-status-filter').value || null;
+  const from = document.getElementById('fc-from').value || null;
+  const until = document.getElementById('fc-until').value || null;
+  const container = document.getElementById('forecasts-list');
+  container.innerHTML = '<div class="loading">Carregando...</div>';
+  try {
+    const resp = await send('list_forecasts', { status, from, until });
+    if (resp.error) { container.innerHTML = '<p>Erro: ' + escHtml(resp.error) + '</p>'; return; }
+    renderForecasts(resp.payload.forecasts || []);
+  } catch (e) { container.innerHTML = '<p>Erro de conexão</p>'; }
+}
+
+function renderForecasts(forecasts) {
+  const container = document.getElementById('forecasts-list');
+  if (!forecasts.length) {
+    container.innerHTML = '<p style="color:var(--muted)">Nenhum forecast encontrado.</p>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Valor</th><th>Status</th></tr></thead><tbody>';
+  for (const f of forecasts) {
+    const amount = toNum(f.amount);
+    html += `<tr>
+      <td>${f.due_date || '—'}</td>
+      <td>${escHtml(f.description)}</td>
+      <td>${escHtml(f.category_id || '—')}</td>
+      <td class="amount ${amount >= 0 ? 'inflow' : 'outflow'}">${fmtBRL0(amount)}</td>
+      <td>${f.status}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// ── Categories & Accounts (for form) ──
+async function loadCategories() {
+  try {
+    const resp = await send('get_categories', {});
+    if (resp.error) return;
+    const cats = resp.payload.categories || [];
+    let html = '<option value="">--</option>';
+    for (const c of cats) {
+      html += `<option value="${escHtml(c.category_id)}">${escHtml(c.name || c.category_id)}</option>`;
+    }
+    document.getElementById('fc-category').innerHTML = html;
+  } catch (e) {}
+}
+
+async function loadAccounts() {
+  try {
+    const resp = await send('get_accounts', {});
+    if (resp.error) return;
+    const accounts = resp.payload.accounts || [];
+    let html = '<option value="">--</option>';
+    for (const a of accounts) {
+      html += `<option value="${escHtml(a.account_id)}">${escHtml(a.account_id)}</option>`;
+    }
+    document.getElementById('fc-account').innerHTML = html;
+  } catch (e) {}
+}
+
+// ── Add Forecast ──
+async function submitForecast(e) {
+  e.preventDefault();
+  const desc = document.getElementById('fc-desc').value.trim();
+  const amount = document.getElementById('fc-amount').value.trim();
+  const date = document.getElementById('fc-date').value;
+  const cat = document.getElementById('fc-category').value;
+  const acct = document.getElementById('fc-account').value;
+  if (!desc || !amount) return;
+
+  try {
+    const resp = await send('upsert_forecast', {
+      description: desc,
+      amount: amount,
+      due_date: date || null,
+      category_id: cat || null,
+      account_id: acct || null,
+    });
+    if (resp.error) { alert('Erro: ' + resp.error); return; }
+    document.getElementById('add-forecast-form').reset();
+    alert('Forecast adicionado: ' + resp.payload.forecast_id);
+    loadForecasts();
+  } catch (e) { alert('Erro de conexão'); }
+}
+
+// ── Tab navigation ──
+document.querySelectorAll('nav a').forEach(a => {
+  a.addEventListener('click', () => {
+    document.querySelectorAll('nav a').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
+    document.getElementById('tab-' + a.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Init ──
+connect();
+</script>
+</body>
+</html>

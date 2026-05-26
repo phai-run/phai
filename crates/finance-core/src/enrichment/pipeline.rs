@@ -512,6 +512,20 @@ mod tests {
         ) -> Result<Vec<ForecastRecord>> {
             Ok(vec![])
         }
+        async fn list_forecasts(
+            &self,
+            _status: Option<&str>,
+            _from: Option<NaiveDate>,
+            _until: Option<NaiveDate>,
+        ) -> Result<Vec<ForecastRecord>> {
+            Ok(vec![])
+        }
+        async fn get_forecast(&self, _forecast_id: &str) -> Result<Option<ForecastRecord>> {
+            Ok(None)
+        }
+        async fn get_categories(&self) -> Result<Vec<CategoryRecord>> {
+            Ok(vec![])
+        }
         async fn cards_open_now(&self) -> Result<Vec<crate::models::CardSummaryRow>> {
             Ok(vec![])
         }
