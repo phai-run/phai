@@ -1016,7 +1016,7 @@ impl FinanceStore for LocalStore {
             "
             SELECT category_id, name, parent_category_id, metadata_json, actor_id, updated_at
             FROM categories
-            ORDER BY category_id ASC
+            ORDER BY name ASC
             ",
         )?;
         let rows = stmt.query_map([], |row| {

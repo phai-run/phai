@@ -11,6 +11,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::get,
     Router,
@@ -30,6 +31,8 @@ use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+
+const STORE_CHANNEL_CAP: usize = 64;
 use tokio::task::LocalSet;
 use uuid::Uuid;
 
@@ -60,7 +63,7 @@ enum StoreRequest {
         resp: oneshot::Sender<Result<()>>,
     },
     UpsertForecast {
-        record: ForecastRecord,
+        record: Box<ForecastRecord>,
         resp: oneshot::Sender<Result<String>>,
     },
     ListForecasts {
@@ -88,10 +91,7 @@ enum StoreRequest {
 
 use finance_core::models::TransactionRecord;
 
-async fn store_actor_loop(
-    store: Box<dyn FinanceStore>,
-    mut rx: mpsc::UnboundedReceiver<StoreRequest>,
-) {
+async fn store_actor_loop(store: Box<dyn FinanceStore>, mut rx: mpsc::Receiver<StoreRequest>) {
     while let Some(req) = rx.recv().await {
         match req {
             StoreRequest::GetChartData {
@@ -122,7 +122,8 @@ async fn store_actor_loop(
                 let result = handle_dismiss_template(store.as_ref(), &template_id).await;
                 let _ = resp.send(result);
             }
-            StoreRequest::UpsertForecast { mut record, resp } => {
+            StoreRequest::UpsertForecast { record, resp } => {
+                let mut record = *record;
                 let actor_id = record.actor_id.clone();
                 let result: Result<String> = async {
                     if record.forecast_id.is_empty() {
@@ -130,11 +131,11 @@ async fn store_actor_loop(
                     }
                     ensure_forecast_idempotency(&mut record).context("idempotency")?;
                     let forecast_id = record.forecast_id.clone();
+                    let diff = serde_json::to_value(&record).unwrap_or_default();
                     store
                         .upsert_forecasts(&[record])
                         .await
                         .context("upsert_forecasts")?;
-                    // Write a minimal audit event.
                     let event = AuditEvent {
                         event_id: Uuid::now_v7().to_string(),
                         entity_type: "forecast".into(),
@@ -143,7 +144,7 @@ async fn store_actor_loop(
                         actor_id,
                         event_timestamp: Utc::now(),
                         idempotency_key: Uuid::now_v7().to_string(),
-                        diff_json: Value::Object(Default::default()),
+                        diff_json: diff,
                     };
                     store.insert_audit_events(&[event]).await.context("audit")?;
                     Ok(forecast_id)
@@ -198,6 +199,20 @@ async fn handle_accept_template(
     }
     template.status = "ativo".into();
     store.upsert_forecast_templates(&[template.clone()]).await?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "forecast_template".into(),
+        entity_id: template_id.to_string(),
+        action: "accept".into(),
+        actor_id: "serve-dashboard".into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: serde_json::json!({ "status": "ativo" }),
+    };
+    store
+        .insert_audit_events(&[event])
+        .await
+        .context("audit accept_template")?;
     let count = materialise_template_forecasts(
         store,
         &template,
@@ -222,6 +237,20 @@ async fn handle_dismiss_template(store: &dyn FinanceStore, template_id: &str) ->
     }
     template.status = "descartado".into();
     store.upsert_forecast_templates(&[template]).await?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "forecast_template".into(),
+        entity_id: template_id.to_string(),
+        action: "dismiss".into(),
+        actor_id: "serve-dashboard".into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: serde_json::json!({ "status": "descartado" }),
+    };
+    store
+        .insert_audit_events(&[event])
+        .await
+        .context("audit dismiss_template")?;
     Ok(())
 }
 
@@ -267,7 +296,7 @@ impl WsResponse {
     }
 }
 
-async fn handle_socket(socket: WebSocket, tx: mpsc::UnboundedSender<StoreRequest>) {
+async fn handle_socket(socket: WebSocket, tx: mpsc::Sender<StoreRequest>) {
     let (mut sender, mut receiver) = socket.split();
 
     while let Some(Ok(msg)) = receiver.next().await {
@@ -299,7 +328,7 @@ async fn handle_socket(socket: WebSocket, tx: mpsc::UnboundedSender<StoreRequest
     }
 }
 
-async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest>) -> WsResponse {
+async fn process_request(req: WsRequest, tx: &mpsc::Sender<StoreRequest>) -> WsResponse {
     match req.msg_type.as_str() {
         "get_chart_data" => {
             let months_back = req.payload["months_back"].as_u64().unwrap_or(6) as usize;
@@ -311,6 +340,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                     months_ahead,
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -335,6 +365,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                     status,
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -361,6 +392,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                     materialize_months,
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -381,6 +413,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                     template_id: template_id.into(),
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -400,12 +433,23 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            let amount_str = req.payload["amount"].as_str().unwrap_or("0");
-            let amount = Decimal::from_str(amount_str).unwrap_or(Decimal::ZERO);
+            let amount_str = match req.payload["amount"].as_str() {
+                Some(s) => s,
+                None => return WsResponse::error(req.id, "amount é obrigatório"),
+            };
+            let amount = match Decimal::from_str(amount_str) {
+                Ok(d) => d,
+                Err(_) => {
+                    return WsResponse::error(
+                        req.id,
+                        &format!("amount inválido: '{amount_str}' (use formato: -250.00)"),
+                    )
+                }
+            };
             let due_date = req.payload["due_date"]
                 .as_str()
                 .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-            let record = ForecastRecord {
+            let record = Box::new(ForecastRecord {
                 forecast_id: String::new(),
                 due_date,
                 description,
@@ -422,13 +466,14 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                 template_id: None,
                 realized_transaction_id: None,
                 realized_at: None,
-            };
+            });
             let (resp_tx, resp_rx) = oneshot::channel();
             if tx
                 .send(StoreRequest::UpsertForecast {
                     record,
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -459,6 +504,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                     until,
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -483,6 +529,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                     forecast_id: forecast_id.into(),
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -501,6 +548,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
             let (resp_tx, resp_rx) = oneshot::channel();
             if tx
                 .send(StoreRequest::GetCategories { resp: resp_tx })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -519,6 +567,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
             let (resp_tx, resp_rx) = oneshot::channel();
             if tx
                 .send(StoreRequest::GetAccounts { resp: resp_tx })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -553,6 +602,7 @@ async fn process_request(req: WsRequest, tx: &mpsc::UnboundedSender<StoreRequest
                     to,
                     resp: resp_tx,
                 })
+                .await
                 .is_err()
             {
                 return WsResponse::error(req.id, "store actor morreu");
@@ -584,7 +634,7 @@ pub async fn run(port: u16, host: &str) -> Result<()> {
     let config: AppConfig = config;
 
     // Build the channel before entering LocalSet.
-    let (store_tx, store_rx) = mpsc::unbounded_channel::<StoreRequest>();
+    let (store_tx, store_rx) = mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP);
 
     let local = LocalSet::new();
 
@@ -624,7 +674,113 @@ pub async fn run(port: u16, host: &str) -> Result<()> {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(tx): State<Arc<mpsc::UnboundedSender<StoreRequest>>>,
+    State(tx): State<Arc<mpsc::Sender<StoreRequest>>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if !is_origin_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "Origin não permitida").into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, (*tx).clone()))
+        .into_response()
+}
+
+/// Permite apenas conexões de localhost ou sem Origin (curl, integração direta).
+/// Rejeita qualquer outro Origin para prevenir Cross-Site WebSocket Hijacking.
+fn is_origin_allowed(headers: &HeaderMap) -> bool {
+    match headers.get("origin") {
+        None => true,
+        Some(v) => {
+            let origin = v.to_str().unwrap_or("");
+            origin.starts_with("http://localhost:")
+                || origin.starts_with("http://127.0.0.1:")
+                || origin == "null"
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    // ── is_origin_allowed ──────────────────────────────────────────────────
+
+    #[test]
+    fn origin_absent_is_allowed() {
+        assert!(is_origin_allowed(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn localhost_origin_allowed() {
+        let mut h = HeaderMap::new();
+        h.insert("origin", HeaderValue::from_static("http://localhost:8080"));
+        assert!(is_origin_allowed(&h));
+    }
+
+    #[test]
+    fn loopback_origin_allowed() {
+        let mut h = HeaderMap::new();
+        h.insert("origin", HeaderValue::from_static("http://127.0.0.1:8080"));
+        assert!(is_origin_allowed(&h));
+    }
+
+    #[test]
+    fn null_origin_allowed() {
+        let mut h = HeaderMap::new();
+        h.insert("origin", HeaderValue::from_static("null"));
+        assert!(is_origin_allowed(&h));
+    }
+
+    #[test]
+    fn external_origin_rejected() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "origin",
+            HeaderValue::from_static("https://evil.example.com"),
+        );
+        assert!(!is_origin_allowed(&h));
+    }
+
+    #[test]
+    fn lan_ip_origin_rejected() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "origin",
+            HeaderValue::from_static("http://192.168.1.100:8080"),
+        );
+        assert!(!is_origin_allowed(&h));
+    }
+
+    // ── WsResponse helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn ws_response_success_has_no_error() {
+        let r = WsResponse::success("id1".into(), "pong", serde_json::json!({}));
+        assert_eq!(r.id, "id1");
+        assert_eq!(r.msg_type, "pong");
+        assert!(r.error.is_none());
+        assert!(r.payload.is_some());
+    }
+
+    #[test]
+    fn ws_response_error_has_no_payload() {
+        let r = WsResponse::error("id2".into(), "falhou");
+        assert_eq!(r.msg_type, "error");
+        assert!(r.payload.is_none());
+        assert_eq!(r.error.as_deref(), Some("falhou"));
+    }
+
+    // ── Decimal parse guard ────────────────────────────────────────────────
+
+    #[test]
+    fn decimal_parse_rejects_non_numeric() {
+        let result = rust_decimal::Decimal::from_str("R$ 250,00");
+        assert!(result.is_err(), "must reject locale-formatted strings");
+    }
+
+    #[test]
+    fn decimal_parse_accepts_dot_notation() {
+        let d = rust_decimal::Decimal::from_str("-250.00").unwrap();
+        assert_eq!(d.to_string(), "-250.00");
+    }
 }

@@ -69,6 +69,7 @@ proposed → active → superseded
 | [0015](0015-anatomy-replication.md) | Anatomy replication propagates human-curated description and purpose from prior same-merchant transactions | active |
 | [0016](0016-forecast-automation.md) | Forecast automation: templates, detection layers and reconciliation | accepted |
 | [0017](0017-release-signature-verification.md) | Release signature verification (minisign) on top of SHA-256 | active |
+| [0018](0018-serve-local-dashboard.md) | `fin serve`: local HTTP+WebSocket dashboard for forecast review | active |
 
 ---
 

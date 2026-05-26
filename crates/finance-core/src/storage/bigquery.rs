@@ -1970,7 +1970,7 @@ impl FinanceStore for BigQueryStore {
               actor_id,
               FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
             FROM {}
-            ORDER BY category_id ASC
+            ORDER BY name ASC
             ",
             self.qualified_table("categories")?,
         );

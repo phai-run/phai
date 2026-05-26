@@ -246,8 +246,6 @@ function renderChart(data) {
   const ctx = document.getElementById('cashflowChart').getContext('2d');
   if (chartInstance) chartInstance.destroy();
 
-  Chart.register(ChartDataLabels);
-
   chartInstance = new Chart(ctx, {
     type: 'bar',
     data: {
@@ -343,16 +341,6 @@ function renderChart(data) {
       }
     }
   });
-
-  // Click handler on the chart to show transactions
-  document.getElementById('cashflowChart').onclick = (e) => {
-    const points = chartInstance.getElementsAtEventForMode(e, 'index', { intersect: false }, true);
-    if (points.length > 0) {
-      const idx = points[0].index;
-      const m = months[idx];
-      if (m) showTransactionsForMonth(m);
-    }
-  };
 }
 
 async function showTransactionsForMonth(month) {
@@ -456,16 +444,26 @@ function renderTemplates(templates) {
       </div>`;
     if (isProposto) {
       html += `<div class="actions">
-        <button class="success" onclick="event.stopPropagation(); acceptTemplate('${escHtml(t.template_id)}')">Aceitar</button>
-        <button class="muted" onclick="event.stopPropagation(); dismissTemplate('${escHtml(t.template_id)}')">Recusar</button>
+        <button class="success" data-action="accept" data-tid="${escHtml(t.template_id)}">Aceitar</button>
+        <button class="muted" data-action="dismiss" data-tid="${escHtml(t.template_id)}">Recusar</button>
       </div>`;
     }
     html += '</div>';
   }
   container.innerHTML = html;
+
+  container.querySelectorAll('button[data-action]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const tid = btn.dataset.tid;
+      const action = btn.dataset.action;
+      if (action === 'accept') await doAcceptTemplate(tid);
+      else if (action === 'dismiss') await doDismissTemplate(tid);
+    });
+  });
 }
 
-async function acceptTemplate(templateId) {
+async function doAcceptTemplate(templateId) {
   try {
     const resp = await send('accept_template', { template_id: templateId, materialize_months: 6 });
     if (resp.error) { alert('Erro: ' + resp.error); return; }
@@ -473,7 +471,7 @@ async function acceptTemplate(templateId) {
   } catch (e) { alert('Erro de conexão'); }
 }
 
-async function dismissTemplate(templateId) {
+async function doDismissTemplate(templateId) {
   try {
     const resp = await send('dismiss_template', { template_id: templateId });
     if (resp.error) { alert('Erro: ' + resp.error); return; }
@@ -579,6 +577,7 @@ document.querySelectorAll('nav a').forEach(a => {
 });
 
 // ── Init ──
+Chart.register(ChartDataLabels);
 connect();
 </script>
 </body>

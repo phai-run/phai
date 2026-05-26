@@ -121,7 +121,7 @@ enum Commands {
     Serve {
         #[arg(long, default_value_t = 8080, help = "porta do servidor web")]
         port: u16,
-        #[arg(long, default_value = "0.0.0.0", help = "endereço para escutar")]
+        #[arg(long, default_value = "127.0.0.1", help = "endereço para escutar")]
         host: String,
     },
     /// Push the daily pulse to an external channel (WhatsApp via webhook).
