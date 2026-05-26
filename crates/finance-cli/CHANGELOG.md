@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/feliperun/finance-os/compare/v2.5.0...v3.0.0) (2026-05-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **serve:** fin serve no longer accepts --host; it always binds to 127.0.0.1 and advertises meuapp.localhost.
+
+### Bug Fixes
+
+* **serve:** bind dashboard to localhost alias ([a1f1346](https://github.com/feliperun/finance-os/commit/a1f1346b7fe90b7cd8ae68b92c5160f28517dfc6))
+
 ## [2.5.0](https://github.com/feliperun/finance-os/compare/v2.4.0...v2.5.0) (2026-05-26)
 
 
