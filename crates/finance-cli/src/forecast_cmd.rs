@@ -11,8 +11,8 @@ use chrono::{Datelike, NaiveDate, Utc};
 use finance_core::migrations::run_migrations;
 use finance_core::storage::{open_store, FinanceStore};
 use finance_core::{
-    group_into_chains, AppConfig, AuditEvent, ForecastRecord, ForecastTemplateRecord,
-    InstallmentChain,
+    group_into_chains, AccountRecord, AppConfig, AuditEvent, ForecastRecord,
+    ForecastTemplateRecord, InstallmentChain,
 };
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -1357,6 +1357,8 @@ pub struct RefreshReport {
     pub templates_materialised: usize,
     pub forecasts_materialised: usize,
     pub new_suggestions: usize,
+    /// Number of open-bill forecast rows upserted (one per card with pending charges).
+    pub open_bill_forecasts: usize,
 }
 
 pub(crate) async fn run_refresh(args: ForecastRefreshArgs) -> Result<()> {
@@ -1389,6 +1391,7 @@ pub(crate) async fn run_refresh(args: ForecastRefreshArgs) -> Result<()> {
             },
             "templates_materialised": report.templates_materialised,
             "forecasts_materialised": report.forecasts_materialised,
+            "open_bill_forecasts": report.open_bill_forecasts,
             "new_suggestions": report.new_suggestions,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -1434,6 +1437,8 @@ pub async fn refresh_all(
         }
     }
 
+    let open_bill_forecasts = refresh_open_card_bills(store, &config.actor_id, now).await?;
+
     let new_suggestions = if skip_suggest {
         0
     } else {
@@ -1446,6 +1451,7 @@ pub async fn refresh_all(
         templates_materialised,
         forecasts_materialised,
         new_suggestions,
+        open_bill_forecasts,
     })
 }
 
@@ -1531,6 +1537,127 @@ async fn run_suggest_silent(
     Ok(new_proposals.len())
 }
 
+// ---------------------------------------------------------------------------
+// Open card-bill forecasts
+// ---------------------------------------------------------------------------
+
+/// Materialize one `forecast` row per credit card that has a non-zero open
+/// bill (`payment_status = 'pending'` charges in the current cycle). The row
+/// is keyed on `(account_id, cycle_month)` so it is updated in-place on every
+/// refresh as new purchases accumulate. Skips cards without `billing_due_day`
+/// configured in `accounts.metadata_json`.
+pub async fn refresh_open_card_bills(
+    store: &dyn FinanceStore,
+    actor_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<usize> {
+    let open_cards = store
+        .cards_open_now()
+        .await
+        .context("falha ao carregar faturas abertas")?;
+    if open_cards.is_empty() {
+        return Ok(0);
+    }
+
+    let accounts = store
+        .get_accounts()
+        .await
+        .context("falha ao carregar contas")?;
+
+    let mut forecasts: Vec<ForecastRecord> = Vec::new();
+    for card in &open_cards {
+        if card.open_amount.is_zero() {
+            continue;
+        }
+        let Some(acc) = accounts.iter().find(|a| a.account_id == card.account_id) else {
+            continue;
+        };
+        let Some(due_day) = billing_due_day_from_account(acc) else {
+            continue;
+        };
+        let Some(due_date) = card_open_bill_due_date(&card.month_ref, due_day) else {
+            continue;
+        };
+        let forecast_id = card_open_bill_forecast_id(&card.account_id, &card.month_ref);
+        let label = if acc.label.is_empty() {
+            acc.account_id.as_str()
+        } else {
+            acc.label.as_str()
+        };
+        forecasts.push(ForecastRecord {
+            forecast_id: forecast_id.clone(),
+            due_date: Some(due_date),
+            description: format!("Fatura {label}"),
+            amount: -card.open_amount,
+            category_id: None,
+            account_id: Some(card.account_id.clone()),
+            status: "ativo".to_string(),
+            recurrence: Some("card-cycle".to_string()),
+            actor_id: actor_id.to_string(),
+            idempotency_key: forecast_id,
+            metadata_json: json!({
+                "source": "card-open-bill",
+                "cycle_month": card.month_ref,
+            }),
+            created_at: now,
+            updated_at: now,
+            template_id: None,
+            realized_transaction_id: None,
+            realized_at: None,
+        });
+    }
+
+    let count = forecasts.len();
+    if !forecasts.is_empty() {
+        store
+            .upsert_forecasts(&forecasts)
+            .await
+            .context("falha ao gravar forecasts de fatura aberta")?;
+        let events = forecasts
+            .iter()
+            .map(|f| audit_event_for_forecast(f, "upsert", actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&events).await?;
+    }
+    Ok(count)
+}
+
+fn billing_due_day_from_account(acc: &AccountRecord) -> Option<u32> {
+    acc.metadata_json
+        .get("billing_due_day")?
+        .as_str()?
+        .parse::<u32>()
+        .ok()
+        .filter(|&d| (1..=31).contains(&d))
+}
+
+/// Due date for an open bill: `billing_due_day` of the `month_ref` cycle
+/// month (clamped to the last day of that month). The cycle month is
+/// already the month in which the bill closes, so the due date falls within
+/// the same month.
+fn card_open_bill_due_date(month_ref: &str, due_day: u32) -> Option<NaiveDate> {
+    let (year_str, month_str) = month_ref.split_once('-')?;
+    let y: i32 = year_str.parse().ok()?;
+    let m: u32 = month_str.parse().ok()?;
+    let last = days_in_month(y, m);
+    NaiveDate::from_ymd_opt(y, m, due_day.min(last))
+}
+
+/// Deterministic forecast ID for a card's open-bill forecast, keyed on
+/// `(account_id, cycle_month)`.
+fn card_open_bill_forecast_id(account_id: &str, month_ref: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"card-open-bill\x1f");
+    hasher.update(account_id.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(month_ref.as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "cob-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    )
+}
+
 fn print_refresh_report(report: &RefreshReport) {
     println!("🔁 Forecast · refresh completo");
     println!(
@@ -1547,6 +1674,12 @@ fn print_refresh_report(report: &RefreshReport) {
         "  Recorrentes    · templates materializados {} · forecasts {}",
         report.templates_materialised, report.forecasts_materialised,
     );
+    if report.open_bill_forecasts > 0 {
+        println!(
+            "  Faturas abertas · {} forecast(s) atualizado(s)",
+            report.open_bill_forecasts,
+        );
+    }
     if report.new_suggestions > 0 {
         println!(
             "  Sugestões      · {} novo(s) candidato(s) — rode `fin forecast suggest`",
@@ -1666,5 +1799,39 @@ mod tests {
             confidence: 0.0,
         };
         assert_eq!(c.idempotency_hash(), "f25d52649954089b");
+    }
+
+    #[test]
+    fn card_open_bill_due_date_returns_correct_day() {
+        // Cycle closes in June, due on day 10 of June.
+        assert_eq!(
+            card_open_bill_due_date("2026-06", 10),
+            NaiveDate::from_ymd_opt(2026, 6, 10),
+        );
+    }
+
+    #[test]
+    fn card_open_bill_due_date_clamps_to_month_end() {
+        // February 2026 has 28 days; due_day=31 must clamp to 28.
+        assert_eq!(
+            card_open_bill_due_date("2026-02", 31),
+            NaiveDate::from_ymd_opt(2026, 2, 28),
+        );
+    }
+
+    #[test]
+    fn card_open_bill_forecast_id_is_stable_across_builds() {
+        // Frozen value — changing this breaks existing forecast rows in prod.
+        assert_eq!(
+            card_open_bill_forecast_id("shared_credit", "2026-06"),
+            "cob-83b9b495c65a7647",
+        );
+    }
+
+    #[test]
+    fn card_open_bill_forecast_id_differs_by_cycle_month() {
+        let a = card_open_bill_forecast_id("card_a", "2026-05");
+        let b = card_open_bill_forecast_id("card_a", "2026-06");
+        assert_ne!(a, b);
     }
 }
