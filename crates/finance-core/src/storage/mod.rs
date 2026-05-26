@@ -94,6 +94,21 @@ pub trait FinanceStore {
         from: NaiveDate,
         until: NaiveDate,
     ) -> Result<Vec<ForecastRecord>>;
+    /// List forecast records with optional status and/or date-range filters.
+    /// When `status` is `None`, all statuses are included. When `from`/`until`
+    /// are `None`, no date filtering is applied. Ordered by due_date ASC.
+    async fn list_forecasts(
+        &self,
+        status: Option<&str>,
+        from: Option<NaiveDate>,
+        until: Option<NaiveDate>,
+    ) -> Result<Vec<ForecastRecord>>;
+    /// Look up a single forecast by its primary key. `Ok(None)` when missing.
+    async fn get_forecast(&self, forecast_id: &str) -> Result<Option<ForecastRecord>>;
+    /// Return every category record from the `categories` table with its name
+    /// and parent. Unlike `list_all_category_ids` (which returns a flat set),
+    /// this returns the full records suitable for dropdown rendering.
+    async fn get_categories(&self) -> Result<Vec<CategoryRecord>>;
     async fn apply_transaction_split(
         &self,
         split: &TransactionSplitRecord,

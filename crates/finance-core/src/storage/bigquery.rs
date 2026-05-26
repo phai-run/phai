@@ -1805,6 +1805,197 @@ impl FinanceStore for BigQueryStore {
         Ok(items)
     }
 
+    async fn list_forecasts(
+        &self,
+        status: Option<&str>,
+        from: Option<NaiveDate>,
+        until: Option<NaiveDate>,
+    ) -> Result<Vec<ForecastRecord>> {
+        let mut filters = Vec::new();
+        let mut params = Vec::new();
+        if let Some(s) = status {
+            filters.push("status = @status");
+            params.push(Param::string("status", s));
+        }
+        if let Some(d) = from {
+            filters.push("due_date >= @from");
+            params.push(Param::date("from", d));
+        }
+        if let Some(d) = until {
+            filters.push("due_date <= @until");
+            params.push(Param::date("until", d));
+        }
+        let where_sql = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", filters.join(" AND "))
+        };
+        let sql = format!(
+            "
+            SELECT
+              forecast_id,
+              CAST(due_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              category_id,
+              account_id,
+              status,
+              recurrence,
+              actor_id,
+              idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at),
+              template_id,
+              realized_transaction_id,
+              FORMAT_TIMESTAMP('%FT%T%Ez', realized_at)
+            FROM {}
+            {where_sql}
+            ORDER BY due_date ASC, amount DESC
+            ",
+            self.qualified_table("forecast")?,
+        );
+        let response = self.run_query_with_params(&sql, &params).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let metadata_str = optional_string(&values, 10).unwrap_or_else(|| "{}".to_string());
+            let metadata_json: Value =
+                serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+            let created_str = required_string(&values, 11, "created_at")?;
+            let updated_str = required_string(&values, 12, "updated_at")?;
+            items.push(ForecastRecord {
+                forecast_id: required_string(&values, 0, "forecast_id")?,
+                due_date: optional_date(&values, 1, "due_date")?,
+                description: required_string(&values, 2, "description")?,
+                amount: required_decimal(&values, 3, "amount")?,
+                category_id: optional_string(&values, 4),
+                account_id: optional_string(&values, 5),
+                status: required_string(&values, 6, "status")?,
+                recurrence: optional_string(&values, 7),
+                actor_id: required_string(&values, 8, "actor_id")?,
+                idempotency_key: required_string(&values, 9, "idempotency_key")?,
+                metadata_json,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                template_id: optional_string(&values, 13),
+                realized_transaction_id: optional_string(&values, 14),
+                realized_at: optional_string(&values, 15).and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .ok()
+                }),
+            });
+        }
+        Ok(items)
+    }
+
+    async fn get_forecast(&self, forecast_id: &str) -> Result<Option<ForecastRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              forecast_id,
+              CAST(due_date AS STRING),
+              description,
+              CAST(amount AS STRING),
+              category_id,
+              account_id,
+              status,
+              recurrence,
+              actor_id,
+              idempotency_key,
+              TO_JSON_STRING(metadata_json),
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at),
+              template_id,
+              realized_transaction_id,
+              FORMAT_TIMESTAMP('%FT%T%Ez', realized_at)
+            FROM {}
+            WHERE forecast_id = @forecast_id
+            ",
+            self.qualified_table("forecast")?,
+        );
+        let response = self
+            .run_query_with_params(&sql, &[Param::string("forecast_id", forecast_id)])
+            .await?;
+        if response.rows.is_empty() {
+            return Ok(None);
+        }
+        let values = row_values(&response.rows[0]);
+        let metadata_str = optional_string(&values, 10).unwrap_or_else(|| "{}".to_string());
+        let metadata_json: Value =
+            serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+        let created_str = required_string(&values, 11, "created_at")?;
+        let updated_str = required_string(&values, 12, "updated_at")?;
+        Ok(Some(ForecastRecord {
+            forecast_id: required_string(&values, 0, "forecast_id")?,
+            due_date: optional_date(&values, 1, "due_date")?,
+            description: required_string(&values, 2, "description")?,
+            amount: required_decimal(&values, 3, "amount")?,
+            category_id: optional_string(&values, 4),
+            account_id: optional_string(&values, 5),
+            status: required_string(&values, 6, "status")?,
+            recurrence: optional_string(&values, 7),
+            actor_id: required_string(&values, 8, "actor_id")?,
+            idempotency_key: required_string(&values, 9, "idempotency_key")?,
+            metadata_json,
+            created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now()),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now()),
+            template_id: optional_string(&values, 13),
+            realized_transaction_id: optional_string(&values, 14),
+            realized_at: optional_string(&values, 15).and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .ok()
+            }),
+        }))
+    }
+
+    async fn get_categories(&self) -> Result<Vec<CategoryRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              category_id,
+              name,
+              parent_category_id,
+              TO_JSON_STRING(metadata_json),
+              actor_id,
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            ORDER BY name ASC
+            ",
+            self.qualified_table("categories")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let metadata_str = optional_string(&values, 3).unwrap_or_else(|| "{}".to_string());
+            let metadata_json: Value =
+                serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default()));
+            let updated_str = required_string(&values, 5, "updated_at")?;
+            items.push(CategoryRecord {
+                category_id: required_string(&values, 0, "category_id")?,
+                name: required_string(&values, 1, "name")?,
+                parent_category_id: optional_string(&values, 2),
+                metadata_json,
+                actor_id: required_string(&values, 4, "actor_id")?,
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            });
+        }
+        Ok(items)
+    }
+
     async fn apply_transaction_split(
         &self,
         split: &TransactionSplitRecord,

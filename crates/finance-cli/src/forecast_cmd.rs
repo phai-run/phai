@@ -961,7 +961,7 @@ pub(crate) async fn run_dismiss(args: ForecastDismissArgs) -> Result<()> {
 
 /// Materialise N monthly forecast instances ahead of `today` for a given
 /// template. Idempotent on `forecast_id` (`tpl-{template_id}-YYYYMM`).
-async fn materialise_template_forecasts(
+pub(crate) async fn materialise_template_forecasts(
     store: &dyn FinanceStore,
     template: &ForecastTemplateRecord,
     months_ahead: u32,

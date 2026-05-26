@@ -14,8 +14,9 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
 use finance_core::migrations::run_migrations;
-use finance_core::storage::open_store;
+use finance_core::storage::{open_store, FinanceStore};
 use rust_decimal::Decimal;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -23,7 +24,7 @@ use crate::human_format;
 use crate::{load_config, month_ref_for, parse_month_ref, shift_month, CashflowChartArgs};
 
 /// One month's slice of data for the chart.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct MonthDatum {
     pub label: String, // "mai/26"
     /// Realized inflows (what already hit the checking accounts). Zero for
@@ -50,7 +51,7 @@ pub(crate) struct MonthDatum {
 }
 
 /// Bundle returned by the data collection pass — what the renderers consume.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ChartData {
     pub months: Vec<MonthDatum>,
     /// Opening balance at the left edge of the window — the line anchor.
@@ -68,7 +69,7 @@ pub(crate) struct ChartData {
 }
 
 /// What-if scenario overlay (see ADR-0016 Layer 5).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ScenarioOverlay {
     pub label: String,
     /// Signed monthly amount of the hypothetical commitment.
@@ -93,8 +94,6 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
         anyhow::bail!("--no-svg sem --text não produz nada: passe --text ou remova --no-svg");
     }
     if months_ahead > 0 && !args.forecast {
-        // months-ahead without forecast = pure-future months with no data.
-        // The bars would just be empty. Better to fail loud than draw nothing.
         anyhow::bail!("--months-ahead requer --forecast (sem forecast não há nada para projetar)");
     }
 
@@ -102,6 +101,43 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
 
+    let mut chart =
+        build_chart_data(store.as_ref(), months_back, months_ahead, args.forecast).await?;
+    let scenario = build_scenario_overlay(&args, &chart.months, chart.realized_count)?;
+    if scenario.is_some() && !args.forecast {
+        anyhow::bail!(
+            "--scenario-amount requer --forecast (a sobreposição parte do saldo projetado)"
+        );
+    }
+    chart.scenario = scenario;
+
+    if !args.no_svg {
+        let output_path = args
+            .output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("finance-cashflow.svg"));
+        let svg = render_svg(&chart);
+        write_svg(&output_path, &svg)?;
+        println!("📊 SVG gravado em {}", output_path.display());
+    }
+
+    if args.text {
+        print!("{}", render_sparkline(&chart));
+    }
+
+    Ok(())
+}
+
+/// Build [`ChartData`] for a window of `months_back` (past+current) +
+/// `months_ahead` (future) months. When `with_forecast` is true, each
+/// month includes the forecast-remaining portion (hatched bar tops) and
+/// projected closing balances (dashed saldo line).
+pub(crate) async fn build_chart_data(
+    store: &dyn FinanceStore,
+    months_back: usize,
+    months_ahead: usize,
+    with_forecast: bool,
+) -> Result<ChartData> {
     let today = chrono::Local::now().date_naive();
     let current_month = first_of_month(today)?;
 
@@ -142,7 +178,7 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
             (Decimal::ZERO, Decimal::ZERO, None)
         };
 
-        let (fc_in_remaining, fc_out_remaining) = if args.forecast {
+        let (fc_in_remaining, fc_out_remaining) = if with_forecast {
             let last_day = last_day_of_month(*month_start)?;
             // "Remaining" = forecasts whose due_date hasn't passed yet.
             // For past months this returns nothing (all due_dates < today).
@@ -172,7 +208,7 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
         // for current, prev_projection + (fc_in - fc_out) for future. We do
         // it in one expression by relying on the fact that for future months
         // realized is zero, so the formula collapses naturally.
-        let projected = if args.forecast {
+        let projected = if with_forecast {
             let net_realized = inflows - outflows;
             let net_remaining = fc_in_remaining.unwrap_or(Decimal::ZERO)
                 - fc_out_remaining.unwrap_or(Decimal::ZERO);
@@ -188,7 +224,7 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
         running_projection = if !is_future && closing_balance.is_some() {
             // Use projected (which incorporates forecast remaining) if forecast
             // is on, else use the realized closing.
-            if args.forecast {
+            if with_forecast {
                 projected
             } else {
                 closing_balance
@@ -209,36 +245,13 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
         });
     }
 
-    let scenario = build_scenario_overlay(&args, &data, realized_count)?;
-    if scenario.is_some() && !args.forecast {
-        anyhow::bail!(
-            "--scenario-amount requer --forecast (a sobreposição parte do saldo projetado)"
-        );
-    }
-
-    let chart = ChartData {
+    Ok(ChartData {
         months: data,
         initial_balance,
-        with_forecast: args.forecast,
+        with_forecast,
         realized_count,
-        scenario,
-    };
-
-    if !args.no_svg {
-        let output_path = args
-            .output
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("finance-cashflow.svg"));
-        let svg = render_svg(&chart);
-        write_svg(&output_path, &svg)?;
-        println!("📊 SVG gravado em {}", output_path.display());
-    }
-
-    if args.text {
-        print!("{}", render_sparkline(&chart));
-    }
-
-    Ok(())
+        scenario: None,
+    })
 }
 
 fn write_svg(path: &Path, body: &str) -> Result<()> {
