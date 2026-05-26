@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/feliperun/finance-os/compare/v2.3.2...v2.4.0) (2026-05-26)
+
+
+### Features
+
+* **forecast:** close ADR-0016 operational gaps ([#69](https://github.com/feliperun/finance-os/issues/69)) ([fa55448](https://github.com/feliperun/finance-os/commit/fa55448b4cfaf0e33ce15672ff0317bb906e0986))
+
 ## [2.3.2](https://github.com/feliperun/finance-os/compare/v2.3.1...v2.3.2) (2026-05-25)
 
 
