@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::get,
-    Router,
+    Json, Router,
 };
 use chrono::{NaiveDate, Utc};
 use finance_core::idempotency::ensure_forecast_idempotency;
@@ -35,6 +35,8 @@ use tokio::task::LocalSet;
 use uuid::Uuid;
 
 const STORE_CHANNEL_CAP: usize = 64;
+const LOCAL_BIND_HOST: &str = "127.0.0.1";
+const LOCAL_APP_HOST: &str = "meuapp.localhost";
 
 use crate::cashflow_chart::{build_chart_data, ChartData};
 use crate::forecast_cmd::materialise_template_forecasts;
@@ -627,9 +629,13 @@ async fn dashboard_page() -> impl IntoResponse {
     Html(include_str!("serve_dashboard.html"))
 }
 
+async fn api_status() -> Json<Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────
 
-pub async fn run(port: u16, host: &str) -> Result<()> {
+pub async fn run(port: u16) -> Result<()> {
     let (_, config) = load_config().await?;
     let config: AppConfig = config;
 
@@ -650,15 +656,16 @@ pub async fn run(port: u16, host: &str) -> Result<()> {
 
     let app = Router::new()
         .route("/", get(dashboard_page))
+        .route("/api", get(api_status))
         .route("/ws", get(ws_handler))
         .with_state(app_state);
 
-    let addr = format!("{host}:{port}");
+    let addr = format!("{LOCAL_BIND_HOST}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("falha ao escutar em {addr}"))?;
 
-    println!("🌐 Dashboard em http://{addr}");
+    println!("🌐 Dashboard em http://{LOCAL_APP_HOST}:{port}");
     println!("   Pressione Ctrl+C para parar");
 
     local
@@ -693,6 +700,7 @@ fn is_origin_allowed(headers: &HeaderMap) -> bool {
             let origin = v.to_str().unwrap_or("");
             origin.starts_with("http://localhost:")
                 || origin.starts_with("http://127.0.0.1:")
+                || origin.starts_with("http://meuapp.localhost:")
                 || origin == "null"
         }
     }
@@ -721,6 +729,16 @@ mod tests {
     fn loopback_origin_allowed() {
         let mut h = HeaderMap::new();
         h.insert("origin", HeaderValue::from_static("http://127.0.0.1:8080"));
+        assert!(is_origin_allowed(&h));
+    }
+
+    #[test]
+    fn localhost_alias_origin_allowed() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "origin",
+            HeaderValue::from_static("http://meuapp.localhost:8080"),
+        );
         assert!(is_origin_allowed(&h));
     }
 

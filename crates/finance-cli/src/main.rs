@@ -121,8 +121,6 @@ enum Commands {
     Serve {
         #[arg(long, default_value_t = 8080, help = "porta do servidor web")]
         port: u16,
-        #[arg(long, default_value = "127.0.0.1", help = "endereço para escutar")]
-        host: String,
     },
     /// Push the daily pulse to an external channel (WhatsApp via webhook).
     Notify {
@@ -3085,7 +3083,7 @@ async fn main() -> Result<()> {
             BudgetCommand::Upsert(args) => budget_upsert(args).await,
             BudgetCommand::List(args) => budget_list(args).await,
         },
-        Some(Commands::Serve { port, host }) => serve::run(port, &host).await,
+        Some(Commands::Serve { port }) => serve::run(port).await,
         Some(Commands::Notify { command }) => match command {
             NotifyCommand::Whatsapp(args) => notify_whatsapp(args).await,
         },
