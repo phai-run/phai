@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "finance-cli"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "finance-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",

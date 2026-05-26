@@ -137,7 +137,7 @@ finance-cli forecast scenario       What-if: project balance with a hypothetical
 finance-cli rule upsert/list/inspect Classification rule management
 finance-cli account upsert          Create or update an account
 finance-cli budget upsert/list      Category budget management
-finance-cli serve [--port 8080] [--host 127.0.0.1]  Web dashboard for forecast review (WebSocket API)
+finance-cli serve [--port 8080]  Local web dashboard for forecast review (WebSocket API)
 finance-cli self check              Check for available updates
 finance-cli self update             Force-update to the latest release
 ```
