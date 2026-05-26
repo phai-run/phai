@@ -9,7 +9,8 @@
 set -euo pipefail
 
 REPO="feliperun/finance-os"
-BIN_NAME="finance-cli"
+ASSET_PREFIX="finance-cli"   # prefix used in GitHub release asset filenames
+BINARY_NAME="fin"            # actual binary name inside the tarball and on disk
 DEFAULT_PREFIX="${HOME}/.local"
 PREFIX="${DEFAULT_PREFIX}"
 VERSION="latest"
@@ -24,7 +25,7 @@ for arg in "$@"; do
 finance-os installer
 
 Options:
-  --prefix=PATH    Install directory (default: \$HOME/.local). Binary goes to PREFIX/bin/${BIN_NAME}.
+  --prefix=PATH    Install directory (default: \$HOME/.local). Binary goes to PREFIX/bin/${BINARY_NAME}.
   --version=TAG    Specific release tag (e.g. v0.5.1). Defaults to latest.
   -h, --help       Show this help.
 EOF
@@ -60,8 +61,13 @@ esac
 
 # ─── Resolve version ────────────────────────────────────────────────────────
 if [ "$VERSION" = "latest" ]; then
-  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+  # The monorepo publishes finance-core-vX.Y.Z releases alongside finance-cli
+  # ones. GitHub may flag a finance-core release as "latest", so we list the
+  # 20 most recent releases and pick the first tag that is NOT a finance-core
+  # release (i.e. doesn't start with "finance-core-").
+  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=20" \
     | grep '"tag_name"' \
+    | grep -v '"finance-core-' \
     | head -1 \
     | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
   if [ -z "$TAG" ]; then
@@ -73,12 +79,12 @@ else
 fi
 
 # ─── Download and verify ────────────────────────────────────────────────────
-ASSET="${BIN_NAME}-${TARGET}.tar.gz"
+ASSET="${ASSET_PREFIX}-${TARGET}.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "→ Downloading ${BIN_NAME} ${TAG} for ${TARGET}..."
+echo "→ Downloading ${BINARY_NAME} ${TAG} for ${TARGET}..."
 curl -fsSL -o "${TMPDIR}/${ASSET}"        "${BASE_URL}/${ASSET}"
 curl -fsSL -o "${TMPDIR}/${ASSET}.sha256" "${BASE_URL}/${ASSET}.sha256"
 
@@ -94,10 +100,10 @@ fi
 INSTALL_DIR="${PREFIX}/bin"
 mkdir -p "$INSTALL_DIR"
 
-echo "→ Installing to ${INSTALL_DIR}/${BIN_NAME}..."
+echo "→ Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
 tar -xzf "${TMPDIR}/${ASSET}" -C "${TMPDIR}"
-mv "${TMPDIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
-chmod +x "${INSTALL_DIR}/${BIN_NAME}"
+mv "${TMPDIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
 # ─── PATH check ─────────────────────────────────────────────────────────────
 case ":$PATH:" in
@@ -119,14 +125,14 @@ EOF
 esac
 
 # ─── Done ───────────────────────────────────────────────────────────────────
-INSTALLED_VERSION="$("${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null || echo "?")"
+INSTALLED_VERSION="$("${INSTALL_DIR}/${BINARY_NAME}" --version 2>/dev/null || echo "?")"
 cat <<EOF
 
 ✓ Installed: ${INSTALLED_VERSION}
-  Location:  ${INSTALL_DIR}/${BIN_NAME}
+  Location:  ${INSTALL_DIR}/${BINARY_NAME}
 
 Next steps:
-  ${BIN_NAME} --help            # show available commands
-  ${BIN_NAME} self check        # verify auto-update connectivity
+  ${BINARY_NAME} --help            # show available commands
+  ${BINARY_NAME} self check        # verify auto-update connectivity
 
 EOF
