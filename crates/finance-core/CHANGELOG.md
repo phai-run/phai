@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/feliperun/finance-os/compare/finance-core-v1.1.0...finance-core-v1.1.1) (2026-05-27)
+
+
+### Bug Fixes
+
+* **migrations:** renumber card-summary fix to 035 and register it ([6ee3b85](https://github.com/feliperun/finance-os/commit/6ee3b8584fb67e7949f0f0c0bdc89c0c3a270296))
+* **migrations:** renumber card-summary fix to 035 and register it ([8f5b10a](https://github.com/feliperun/finance-os/commit/8f5b10a2dbdf545b11b9300c845f48d0c24ccf17))
+
 ## [1.1.0](https://github.com/feliperun/finance-os/compare/finance-core-v1.0.1...finance-core-v1.1.0) (2026-05-26)
 
 
