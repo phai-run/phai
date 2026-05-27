@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 34] = [
+const SQLITE_MIGRATIONS: [Migration; 35] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -141,9 +141,13 @@ const SQLITE_MIGRATIONS: [Migration; 34] = [
         "034_forecast_template",
         include_str!("../../../schema/sqlite/034_forecast_template.sql"),
     ),
+    (
+        "035_fix_card_summary_double_count",
+        include_str!("../../../schema/sqlite/035_fix_card_summary_double_count.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 34] = [
+const BIGQUERY_MIGRATIONS: [Migration; 35] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -279,6 +283,10 @@ const BIGQUERY_MIGRATIONS: [Migration; 34] = [
     (
         "034_forecast_template",
         include_str!("../../../schema/bigquery/034_forecast_template.sql"),
+    ),
+    (
+        "035_fix_card_summary_double_count",
+        include_str!("../../../schema/bigquery/035_fix_card_summary_double_count.sql"),
     ),
 ];
 

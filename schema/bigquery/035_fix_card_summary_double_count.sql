@@ -1,11 +1,10 @@
--- Migration 034: fix v_card_summary double-counting of card payments.
+-- Migration 035: fix v_card_summary double-counting of card charges.
 --
 -- v_card_summary previously read from `transactions` directly, which
--- admits every row including duplicate Pluggy-synced "Pagamento recebido"
--- credit entries (bill payments mirrored on the card side). Because the
--- view computed `total_charges` and `transaction_count` only on negative
--- amounts, the monetary totals were correct, but `transaction_count` was
--- inflated when Pluggy reported the same bill payment twice.
+-- admits both the legacy manual entry and its Pluggy-synced equivalent
+-- for the same negative charge. `total_charges` and `transaction_count`
+-- only consider amount_cents < 0, so duplicate debits (not duplicated
+-- "Pagamento recebido" credits) inflated both totals and the count.
 --
 -- Switching to `v_transactions_reportable` ensures:
 --   1. Legacy manual entries deduped against Pluggy equivalents.
