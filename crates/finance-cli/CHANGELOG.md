@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.1.0](https://github.com/feliperun/finance-os/compare/v3.0.0...v3.1.0) (2026-05-26)
+
+
+### Features
+
+* **forecast:** materialise open credit-card bill as forecast on refresh ([9aaa0de](https://github.com/feliperun/finance-os/commit/9aaa0de34a455a6bdf6c7d3fb1b1f839f0afc2a5))
+* **forecast:** materialise open credit-card bill as forecast on refresh ([c7594cc](https://github.com/feliperun/finance-os/commit/c7594cc2b21c9fdcded2119ff3d1435dd5edd028))
+
 ## [3.0.0](https://github.com/feliperun/finance-os/compare/v2.5.0...v3.0.0) (2026-05-26)
 
 
