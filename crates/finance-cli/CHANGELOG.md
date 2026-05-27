@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/feliperun/finance-os/compare/v3.1.0...v3.2.0) (2026-05-27)
+
+
+### Features
+
+* **tui:** review improvements — SQLite local saves, bulk progress, split modal ([#86](https://github.com/feliperun/finance-os/issues/86)) ([45b938c](https://github.com/feliperun/finance-os/commit/45b938ca3364bb3b35490cc580a0acf1f56a998d))
+
 ## [3.1.0](https://github.com/feliperun/finance-os/compare/v3.0.0...v3.1.0) (2026-05-26)
 
 
