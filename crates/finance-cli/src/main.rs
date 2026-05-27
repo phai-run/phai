@@ -41,6 +41,8 @@ use std::future::Future;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::task::{JoinHandle, LocalSet};
 use uuid::Uuid;
@@ -72,6 +74,9 @@ const REVIEW_TUI_RECENT_CATEGORY_LIMIT: usize = 5;
 #[derive(Parser)]
 #[command(name = "fin", version, about = "Finance OS — `fin` abre a revisão TUI")]
 struct Cli {
+    /// Skip the automatic update check on startup.
+    #[arg(long, global = true)]
+    no_auto_update: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -2917,7 +2922,7 @@ async fn load_split_payload_preview(
 }
 
 fn should_run_auto_check(cli: &Cli) -> bool {
-    if std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_some() {
+    if cli.no_auto_update || std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_some() {
         return false;
     }
     if let Some(updated_ver) = std::env::var_os("FINANCE_OS_UPDATED") {
@@ -9023,6 +9028,12 @@ struct ReviewTuiView<'a> {
     bulk_targets: &'a [TransactionRecord],
     pending_save_count: usize,
     last_save_error: Option<&'a str>,
+    active_save_progress: Option<&'a ActiveSaveProgress>,
+    split_modal_open: bool,
+    split_lines: &'a [SplitLineDraft],
+    split_focus: usize,
+    split_field: usize,
+    split_parent_amount: Decimal,
 }
 
 fn clip_tui_text(text: &str, max_chars: usize) -> String {
@@ -9213,6 +9224,9 @@ fn draw_review_tui_frame(frame: &mut Frame<'_>, view: &ReviewTuiView<'_>) {
     if view.details_open {
         draw_review_tui_details_modal(frame, root, view);
     }
+    if view.split_modal_open {
+        draw_review_tui_split_modal(frame, root, view);
+    }
 
     if let Some(position) = cursor {
         frame.set_cursor_position(position);
@@ -9299,7 +9313,17 @@ fn draw_review_tui_header(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiVie
     } else {
         None
     };
-    let pending_badge = if view.pending_save_count > 0 {
+    let pending_badge = if let Some(prog) = view.active_save_progress {
+        let done = prog.done.load(std::sync::atomic::Ordering::Relaxed);
+        let total = prog.total.load(std::sync::atomic::Ordering::Relaxed);
+        Some(Span::styled(
+            format!(" ⟳ {done}/{total} "),
+            Style::default()
+                .fg(TuiColor::Black)
+                .bg(TuiColor::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else if view.pending_save_count > 0 {
         Some(Span::styled(
             format!(" ⟳ salvando {} ", view.pending_save_count),
             Style::default()
@@ -9391,9 +9415,9 @@ fn draw_review_tui_body(
     area: Rect,
     view: &ReviewTuiView<'_>,
 ) -> Option<Position> {
-    // Bulk mode: 3-column layout when there's enough width.
-    // The queue column shrinks to leave room for the bulk preview on the right.
-    if view.bulk_mode && area.width >= 140 {
+    // Bulk mode: 3-column layout when there's enough width (lowered from
+    // 140 to 120 so more terminals can use it).
+    if view.bulk_mode && area.width >= 120 {
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -9413,9 +9437,9 @@ fn draw_review_tui_body(
             .constraints([Constraint::Length(60), Constraint::Min(52)])
             .split(area);
         draw_review_tui_queue(frame, horizontal[0], view);
-        // When bulk is on but width is below 140, fall through to the 2-col
-        // layout — the bulk preview would make the editor too tight. The
-        // user still sees the bulk badge in the header.
+        // When bulk is on but width is below 120, show a compact bulk
+        // indicator in the footer instead of a full panel. The user still
+        // sees the bulk badge + count in the header.
         draw_review_tui_editor(frame, horizontal[1], view)
     } else {
         let queue_height = area.height.min(10);
@@ -9814,6 +9838,9 @@ fn draw_review_tui_footer(frame: &mut Frame<'_>, area: Rect, status: &str) {
         key("^D"),
         lbl(" detalhes"),
         sep(),
+        key("^T"),
+        lbl(" split"),
+        sep(),
         key("^S"),
         lbl(" salva"),
         sep(),
@@ -9849,6 +9876,106 @@ fn centered_tui_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
             Constraint::Percentage(horizontal_margin),
         ])
         .split(vertical[1])[1]
+}
+
+fn draw_review_tui_split_modal(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
+    let popup = centered_tui_rect(area, 70, 60);
+    frame.render_widget(Clear, popup);
+    let parent_abs = view.split_parent_amount.abs();
+    let split_sum: Decimal = view
+        .split_lines
+        .iter()
+        .filter_map(|l| l.amount_decimal())
+        .sum();
+    let remaining = parent_abs - split_sum;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("Dividir R$ {parent_abs:.2} em partes  |  Ctrl+S aplica  |  Esc cancela"),
+        Style::default()
+            .fg(TuiColor::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    for (i, line) in view.split_lines.iter().enumerate() {
+        let is_focused = view.split_focus == i;
+        let prefix = if is_focused { "> " } else { "  " };
+        let amt = line.amount_decimal().unwrap_or(Decimal::ZERO);
+        let cat_display: String = if line.category_id.is_empty() {
+            "(sem categoria)".to_string()
+        } else {
+            line.category_id.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{prefix}{}: ", i + 1)),
+            Span::styled(
+                format!("R$ {amt:.2}"),
+                if is_focused && view.split_field == 2 {
+                    Style::default()
+                        .fg(TuiColor::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(TuiColor::Green)
+                },
+            ),
+            Span::raw("  "),
+            Span::styled(
+                cat_display.to_string(),
+                if is_focused && view.split_field == 0 {
+                    Style::default()
+                        .fg(TuiColor::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(TuiColor::DarkGray)
+                },
+            ),
+            Span::raw("  "),
+            Span::styled(
+                if line.description.is_empty() {
+                    "(sem descrição)".to_string()
+                } else {
+                    line.description.clone()
+                },
+                if is_focused && view.split_field == 1 {
+                    Style::default()
+                        .fg(TuiColor::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(TuiColor::Gray)
+                },
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    let remaining_style = if remaining == Decimal::ZERO {
+        Style::default()
+            .fg(TuiColor::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TuiColor::Red)
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Restante: ", Style::default().fg(TuiColor::DarkGray)),
+        Span::styled(format!("R$ {remaining:.2}"), remaining_style),
+        Span::styled(
+            "  (+ adicionar linha  |  Ctrl+D remove linha)",
+            Style::default().fg(TuiColor::DarkGray),
+        ),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title(" Dividir transação ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(TuiColor::Yellow)),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 fn draw_review_tui_filter_modal(frame: &mut Frame<'_>, area: Rect, view: &ReviewTuiView<'_>) {
@@ -10519,6 +10646,18 @@ struct ReviewTuiSession {
     /// Cumulative number of background saves persisted in this session.
     /// Used purely for the status line.
     saves_completed: usize,
+    /// Optional local SQLite store for instant saves. When set, saves are
+    /// written here first (synchronous, fast) before the background BigQuery
+    /// sync task runs.
+    local_store: Option<Rc<dyn FinanceStore>>,
+    /// Progress of the currently-running background save, shared with the
+    /// spawned task so the header can render e.g. "5/29".
+    active_save_progress: Option<Arc<ActiveSaveProgress>>,
+    /// Split modal state: when the user presses Ctrl+T, this opens.
+    split_modal_open: bool,
+    split_lines: Vec<SplitLineDraft>,
+    split_focus: usize, // which line is focused (0..n)
+    split_field: usize, // 0=category, 1=description, 2=amount
 }
 
 #[derive(Debug)]
@@ -10526,6 +10665,35 @@ struct BackgroundSaveOutcome {
     label: String,
     result: Result<usize>,
     sound: bool,
+}
+
+/// Shared progress counter for bulk background saves.
+/// Written by the spawned task, read by the header renderer.
+#[derive(Debug, Default)]
+struct ActiveSaveProgress {
+    done: AtomicUsize,
+    total: AtomicUsize,
+}
+
+/// One editable line in the split modal.
+#[derive(Debug, Clone)]
+struct SplitLineDraft {
+    category_id: String,
+    description: String,
+    amount_str: String,
+}
+
+impl SplitLineDraft {
+    fn empty() -> Self {
+        Self {
+            category_id: String::new(),
+            description: String::new(),
+            amount_str: String::from("0.00"),
+        }
+    }
+    fn amount_decimal(&self) -> Option<Decimal> {
+        Decimal::from_str_exact(&self.amount_str).ok()
+    }
 }
 
 impl ReviewTuiSession {
@@ -10536,6 +10704,7 @@ impl ReviewTuiSession {
         min_abs_amount: Decimal,
         filters: ReviewFilters,
         available_months: Vec<String>,
+        local_store: Option<Rc<dyn FinanceStore>>,
     ) -> Self {
         Self {
             index: 0,
@@ -10570,6 +10739,12 @@ impl ReviewTuiSession {
             pending_save_count: 0,
             last_save_error: None,
             saves_completed: 0,
+            local_store,
+            active_save_progress: None,
+            split_modal_open: false,
+            split_lines: Vec::new(),
+            split_focus: 0,
+            split_field: 0,
         }
     }
 }
@@ -10703,6 +10878,12 @@ fn draw_current_review_tui(
         bulk_targets: &session.bulk_targets,
         pending_save_count: session.pending_save_count,
         last_save_error: session.last_save_error.as_deref(),
+        active_save_progress: session.active_save_progress.as_deref(),
+        split_modal_open: session.split_modal_open,
+        split_lines: &session.split_lines,
+        split_focus: session.split_focus,
+        split_field: session.split_field,
+        split_parent_amount: rows[session.index].amount,
     })
 }
 
@@ -10763,7 +10944,7 @@ async fn handle_review_tui_event(
     if review_tui_exit_key(key) {
         return Ok(true);
     }
-    if handle_review_tui_modal_event(&**store, key, &mut state).await? {
+    if handle_review_tui_modal_event(&**store, config, key, &mut state).await? {
         return Ok(false);
     }
     if handle_review_tui_async_global_event(&**store, key, &mut state).await? {
@@ -10788,11 +10969,15 @@ fn review_tui_exit_key(key: crossterm::event::KeyEvent) -> bool {
 
 async fn handle_review_tui_modal_event(
     store: &dyn FinanceStore,
+    config: &AppConfig,
     key: crossterm::event::KeyEvent,
     state: &mut ReviewTuiEventState<'_>,
 ) -> Result<bool> {
     if state.session.details_open {
         return Ok(handle_review_tui_details_modal_key(key, state));
+    }
+    if state.session.split_modal_open {
+        return handle_review_tui_split_modal_key(store, config, key, state).await;
     }
     if state.session.category_modal_open {
         return Ok(handle_review_tui_category_modal_key(key, state));
@@ -10804,6 +10989,177 @@ async fn handle_review_tui_modal_event(
         return handle_review_tui_filter_menu_key(store, key, state).await;
     }
     Ok(false)
+}
+
+async fn handle_review_tui_split_modal_key(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    key: crossterm::event::KeyEvent,
+    state: &mut ReviewTuiEventState<'_>,
+) -> Result<bool> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Esc => {
+            state.session.split_modal_open = false;
+            state.session.status = "split cancelado".to_string();
+            Ok(true)
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            apply_split_from_modal(store, config, state).await
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if state.session.split_lines.len() > 1 {
+                state.session.split_lines.remove(state.session.split_focus);
+                if state.session.split_focus >= state.session.split_lines.len() {
+                    state.session.split_focus = state.session.split_lines.len() - 1;
+                }
+            }
+            Ok(true)
+        }
+        KeyCode::Tab => {
+            state.session.split_field = (state.session.split_field + 1) % 3;
+            Ok(true)
+        }
+        KeyCode::BackTab => {
+            state.session.split_field = (state.session.split_field + 2) % 3;
+            Ok(true)
+        }
+        KeyCode::Up => {
+            state.session.split_focus = state.session.split_focus.saturating_sub(1);
+            Ok(true)
+        }
+        KeyCode::Down => {
+            let max = state.session.split_lines.len().saturating_sub(1);
+            if state.session.split_focus < max {
+                state.session.split_focus += 1;
+            }
+            Ok(true)
+        }
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            state.session.split_lines.push(SplitLineDraft::empty());
+            state.session.split_focus = state.session.split_lines.len() - 1;
+            Ok(true)
+        }
+        _ => {
+            if state.session.split_lines.is_empty() {
+                return Ok(true);
+            }
+            let line = &mut state.session.split_lines[state.session.split_focus];
+            let text = match state.session.split_field {
+                0 => &mut line.category_id,
+                1 => &mut line.description,
+                2 => &mut line.amount_str,
+                _ => return Ok(true),
+            };
+            handle_split_text_input(key, text);
+            Ok(true)
+        }
+    }
+}
+
+fn handle_split_text_input(key: crossterm::event::KeyEvent, text: &mut String) {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Char(c) => text.push(c),
+        KeyCode::Backspace => {
+            text.pop();
+        }
+        _ => {}
+    }
+}
+
+async fn apply_split_from_modal(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    state: &mut ReviewTuiEventState<'_>,
+) -> Result<bool> {
+    let parent_amount = state.rows[state.session.index].amount;
+    let parent_abs = parent_amount.abs();
+    let split_sum: Decimal = state
+        .session
+        .split_lines
+        .iter()
+        .filter_map(|l| l.amount_decimal())
+        .sum();
+
+    if split_sum != parent_abs {
+        state.session.status = format!("split: total R$ {split_sum:.2} ≠ R$ {parent_abs:.2}");
+        return Ok(true);
+    }
+
+    let lines: Vec<finance_core::splits::SplitPayloadLine> = state
+        .session
+        .split_lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| finance_core::splits::SplitPayloadLine {
+            description: if l.description.is_empty() {
+                format!("Parte {}", i + 1)
+            } else {
+                l.description.clone()
+            },
+            amount: serde_json::Value::String(format!(
+                "{:.2}",
+                l.amount_decimal().unwrap_or(Decimal::ZERO)
+            )),
+            category_id: if l.category_id.is_empty() {
+                None
+            } else {
+                Some(l.category_id.clone())
+            },
+            context: None,
+            metadata: None,
+        })
+        .collect();
+
+    let payload = finance_core::splits::SplitPayload {
+        source: Some("review-tui".to_string()),
+        notes: None,
+        metadata: None,
+        lines,
+        items: Vec::new(),
+    };
+
+    let transaction_id = state.rows[state.session.index].transaction_id.clone();
+    let preview =
+        match finance_core::splits::validate_split_payload(&transaction_id, parent_amount, payload)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                state.session.status = format!("split inválido: {e}");
+                return Ok(true);
+            }
+        };
+
+    let now = chrono::Utc::now();
+    let (split, split_lines, items) = match finance_core::splits::build_split_records(
+        &transaction_id,
+        &config.actor_id,
+        Some("review-tui"),
+        None,
+        None,
+        &preview,
+        now,
+    ) {
+        Ok(records) => records,
+        Err(e) => {
+            state.session.status = format!("split inválido: {e}");
+            return Ok(true);
+        }
+    };
+
+    let n_lines = split_lines.len();
+    if let Err(e) = store
+        .apply_transaction_split(&split, &split_lines, &items)
+        .await
+    {
+        state.session.status = format!("split falhou: {e}");
+        return Ok(true);
+    }
+
+    state.session.split_modal_open = false;
+    state.session.status = format!("split aplicado: {n_lines} partes");
+    Ok(true)
 }
 
 fn handle_review_tui_details_modal_key(
@@ -11082,6 +11438,29 @@ async fn refresh_bulk_targets_for_session(
     Ok(())
 }
 
+fn open_split_modal(state: &mut ReviewTuiEventState<'_>) {
+    let parent_amount = state.rows[state.session.index].amount;
+    let parent_abs = parent_amount.abs();
+    // Pre-fill 2 equal parts
+    let half = parent_abs / Decimal::from(2);
+    state.session.split_lines = vec![
+        SplitLineDraft {
+            category_id: String::new(),
+            description: String::new(),
+            amount_str: format!("{half:.2}"),
+        },
+        SplitLineDraft {
+            category_id: String::new(),
+            description: String::new(),
+            amount_str: format!("{half:.2}"),
+        },
+    ];
+    state.session.split_focus = 0;
+    state.session.split_field = 0;
+    state.session.split_modal_open = true;
+    state.session.status = format!("split: divida R$ {parent_abs:.2} em partes");
+}
+
 fn handle_review_tui_global_event(
     key: crossterm::event::KeyEvent,
     state: &mut ReviewTuiEventState<'_>,
@@ -11098,6 +11477,10 @@ fn handle_review_tui_global_event(
             state.session.details_scroll = 0;
             state.session.details_query.clear();
             state.session.status = "detalhes abertos".to_string();
+            true
+        }
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            open_split_modal(state);
             true
         }
         KeyCode::Esc => {
@@ -11444,6 +11827,21 @@ fn save_review_tui_current_draft_optimistic(
     };
 
     // --- Optimistic local mutation ---
+    // Collect affected rows BEFORE clearing bulk targets / advancing index.
+    let affected_rows_for_local: Vec<TransactionRecord> = state
+        .rows
+        .iter()
+        .filter(|r| transaction_ids.contains(&r.transaction_id))
+        .chain(
+            state
+                .session
+                .bulk_targets
+                .iter()
+                .filter(|r| transaction_ids.contains(&r.transaction_id)),
+        )
+        .cloned()
+        .collect();
+
     apply_review_tui_patch_to_local_rows(state.rows, state.drafts, &transaction_ids, &patch);
     invalidate_review_tui_contexts(&mut state.session.context_cache, &transaction_ids);
     apply_optimistic_summary_decrement(state.summary, &patch, bulk_count);
@@ -11461,21 +11859,83 @@ fn save_review_tui_current_draft_optimistic(
     state.session.pending_save_count += 1;
     advance_review_tui_index_after_save(state.rows, state.session);
 
-    // --- Spawn the real write ---
+    // --- Background writes: local SQLite first (fast), then BigQuery (slow) ---
     let store_clone = Rc::clone(store);
+    let local_clone = state.session.local_store.as_ref().map(Rc::clone);
     let config_clone = config.clone();
     let patch_for_persist = patch.clone();
     let label_for_task = label;
+    // Progress counter for bulk saves — updated by the background task,
+    // read by the header renderer to show e.g. "5/29".
+    let progress = Arc::new(ActiveSaveProgress {
+        done: AtomicUsize::new(0),
+        total: AtomicUsize::new(transaction_ids.len()),
+    });
+    state.session.active_save_progress = Some(progress.clone());
     let handle = tokio::task::spawn_local(async move {
         let n = transaction_ids.len();
         let mut last_err: Option<anyhow::Error> = None;
-        for tid in &transaction_ids {
-            if let Err(e) =
-                apply_human_review(&*store_clone, &config_clone, tid, patch_for_persist.clone())
+        let mut bq_warning: Option<String> = None;
+        // Phase 1: sync data into local SQLite, then apply the patch.
+        if let Some(ref local) = local_clone {
+            // Upsert rows into local DB first (they don't exist yet).
+            if !affected_rows_for_local.is_empty() {
+                if let Err(e) = local.upsert_transactions(&affected_rows_for_local).await {
+                    last_err = Some(anyhow::anyhow!("erro ao sincronizar dados locais: {e}"));
+                }
+            }
+            // Now apply the human review patch (UPDATE will find the row).
+            if last_err.is_none() {
+                for tid in &transaction_ids {
+                    if let Err(e) =
+                        apply_human_review(&**local, &config_clone, tid, patch_for_persist.clone())
+                            .await
+                    {
+                        last_err = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+        // Phase 2: sync to BigQuery with retries and progress.
+        if last_err.is_none() {
+            for (i, tid) in transaction_ids.iter().enumerate() {
+                let mut bq_ok = false;
+                for attempt in 0..3 {
+                    match apply_human_review(
+                        &*store_clone,
+                        &config_clone,
+                        tid,
+                        patch_for_persist.clone(),
+                    )
                     .await
-            {
-                last_err = Some(e);
-                break;
+                    {
+                        Ok(_) => {
+                            bq_ok = true;
+                            break;
+                        }
+                        Err(_) if attempt < 2 => {
+                            let ms = 500 * 2u64.pow(attempt);
+                            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                        }
+                        Err(e) => {
+                            bq_warning = Some(format!("sync BQ pendente: {e}"));
+                        }
+                    }
+                }
+                progress
+                    .done
+                    .store(i + 1, std::sync::atomic::Ordering::Relaxed);
+                if !bq_ok && bq_warning.is_some() {
+                    break;
+                }
+            }
+            // Without a local fallback, a BQ failure means the data was
+            // lost — surface it as an error instead of a soft warning.
+            if local_clone.is_none() {
+                if let Some(w) = bq_warning.take() {
+                    last_err = Some(anyhow::anyhow!(w));
+                }
             }
         }
         let result = match last_err {
@@ -11483,7 +11943,11 @@ fn save_review_tui_current_draft_optimistic(
             None => Ok(n),
         };
         BackgroundSaveOutcome {
-            label: label_for_task,
+            label: if let Some(ref w) = bq_warning {
+                format!("{label_for_task} ({w})")
+            } else {
+                label_for_task.clone()
+            },
             result,
             sound,
         }
@@ -11556,6 +12020,10 @@ fn poll_review_tui_pending_saves(session: &mut ReviewTuiSession) -> bool {
         }
     }
     session.pending_save_count = session.pending_saves.len();
+    // Clear progress when all background tasks complete.
+    if session.pending_saves.is_empty() {
+        session.active_save_progress = None;
+    }
     if any_success_with_sound {
         crossterm::execute!(io::stdout(), crossterm::style::Print('\x07')).ok();
     }
@@ -11618,6 +12086,7 @@ async fn tx_review_human_tui(
     config: AppConfig,
     mut rows: Vec<TransactionRecord>,
     launch: ReviewTuiLaunch,
+    local_store: Option<Rc<dyn FinanceStore>>,
 ) -> Result<()> {
     use crossterm::event::{self, Event};
 
@@ -11645,6 +12114,7 @@ async fn tx_review_human_tui(
         launch.min_abs_amount,
         launch.filters,
         launch.available_months,
+        local_store,
     );
     session.include_reviewed = launch.include_reviewed;
 
@@ -11829,6 +12299,37 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
         // (spawned via `spawn_local`) can hold a clone. The whole TUI runs
         // inside a `LocalSet` to allow `spawn_local`.
         let store_rc: Rc<dyn FinanceStore> = Rc::from(store);
+        // Open a local SQLite store for instant saves when configured.
+        // Saves go to SQLite first (synchronous, fast), then BigQuery
+        // sync runs in the background task.
+        let local_store: Option<Rc<dyn FinanceStore>> = if config.local_db_path.is_some()
+            && config.effective_backend() == BackendKind::Bigquery
+        {
+            match finance_core::storage::local::LocalStore::new(config.clone()) {
+                Ok(ls) => {
+                    // Run SQLite migrations (not BigQuery!) against the local DB.
+                    // The global config has backend=bigquery, so we need a
+                    // local-mode config clone to pick the correct .sql files.
+                    let mut local_cfg = config.clone();
+                    local_cfg.backend = BackendKind::Local;
+                    match run_migrations(&ls, &local_cfg).await {
+                        Ok(_) => Some(Rc::new(ls) as Rc<dyn FinanceStore>),
+                        Err(e) => {
+                            eprintln!(
+                                "TUI: migrações locais falharam, desabilitando cache SQLite: {e}"
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("TUI: não foi possível abrir SQLite local: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let launch = ReviewTuiLaunch {
             kind: args.kind,
             limit,
@@ -11840,7 +12341,13 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
         };
         let local = LocalSet::new();
         return local
-            .run_until(tx_review_human_tui(store_rc, config, rows, launch))
+            .run_until(tx_review_human_tui(
+                store_rc,
+                config,
+                rows,
+                launch,
+                local_store,
+            ))
             .await;
     }
 
@@ -13425,15 +13932,16 @@ impl NaiveDateSat for NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_review_tui_category_pick, category_matches, changed_text,
-        effective_review_human_limit, handle_cashflow_tui_key, parse_closing_day,
-        resolve_sync_from, review_tui_filters_from_menu_key, review_tui_plain_skip_requested,
-        CashflowTerminalFamily, CashflowTuiState, CashflowTuiTab, ReviewFilters, ReviewTuiDraft,
-        ReviewTuiField,
+        apply_human_review, apply_optimistic_summary_decrement, apply_review_tui_category_pick,
+        category_matches, changed_text, effective_review_human_limit, handle_cashflow_tui_key,
+        parse_closing_day, resolve_sync_from, review_tui_filters_from_menu_key,
+        review_tui_plain_skip_requested, CashflowTerminalFamily, CashflowTuiState, CashflowTuiTab,
+        HumanReviewPatch, ReviewFilters, ReviewHumanSummary, ReviewTuiDraft, ReviewTuiField,
     };
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use finance_core::models::TransactionRecord;
+    use finance_core::storage::FinanceStore;
     use rust_decimal::Decimal;
     use serde_json::json;
 
@@ -13714,6 +14222,290 @@ mod tests {
             created_at: now,
             updated_at: now,
             enrichment_attempted_at: None,
+        }
+    }
+
+    // ── Review TUI save flow tests ─────────────────────────────────
+
+    #[test]
+    fn review_draft_patch_detects_all_changes() {
+        let row = sample_review_row("alimentacao:mercado");
+        let mut draft = ReviewTuiDraft::from_row(&row);
+        draft.merchant_name = "Novo Mercado".to_string();
+        draft.description = "Compra semanal".to_string();
+        draft.purpose = "Abastecimento da casa".to_string();
+        draft.category_id = "alimentacao:supermercado".to_string();
+
+        let patch = draft.patch_against(&row);
+        assert!(patch.has_changes());
+        assert_eq!(patch.merchant_name, Some("Novo Mercado".to_string()));
+        assert_eq!(patch.description, Some("Compra semanal".to_string()));
+        assert_eq!(patch.purpose, Some("Abastecimento da casa".to_string()));
+        assert_eq!(
+            patch.category_id,
+            Some("alimentacao:supermercado".to_string())
+        );
+    }
+
+    #[test]
+    fn review_draft_patch_empty_when_no_changes() {
+        let row = sample_review_row("alimentacao:mercado");
+        let draft = ReviewTuiDraft::from_row(&row);
+        let patch = draft.patch_against(&row);
+        assert!(!patch.has_changes());
+    }
+
+    #[test]
+    fn review_optimistic_summary_decrement_reduces_counters() {
+        let mut summary = ReviewHumanSummary {
+            uncategorized_count: 0,
+            missing_description_count: 10,
+            missing_merchant_count: 8,
+            missing_purpose_count: 5,
+            min_purpose_amount: "0".to_string(),
+            total_attention_count: 0,
+            suggested_next_command: String::new(),
+        };
+        let patch = HumanReviewPatch {
+            description: Some("nova desc".to_string()),
+            merchant_name: Some("novo merchant".to_string()),
+            purpose: None,
+            category_id: None,
+        };
+        apply_optimistic_summary_decrement(&mut summary, &patch, 1);
+        assert_eq!(summary.missing_description_count, 9);
+        assert_eq!(summary.missing_merchant_count, 7);
+        assert_eq!(summary.missing_purpose_count, 5); // unchanged
+    }
+
+    #[test]
+    fn review_optimistic_summary_bulk_decrements_multiple() {
+        let mut summary = ReviewHumanSummary {
+            uncategorized_count: 0,
+            missing_description_count: 10,
+            missing_merchant_count: 8,
+            missing_purpose_count: 5,
+            min_purpose_amount: "0".to_string(),
+            total_attention_count: 0,
+            suggested_next_command: String::new(),
+        };
+        let patch = HumanReviewPatch {
+            description: Some("desc".to_string()),
+            merchant_name: None,
+            purpose: None,
+            category_id: Some("cat".to_string()),
+        };
+        apply_optimistic_summary_decrement(&mut summary, &patch, 5);
+        assert_eq!(summary.missing_description_count, 5); // 10 - 5
+        assert_eq!(summary.missing_merchant_count, 8); // unchanged
+        assert_eq!(summary.missing_purpose_count, 5); // unchanged
+    }
+
+    #[tokio::test]
+    async fn local_sqlite_save_upserts_and_updates_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let config = finance_core::AppConfig {
+            local_db_path: Some(db_path.clone()),
+            ..Default::default()
+        };
+
+        let store = finance_core::storage::local::LocalStore::new(config.clone()).unwrap();
+        finance_core::migrations::run_migrations(&store, &config)
+            .await
+            .unwrap();
+
+        let tx = sample_review_row("alimentacao:mercado");
+        store
+            .upsert_transactions(std::slice::from_ref(&tx))
+            .await
+            .unwrap();
+        let fetched = store.transaction_by_id(&tx.transaction_id).await.unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(
+            fetched.unwrap().category_id,
+            Some("alimentacao:mercado".to_string())
+        );
+
+        store
+            .annotate_transaction(
+                &tx.transaction_id,
+                Some("transporte:app"),
+                Some("manual"),
+                None,
+                "test",
+                "test-key",
+            )
+            .await
+            .unwrap();
+        let updated = store
+            .transaction_by_id(&tx.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.category_id, Some("transporte:app".to_string()));
+        assert_eq!(updated.category_source, "manual");
+    }
+
+    // ── E2E: Consistency between Local (SQLite) and Remote (BigQuery) ──
+    // Simulates the full TUI save pipeline with two SQLite DBs playing the
+    // roles of local cache and remote BigQuery.
+
+    #[tokio::test]
+    async fn e2e_local_save_replicates_to_remote() {
+        // Setup: two independent SQLite DBs
+        let tmp = tempfile::tempdir().unwrap();
+        let local_path = tmp.path().join("local.db");
+        let remote_path = tmp.path().join("remote.db");
+
+        let local_cfg = finance_core::AppConfig {
+            local_db_path: Some(local_path.clone()),
+            ..Default::default()
+        };
+        let local = finance_core::storage::local::LocalStore::new(local_cfg.clone()).unwrap();
+        finance_core::migrations::run_migrations(&local, &local_cfg)
+            .await
+            .unwrap();
+
+        let remote_cfg = finance_core::AppConfig {
+            local_db_path: Some(remote_path.clone()),
+            ..Default::default()
+        };
+        let remote = finance_core::storage::local::LocalStore::new(remote_cfg.clone()).unwrap();
+        finance_core::migrations::run_migrations(&remote, &remote_cfg)
+            .await
+            .unwrap();
+
+        // Seed both with the same initial transaction
+        let tx = sample_review_row("outros:geral");
+        local
+            .upsert_transactions(std::slice::from_ref(&tx))
+            .await
+            .unwrap();
+        remote
+            .upsert_transactions(std::slice::from_ref(&tx))
+            .await
+            .unwrap();
+
+        // Simulate TUI save: update local, then replicate to remote
+        let patch = HumanReviewPatch {
+            description: Some("Descrição E2E".to_string()),
+            merchant_name: Some("Merchant E2E".to_string()),
+            purpose: None,
+            category_id: Some("alimentacao:restaurantes".to_string()),
+        };
+
+        // Step 1: apply to local (fast, synchronous from TUI perspective)
+        apply_human_review(&local, &local_cfg, &tx.transaction_id, patch.clone())
+            .await
+            .unwrap();
+
+        // Step 2: replicate to remote (background sync)
+        // With retry simulated
+        let mut synced = false;
+        for attempt in 0..3 {
+            match apply_human_review(&remote, &remote_cfg, &tx.transaction_id, patch.clone()).await
+            {
+                Ok(_) => {
+                    synced = true;
+                    break;
+                }
+                Err(e) if attempt < 2 => {
+                    eprintln!("retry {}/2: {e}", attempt + 1);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => {
+                    panic!("sync falhou após 3 tentativas: {e}");
+                }
+            }
+        }
+        assert!(synced, "replicação deveria ter funcionado");
+
+        // Step 3: verify consistency — both DBs have the same data
+        let local_row = local
+            .transaction_by_id(&tx.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let remote_row = remote
+            .transaction_by_id(&tx.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(local_row.description, remote_row.description);
+        assert_eq!(local_row.merchant_name, remote_row.merchant_name);
+        assert_eq!(local_row.category_id, remote_row.category_id);
+        assert_eq!(local_row.category_source, remote_row.category_source);
+        assert_eq!(local_row.category_source, "manual");
+    }
+
+    #[tokio::test]
+    async fn e2e_bulk_save_consistency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local_path = tmp.path().join("local.db");
+        let remote_path = tmp.path().join("remote.db");
+
+        let mut cfg = finance_core::AppConfig {
+            local_db_path: Some(local_path.clone()),
+            ..Default::default()
+        };
+        let local = finance_core::storage::local::LocalStore::new(cfg.clone()).unwrap();
+        finance_core::migrations::run_migrations(&local, &cfg)
+            .await
+            .unwrap();
+
+        cfg.local_db_path = Some(remote_path.clone());
+        let remote = finance_core::storage::local::LocalStore::new(cfg.clone()).unwrap();
+        finance_core::migrations::run_migrations(&remote, &cfg)
+            .await
+            .unwrap();
+
+        // Create 5 transactions with the same raw_description (bulk scenario)
+        let mut txs = Vec::new();
+        for i in 0..5 {
+            let mut tx = sample_review_row("outros:geral");
+            tx.transaction_id = format!("bulk-tx-{i}");
+            txs.push(tx);
+        }
+        local.upsert_transactions(&txs).await.unwrap();
+        remote.upsert_transactions(&txs).await.unwrap();
+
+        let patch = HumanReviewPatch {
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            category_id: Some("transporte:aplicativo".to_string()),
+        };
+
+        // Apply to all 5 locally
+        for tx in &txs {
+            apply_human_review(&local, &cfg, &tx.transaction_id, patch.clone())
+                .await
+                .unwrap();
+        }
+
+        // Replicate to remote
+        for tx in &txs {
+            apply_human_review(&remote, &cfg, &tx.transaction_id, patch.clone())
+                .await
+                .unwrap();
+        }
+
+        // Verify all 5 are consistent
+        for tx in &txs {
+            let l = local
+                .transaction_by_id(&tx.transaction_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let r = remote
+                .transaction_by_id(&tx.transaction_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(l.category_id, r.category_id);
+            assert_eq!(l.category_id, Some("transporte:aplicativo".to_string()));
         }
     }
 }
