@@ -81,7 +81,7 @@ struct QueryRequest<'a> {
 
 /// BigQuery query parameter type declaration, mirroring the REST schema at
 /// https://cloud.google.com/bigquery/docs/reference/rest/v2/QueryParameterType.
-/// Only the subset used by Finance OS write paths is modelled; expand on
+/// Only the subset used by phai write paths is modelled; expand on
 /// demand. `Bool` is intentionally part of the surface so callers can opt
 /// in without touching this module.
 #[derive(Debug, Clone)]

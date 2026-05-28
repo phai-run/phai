@@ -8,7 +8,7 @@ date: 2026-02-14
 
 ## Context
 
-Finance OS is open source and runs on the author's real money. The two facts are in tension. The natural shortcut — hardcode a counterparty regex, ship a fixture mirroring a real statement, embed an account label in a migration — saves minutes today and is irrecoverable forever:
+phai is open source and runs on the author's real money. The two facts are in tension. The natural shortcut — hardcode a counterparty regex, ship a fixture mirroring a real statement, embed an account label in a migration — saves minutes today and is irrecoverable forever:
 
 - Once it lands in a public commit, `git history` is permanent.
 - AI agents and code-search tools scrape public repos.

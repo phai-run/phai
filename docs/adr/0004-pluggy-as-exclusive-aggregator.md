@@ -8,7 +8,7 @@ date: 2026-01-08
 
 ## Context
 
-Finance OS targets Brazilian users first: that's where the author's accounts are, where open finance is most mature, and where the existing-tool gap is largest. Bank-data ingestion is the most operationally sensitive part of the system: a slow, fragile, or generic aggregator forces a worse user experience everywhere downstream.
+phai targets Brazilian users first: that's where the author's accounts are, where open finance is most mature, and where the existing-tool gap is largest. Bank-data ingestion is the most operationally sensitive part of the system: a slow, fragile, or generic aggregator forces a worse user experience everywhere downstream.
 
 Candidate aggregators:
 
@@ -21,7 +21,7 @@ A generic "bank-agnostic" abstraction layered over multiple aggregators would be
 
 ## Decision
 
-**Pluggy is the only bank aggregator integrated into Finance OS, accessed through `crates/finance-core/src/pluggy.rs` directly — no generic aggregator trait.** Other ingestion paths exist but are clearly secondary: `admin import-legacy` for one-time CSV imports, `tx upsert-manual` for hand entries.
+**Pluggy is the only bank aggregator integrated into phai, accessed through `crates/finance-core/src/pluggy.rs` directly — no generic aggregator trait.** Other ingestion paths exist but are clearly secondary: `admin import-legacy` for one-time CSV imports, `tx upsert-manual` for hand entries.
 
 When (if) a second aggregator becomes necessary, the abstraction emerges from refactoring two concrete clients, not from speculating one.
 
@@ -38,4 +38,4 @@ When (if) a second aggregator becomes necessary, the abstraction emerges from re
 - **Invariants for the codebase**:
   - Pluggy-specific fields can appear on `TransactionRecord.metadata` and in enrichment paths without indirection.
   - Personal classification still does **not** live in `pluggy.rs` — see [ADR-0008](0008-privacy-no-personal-data-in-shared-source.md).
-- **Re-evaluation triggers**: a Finance OS user in a country Pluggy doesn't cover; sustained Pluggy API instability; or a second aggregator integration becoming a real need (not hypothetical).
+- **Re-evaluation triggers**: a phai user in a country Pluggy doesn't cover; sustained Pluggy API instability; or a second aggregator integration becoming a real need (not hypothetical).

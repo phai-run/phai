@@ -1,4 +1,4 @@
-# Finance OS — Product Vision
+# phai — Product Vision
 
 *A living document. Update it as the vision evolves.*
 
@@ -8,7 +8,7 @@
 
 Most personal finance tools are dashboards. You log in, you look at a chart, you close the tab, you go back to making the same decision blind. The data is hostage to a UI, a vendor, and a country.
 
-Finance OS rejects that shape. It is a **runtime**, not a dashboard:
+phai rejects that shape. It is a **runtime**, not a dashboard:
 
 - One binary on your machine.
 - A real relational database underneath, queryable in SQL.
@@ -28,7 +28,7 @@ People who care about their money face a recurring shape of frustration:
 3. **AI can't help.** Even with ChatGPT, an LLM cannot answer a finance question without structured data and a stable API. Screenshots of a banking app don't count.
 4. **Privacy is binary.** Either you trust a SaaS with your full transaction history, or you accept zero automation. There is no middle ground that is also low-effort.
 
-Finance OS addresses all four with the same architectural choice: **a local-or-personal-cloud database the user controls, fed by open finance, queried in SQL, surfaced through human-readable and machine-readable reports.**
+phai addresses all four with the same architectural choice: **a local-or-personal-cloud database the user controls, fed by open finance, queried in SQL, surfaced through human-readable and machine-readable reports.**
 
 ---
 
@@ -47,7 +47,7 @@ A runtime, not an app. The author's daily WhatsApp pipeline is one consumer of t
 
 ## The method: how to organize personal finance
 
-Finance OS is opinionated — these are the conventions that make the system useful out of the box.
+phai is opinionated — these are the conventions that make the system useful out of the box.
 
 ### Categorization is a function, not a label
 
@@ -83,7 +83,7 @@ Every report works on a phone first. Emoji prefixes, category grouping, a single
 
 ## The foundation: an architecture that earns trust
 
-The method only works if the system underneath is honest. Finance OS leans on five architectural commitments:
+The method only works if the system underneath is honest. phai leans on five architectural commitments:
 
 ### Decimal precision, end-to-end
 
@@ -91,7 +91,7 @@ Floats never touch an amount. `rust_decimal::Decimal` from the API to the databa
 
 ### One binary, atomic update
 
-Install: a `curl | bash` and you have `finance-cli`. Update: the running binary fetches the next release, verifies the SHA-256, atomically swaps itself, and re-execs. No package manager. No upgrade ceremony. No version skew between machines.
+Install: a `curl | bash` and you have `phai`. Update: the running binary fetches the next release, verifies the SHA-256, atomically swaps itself, and re-execs. No package manager. No upgrade ceremony. No version skew between machines.
 
 ### Dual backend behind one trait
 
@@ -113,7 +113,7 @@ No personal counterparty names, account labels, or institution-specific fingerpr
 
 **Stage 1: One person, one runtime** *(current)*
 
-A single user runs `finance-cli` on a laptop. Pluggy syncs nightly. Reports run on demand or on a schedule. The user reads them on WhatsApp, an AI agent answers ad-hoc questions, a Google Sheet overrides categories when needed. The runtime is invisible — it just keeps the answers accurate.
+A single user runs `phai` on a laptop. Pluggy syncs nightly. Reports run on demand or on a schedule. The user reads them on WhatsApp, an AI agent answers ad-hoc questions, a Google Sheet overrides categories when needed. The runtime is invisible — it just keeps the answers accurate.
 
 **Stage 2: Couples and households**
 
@@ -127,7 +127,7 @@ What stays constant across stages: the runtime, the SQL surface, the audit log, 
 
 ### Early adopters
 
-The first people who'll get the most from Finance OS are:
+The first people who'll get the most from phai are:
 
 - Brazilians using Pluggy or curious about open finance.
 - Engineers comfortable with a CLI and SQL.

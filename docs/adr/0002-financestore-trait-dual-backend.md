@@ -8,7 +8,7 @@ date: 2025-12-20
 
 ## Context
 
-Finance OS has two distinct user shapes:
+phai has two distinct user shapes:
 
 1. **One person, one machine.** Wants zero setup. SQLite on disk is ideal — no network, no credentials, no cost.
 2. **One person, multiple devices, or a Sheets-backed budget.** Needs a shared dataset reachable from anywhere. BigQuery is ideal — joinable with Sheets, free tier covers personal volume, no operational overhead.

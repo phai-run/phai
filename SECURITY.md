@@ -12,7 +12,7 @@ Only the latest minor release receives security fixes. Older versions are not su
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability, please report it privately via
-[GitHub Security Advisories](https://github.com/feliperun/finance-os/security/advisories/new).
+[GitHub Security Advisories](https://github.com/phai-run/phai/security/advisories/new).
 
 Do **not** open a public issue.
 

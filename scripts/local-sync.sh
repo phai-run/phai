@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run Finance OS sync using the local ./.private/ overlay.
+Run phai sync using the local ./.private/ overlay.
 
 Usage:
   scripts/local-sync.sh [sync pluggy args...]
@@ -23,7 +23,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRIVATE_DIR="$REPO_ROOT/.private"
-FINANCE_BIN="${FINANCE_BIN:-$REPO_ROOT/target/release/finance-cli}"
+FINANCE_BIN="${FINANCE_BIN:-$REPO_ROOT/target/release/phai}"
 
 for path in \
   "$PRIVATE_DIR/runtime" \
@@ -39,7 +39,7 @@ do
 done
 
 if [[ ! -x "$FINANCE_BIN" ]]; then
-  echo "finance-cli binary not found or not executable: $FINANCE_BIN" >&2
+  echo "phai binary not found or not executable: $FINANCE_BIN" >&2
   echo "Build it with: cargo build --release" >&2
   exit 1
 fi

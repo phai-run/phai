@@ -2,7 +2,7 @@
 description: Create a new Architecture Decision Record under docs/adr/
 ---
 
-Create a new ADR in `docs/adr/` documenting a structural decision for Finance OS.
+Create a new ADR in `docs/adr/` documenting a structural decision for phai.
 
 ## Steps
 

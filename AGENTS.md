@@ -1,6 +1,6 @@
-# AGENTS.md — Finance OS
+# AGENTS.md — phai
 
-> Quick links: [Architecture](docs/ARCHITECTURE.md) · [Abstractions](docs/ABSTRACTIONS.md) · [Vision](docs/VISION.md) · [Getting Started](docs/GETTING-STARTED.md) · [ADRs](docs/adr/README.md) · [Reporting UX rules](FINANCE_OS.md)
+> Quick links: [Architecture](docs/ARCHITECTURE.md) · [Abstractions](docs/ABSTRACTIONS.md) · [Vision](docs/VISION.md) · [Getting Started](docs/GETTING-STARTED.md) · [ADRs](docs/adr/README.md) · [Reporting UX rules](REPORTING_UX.md)
 >
 > *Playbook structure inspired by [tolaria](https://github.com/refactoringhq/tolaria).*
 
@@ -17,7 +17,7 @@ These come first because violations are the hardest to undo.
 - **Migrations are generic.** Shared migrations under `schema/sqlite/` and `schema/bigquery/` may create infrastructure (tables, views, indexes). They must not embed personal names, account numbers, or institution-specific text.
 - **Fixtures are synthetic.** All committed fixtures and test data must be plausible-but-fake. If a real bug needs a real-data repro, reproduce it locally and translate the failure into a synthetic test.
 - **Bug fixes vs. data fixes.** If a real-user bug requires a data correction, implement the generic engine support in shared code, then apply the private rule or data fix outside this repository.
-- **Reporting UX rules** live in [FINANCE_OS.md](FINANCE_OS.md). Read that before formatting any user-facing finance output.
+- **Reporting UX rules** live in [REPORTING_UX.md](REPORTING_UX.md). Read that before formatting any user-facing finance output.
 
 ---
 
@@ -92,7 +92,7 @@ CI mirrors this and runs on every PR (`.github/workflows/ci.yml`).
 
 - Idempotent by construction: `CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE VIEW`, guarded backfills.
 - The same numeric prefix exists in both backends; semantics must match. If a feature is backend-specific (rare), explain why in the migration header comment.
-- Embedded into the binary at compile time via `include_str!`. After adding a file, also register it in `crates/finance-core/src/migrations.rs`.
+- Embedded into the binary at compile time via `include_str!`. After adding a file, also register it in `crates/phai-core/src/migrations.rs`.
 
 ### Code health gate — Sentrux (mandatory)
 
@@ -155,12 +155,12 @@ Before merging or releasing, confirm:
 
 ## 5. Reporting UX (when answering finance questions)
 
-The reporting voice and disambiguation rules are documented in [FINANCE_OS.md](FINANCE_OS.md). Highlights:
+The reporting voice and disambiguation rules are documented in [REPORTING_UX.md](REPORTING_UX.md). Highlights:
 
-- `finance-cli` is the single source of truth for operational output.
+- `phai` is the single source of truth for operational output.
 - Prefer standard reports (`--notify-summary` for text, `--json-summary` / `--raw` for structured) over ad-hoc agent formatting.
 - Never invent categories — category assignment must come from rules and effective overrides.
-- Card-bill questions: disambiguate "open" vs "closed" before answering (see FINANCE_OS.md §Interaction Consistency).
+- Card-bill questions: disambiguate "open" vs "closed" before answering (see REPORTING_UX.md §Interaction Consistency).
 
 ---
 
@@ -170,8 +170,8 @@ The reporting voice and disambiguation rules are documented in [FINANCE_OS.md](F
 
 ```
 crates/
-  finance-core/   Domain models, storage trait, Pluggy client, rules, splits, enrichment
-  finance-cli/    Binary, report formatters, auto-update, command surface
+  phai-core/   Domain models, storage trait, Pluggy client, rules, splits, enrichment
+  phai-cli/    Binary, report formatters, auto-update, command surface
 schema/
   sqlite/         SQLite migrations (local backend)
   bigquery/       BigQuery migrations (production backend)
@@ -185,9 +185,9 @@ docs/
 ### Useful commands
 
 ```bash
-cargo run -p finance-cli -- --help            # explore CLI
-cargo test -p finance-cli                     # E2E tests against SQLite
-cargo test -p finance-core                    # core unit tests
+cargo run -p phai-cli -- --help            # explore CLI
+cargo test -p phai-cli                     # E2E tests against SQLite
+cargo test -p phai-core                    # core unit tests
 cargo deny check licenses                     # license policy
 cargo audit                                   # vulnerability scan
 ```

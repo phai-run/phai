@@ -9,7 +9,7 @@ date: 2026-02-02
 
 ## Context
 
-Finance OS ships as a single binary updated frequently via Release Please (see [ADR-0001](0001-single-binary-rust-cli.md)). For the user the upgrade story must be:
+phai ships as a single binary updated frequently via Release Please (see [ADR-0001](0001-single-binary-rust-cli.md)). For the user the upgrade story must be:
 
 - Zero ceremony — no `brew upgrade`, no `cargo install --force`, no version-pinning files.
 - Verified — every binary must be cryptographically tied to the published release.

@@ -8,13 +8,13 @@ date: 2025-12-15
 
 ## Context
 
-Finance OS needs to be installable, updatable, scriptable, and usable on a phone (via WhatsApp formatting). The author runs it daily in a personal pipeline that includes shell scripts, cron-style schedules, and AI agents. Long-running processes, browser UIs, and runtime dependencies all add friction the workflow cannot absorb.
+phai needs to be installable, updatable, scriptable, and usable on a phone (via WhatsApp formatting). The author runs it daily in a personal pipeline that includes shell scripts, cron-style schedules, and AI agents. Long-running processes, browser UIs, and runtime dependencies all add friction the workflow cannot absorb.
 
 Alternative shapes considered: a web dashboard (Next.js + Postgres), a desktop app (Tauri), a Python TUI, a Rust CLI.
 
 ## Decision
 
-**Finance OS ships as a single statically-linked Rust binary, installed via `curl | bash` (`install.sh`) or `cargo install`.** The CLI is the only product surface. SQLite is bundled (`rusqlite` with `bundled`). Migrations are embedded at compile time via `include_str!`. There is no server, no daemon, no GUI.
+**phai ships as a single statically-linked Rust binary, installed via `curl | bash` (`install.sh`) or `cargo install`.** The CLI is the only product surface. SQLite is bundled (`rusqlite` with `bundled`). Migrations are embedded at compile time via `include_str!`. There is no server, no daemon, no GUI.
 
 ## Options considered
 

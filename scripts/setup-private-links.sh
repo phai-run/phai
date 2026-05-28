@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Create local symlinks under ./.private/ for private Finance OS files.
+Create local symlinks under ./.private/ for private phai files.
 
 Usage:
   scripts/setup-private-links.sh \

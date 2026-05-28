@@ -8,7 +8,7 @@ date: 2026-01-18
 
 ## Context
 
-Finance OS runs against two backends (see [ADR-0002](0002-financestore-trait-dual-backend.md)) and ships as a single binary that the user re-runs against the same database, possibly across many version upgrades. The migration story must:
+phai runs against two backends (see [ADR-0002](0002-financestore-trait-dual-backend.md)) and ships as a single binary that the user re-runs against the same database, possibly across many version upgrades. The migration story must:
 
 1. **Be idempotent.** `admin migrate` on a fully-migrated database is a no-op.
 2. **Keep both backends in semantic parity.** A user moving from SQLite to BigQuery (or vice versa) sees the same domain shape.

@@ -1,6 +1,6 @@
 # Architecture
 
-Finance OS is a single-binary Rust CLI that turns a bank feed into a queryable, scriptable, reportable finance database. It connects to [Pluggy](https://pluggy.ai), normalizes everything into a relational store (SQLite local or BigQuery production), and produces human-friendly reports (default) or structured JSON (`--raw`, consumed by AI agents and dashboards).
+phai is a single-binary Rust CLI that turns a bank feed into a queryable, scriptable, reportable finance database. It connects to [Pluggy](https://pluggy.ai), normalizes everything into a relational store (SQLite local or BigQuery production), and produces human-friendly reports (default) or structured JSON (`--raw`, consumed by AI agents and dashboards).
 
 > See also: [ABSTRACTIONS.md](ABSTRACTIONS.md) for domain models · [VISION.md](VISION.md) for product direction · [adr/](adr/README.md) for individual decisions.
 
@@ -26,13 +26,13 @@ Every mutation emits an `AuditEvent` into an append-only table. The dataset is a
 
 ### 5. Dual backend behind one trait
 
-`FinanceStore` (in `crates/finance-core/src/storage/mod.rs`) abstracts both backends. The CLI never branches on backend type. Migrations exist in parallel in `schema/sqlite/` and `schema/bigquery/`, sharing numeric prefixes and semantics. When the semantics can't match, the feature doesn't ship.
+`FinanceStore` (in `crates/phai-core/src/storage/mod.rs`) abstracts both backends. The CLI never branches on backend type. Migrations exist in parallel in `schema/sqlite/` and `schema/bigquery/`, sharing numeric prefixes and semantics. When the semantics can't match, the feature doesn't ship.
 
 ### 6. Privacy is a code rule, not a code review check
 
 No personal counterparty names, account labels, or institution-specific statement fingerprints in shared source. Classification logic lives in the runtime `rules` table or in private configuration. Shared migrations create generic infrastructure only. Shared fixtures use synthetic data.
 
-This is enforced by review and reinforced in [AGENTS.md §1](../AGENTS.md#1-privacy--data-hygiene-hard-rules). It exists because Finance OS is open source, the author runs it on real money, and a leak through a "harmless" hardcoded heuristic is irrecoverable.
+This is enforced by review and reinforced in [AGENTS.md §1](../AGENTS.md#1-privacy--data-hygiene-hard-rules). It exists because phai is open source, the author runs it on real money, and a leak through a "harmless" hardcoded heuristic is irrecoverable.
 
 ### 7. Human-friendly by default, agent-friendly on demand
 
@@ -47,8 +47,8 @@ Every report has a human format (grouped, emoji-prefixed, phone-readable) and a 
 ```mermaid
 flowchart LR
     User["👤 User / Agent"]
-    CLI["finance-cli\n(binary, embedded migrations)"]
-    Core["finance-core\n(domain, storage trait,\nPluggy client, rules,\nsplits, enrichment)"]
+    CLI["phai\n(binary, embedded migrations)"]
+    Core["phai-core\n(domain, storage trait,\nPluggy client, rules,\nsplits, enrichment)"]
     SQLite[("SQLite\nlocal backend")]
     BQ[("BigQuery\nproduction backend")]
     Pluggy["🏦 Pluggy API\n(open finance aggregator)"]
@@ -81,7 +81,7 @@ flowchart LR
 | Async | `tokio` (rt-multi-thread) | Storage trait is `async fn` |
 | Errors | `anyhow` with `.context()` | `thiserror` only at domain boundaries if needed |
 | Time | `chrono` (with `serde`) | UTC inside, local format at the edge |
-| Migrations | `include_str!` SQL files | Registered in `finance-core::migrations` |
+| Migrations | `include_str!` SQL files | Registered in `phai-core::migrations` |
 | AI enrichment | `rig-core` | LLM-assisted classification suggestions |
 | Search / dedupe | `nucleo` (fuzzy), `deunicode` | Description matching |
 | CLI tests | `assert_cmd`, `predicates`, `tempfile`, `serial_test` | E2E run against a real SQLite DB in a tempdir |
@@ -90,9 +90,9 @@ flowchart LR
 ## Workspace Layout
 
 ```
-finance-os/
+phai/
 ├── crates/
-│   ├── finance-core/             # Domain + storage trait (no CLI deps)
+│   ├── phai-core/                # Domain + storage trait (no CLI deps)
 │   │   └── src/
 │   │       ├── lib.rs            # Public re-exports
 │   │       ├── models.rs         # AuditEvent, TransactionRecord, …
@@ -109,7 +109,7 @@ finance-os/
 │   │       ├── idempotency.rs    # Idempotency key derivation
 │   │       ├── legacy.rs         # CSV importer
 │   │       └── enrichment/       # LLM + heuristics + CNPJ + fuzzy
-│   └── finance-cli/              # Binary
+│   └── phai-cli/                 # Binary
 │       └── src/
 │           ├── main.rs           # Clap subcommands + dispatch
 │           ├── human_format.rs   # WhatsApp-friendly formatters
@@ -131,7 +131,7 @@ finance-os/
 │   └── adr/                      # Architecture Decision Records
 ├── .github/workflows/            # CI + Release Please
 ├── AGENTS.md                     # Agent guardrails
-├── FINANCE_OS.md                 # Reporting voice & disambiguation rules
+├── REPORTING_UX.md               # Reporting voice & disambiguation rules
 └── install.sh                    # Single-binary installer
 ```
 
@@ -142,12 +142,12 @@ finance-os/
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant CLI as finance-cli
+    participant CLI as phai
     participant P as Pluggy client
     participant S as FinanceStore
     participant A as audit_events
 
-    U->>CLI: finance-cli sync pluggy
+    U->>CLI: phai sync pluggy
     CLI->>P: list_items() → for each item, fetch_transactions()
     P-->>CLI: TransactionRecord[] (decimal amounts)
     CLI->>S: existing_transaction_ids(ids)
@@ -165,7 +165,7 @@ Idempotency keys are derived from the Pluggy payload in `idempotency.rs`. Re-run
 ```mermaid
 sequenceDiagram
     participant U as User / Agent
-    participant CLI as finance-cli
+    participant CLI as phai
     participant S as FinanceStore
     U->>CLI: report card-summary --raw
     CLI->>S: card_summary(month_ref)
@@ -188,7 +188,7 @@ See [ADR-0007](adr/0007-atomic-self-update.md). On macOS, the running binary ato
 
 The `FinanceStore` trait is the seam between domain code and persistence. It is intentionally wide (~50 methods) because:
 
-1. The domain is finite. Finance OS is not a generic ORM — every method maps to a well-known query.
+1. The domain is finite. phai is not a generic ORM — every method maps to a well-known query.
 2. Pushing logic into the trait keeps each backend's implementation flat and auditable. The same SQL idea lives in two files, side by side; that makes review for parity easy.
 3. Reports are first-class methods (`daily_pulse`, `card_summary`, `cashflow`, …) because they bundle the business logic that distinguishes "raw amounts" from "what you should see."
 
@@ -221,11 +221,11 @@ Release Please runs on `main`, parses Conventional Commits, and maintains an ope
 
 | Want to… | Edit |
 |---|---|
-| Add a CLI subcommand | `crates/finance-cli/src/main.rs` (clap derive) |
+| Add a CLI subcommand | `crates/phai-cli/src/main.rs` (clap derive) |
 | Add a report | New `FinanceStore` method + `human_format.rs` formatter + view migration |
-| Add a domain model | `crates/finance-core/src/models.rs` |
+| Add a domain model | `crates/phai-core/src/models.rs` |
 | Change a storage shape | New migration in both `schema/sqlite/` and `schema/bigquery/`; update `migrations.rs` |
 | Add a bank aggregator | New module beside `pluggy.rs`; do **not** generalize prematurely |
 | Tune classification | `rules` table (runtime) or `enrichment/` (heuristics + LLM glue) |
-| Change reporting voice | `human_format.rs` + update [FINANCE_OS.md](../FINANCE_OS.md) |
+| Change reporting voice | `human_format.rs` + update [REPORTING_UX.md](../REPORTING_UX.md) |
 | Document a decision | New ADR in `docs/adr/` |

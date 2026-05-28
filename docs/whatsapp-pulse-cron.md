@@ -1,6 +1,6 @@
 # Daily pulse via cron + WhatsApp
 
-This document shows how to wire `finance-cli` to push the daily pulse to a
+This document shows how to wire `phai` to push the daily pulse to a
 WhatsApp number on a schedule.
 
 > See also: [ADR-0009](adr/0009-proactive-pulse-and-closing-plan.md) for the
@@ -46,7 +46,7 @@ The five blocks are designed for a single phone-screen glance:
 
 ## Direct webhook (recommended)
 
-`finance-cli notify whatsapp` posts the rendered body to a webhook of your
+`phai notify whatsapp` posts the rendered body to a webhook of your
 choice. Configure two env vars:
 
 ```bash
@@ -59,10 +59,10 @@ sent as `Authorization: Bearer <token>`.
 
 ```bash
 # Preview without sending
-finance-cli notify whatsapp --dry-run
+phai notify whatsapp --dry-run
 
 # Send and log to stdout
-finance-cli notify whatsapp --echo
+phai notify whatsapp --echo
 ```
 
 ### Crontab example
@@ -76,7 +76,7 @@ Send the pulse every day at 21:00 local time:
   FINANCE_OS_WHATSAPP_WEBHOOK_URL="https://your-gateway.example.com/messages" \
   FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN="..." \
   HOME="$HOME" \
-  /Users/you/.local/bin/finance-cli notify whatsapp >> ~/.finance-os/pulse.log 2>&1
+  /Users/you/.local/bin/phai notify whatsapp >> ~/.phai/pulse.log 2>&1
 ```
 
 The `env -i` keeps the cron environment minimal so secrets aren't leaked from
@@ -87,16 +87,16 @@ under `~/Library/Application Support/finance-os` (macOS) or
 ### macOS launchd
 
 For macOS, `launchd` is more reliable than cron under sleep/wake. Drop this in
-`~/Library/LaunchAgents/io.finance-os.pulse.plist`:
+`~/Library/LaunchAgents/io.phai.pulse.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>io.finance-os.pulse</string>
+  <key>Label</key><string>io.phai.pulse</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/you/.local/bin/finance-cli</string>
+    <string>/Users/you/.local/bin/phai</string>
     <string>notify</string>
     <string>whatsapp</string>
   </array>
@@ -110,12 +110,12 @@ For macOS, `launchd` is more reliable than cron under sleep/wake. Drop this in
   </dict>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
-  <key>StandardOutPath</key><string>/tmp/finance-os-pulse.log</string>
-  <key>StandardErrorPath</key><string>/tmp/finance-os-pulse.log</string>
+  <key>StandardOutPath</key><string>/tmp/phai-pulse.log</string>
+  <key>StandardErrorPath</key><string>/tmp/phai-pulse.log</string>
 </dict></plist>
 ```
 
-Then: `launchctl load ~/Library/LaunchAgents/io.finance-os.pulse.plist`.
+Then: `launchctl load ~/Library/LaunchAgents/io.phai.pulse.plist`.
 
 ## Piping stdout (alternative)
 
@@ -123,7 +123,7 @@ If your gateway only accepts text on stdin, render the body with
 `report daily-pulse` and pipe it:
 
 ```bash
-finance-cli report daily-pulse --days 1 | your-whatsapp-sender
+phai report daily-pulse --days 1 | your-whatsapp-sender
 ```
 
 ## Tuning
@@ -135,7 +135,7 @@ finance-cli report daily-pulse --days 1 | your-whatsapp-sender
   compared to the full-month baseline directly (no pacing), which suppresses
   noise from one-shot fixed bills.
 - The "A vencer" block reads from the `forecast` table. Keep it current with
-  `finance-cli forecast upsert ...`. Stale forecasts → empty block; this is
+  `phai forecast upsert ...`. Stale forecasts → empty block; this is
   intentional and surfaces the data hygiene gap explicitly.
 - Card due dates come from `accounts.metadata_json.billing_due_day`. When the
   field is empty (e.g. corporate meal-voucher cards), the due-date hint is

@@ -19,7 +19,7 @@ Mutable-only models are also a poor fit for AI agents writing to the database. A
 
 ## Decision
 
-**Every write operation in Finance OS emits an `AuditEvent` into an append-only `audit_events` table.** Events carry: a v7 UUID (chronologically sortable), the `actor_id`, an action name in `entity.verb` grammar (`tx.categorize`, `sync.pluggy`, `split.apply`, …), the affected `entity` + `entity_id`, and a JSON `payload` containing before/after snapshots where relevant.
+**Every write operation in phai emits an `AuditEvent` into an append-only `audit_events` table.** Events carry: a v7 UUID (chronologically sortable), the `actor_id`, an action name in `entity.verb` grammar (`tx.categorize`, `sync.pluggy`, `split.apply`, …), the affected `entity` + `entity_id`, and a JSON `payload` containing before/after snapshots where relevant.
 
 The `FinanceStore` trait does not magically log writes. **Callers are responsible** for pairing a write with `insert_audit_events`. This is enforced by code review and by tests that assert on the audit row alongside the mutated state.
 

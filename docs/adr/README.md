@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This folder contains Architecture Decision Records (ADRs) for Finance OS — the record of *why* each structural choice was made, so future contributors don't have to re-derive it from `git log`.
+This folder contains Architecture Decision Records (ADRs) for phai — the record of *why* each structural choice was made, so future contributors don't have to re-derive it from `git log`.
 
 ## Format
 
