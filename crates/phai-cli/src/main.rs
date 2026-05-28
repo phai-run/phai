@@ -71,12 +71,29 @@ const DEFAULT_TUI_REVIEW_LIMIT: usize = 500;
 const REVIEW_TUI_CATEGORY_MATCH_LIMIT: usize = 9;
 const REVIEW_TUI_RECENT_CATEGORY_LIMIT: usize = 5;
 
+/// Branded `--version` output. Plain text by design: it is piped, screenshotted,
+/// and copied into issues, so it must render identically without a TTY.
+const VERSION_BANNER: &str = concat!(
+    "φ phai v",
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "finanças da casa, inteligência de verdade.\n",
+    "phai.run · github.com/phai-run/phai\n",
+);
+
 #[derive(Parser)]
-#[command(name = "fin", version, about = "Finance OS — `fin` abre a revisão TUI")]
+#[command(
+    name = "phai",
+    disable_version_flag = true,
+    about = "phai — finanças da casa, inteligência de verdade."
+)]
 struct Cli {
     /// Skip the automatic update check on startup.
     #[arg(long, global = true)]
     no_auto_update: bool,
+    /// Print version information.
+    #[arg(short = 'V', long = "version")]
+    version: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -2945,6 +2962,11 @@ fn should_run_auto_check(cli: &Cli) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.version {
+        print!("{VERSION_BANNER}");
+        return Ok(());
+    }
 
     // If we were just re-execed by a self-update, show the release notes
     // for the new version once, then continue with the user's command.
