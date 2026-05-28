@@ -16,5 +16,13 @@
       "include-component-in-tag": true,
       "bootstrap-sha": "ae65802258a02614bb4cba3874dad41902278a00c"
     }
-  }
+  },
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "finance-os",
+      "components": ["finance-cli", "finance-core"],
+      "merge": false
+    }
+  ]
 }
