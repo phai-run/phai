@@ -29,19 +29,29 @@ binary tarball. The two-version split bought nothing and cost a steady stream of
 
 ## Decision
 
-**Collapse the workspace to a single version, sourced from `workspace.package.version`,
-owned by release-please as one root package.** Both crates inherit `version.workspace = true`;
-the internal path dependency carries no `version` requirement; there is one release line
-(`vX.Y.Z`) and one release PR. `finance-core` no longer has an independent version — at the
-collapse it adopts the CLI's `3.x` line.
+**Collapse the workspace to a single version, owned by one root release-please package
+(path `.`, `release-type: simple`).** release-please tracks the version in
+`.release-please-manifest.json` and writes it into both crate manifests via `extra-files`
+(TOML updater on `$.package.version`); the internal path dependency carries no `version`
+requirement; there is one release line (`vX.Y.Z`) and one release PR. `finance-core` no
+longer has an independent version — at the collapse it adopts the CLI's `3.x` line.
+
+The crate versions are literal strings kept identical by release-please. The `rust`
+release-type was rejected: pointed at a virtual workspace root it fails
+(`value at path package.version is not tagged` with inherited versions;
+`is not a package manifest` because the root has no `[package]`). The `simple` strategy
+plus `extra-files` sidesteps the rust workspace machinery entirely. The committed
+`Cargo.lock` is not rewritten on release, which is harmless — CI does not build `--locked`,
+so cargo regenerates it.
 
 ## Options considered
 
-- **Single workspace version** (chosen): one root release-please package (path `.`) so
-  every commit anywhere bumps the one number; `version.workspace = true` in both crates;
-  no `version` on the internal path dep. Pros: eliminates the drift bug class entirely; one
-  PR, one tag, one number. Cons: one-time discontinuity (core `1.1.2` → `3.2.2`); historical
-  `finance-core-v*` tags remain in the repo (harmless, never `latest` again).
+- **Single workspace version** (chosen): one root release-please package (path `.`,
+  `release-type: simple`) so every commit anywhere bumps the one number; crate manifests
+  updated via `extra-files`; no `version` on the internal path dep. Pros: eliminates the
+  drift bug class entirely; one PR, one tag, one number. Cons: one-time discontinuity
+  (core `1.1.2` → `3.2.2`); `Cargo.lock` not rewritten on release (harmless, see above);
+  historical `finance-core-v*` tags remain in the repo (harmless, never `latest` again).
 - **Keep two packages, sync via `extra-files`**: retain core's `1.x` line but mirror the CLI
   version into core's manifest. Pros: preserves core's history line. Cons: still two release
   PRs and tags; `extra-files` mirroring is fragile and does not fix commit-attribution.
