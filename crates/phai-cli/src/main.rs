@@ -3365,7 +3365,7 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     // Always run on the latest binary before touching external data.
     // Skip when we just re-execed after an upgrade (FINANCE_OS_UPDATED) or
     // when the user opted out of auto-update (FINANCE_OS_NO_AUTO_UPDATE) —
-    // CI and e2e tests rely on the latter to keep `target/debug/finance-cli`
+    // CI and e2e tests rely on the latter to keep `target/debug/phai`
     // stable across subprocess invocations.
     if std::env::var_os("FINANCE_OS_UPDATED").is_none()
         && std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_none()

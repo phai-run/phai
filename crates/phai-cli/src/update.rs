@@ -10,9 +10,9 @@ use crate::update_state::{compute_exe_path_hash, state_file_path, UpdateState};
 // Constants
 // ---------------------------------------------------------------------------
 
-const REPO_OWNER: &str = "feliperun";
-const REPO_NAME: &str = "finance-os";
-pub const REPO_URL: &str = "https://github.com/feliperun/finance-os";
+const REPO_OWNER: &str = "phai-run";
+const REPO_NAME: &str = "phai";
+pub const REPO_URL: &str = "https://github.com/phai-run/phai";
 
 // Each compiled binary is locked to one platform. We expose the triple and
 // matching asset names per architecture so the updater always asks GitHub
@@ -30,27 +30,27 @@ pub const TARGET_TRIPLE: &str = "x86_64-apple-darwin";
 pub const TARGET_TRIPLE: &str = "unsupported";
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz";
+const ASSET_NAME: &str = "phai-cli-aarch64-apple-darwin.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz";
+const ASSET_NAME: &str = "phai-cli-x86_64-apple-darwin.tar.gz";
 #[cfg(not(target_os = "macos"))]
-const ASSET_NAME: &str = "finance-cli-unsupported.tar.gz";
+const ASSET_NAME: &str = "phai-cli-unsupported.tar.gz";
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const CHECKSUM_ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz.sha256";
+const CHECKSUM_ASSET_NAME: &str = "phai-cli-aarch64-apple-darwin.tar.gz.sha256";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const CHECKSUM_ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz.sha256";
+const CHECKSUM_ASSET_NAME: &str = "phai-cli-x86_64-apple-darwin.tar.gz.sha256";
 #[cfg(not(target_os = "macos"))]
-const CHECKSUM_ASSET_NAME: &str = "finance-cli-unsupported.tar.gz.sha256";
+const CHECKSUM_ASSET_NAME: &str = "phai-cli-unsupported.tar.gz.sha256";
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SIGNATURE_ASSET_NAME: &str = "finance-cli-aarch64-apple-darwin.tar.gz.minisig";
+const SIGNATURE_ASSET_NAME: &str = "phai-cli-aarch64-apple-darwin.tar.gz.minisig";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const SIGNATURE_ASSET_NAME: &str = "finance-cli-x86_64-apple-darwin.tar.gz.minisig";
+const SIGNATURE_ASSET_NAME: &str = "phai-cli-x86_64-apple-darwin.tar.gz.minisig";
 #[cfg(not(target_os = "macos"))]
-const SIGNATURE_ASSET_NAME: &str = "finance-cli-unsupported.tar.gz.minisig";
+const SIGNATURE_ASSET_NAME: &str = "phai-cli-unsupported.tar.gz.minisig";
 
-const BINARY_NAME: &str = "fin";
+const BINARY_NAME: &str = "phai";
 
 /// Minisign public key matched against release tarball signatures. See
 /// [ADR-0017](../../docs/adr/0017-release-signature-verification.md) for the
@@ -158,7 +158,7 @@ pub(crate) struct GitHubAsset {
 
 pub(crate) fn http_client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent(format!("finance-cli/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("phai-cli/{}", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(timeout_secs))
         .connect_timeout(Duration::from_secs(1))
         .build()
@@ -288,7 +288,7 @@ fn extract_binary(tarball: &[u8], dest_dir: &Path) -> Result<PathBuf> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(tarball));
     let mut archive = tar::Archive::new(decoder);
 
-    // We only expect one entry: `finance-cli`
+    // We only expect one entry: `phai`
     let mut binary_path: Option<PathBuf> = None;
 
     for entry in archive
@@ -328,7 +328,7 @@ fn extract_binary(tarball: &[u8], dest_dir: &Path) -> Result<PathBuf> {
         }
     }
 
-    binary_path.context("executable 'fin' not found in tarball")
+    binary_path.context("executable 'phai' not found in tarball")
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +338,7 @@ fn extract_binary(tarball: &[u8], dest_dir: &Path) -> Result<PathBuf> {
 #[cfg(unix)]
 pub(crate) fn exec_new_binary(new_version: &str) {
     use std::os::unix::process::CommandExt;
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("finance-cli"));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phai"));
     let args: Vec<String> = std::env::args().collect();
     let err = std::process::Command::new(&exe)
         .args(&args[1..]) // skip argv[0]
@@ -351,7 +351,7 @@ pub(crate) fn exec_new_binary(new_version: &str) {
 #[cfg(not(unix))]
 fn exec_new_binary(_new_version: &str) {
     eprintln!("Warning: process re-exec is not supported on this platform.");
-    eprintln!("Please restart finance-cli manually.");
+    eprintln!("Please restart phai manually.");
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +427,7 @@ pub(crate) async fn download_and_replace(
         .parent()
         .context("current exe has no parent directory")?;
     let tempdir = tempfile::Builder::new()
-        .prefix("finance-cli-update-")
+        .prefix("phai-update-")
         .tempdir_in(exe_parent)
         .context("failed to create tempdir for update")?;
 
@@ -648,7 +648,7 @@ pub async fn print_release_notes(version: &str) {
 
     let release_url = format!("{REPO_URL}/releases/tag/v{version}");
     eprintln!();
-    eprintln!("🎉 finance-cli updated to v{version}");
+    eprintln!("🎉 phai updated to v{version}");
     eprintln!();
     eprintln!("{}", indent_lines(body, "  "));
     eprintln!();
@@ -918,7 +918,7 @@ mod tests {
         // (on macOS, tempdir may sit under /var/... which symlinks to /private/var/...).
         let dest = tempdir.path().canonicalize().unwrap();
         let binary_data = b"fake binary content";
-        let tarball = build_tarball(&[("fin", binary_data)]);
+        let tarball = build_tarball(&[("phai", binary_data)]);
         let extracted = extract_binary(&tarball, &dest).unwrap();
         assert!(extracted.exists(), "extracted binary should exist");
         let contents = std::fs::read(&extracted).unwrap();

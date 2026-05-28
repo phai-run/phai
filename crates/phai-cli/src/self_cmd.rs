@@ -142,7 +142,7 @@ async fn self_update() -> Result<()> {
             update::exec_new_binary(latest_str);
             // exec replaces the process; if we reach here, exec failed
             eprintln!(
-                "Error: failed to restart after update. Please run 'finance self update' again."
+                "Error: failed to restart after update. Please run 'phai self update' again."
             );
             Ok(())
         }
