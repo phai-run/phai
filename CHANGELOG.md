@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.4](https://github.com/feliperun/finance-os/compare/v3.2.3...v3.2.4) (2026-05-28)
+
+
+### Bug Fixes
+
+* **release:** read unprefixed release-please outputs for root package ([#97](https://github.com/feliperun/finance-os/issues/97)) ([17384cc](https://github.com/feliperun/finance-os/commit/17384cc7249bcfb98ca1f118c2a14fb03b93e905))
+
 ## [3.2.3](https://github.com/feliperun/finance-os/compare/v3.2.2...v3.2.3) (2026-05-28)
 
 
