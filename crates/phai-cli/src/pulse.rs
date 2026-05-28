@@ -14,11 +14,11 @@
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, NaiveDate};
-use finance_core::models::{
+use phai_core::models::{
     AccountRecord, AccountSnapshotRecord, BudgetStatusRow, CardSummaryRow, CashflowRow,
     ForecastRecord,
 };
-use finance_core::storage::FinanceStore;
+use phai_core::storage::FinanceStore;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, BTreeSet};
 
