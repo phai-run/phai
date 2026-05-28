@@ -1,0 +1,17 @@
+<svg width="256" height="256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="phi-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2DD4BF"/>
+      <stop offset="50%" stop-color="#A78BFA"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" fill="#08060B" rx="48"/>
+  <text x="128" y="188" 
+        font-family="Georgia, 'Times New Roman', serif" 
+        font-size="180" 
+        fill="url(#phi-grad)" 
+        text-anchor="middle" 
+        font-style="italic"
+        font-weight="bold">φ</text>
+</svg>
