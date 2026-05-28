@@ -33,9 +33,6 @@ export default function Home() {
       setRoundsLeft(data.remaining);
     } catch (e: any) {
       setError(e.message);
-      if (e.message?.includes("No rounds")) {
-        setRoundsLeft(0);
-      }
     } finally {
       setLoading(false);
     }
@@ -57,47 +54,31 @@ export default function Home() {
 
   return (
     <>
-      {/* Hero */}
       <section className="hero">
-        <div className="hero-phi">φ</div>
-        <h1>Name your thing</h1>
-        <p>AI-powered naming in seconds.<br />DeepSeek-driven, $1 for 10 rounds.</p>
+        <h1>namezator</h1>
+        <p>AI-powered naming.<br />Describe your project. Get 10 names. $1 per 10 rounds.</p>
       </section>
 
-      {/* How */}
       <section className="alt" style={{ padding: "3rem 0" }}>
         <div className="container">
           <div className="stats">
-            <div className="stat">
-              <div className="num">$1</div>
-              <div className="lbl">per 10 rounds</div>
-            </div>
-            <div className="stat">
-              <div className="num">10</div>
-              <div className="lbl">names per round</div>
-            </div>
-            <div className="stat">
-              <div className="num">DeepSeek</div>
-              <div className="lbl">LLM engine</div>
-            </div>
-            <div className="stat">
-              <div className="num">Stripe</div>
-              <div className="lbl">payments</div>
-            </div>
+            <div className="stat"><div className="num">$1</div><div className="lbl">per 10 rounds</div></div>
+            <div className="stat"><div className="num">10</div><div className="lbl">names per round</div></div>
+            <div className="stat"><div className="num">DeepSeek</div><div className="lbl">LLM engine</div></div>
+            <div className="stat"><div className="num">Stripe</div><div className="lbl">payments</div></div>
           </div>
         </div>
       </section>
 
-      {/* Form */}
       <section id="generate">
         <div className="container">
           <h2>What are you <em>naming</em>?</h2>
           <p style={{ color: "var(--muted)", marginBottom: "1.5rem", fontSize: "0.92rem" }}>
-            Describe your project, startup, app, or product. The more detail, the better the names.
+            Describe your project, startup, app, CLI tool, or product. The more detail, the better the names.
           </p>
           <div className="form-group">
             <textarea
-              placeholder="e.g. A CLI tool for personal finance. Connects to Brazilian banks, syncs transactions, reports via WhatsApp. Audience: devs and families. Max 8 chars, no hyphens, avoid clichés."
+              placeholder="e.g. A CLI tool for personal finance. Connects to Brazilian banks via open-finance, syncs transactions, reports via WhatsApp. Audience: devs and families. Max 8 chars, no hyphens, avoid clichés."
               value={brief}
               onChange={(e) => setBrief(e.target.value)}
             />
@@ -121,7 +102,6 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Results */}
       {results && (
         <section className="alt">
           <div className="container">
@@ -144,7 +124,7 @@ export default function Home() {
 
       <footer>
         <div className="container">
-          φ phai · naming-as-a-service<br />
+          namezator · AI naming tool<br />
           powered by <a href="https://deepseek.com" target="_blank" rel="noopener">DeepSeek</a> · payments by <a href="https://stripe.com" target="_blank" rel="noopener">Stripe</a>
         </div>
       </footer>

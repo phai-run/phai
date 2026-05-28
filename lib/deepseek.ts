@@ -1,8 +1,8 @@
 import OpenAI from "openai";
 
 const deepseek = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY || "",
-  baseURL: "https://api.deepseek.com/v1",
+	apiKey: process.env.DEEPSEEK_API_KEY || "",
+	baseURL: "https://api.deepseek.com/v1",
 });
 
 const SYSTEM_PROMPT = `You are a world-class naming strategist. Generate creative, ownable names for any project, startup, app, or product.
@@ -30,36 +30,39 @@ Return ONLY valid JSON. No markdown, no prose outside the JSON:
 }`;
 
 type GeneratedName = {
-  name: string;
-  strategy: string;
-  rationale: string;
-  domain_hint: string;
+	name: string;
+	strategy: string;
+	rationale: string;
+	domain_hint: string;
 };
 
-export async function generateNames(brief: string, previousNames?: string[]): Promise<GeneratedName[]> {
-  let userMessage = `Brief: ${brief}`;
-  
-  if (previousNames && previousNames.length > 0) {
-    userMessage += `\n\nPreviously generated names (DO NOT repeat): ${previousNames.join(", ")}`;
-  }
+export async function generateNames(
+	brief: string,
+	previousNames?: string[],
+): Promise<GeneratedName[]> {
+	let userMessage = `Brief: ${brief}`;
 
-  const response = await deepseek.chat.completions.create({
-    model: "deepseek-chat",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userMessage },
-    ],
-    temperature: 0.9,
-    max_tokens: 2048,
-  });
+	if (previousNames && previousNames.length > 0) {
+		userMessage += `\n\nPreviously generated names (DO NOT repeat): ${previousNames.join(", ")}`;
+	}
 
-  const text = response.choices[0]?.message?.content || "";
-  
-  // Extract JSON from response (handle markdown fences)
-  let json = text.trim();
-  const fenceMatch = json.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) json = fenceMatch[1].trim();
-  
-  const parsed = JSON.parse(json);
-  return parsed.names || [];
+	const response = await deepseek.chat.completions.create({
+		model: "deepseek-chat",
+		messages: [
+			{ role: "system", content: SYSTEM_PROMPT },
+			{ role: "user", content: userMessage },
+		],
+		temperature: 0.9,
+		max_tokens: 2048,
+	});
+
+	const text = response.choices[0]?.message?.content || "";
+
+	// Extract JSON from response (handle markdown fences)
+	let json = text.trim();
+	const fenceMatch = json.match(/```(?:json)?\s*([\s\S]*?)```/);
+	if (fenceMatch) json = fenceMatch[1].trim();
+
+	const parsed = JSON.parse(json);
+	return parsed.names || [];
 }
