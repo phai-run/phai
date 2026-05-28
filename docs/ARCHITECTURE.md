@@ -215,7 +215,7 @@ New backend-divergence should be a deliberate choice with a documented reason in
 - `cargo audit` via `rustsec/audit-check@v2`
 - `cargo deny check licenses`
 
-Release Please runs on `main`, parses Conventional Commits, and maintains an open release PR with the next version and CHANGELOG. Merging that PR triggers the release workflow which builds, uploads, and signs platform tarballs. The CLI's self-updater consumes those releases.
+Release Please runs on `main`, parses Conventional Commits, and maintains an open release PR with the next version and CHANGELOG. The whole workspace ships as a single version (sourced from `workspace.package.version`, one root release-please package, one `vX.Y.Z` tag) — see [ADR-0020](adr/0020-single-workspace-version.md). Merging that PR triggers the release workflow which builds, uploads, and signs platform tarballs. The CLI's self-updater consumes those releases.
 
 ## Where to make changes
 

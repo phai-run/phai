@@ -71,6 +71,7 @@ proposed → active → superseded
 | [0017](0017-release-signature-verification.md) | Release signature verification (minisign) on top of SHA-256 | active |
 | [0018](0018-serve-local-dashboard.md) | `fin serve`: local HTTP+WebSocket dashboard for forecast review | superseded by [0019](0019-serve-loopback-only-localhost-alias.md) |
 | [0019](0019-serve-loopback-only-localhost-alias.md) | `fin serve` uses loopback-only binding with a localhost alias | active |
+| [0020](0020-single-workspace-version.md) | Single workspace version: one number for the whole product | active |
 
 ---
 

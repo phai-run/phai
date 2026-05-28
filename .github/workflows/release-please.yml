@@ -14,8 +14,8 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      finance-cli-released: ${{ steps.release.outputs['crates/finance-cli--release_created'] }}
-      finance-cli-tag: ${{ steps.release.outputs['crates/finance-cli--tag_name'] }}
+      finance-cli-released: ${{ steps.release.outputs['.--release_created'] }}
+      finance-cli-tag: ${{ steps.release.outputs['.--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
