@@ -79,40 +79,41 @@ Commit: `refactor: rename crates to phai-core/phai-cli and binary to phai`
 
 ---
 
-## Phase 2 — Infra: install, self-update, release, dashboard, repo description
+## Phase 2 — Infra: install, self-update, release, dashboard, repo description ✅ DONE (commit b512592)
 
 **Goal:** every functional pointer targets `phai-run/phai` and the `phai` binary; nothing 404s.
 
 Files & changes:
-- [ ] `install.sh`: `REPO="phai-run/phai"`; `ASSET_PREFIX="phai-cli"` (match Phase 1 workflow); `BINARY_NAME="phai"`; header comment + install banner text → phai; install URL in the usage examples → `raw.githubusercontent.com/phai-run/phai/main/install.sh`.
-- [ ] `crates/phai-cli/src/update.rs`: `REPO_NAME = "phai"`, `REPO_URL = "https://github.com/phai-run/phai"`, user-agent `phai-cli/{version}`. (Self-update is **currently pointing at the renamed repo via redirect — fix it explicitly.**)
-- [ ] `crates/phai-cli/src/self_cmd.rs`: any "finance-cli"/"fin" strings → phai.
-- [ ] `crates/phai-cli/src/serve_dashboard.html`: `<title>` and `<h1>` "Finance OS" → "phai" (Phase 6 will restyle to DESIGN.md; here just fix the name).
-- [ ] `crates/phai-cli/src/review_template.html`: footer "Finance OS" → "phai" (TUI deprecated — minimal touch only).
-- [ ] Repo description via `gh repo edit phai-run/phai --description "..."` and homepage → `https://phai.run` (see Phase 5 for copy).
+- [x] `install.sh`: `REPO="phai-run/phai"`; `ASSET_PREFIX="phai-cli"`; `BINARY_NAME="phai"`; header comment + banner text + error prefixes + usage URL → phai.
+- [x] `.github/workflows/release-please.yml` (deferred from Phase 1): `--package phai-cli`; asset/tar `phai-cli-<target>.tar.gz` containing `phai`; output names `finance-cli-*` → `phai-cli-*`.
+- [x] `crates/phai-cli/src/update.rs`: `REPO_OWNER="phai-run"`, `REPO_NAME="phai"`, `REPO_URL`, asset names `phai-cli-*`, `BINARY_NAME="phai"`, user-agent `phai-cli/{version}`, + user-facing strings/tmpdir prefix/tests.
+- [x] `crates/phai-cli/src/self_cmd.rs`: `finance self update` → `phai self update`.
+- [x] `crates/phai-cli/src/serve_dashboard.html`: `<title>`/`<h1>` "Finance OS" → "phai".
+- [x] `crates/phai-cli/src/review_template.html`: footer "Finance OS" → "phai".
+- [x] `crates/phai-cli/src/main.rs`: stale `target/debug/finance-cli` comment → `phai`.
+- [ ] **Deferred:** repo description via `gh repo edit` — shared-state remote mutation; Phase 5 sets the canonical copy, so do it there once.
+- [ ] **Out of scope / flagged:** `crates/phai-core/src/config.rs` still uses `finance-os` for the on-disk config/data dir (`~/.config/finance-os`, `finance-os.local.db`). Renaming orphans existing users' data — needs a deliberate migration decision, not covered by this plan. Left untouched.
 
 Acceptance:
-- [ ] `cargo test --workspace` green (e2e references the binary name).
-- [ ] Grep shows no functional `feliperun/finance-os` or `BINARY_NAME=fin` left: `grep -rn "finance-os\|feliperun" install.sh crates/*/src/*.rs .github/`
+- [x] `cargo test --workspace` green (400 pass).
+- [x] No functional `feliperun/finance-os` or `BINARY_NAME=fin` left (only the config-dir paths above, intentionally deferred).
 
 Commit: `chore: point install/self-update/release at phai-run/phai`
 
 ---
 
-## Phase 3 — CLI branding (banner, --version, about)
+## Phase 3 — CLI branding (banner, --version, about) ✅ DONE (commit 075f704)
 
 **Goal:** a tasteful φ touch in the CLI, in DESIGN.md voice. Terminal-first, no infantilizing, data > opinion.
 
-- [ ] clap `#[command(name = "phai", about = "...")]` — rewrite `about` (currently "Finance OS — `fin` abre a revisão TUI"). New: terminal-first one-liner, e.g. `about = "phai — finanças da casa, inteligência de verdade."`
-- [ ] `--version` output (see Reference §--version): φ glyph + version + tagline + `phai.run · github.com/phai-run/phai`. Locate the version-print path via `grep -n "CARGO_PKG_VERSION" crates/phai-cli/src/main.rs`.
-- [ ] Optional: subtle φ header in report/pulse output. Keep within DESIGN.md palette semantics (cyan = data/finanças, purple = ai, amber = alert). Terminal colors only where a TTY is detected; respect `--json`/structured output (no decoration there).
-- [ ] Do **not** touch the review TUI.
-
-Subagent note: not needed — these are a few targeted edits. Use `Grep` to find each site; `Read` only the ranges.
+- [x] clap root: `name = "phai"`, `about = "phai — finanças da casa, inteligência de verdade."` (was "Finance OS — `fin` abre a revisão TUI").
+- [x] `--version`: disabled clap's auto flag (`disable_version_flag = true`), added a manual `-V`/`--version` bool + a `VERSION_BANNER` const, short-circuited in `main()` before any side effects. Renders φ glyph + version + tagline + `phai.run · github.com/phai-run/phai`. Plain text (no ANSI) by design — it gets piped/screenshotted.
+- [x] Skipped the optional φ header in report/pulse output (keeps scope tight; no risk to `--json`).
+- [x] Did not touch the review TUI.
 
 Acceptance:
-- [ ] `phai --version` and `phai --help` render the brand; `--json` paths stay clean (no ANSI/φ leaking into machine output).
-- [ ] tests green; sentrux no degradation.
+- [x] `phai --version`, `phai -V`, `phai --help` render the brand; no JSON output paths touched.
+- [x] tests green (400 pass); sentrux no degradation (6995→6995).
 
 Commit: `feat(cli): add phai branding to version and help`
 
@@ -215,3 +216,5 @@ Commit: `feat(site): publish phai.run landing via GitHub Pages`
 |------|-------|------|
 | 2026-05-28 | 0 | Plan created. Decisions locked. Repo moved to phai-run/phai. Branch `chore/rename-phai`. Sentrux baseline Quality 6995. |
 | 2026-05-28 | 1 | ✅ Crate+binary rename done (commit 1fa5f8c). fmt/clippy/test green (400 pass), sentrux 6995→6995. Binary is now `phai`. Release-asset wiring + brand strings deferred to Phases 2–3 (see notes in those phases). git remote NOT yet updated (still feliperun URL, redirects fine). |
+| 2026-05-28 | 2 | ✅ Infra pointers (commit b512592). install.sh, release-please.yml asset wiring (deferred from P1), update.rs (repo/asset/binary/user-agent), self_cmd.rs, both HTML files. 400 pass, sentrux 6995→6995. Deferred: `gh repo edit` (→ Phase 5). Flagged: config.rs still uses `finance-os` data-dir path — needs a migration decision, left untouched. |
+| 2026-05-28 | 3 | ✅ CLI branding (commit 075f704). Branded `--version`/`-V` banner (φ glyph, plain text) via custom flag; new `about`; `name="phai"`. 400 pass, sentrux 6995→6995. |
