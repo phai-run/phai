@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.2](https://github.com/feliperun/finance-os/compare/v3.2.1...v3.2.2) (2026-05-28)
+
+
+### Bug Fixes
+
+* **splits:** respeitar split de transações em revisão, updates e relatórios ([#90](https://github.com/feliperun/finance-os/issues/90)) ([71a15f4](https://github.com/feliperun/finance-os/commit/71a15f4e4a7e1380cbd38de8329824f1ed6de6d5))
+
 ## [3.2.1](https://github.com/feliperun/finance-os/compare/v3.2.0...v3.2.1) (2026-05-28)
 
 
