@@ -161,19 +161,19 @@ Commit(s): `docs: rewrite README for phai` + `docs: sweep product name to phai`
 
 ---
 
-## Phase 6 — Landing page polish + GitHub Pages publish
+## Phase 6 — Landing page polish + GitHub Pages publish ✅ DONE (commit 1aa1967)
 
 **Goal:** `phai-brand.html` becomes a spectacular, DESIGN.md-perfect site, served via GitHub Pages.
 
-- [ ] Pull `phai-brand.html` from `master`. Polish:
-  - Replace dead links: `github.com/phai` → `github.com/phai-run/phai`; keep `phai.run` as canonical home (mark install as live only when DNS exists).
-  - Apply Phase 4 emoji/glyph decision consistently.
-  - Accessibility pass (contrast on `muted2`, focus states on the CTA pills, `prefers-reduced-motion` to disable the breathe animation).
-  - Wire favicon → `phai-logo.svg`; OG/twitter meta → `phai-banner.svg`; `<title>`, description, lang.
-  - Consider: real `install.sh` curl line, a "coming soon" treatment for WebApp, self-host fonts or `font-display: swap` (already swap).
-  - Polish opportunities to make it "spectacular": refined section transitions, a subtle φ watermark, consistent vertical rhythm (80px per DESIGN.md), grid alignment, mobile pass at 600px.
-- [ ] Publish via GitHub Pages. Recommended: `docs/` folder on `main` with `index.html` (rename `phai-brand.html` → `docs/index.html`, move assets alongside), then `gh api -X POST repos/phai-run/phai/pages -f source.branch=main -f source.path=/docs` (or enable in repo settings). Site lands at `https://phai-run.github.io/phai/`; add a `CNAME` file with `phai.run` once DNS is pointed.
-- [ ] Verify render: open the published URL (or local) in a browser; check mobile, dark contrast, links, OG preview.
+- [x] Pull `phai-brand.html` from `master`. Polish:
+  - [x] Replace dead links: `github.com/phai` → `github.com/phai-run/phai`; keep `phai.run` as canonical home; install line uses the github-raw URL (`raw.githubusercontent.com/phai-run/phai/main/install.sh`) with a "phai.run/install.sh em breve" note until DNS exists.
+  - [x] Apply Phase 4 emoji/glyph decision consistently — monoline glyphs (`φ ⌨ ◇ ⌂ ⊹ → ✓`) for decoration; emoji confined to the two terminal demos.
+  - [x] Accessibility pass: moved all readable text off `muted2` → `muted`; `:focus-visible` purple ring on CTA links (and global); `prefers-reduced-motion: reduce` disables the breathe.
+  - [x] Wire favicon → `phai-logo.svg`; OG/twitter meta → `phai-banner.svg`; `<title>`, description, `lang=pt-BR`.
+  - [x] φ is now the **embedded vector `<path>`** (hero + footer), gradient cyan→purple→amber — never a font reference; dropped the Playfair Display font link. `h2 em` accent words → Space Grotesk cyan (never the serif).
+  - [x] Spectacular polish: hairline section transitions, 80px vertical rhythm, terminal demos rebuilt as **real aligned lines** (`.ln` blocks), mobile pass at 600px. Removed dead `.audience-*` CSS.
+- [x] Published via GitHub Pages: `phai-brand.html` → `docs/index.html`, assets (`phai-logo.svg`, `phai-banner.svg`) + `.nojekyll` moved alongside. Enabled Pages via `gh api -X POST repos/phai-run/phai/pages` (JSON body `{"source":{"branch":"main","path":"/docs"}}`). Site URL: `https://phai-run.github.io/phai/`. **No `CNAME`** — DNS not pointed (domain unregistered per Locked decisions); add `phai.run` CNAME when DNS exists.
+- [x] Verified render in-browser via local static server (identical serve): hero vector φ + gradient, equation, DNA monoline glyphs, terminal lines, LLM-neutral, palette, CTA, footer φ; mobile 600px pass; favicon + OG SVGs resolve (200); reduced-motion + focus-visible present. ⚠️ **Live `phai-run.github.io/phai/` 404s until this branch merges to `main`** — Pages source is `main /docs` and the content lives on `chore/rename-phai`; it goes live automatically on merge.
 
 Subagent note: keep the visual polish in the main session (it's iterative/judgment-heavy and benefits from screenshots). A subagent could do the mechanical link/meta fixes, but the "make it spectacular" work should stay where you can see it.
 
@@ -219,4 +219,5 @@ Commit: `feat(site): publish phai.run landing via GitHub Pages`
 | 2026-05-28 | 2 | ✅ Infra pointers (commit b512592). install.sh, release-please.yml asset wiring (deferred from P1), update.rs (repo/asset/binary/user-agent), self_cmd.rs, both HTML files. 400 pass, sentrux 6995→6995. Deferred: `gh repo edit` (→ Phase 5). Flagged: config.rs still uses `finance-os` data-dir path — needs a migration decision, left untouched. |
 | 2026-05-28 | 3 | ✅ CLI branding (commit 075f704). Branded `--version`/`-V` banner (φ glyph, plain text) via custom flag; new `about`; `name="phai"`. 400 pass, sentrux 6995→6995. |
 | 2026-05-28 | 5 | ✅ README rewrite (commit d9e6139) + product-name sweep (commit 314b505). README in DESIGN.md voice (φ hero, equation, rules-first/LLM-neutral, terminal block, github-raw install with phai.run "coming soon", quickstart, links all resolve). Swept "Finance OS"/"finance-os" → "phai" across docs, ADR **prose only** (decisions untouched), OpenClaw SKILL.md/finance.sh, scripts, + one bigquery.rs comment. `FINANCE_OS.md` → `REPORTING_UX.md`. Fixed finance.sh to call renamed `phai` binary (functional). Docs/comment-only → no cargo/sentrux run. **Deferred (intentional, surfaced to user):** config.rs data-dir (`~/.config/finance-os`, `finance-os.local.db`, `FINANCE_OS_*` envs) + OpenClaw skill deploy identity (`name: finance-os`, `skills/finance-os/` paths) — both need a separate migration decision. `gh repo edit` run for description + homepage. |
+| 2026-05-28 | 6 | ✅ Landing page polish + GitHub Pages publish (commit 1aa1967). Polished site → `docs/index.html` (+ `phai-{logo,banner}.svg`, `.nojekyll`): φ as embedded vector path (hero+footer), monoline glyphs only (emoji confined to terminal demos), dead links fixed (`github.com/phai`→`phai-run/phai`, github-raw install line, phai.run kept as home), a11y (text off muted2, `:focus-visible`, `prefers-reduced-motion`), favicon/OG/title/desc/lang, terminal demos rebuilt as aligned `.ln` lines, 80px rhythm, 600px mobile pass; dropped Playfair link + dead `.audience-*` CSS. Pages enabled on `main /docs` (`https://phai-run.github.io/phai/`); **no CNAME** (DNS unregistered). Verified via local static serve (live URL 404s until branch merges to main). Docs/assets only → no cargo/sentrux run. |
 | 2026-05-28 | 4 | ✅ Brand files + DESIGN.md refine (commit ed75400). Added DESIGN.md (root) + `assets/brand/phai-{logo,banner}.svg`; φ now an embedded vector `<path>`. Refined DESIGN.md: motion, accessibility, emoji rule (monoline glyphs), favicon/OG, token→CSS-var table; folded salvaged BRAND_BOOK lines. **Finding:** Playfair has no φ glyph — path extracted from Georgia bold italic (the font the SVGs actually rendered). Docs/assets only, no `.rs` touched → no cargo/sentrux run. SVGs verified via `rsvg-convert`. |
