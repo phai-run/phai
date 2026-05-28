@@ -474,6 +474,36 @@ impl BigQueryStore {
             table
         ))
     }
+
+    /// If `transaction_id` matches a row in `transaction_split_lines` with an
+    /// active or confirmed split, returns the parent transaction id so writes
+    /// can be routed appropriately. Returns `None` for ordinary transactions.
+    ///
+    /// Why: after splitting, the parent row is hidden by `v_transactions_effective`
+    /// and the user interacts with the synthetic child rows (whose id is the
+    /// `split_line_id`). Anatomy/category edits against those ids must hit
+    /// `transaction_split_lines` — otherwise the UPDATE silently affects zero
+    /// rows on `transactions`.
+    async fn resolve_split_line_target(&self, transaction_id: &str) -> Result<Option<String>> {
+        let sql = format!(
+            "
+            SELECT parent_transaction_id
+            FROM {}
+            WHERE split_line_id = @tid
+              AND status IN ('active', 'confirmed')
+            LIMIT 1
+            ",
+            self.qualified_table("transaction_split_lines")?,
+        );
+        let response = self
+            .run_query_with_params(&sql, &[Param::string("tid", transaction_id)])
+            .await?;
+        let Some(row) = response.rows.first() else {
+            return Ok(None);
+        };
+        let values = row_values(row);
+        Ok(Some(required_string(&values, 0, "parent_transaction_id")?))
+    }
 }
 
 /// Mirror of `local::last_day_of_target_month`: last calendar day of the
@@ -1015,7 +1045,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT @lim
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self
             .run_query_with_params(
@@ -1053,7 +1083,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT @lim
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self
             .run_query_with_params(&sql, &[Param::int64("lim", limit as i64)])
@@ -1066,6 +1096,10 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn pending_human_descriptions(&self, limit: usize) -> Result<Vec<TransactionRecord>> {
+        // Read from the effective view so transactions whose anatomy lives in
+        // `transaction_split_lines` are surfaced instead of their (now hidden)
+        // parents. Without this, splitting a transaction leaves the parent
+        // stuck in the review queue with stale anatomy.
         let sql = format!(
             "
             SELECT
@@ -1083,7 +1117,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT @lim
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self
             .run_query_with_params(&sql, &[Param::int64("lim", limit as i64)])
@@ -1113,7 +1147,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT @lim
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self
             .run_query_with_params(&sql, &[Param::int64("lim", limit as i64)])
@@ -1148,7 +1182,7 @@ impl FinanceStore for BigQueryStore {
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT @lim
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self
             .run_query_with_params(
@@ -1174,7 +1208,7 @@ impl FinanceStore for BigQueryStore {
             WHERE (description IS NULL OR TRIM(description) = '')
               AND ABS(amount) > 0
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self.run_query(&sql).await?;
         let count = response
@@ -1194,7 +1228,7 @@ impl FinanceStore for BigQueryStore {
             WHERE (merchant_name IS NULL OR TRIM(merchant_name) = '')
               AND category_source != 'unclassified'
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self.run_query(&sql).await?;
         let count = response
@@ -1215,7 +1249,7 @@ impl FinanceStore for BigQueryStore {
               AND ABS(amount) >= @min_abs
               AND category_id IS NOT NULL
             ",
-            self.qualified_table("transactions")?,
+            self.qualified_table("v_transactions_reportable")?,
         );
         let response = self
             .run_query_with_params(&sql, &[Param::decimal("min_abs", min_abs_amount.abs())])
@@ -2309,6 +2343,55 @@ impl FinanceStore for BigQueryStore {
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()> {
+        // If this id points at a split line, route the category update to
+        // `transaction_split_lines` so the change is visible via the effective
+        // view. `transaction_split_lines` has no `classifier_trace` column —
+        // the view derives it from `context` for child rows — so we fold the
+        // trace into `context` when no explicit context was provided.
+        if self
+            .resolve_split_line_target(transaction_id)
+            .await?
+            .is_some()
+        {
+            let sql = format!(
+                "
+                UPDATE {}
+                SET category_id = COALESCE(@category_id, category_id),
+                    category_source = COALESCE(@category_source, category_source),
+                    context = COALESCE(@classifier_trace, context),
+                    actor_id = @actor_id,
+                    idempotency_key = @idempotency_key,
+                    updated_at = CURRENT_TIMESTAMP()
+                WHERE split_line_id = @transaction_id
+                  AND status IN ('active', 'confirmed')
+                ",
+                self.qualified_table("transaction_split_lines")?,
+            );
+            let resp = self
+                .run_query_with_params(
+                    &sql,
+                    &[
+                        Param::optional_string("category_id", category_id),
+                        Param::optional_string("category_source", category_source),
+                        Param::optional_string("classifier_trace", classifier_trace),
+                        Param::string("actor_id", actor_id),
+                        Param::string("idempotency_key", idempotency_key),
+                        Param::string("transaction_id", transaction_id),
+                    ],
+                )
+                .await?;
+            let affected: i64 = resp
+                .num_dml_affected_rows
+                .as_deref()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
+            if affected == 0 {
+                anyhow::bail!("Linha de split {transaction_id} não encontrada");
+            }
+            return Ok(());
+        }
+
         let sql = format!(
             "
             UPDATE {}
@@ -2354,6 +2437,78 @@ impl FinanceStore for BigQueryStore {
         actor_id: &str,
         idempotency_key: &str,
     ) -> Result<()> {
+        // Split-line routing: `description` and `context` live on the split
+        // line itself; `merchant_name` and `purpose` are receipt-level so they
+        // remain on the parent (shared across siblings). `classifier_trace`
+        // has no dedicated column on `transaction_split_lines`, so when no
+        // explicit context is provided we fold it into the line's `context`
+        // (mirroring how the view derives `classifier_trace` from `sl.context`
+        // for child rows).
+        if let Some(parent_id) = self.resolve_split_line_target(transaction_id).await? {
+            let line_context = patch.context.or(patch.classifier_trace);
+            let line_sql = format!(
+                "
+                UPDATE {}
+                SET description = COALESCE(@description, description),
+                    context = COALESCE(@context, context),
+                    actor_id = @actor_id,
+                    idempotency_key = @idempotency_key,
+                    updated_at = CURRENT_TIMESTAMP()
+                WHERE split_line_id = @transaction_id
+                  AND status IN ('active', 'confirmed')
+                ",
+                self.qualified_table("transaction_split_lines")?,
+            );
+            let resp = self
+                .run_query_with_params(
+                    &line_sql,
+                    &[
+                        Param::optional_string("description", patch.description),
+                        Param::optional_string("context", line_context),
+                        Param::string("actor_id", actor_id),
+                        Param::string("idempotency_key", idempotency_key),
+                        Param::string("transaction_id", transaction_id),
+                    ],
+                )
+                .await?;
+            let affected: i64 = resp
+                .num_dml_affected_rows
+                .as_deref()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
+            if affected == 0 {
+                anyhow::bail!("Linha de split {transaction_id} não encontrada");
+            }
+
+            if patch.merchant_name.is_some() || patch.purpose.is_some() {
+                let parent_sql = format!(
+                    "
+                    UPDATE {}
+                    SET merchant_name = COALESCE(@merchant_name, merchant_name),
+                        purpose = COALESCE(@purpose, purpose),
+                        actor_id = @actor_id,
+                        idempotency_key = @idempotency_key,
+                        updated_at = CURRENT_TIMESTAMP()
+                    WHERE transaction_id = @parent_id
+                    ",
+                    self.qualified_table("transactions")?,
+                );
+                self.run_query_with_params(
+                    &parent_sql,
+                    &[
+                        Param::optional_string("merchant_name", patch.merchant_name),
+                        Param::optional_string("purpose", patch.purpose),
+                        Param::string("actor_id", actor_id),
+                        Param::string("idempotency_key", idempotency_key),
+                        Param::string("parent_id", &parent_id),
+                    ],
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+
         let sql = format!(
             "
             UPDATE {}
@@ -2988,9 +3143,17 @@ impl FinanceStore for BigQueryStore {
 
     async fn effective_transactions_window(
         &self,
+        account_id: Option<&str>,
         since: NaiveDate,
         until: NaiveDate,
     ) -> Result<Vec<TransactionRecord>> {
+        let mut params = vec![Param::date("since", since), Param::date("until", until)];
+        let account_clause = if let Some(id) = account_id {
+            params.push(Param::string("acc", id));
+            "AND account_id = @acc"
+        } else {
+            ""
+        };
         let sql = format!(
             "
             SELECT
@@ -3018,16 +3181,12 @@ impl FinanceStore for BigQueryStore {
             FROM {}
             WHERE transaction_date >= @since
               AND transaction_date <= @until
+              {account_clause}
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             ",
             self.qualified_table("v_transactions_reportable")?,
         );
-        let response = self
-            .run_query_with_params(
-                &sql,
-                &[Param::date("since", since), Param::date("until", until)],
-            )
-            .await?;
+        let response = self.run_query_with_params(&sql, &params).await?;
         let mut items = Vec::with_capacity(response.rows.len());
         for row in response.rows {
             let values = row_values(&row);

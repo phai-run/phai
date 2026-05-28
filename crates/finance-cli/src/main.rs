@@ -4268,7 +4268,7 @@ async fn cashflow_card_bill_rows(
     let window_start = shift_month(context.month_start, -2)?;
     let credit_rows = context
         .store
-        .effective_transactions_window(window_start, context.month_end)
+        .effective_transactions_window(None, window_start, context.month_end)
         .await?;
 
     let mut bills = BTreeMap::<(String, String), Vec<CardClosedTransactionRow>>::new();
@@ -4747,7 +4747,7 @@ async fn build_cashflow_detail_sections(
         .collect::<BTreeMap<_, _>>();
     let internal_categories = store.internal_categories().await?;
     let actual_rows = store
-        .effective_transactions_window(month_start, month_end)
+        .effective_transactions_window(None, month_start, month_end)
         .await?;
     let mut actual_parts =
         collect_cashflow_actual_parts(actual_rows, &account_types, &internal_categories);
@@ -7070,7 +7070,7 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let mut db_rows = store
-        .effective_transactions_window(query_since, query_until)
+        .effective_transactions_window(None, query_since, query_until)
         .await?;
 
     let inferred_account_id = infer_account_id_from_fit_ids(&ofx_rows, &db_rows)
@@ -8872,6 +8872,18 @@ fn metadata_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     Some(current)
 }
 
+/// When the row was synthesized from `transaction_split_lines` (i.e. it's
+/// one of the children of a split), return the original parent transaction
+/// id. `None` for ordinary rows. Reads from the view-synthesized metadata
+/// `{effectiveKind: 'split', parentTransactionId: ..., ...}`.
+fn review_tui_split_parent_id(row: &TransactionRecord) -> Option<String> {
+    let kind = metadata_text(&row.metadata_json, &["effectiveKind"])?;
+    if kind != "split" {
+        return None;
+    }
+    metadata_text(&row.metadata_json, &["parentTransactionId"])
+}
+
 fn metadata_text(value: &Value, path: &[&str]) -> Option<String> {
     metadata_path(value, path).and_then(|value| match value {
         Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
@@ -9651,6 +9663,20 @@ fn review_tui_card_lines(
             &metadata_bits.join(" | "),
             detail_width,
         ));
+    }
+    if let Some(parent_id) = review_tui_split_parent_id(row) {
+        // This row is one of the lines of a split. Surface the parent id so
+        // the user has the reference back to the original transaction.
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<19}", "Split"),
+                Style::default().fg(TuiColor::DarkGray),
+            ),
+            Span::styled(
+                format!("↳ mãe: {parent_id}"),
+                Style::default().fg(TuiColor::Magenta),
+            ),
+        ]));
     }
     lines.push(Line::from(""));
 
@@ -11430,7 +11456,9 @@ async fn refresh_bulk_targets_for_session(
     }
     let today = chrono::Utc::now().date_naive();
     let from = today - chrono::Duration::days(730);
-    let mut targets = store.transactions_in_date_range(None, from, today).await?;
+    let mut targets = store
+        .effective_transactions_window(None, from, today)
+        .await?;
     targets.retain(|r| r.raw_description.trim().to_lowercase() == key);
     targets.sort_by_key(|t| std::cmp::Reverse(t.transaction_date));
     session.bulk_targets = targets;
@@ -11618,7 +11646,7 @@ async fn all_transactions_for_review(
         }
     };
     let mut rows = store
-        .transactions_in_date_range(filters.account_id.as_deref(), from, to)
+        .effective_transactions_window(filters.account_id.as_deref(), from, to)
         .await?;
     // Apply remaining filters + min-abs-amount.
     rows.retain(|row| row.amount.abs() >= min_abs_amount && filters.matches(row));

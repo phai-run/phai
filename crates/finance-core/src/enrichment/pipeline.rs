@@ -652,6 +652,7 @@ mod tests {
         }
         async fn effective_transactions_window(
             &self,
+            _: Option<&str>,
             _: NaiveDate,
             _: NaiveDate,
         ) -> Result<Vec<TransactionRecord>> {
