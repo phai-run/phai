@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/feliperun/finance-os/compare/finance-core-v1.1.1...finance-core-v1.1.2) (2026-05-28)
+
+
+### Bug Fixes
+
+* **splits:** respeitar split de transações em revisão, updates e relatórios ([#90](https://github.com/feliperun/finance-os/issues/90)) ([71a15f4](https://github.com/feliperun/finance-os/commit/71a15f4e4a7e1380cbd38de8329824f1ed6de6d5))
+
 ## [1.1.1](https://github.com/feliperun/finance-os/compare/finance-core-v1.1.0...finance-core-v1.1.1) (2026-05-27)
 
 
