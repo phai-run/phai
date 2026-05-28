@@ -119,24 +119,24 @@ Commit: `feat(cli): add phai branding to version and help`
 
 ---
 
-## Phase 4 — Brand source files into repo + revise DESIGN.md
+## Phase 4 — Brand source files into repo + revise DESIGN.md ✅ DONE (commit ed75400)
 
 **Goal:** brand assets live in the repo; DESIGN.md is sharper.
 
 Source files currently on the `master` branch of the repo (orphan brand branch): `DESIGN.md`, `BRAND_BOOK.md`, `phai-brand.html`, `phai-logo.svg`, `phai-banner.svg`, `README.md`. Pull them with `gh api repos/phai-run/phai/contents/<f>?ref=master`.
 
-- [ ] Add `DESIGN.md` (root) and `phai-logo.svg`, `phai-banner.svg` (root or `assets/brand/`).
-- [ ] **Do not** import `BRAND_BOOK.md` (deprecated). Extract any still-useful lines into DESIGN.md or README (see Reference).
-- [ ] **Revise DESIGN.md** to be more elegant/modern/refined/authentic. Concrete upgrades to consider:
-  - Tighten the prose; cut repetition. Keep the φ+fi+ai equation as the spine.
-  - Add a short **motion** section (the hero φ "breathe" already exists — codify it: 6s ease-in-out brightness, nothing else moves).
-  - Add **accessibility** guardrail: `muted2 #4A4A5E` on void is ~2:1 — decorative only, never body text. Body text uses `white`/`muted`.
-  - Resolve the emoji contradiction: DESIGN.md says "no emojis except terminal output" but the landing uses 🏠⌨️🔧 in DNA cards. **Decide and state one rule** (recommendation: replace decorative emojis with monoline glyphs `φ ⊹ ⌨ ◇` for a more refined, authentic feel; keep emojis only inside simulated terminal blocks).
-  - Specify favicon/OG: φ must render identically everywhere → convert φ to a vector **path** in the SVGs (Playfair-like italic), not a `font-family` reference (Georgia fallback currently breaks the look). See Phase 6.
-  - Add a one-line **token → CSS var** mapping table so CLI/web/site stay in sync.
-- [ ] SVGs: convert the φ `<text>` to a `<path>` so it doesn't depend on Georgia/Playfair being installed. (Generate the path from Playfair Display italic φ; embed.)
+- [x] Add `DESIGN.md` (root) and `phai-logo.svg`, `phai-banner.svg` (chose **`assets/brand/`** — consistent home; Phase 6 will reference them for favicon/OG).
+- [x] **Do not** import `BRAND_BOOK.md` (deprecated). Extracted still-useful lines into DESIGN.md (pronunciation, `.run` verb, taglines, anti-brand, naming architecture); dropped the superseded gold/JetBrains-display palette.
+- [x] **Revise DESIGN.md** to be more elegant/modern/refined/authentic:
+  - [x] Tightened prose; φ+fi+ai equation is the spine.
+  - [x] Added a **Motion** section (6s ease-in-out breathe on the hero φ only; honors `prefers-reduced-motion`).
+  - [x] Added **Accessibility** guardrail: `muted2 #4A4A5E` on void ~2:1 — decorative only, never body text.
+  - [x] Resolved the emoji contradiction — **one rule**: monoline glyphs `φ ⊹ ⌨ ◇` for decoration; emoji only inside simulated terminal blocks.
+  - [x] Specified favicon/OG and the φ rendering rule (embedded vector path, not a font reference).
+  - [x] Added a **token → CSS var** mapping table.
+- [x] SVGs: converted the φ `<text>` to an embedded `<path>`. ⚠️ **Finding:** Playfair Display ships **no φ glyph** (only Δ Ω μ π); the source SVGs actually rendered φ via Georgia. Path extracted from **Georgia bold italic** (the faithful match, a high-contrast italic serif) via `fonttools`; DESIGN.md documents this and the `phi-display` token now points at the Georgia serif stack as the live-text fallback. Both SVGs verified rendering via `rsvg-convert`.
 
-Subagent note: revising DESIGN.md is a single-file craft task — keep it in the main session. Converting the φ glyph to a path can be delegated to a `general-purpose` subagent with a crisp spec (input glyph, target font, output `<path d="...">`).
+Subagent note: revised DESIGN.md in the main session; delegated the φ glyph→path extraction to a `general-purpose` subagent.
 
 Commit: `docs(brand): add DESIGN.md + assets, refine the spec`
 
@@ -218,3 +218,4 @@ Commit: `feat(site): publish phai.run landing via GitHub Pages`
 | 2026-05-28 | 1 | ✅ Crate+binary rename done (commit 1fa5f8c). fmt/clippy/test green (400 pass), sentrux 6995→6995. Binary is now `phai`. Release-asset wiring + brand strings deferred to Phases 2–3 (see notes in those phases). git remote NOT yet updated (still feliperun URL, redirects fine). |
 | 2026-05-28 | 2 | ✅ Infra pointers (commit b512592). install.sh, release-please.yml asset wiring (deferred from P1), update.rs (repo/asset/binary/user-agent), self_cmd.rs, both HTML files. 400 pass, sentrux 6995→6995. Deferred: `gh repo edit` (→ Phase 5). Flagged: config.rs still uses `finance-os` data-dir path — needs a migration decision, left untouched. |
 | 2026-05-28 | 3 | ✅ CLI branding (commit 075f704). Branded `--version`/`-V` banner (φ glyph, plain text) via custom flag; new `about`; `name="phai"`. 400 pass, sentrux 6995→6995. |
+| 2026-05-28 | 4 | ✅ Brand files + DESIGN.md refine (commit ed75400). Added DESIGN.md (root) + `assets/brand/phai-{logo,banner}.svg`; φ now an embedded vector `<path>`. Refined DESIGN.md: motion, accessibility, emoji rule (monoline glyphs), favicon/OG, token→CSS-var table; folded salvaged BRAND_BOOK lines. **Finding:** Playfair has no φ glyph — path extracted from Georgia bold italic (the font the SVGs actually rendered). Docs/assets only, no `.rs` touched → no cargo/sentrux run. SVGs verified via `rsvg-convert`. |
