@@ -142,20 +142,20 @@ Commit: `docs(brand): add DESIGN.md + assets, refine the spec`
 
 ---
 
-## Phase 5 — README rewrite + docs brand sweep + repo description
+## Phase 5 — README rewrite + docs brand sweep + repo description ✅ DONE (commits d9e6139 + 314b505)
 
 **Goal:** README sells phai in DESIGN.md voice; stale "Finance OS"/"finance-os" text across docs becomes "phai".
 
-- [ ] Rewrite `README.md`: hero (φ, name, tagline), the equation, rules-first/LLM-neutral pitch, terminal screenshot block, install one-liner (`curl -fsSL https://raw.githubusercontent.com/phai-run/phai/main/install.sh | bash` until `phai.run/install.sh` DNS exists), quickstart (`phai sync`, `phai report`), links. Working URLs only.
-- [ ] Brand-text sweep (display strings, **not** crate identity): `finance-os` → `phai`, `Finance OS` → `phai`. Files include: `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`, `FINANCE_OS.md` (consider renaming → `BRAND_VOICE.md` or fold into DESIGN.md), `docs/*.md`, `docs/adr/*.md` (⚠️ **never edit an active ADR's decision** — only fix the product name in prose; if an ADR's identity changes materially, supersede it), `integrations/openclaw/skill/*`, `scripts/*`.
+- [x] Rewrite `README.md`: hero (φ, name, tagline), the equation, rules-first/LLM-neutral pitch, terminal screenshot block, install one-liner (`curl -fsSL https://raw.githubusercontent.com/phai-run/phai/main/install.sh | bash` until `phai.run/install.sh` DNS exists), quickstart (`phai sync`, `phai report`), links. Working URLs only.
+- [x] Brand-text sweep (display strings, **not** crate identity): `finance-os` → `phai`, `Finance OS` → `phai`. Files include: `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`, `FINANCE_OS.md` (renamed → `REPORTING_UX.md` — it holds Reporting UX rules, not brand voice), `docs/*.md`, `docs/adr/*.md` (⚠️ **never edit an active ADR's decision** — only fix the product name in prose; if an ADR's identity changes materially, supersede it), `integrations/openclaw/skill/*`, `scripts/*`.
   - ⚠️ Leave `schema/sqlite/026_drop_phantom_account.sql` migration semantics alone — only touch comments if they name the product, never the SQL.
-- [ ] `gh repo edit phai-run/phai --description "φ Rules-first, LLM-neutral personal finance agent. Terminal-first, built in Rust." --homepage "https://phai.run"`
+- [x] `gh repo edit phai-run/phai --description "φ Rules-first, LLM-neutral personal finance agent. Terminal-first, built in Rust." --homepage "https://phai.run"`
 
 **This phase is the prime subagent candidate.** The brand-text sweep fans out across ~40 files. Spawn 2–3 parallel `general-purpose` subagents partitioned by directory (e.g. `docs/`, `docs/adr/`, `integrations/`+`scripts/`), each briefed with: the locked decisions, the "display string only — never crate identity, never ADR decisions, never SQL" rule, and its file list. Main session writes the README itself (craft) and reviews subagent diffs before committing.
 
 Acceptance:
-- [ ] `grep -rn "Finance OS\|finance-os" --exclude-dir=.git .` returns only intentional/historical refs (CHANGELOG history, superseded ADRs).
-- [ ] Links in README resolve.
+- [x] `grep -rn "Finance OS\|finance-os" --exclude-dir=.git .` returns only intentional/historical refs (CHANGELOG history; `finance-os.local.db`/`finance-os.db` filenames + `FINANCE_OS_*` envs from the deferred config.rs data-dir contract; the deferred OpenClaw skill deploy identity — `name: finance-os` + `skills/finance-os/finance.sh` paths; `target/` build artifacts).
+- [x] Links in README resolve.
 
 Commit(s): `docs: rewrite README for phai` + `docs: sweep product name to phai`
 
@@ -218,4 +218,5 @@ Commit: `feat(site): publish phai.run landing via GitHub Pages`
 | 2026-05-28 | 1 | ✅ Crate+binary rename done (commit 1fa5f8c). fmt/clippy/test green (400 pass), sentrux 6995→6995. Binary is now `phai`. Release-asset wiring + brand strings deferred to Phases 2–3 (see notes in those phases). git remote NOT yet updated (still feliperun URL, redirects fine). |
 | 2026-05-28 | 2 | ✅ Infra pointers (commit b512592). install.sh, release-please.yml asset wiring (deferred from P1), update.rs (repo/asset/binary/user-agent), self_cmd.rs, both HTML files. 400 pass, sentrux 6995→6995. Deferred: `gh repo edit` (→ Phase 5). Flagged: config.rs still uses `finance-os` data-dir path — needs a migration decision, left untouched. |
 | 2026-05-28 | 3 | ✅ CLI branding (commit 075f704). Branded `--version`/`-V` banner (φ glyph, plain text) via custom flag; new `about`; `name="phai"`. 400 pass, sentrux 6995→6995. |
+| 2026-05-28 | 5 | ✅ README rewrite (commit d9e6139) + product-name sweep (commit 314b505). README in DESIGN.md voice (φ hero, equation, rules-first/LLM-neutral, terminal block, github-raw install with phai.run "coming soon", quickstart, links all resolve). Swept "Finance OS"/"finance-os" → "phai" across docs, ADR **prose only** (decisions untouched), OpenClaw SKILL.md/finance.sh, scripts, + one bigquery.rs comment. `FINANCE_OS.md` → `REPORTING_UX.md`. Fixed finance.sh to call renamed `phai` binary (functional). Docs/comment-only → no cargo/sentrux run. **Deferred (intentional, surfaced to user):** config.rs data-dir (`~/.config/finance-os`, `finance-os.local.db`, `FINANCE_OS_*` envs) + OpenClaw skill deploy identity (`name: finance-os`, `skills/finance-os/` paths) — both need a separate migration decision. `gh repo edit` run for description + homepage. |
 | 2026-05-28 | 4 | ✅ Brand files + DESIGN.md refine (commit ed75400). Added DESIGN.md (root) + `assets/brand/phai-{logo,banner}.svg`; φ now an embedded vector `<path>`. Refined DESIGN.md: motion, accessibility, emoji rule (monoline glyphs), favicon/OG, token→CSS-var table; folded salvaged BRAND_BOOK lines. **Finding:** Playfair has no φ glyph — path extracted from Georgia bold italic (the font the SVGs actually rendered). Docs/assets only, no `.rs` touched → no cargo/sentrux run. SVGs verified via `rsvg-convert`. |
