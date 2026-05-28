@@ -1,10 +1,4 @@
 node_modules/
-dist/
+.next/
 .env
-*.log
-.DS_Store
-
-
-# Added by cargo
-
-/target
+.env.local
