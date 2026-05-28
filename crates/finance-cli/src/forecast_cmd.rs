@@ -1281,7 +1281,7 @@ pub async fn reconcile_forecasts(
             .checked_add_signed(chrono::Duration::days(RECONCILE_DATE_TOLERANCE_DAYS))
             .unwrap_or(due);
         let txs = store
-            .transactions_in_date_range(Some(&account_id), from_date, to_date)
+            .effective_transactions_window(Some(&account_id), from_date, to_date)
             .await
             .context("falha ao carregar transações para reconciliar forecast")?;
 

@@ -184,8 +184,14 @@ pub trait FinanceStore {
     async fn count_transactions_with_context(&self) -> Result<i64>;
     async fn latest_pluggy_transaction_date(&self) -> Result<Option<NaiveDate>>;
     async fn daily_pulse(&self, since: NaiveDate) -> Result<Vec<DailyPulseItem>>;
+    /// Like [`Self::transactions_in_date_range`] but reads from the effective
+    /// view, so split lines surface in place of their (hidden) parent. Use
+    /// this for any user-facing listing or report. Reserve the raw
+    /// `transactions_in_date_range` for dedup/reconciliation paths that must
+    /// see exactly what was upserted.
     async fn effective_transactions_window(
         &self,
+        account_id: Option<&str>,
         since: NaiveDate,
         until: NaiveDate,
     ) -> Result<Vec<TransactionRecord>>;

@@ -1190,7 +1190,7 @@ impl FinanceStore for LocalStore {
               category_source, context, classifier_trace, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE LOWER(raw_description) LIKE ?1
                OR LOWER(COALESCE(description, '')) LIKE ?1
                OR LOWER(COALESCE(merchant_name, '')) LIKE ?1
@@ -1217,7 +1217,7 @@ impl FinanceStore for LocalStore {
               category_source, context, classifier_trace, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE context IS NULL
             ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             LIMIT ?1
@@ -1239,7 +1239,7 @@ impl FinanceStore for LocalStore {
               category_source, context, classifier_trace, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE (description IS NULL OR TRIM(description) = '')
               AND ABS(amount_cents) > 0
             ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
@@ -1262,7 +1262,7 @@ impl FinanceStore for LocalStore {
               category_source, context, classifier_trace, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE (merchant_name IS NULL OR TRIM(merchant_name) = '')
               AND category_source != 'unclassified'
             ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
@@ -1293,7 +1293,7 @@ impl FinanceStore for LocalStore {
               category_source, context, classifier_trace, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE (purpose IS NULL OR TRIM(purpose) = '')
               AND ABS(amount_cents) >= ?1
               AND category_id IS NOT NULL
@@ -1315,7 +1315,7 @@ impl FinanceStore for LocalStore {
         let count = conn.query_row(
             "
             SELECT COUNT(*)
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE (description IS NULL OR TRIM(description) = '')
               AND ABS(amount_cents) > 0
             ",
@@ -1330,7 +1330,7 @@ impl FinanceStore for LocalStore {
         let count = conn.query_row(
             "
             SELECT COUNT(*)
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE (merchant_name IS NULL OR TRIM(merchant_name) = '')
               AND category_source != 'unclassified'
             ",
@@ -1349,7 +1349,7 @@ impl FinanceStore for LocalStore {
         let count = conn.query_row(
             "
             SELECT COUNT(*)
-            FROM transactions
+            FROM v_transactions_reportable
             WHERE (purpose IS NULL OR TRIM(purpose) = '')
               AND ABS(amount_cents) >= ?1
               AND category_id IS NOT NULL
@@ -1629,6 +1629,7 @@ impl FinanceStore for LocalStore {
 
     async fn effective_transactions_window(
         &self,
+        account_id: Option<&str>,
         since: NaiveDate,
         until: NaiveDate,
     ) -> Result<Vec<TransactionRecord>> {
@@ -1644,14 +1645,16 @@ impl FinanceStore for LocalStore {
             FROM v_transactions_reportable
             WHERE transaction_date >= ?1
               AND transaction_date <= ?2
+              AND (?3 IS NULL OR account_id = ?3)
             ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             ",
         )?;
         let rows = stmt
             .query_map(
-                [
+                params![
                     since.format("%Y-%m-%d").to_string(),
                     until.format("%Y-%m-%d").to_string(),
+                    account_id,
                 ],
                 transaction_record_from_row,
             )?

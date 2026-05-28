@@ -176,7 +176,7 @@ async fn store_actor_loop(store: Box<dyn FinanceStore>, mut rx: mpsc::Receiver<S
                 let _ = resp.send(result);
             }
             StoreRequest::GetTransactions { from, to, resp } => {
-                let result = store.transactions_in_date_range(None, from, to).await;
+                let result = store.effective_transactions_window(None, from, to).await;
                 let _ = resp.send(result);
             }
         }
