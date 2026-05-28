@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>φ phai — finanças da casa, inteligência de verdade.</title>
+    <meta
+      name="description"
+      content="phai — agente de finanças pessoais rules-first e LLM-neutral. Determinístico, terminal-first, feito em Rust. Seus dados, suas regras."
+    />
+    <meta name="theme-color" content="#08060B" />
+
+    <link rel="icon" type="image/svg+xml" href="phai-logo.svg" />
+
+    <!-- Open Graph / Twitter -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://phai-run.github.io/phai/" />
+    <meta property="og:title" content="φ phai — finanças da casa, inteligência de verdade." />
+    <meta
+      property="og:description"
+      content="Agente de finanças pessoais rules-first e LLM-neutral. Determinístico, terminal-first, feito em Rust."
+    />
+    <meta property="og:image" content="https://phai-run.github.io/phai/phai-banner.svg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="φ phai — finanças da casa, inteligência de verdade." />
+    <meta
+      name="twitter:description"
+      content="Agente de finanças pessoais rules-first e LLM-neutral. Determinístico, terminal-first, feito em Rust."
+    />
+    <meta name="twitter:image" content="https://phai-run.github.io/phai/phai-banner.svg" />
+
+    <style>
+      :root {
+        --bg: #08060b;
+        --surface: #100c1a;
+        --purple: #a78bfa;
+        --cyan: #2dd4bf;
+        --amber: #fbbf24;
+        --rose: #fb7185;
+        --green: #4ade80;
+        --white: #f1f5f9;
+        --muted: #7c7c9a;
+        --muted2: #4a4a5e;
+        --border: #1e1832;
+        --rhythm: 80px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        color: var(--white);
+        font-family:
+          "Inter",
+          -apple-system,
+          BlinkMacSystemFont,
+          sans-serif;
+        line-height: 1.7;
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: var(--cyan);
+      }
+      :focus-visible {
+        outline: 1px solid var(--purple);
+        outline-offset: 3px;
+        border-radius: 4px;
+      }
+      .container {
+        max-width: 780px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      /* HERO */
+      .hero {
+        min-height: 95vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            ellipse 80% 60% at 50% 40%,
+            rgba(167, 139, 250, 0.06) 0%,
+            transparent 70%
+          ),
+          radial-gradient(
+            ellipse 60% 50% at 80% 80%,
+            rgba(251, 191, 36, 0.04) 0%,
+            transparent 70%
+          );
+      }
+      /* φ is an embedded vector path — never a font reference (DESIGN.md). */
+      .phi-hero {
+        width: clamp(180px, 34vw, 360px);
+        height: auto;
+        display: block;
+        animation: breathe 6s ease-in-out infinite;
+      }
+      @keyframes breathe {
+        0%,
+        100% {
+          filter: brightness(0.85);
+        }
+        50% {
+          filter: brightness(1);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .phi-hero {
+          animation: none;
+        }
+      }
+      .hero-name {
+        font-family: "Space Grotesk", "Inter", sans-serif;
+        font-size: clamp(2.2rem, 7vw, 5rem);
+        font-weight: 700;
+        margin-top: 0.25rem;
+        letter-spacing: -0.03em;
+      }
+      .hero-sub {
+        color: var(--muted);
+        font-size: 1.15rem;
+        margin-top: 0.75rem;
+        letter-spacing: 0.02em;
+        max-width: 420px;
+      }
+      .hero-pills {
+        display: flex;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        justify-content: center;
+        margin-top: 2rem;
+      }
+      .pill {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.8rem;
+        padding: 0.4rem 1rem;
+        border-radius: 100px;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .pill.hi {
+        border-color: rgba(167, 139, 250, 0.3);
+        color: var(--purple);
+      }
+      .pill.cy {
+        border-color: rgba(45, 212, 191, 0.3);
+        color: var(--cyan);
+      }
+      .pill.pu {
+        border-color: rgba(167, 139, 250, 0.2);
+        color: var(--purple);
+      }
+
+      /* Sections */
+      section {
+        padding: var(--rhythm) 0;
+        border-top: 1px solid var(--border);
+      }
+      .hero {
+        border-top: none;
+      }
+      section.alt {
+        background: var(--surface);
+      }
+      h2 {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 1.75rem;
+        font-weight: 700;
+        margin-bottom: 1.5rem;
+        letter-spacing: -0.02em;
+      }
+      /* Accent word — Space Grotesk, never the φ serif (DESIGN.md). */
+      h2 em {
+        font-style: normal;
+        color: var(--cyan);
+      }
+      h3 {
+        font-size: 0.75rem;
+        color: var(--purple);
+        text-transform: uppercase;
+        letter-spacing: 0.15em;
+        margin: 2.5rem 0 1rem;
+        font-weight: 600;
+      }
+
+      /* The Equation */
+      .equation {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        padding: 2.5rem 0;
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 1.5rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      .equation .part {
+        padding: 0.6rem 1.2rem;
+        border-radius: 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+      }
+      .equation .op {
+        color: var(--muted);
+        font-weight: 400;
+      }
+
+      /* DNA / list items */
+      .dna-grid {
+        display: grid;
+        gap: 0.6rem;
+      }
+      .dna-item {
+        display: flex;
+        gap: 1rem;
+        align-items: flex-start;
+        padding: 1.1rem 1.25rem;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--cyan);
+        border-radius: 14px;
+        transition: border-color 0.15s;
+      }
+      .dna-item:hover {
+        border-color: var(--purple);
+      }
+      .dna-item .dna-icon {
+        font-size: 1.3rem;
+        line-height: 1.4;
+        min-width: 28px;
+        text-align: center;
+        color: var(--cyan);
+      }
+      .dna-item strong {
+        display: block;
+        margin-bottom: 0.15rem;
+      }
+      .dna-item span {
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+
+      /* Palette */
+      .palette {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      .swatch-w {
+        text-align: center;
+      }
+      .swatch {
+        width: 64px;
+        height: 64px;
+        border-radius: 14px;
+        margin-bottom: 0.4rem;
+      }
+      .swatch-n {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.65rem;
+        color: var(--white);
+      }
+      .swatch-h {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.6rem;
+        color: var(--muted);
+      }
+
+      /* Terminal */
+      .term {
+        background: #050208;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        overflow: hidden;
+        margin: 1.5rem 0;
+      }
+      .term-bar {
+        background: #0c0918;
+        padding: 9px 14px;
+        display: flex;
+        gap: 7px;
+        align-items: center;
+      }
+      .td {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+      }
+      .td:nth-child(1) {
+        background: #ff5f56;
+      }
+      .td:nth-child(2) {
+        background: #ffbd2e;
+      }
+      .td:nth-child(3) {
+        background: #27c93f;
+      }
+      .term-t {
+        margin-left: 6px;
+        font-size: 0.7rem;
+        color: var(--muted);
+      }
+      .term-b {
+        padding: 16px 20px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.8rem;
+        line-height: 1.85;
+        overflow-x: auto;
+      }
+      .term-b .ln {
+        white-space: pre;
+      }
+      .term-b .sp {
+        height: 0.9rem;
+      }
+      .c-p {
+        color: var(--purple);
+      }
+      .c-c {
+        color: var(--cyan);
+      }
+      .c-a {
+        color: var(--amber);
+      }
+      .c-r {
+        color: var(--rose);
+      }
+      .c-g {
+        color: var(--green);
+      }
+      .c-m {
+        color: var(--muted);
+      }
+      .c-w {
+        color: var(--white);
+      }
+
+      /* Cards */
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 0.75rem;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem;
+        text-align: center;
+        transition: border-color 0.15s;
+      }
+      .card:hover {
+        border-color: var(--purple);
+      }
+      .card .val {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 1rem;
+      }
+      .card .lbl {
+        color: var(--muted);
+        font-size: 0.75rem;
+        margin-top: 0.2rem;
+      }
+
+      /* Taglines */
+      .tags {
+        display: grid;
+        gap: 0.5rem;
+      }
+      .tag {
+        padding: 1rem 1.2rem;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        font-size: 0.95rem;
+        border-left: 3px solid var(--cyan);
+        transition: border-color 0.15s;
+      }
+      .tag:hover {
+        border-left-color: var(--purple);
+      }
+      .tag small {
+        color: var(--muted);
+        font-size: 0.78rem;
+        display: block;
+        margin-top: 0.2rem;
+      }
+
+      /* Pricing (LLM-neutral) */
+      .price-row {
+        display: flex;
+        gap: 2rem;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem 0;
+      }
+      .price-big {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 2rem;
+        color: var(--cyan);
+      }
+      .price-sub {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .price-fine {
+        color: var(--muted);
+        font-size: 0.75rem;
+        margin-top: 0.2rem;
+      }
+      .price-op {
+        color: var(--muted);
+        font-size: 1.5rem;
+      }
+      .price-mono {
+        font-family: "JetBrains Mono", monospace;
+      }
+
+      /* CTA */
+      .cta-row {
+        display: flex;
+        gap: 1rem;
+        justify-content: center;
+        flex-wrap: wrap;
+        margin-top: 1.5rem;
+      }
+      .cta {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.85rem;
+        text-decoration: none;
+        padding: 0.6rem 1.5rem;
+        border: 1px solid var(--border);
+        border-radius: 100px;
+        transition: border-color 0.15s;
+      }
+      .cta:hover {
+        border-color: var(--purple);
+      }
+      .cta.cy {
+        color: var(--cyan);
+      }
+      .cta.pu {
+        color: var(--purple);
+      }
+
+      footer {
+        text-align: center;
+        padding: var(--rhythm) 0;
+        color: var(--muted);
+        font-size: 0.85rem;
+        background: var(--bg);
+        border-top: 1px solid var(--border);
+      }
+      .phi-foot {
+        width: 56px;
+        height: auto;
+        display: block;
+        margin: 0 auto;
+      }
+
+      @media (max-width: 600px) {
+        .phi-hero {
+          width: 52vw;
+        }
+        .equation {
+          font-size: 1rem;
+          gap: 0.4rem;
+        }
+        .equation .part {
+          padding: 0.4rem 0.8rem;
+        }
+        .price-row {
+          gap: 1rem;
+        }
+      }
+    </style>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <section class="hero">
+      <svg class="phi-hero" viewBox="0 0 256 256" role="img" aria-label="phai">
+        <defs>
+          <linearGradient id="phi-hero-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#2DD4BF" />
+            <stop offset="50%" stop-color="#A78BFA" />
+            <stop offset="100%" stop-color="#FBBF24" />
+          </linearGradient>
+        </defs>
+        <g transform="translate(53.249, 188) scale(0.0878906, -0.0878906)">
+          <path
+            fill="url(#phi-hero-grad)"
+            d="M1634 614Q1634 458 1564.0 337.5Q1494 217 1388 139Q1281 61 1148.5 17.0Q1016 -27 889 -31L800 -444H472L561 -31Q321 -19 194.0 97.0Q67 213 67 397Q67 631 225.0 791.0Q383 951 649 1008L675 930Q567 863 496.0 692.5Q425 522 425 324Q425 206 463.5 131.0Q502 56 579 53L729 737Q746 813 784.5 865.5Q823 918 880 952Q932 982 1004.0 998.0Q1076 1014 1163 1014Q1259 1014 1347.0 988.0Q1435 962 1497 914Q1562 863 1598.0 790.5Q1634 718 1634 614ZM1284 707Q1284 818 1253.0 877.5Q1222 937 1176 937Q1137 937 1113.5 909.0Q1090 881 1075 817L907 53Q979 60 1047.5 111.5Q1116 163 1168 250Q1222 340 1253.0 452.5Q1284 565 1284 707Z"
+          />
+        </g>
+      </svg>
+      <div class="hero-name">phai</div>
+      <div class="hero-sub">finanças da casa, inteligência de verdade.</div>
+      <div class="hero-pills">
+        <div class="pill hi">φ phi</div>
+        <div class="pill">fi · finanças</div>
+        <div class="pill">ai · inteligência</div>
+      </div>
+      <div class="hero-pills" style="margin-top: 0.7rem">
+        <div class="pill cy">◇ OpenClaw ready</div>
+        <div class="pill pu">⊹ WebApp · em breve</div>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <h2>A <em>equação</em></h2>
+        <div class="equation">
+          <div class="part" style="color: var(--amber)">φ</div>
+          <div class="op">+</div>
+          <div class="part" style="color: var(--cyan)">fi</div>
+          <div class="op">+</div>
+          <div class="part" style="color: var(--purple)">ai</div>
+          <div class="op">=</div>
+          <div class="part" style="border-color: rgba(167, 139, 250, 0.4)">
+            phai
+          </div>
+        </div>
+        <p
+          style="
+            text-align: center;
+            color: var(--muted);
+            max-width: 500px;
+            margin: 0 auto;
+          "
+        >
+          <strong style="color: var(--amber)">φ</strong> A proporção que rege o
+          equilíbrio universal.
+          <strong style="color: var(--cyan)">fi</strong> Finanças. A vida real
+          do dinheiro da casa.
+          <strong style="color: var(--purple)">ai</strong> Inteligência que
+          entende, organiza, antecipa.
+        </p>
+      </div>
+    </section>
+
+    <section class="alt">
+      <div class="container">
+        <h2>Pra <em>quem</em> é</h2>
+        <p style="color: var(--muted); margin-bottom: 2rem; max-width: 560px">
+          phai foi pensado para quem cuida das finanças da casa — pais, mães,
+          casais — e tem uma quedinha por tecnologia. Não precisa ser dev, mas
+          ajuda gostar de terminal, dados e controle de verdade sobre o próprio
+          dinheiro.
+        </p>
+        <div class="dna-grid">
+          <div class="dna-item">
+            <div class="dna-icon">⌂</div>
+            <div>
+              <strong>Famílias</strong><span>Pais, mães e casais que dividem as contas da casa. Mercado, escola, plano de saúde — vida real.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">⌨</div>
+            <div>
+              <strong>Mente analítica</strong><span>Quem gosta de entender os dados, fuçar categorias, rodar um SQL. Planilha? Já tentou e cansou.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">◇</div>
+            <div>
+              <strong>Controle de verdade</strong><span>Seus dados, suas regras. Nada de caixa preta. Nada de "confia que a IA resolve".</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">→</div>
+            <div>
+              <strong>Sem enrolação</strong><span>Informação direta, zero gamificação, zero foguetes. Dado > opinião.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <h2><em>DNA</em></h2>
+        <div class="dna-grid">
+          <div class="dna-item">
+            <div class="dna-icon">φ</div>
+            <div>
+              <strong>Equilíbrio</strong><span>A proporção certa entre gastar, guardar e viver. Sem extremismo.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">⌨</div>
+            <div>
+              <strong>Controle real</strong><span>Seus dados, suas regras. SQL, CSV, API. Nada de caixa preta.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">◇</div>
+            <div>
+              <strong>Inteligência</strong><span>Antecipa, categoriza, alerta. Não é dashboard — é agente.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">⌂</div>
+            <div>
+              <strong>Família</strong><span>Feito pra casa. Gastos do mercado, escola, plano de saúde. Vida real.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">⊹</div>
+            <div>
+              <strong>Precisão</strong><span>Decimal exato. Sem floating point. rust_decimal end-to-end.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">→</div>
+            <div>
+              <strong>Sem enrolação</strong><span>"Gastos subiram 23%". Não "você gastou muito". Dado > opinião.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="alt">
+      <div class="container">
+        <h2>No <em>terminal</em></h2>
+        <div class="term">
+          <div class="term-bar">
+            <div class="td"></div>
+            <div class="td"></div>
+            <div class="td"></div>
+            <span class="term-t">phai · finanças da casa</span>
+          </div>
+          <div class="term-b">
+            <div class="ln"><span class="c-p">$</span> <span class="c-w">phai sync pluggy</span>  <span class="c-m">▸ conectando bancos…</span></div>
+            <div class="ln"><span class="c-g">✓ 247 transações · 3 contas</span></div>
+            <div class="ln sp"></div>
+            <div class="ln"><span class="c-p">$</span> <span class="c-w">phai report casa</span></div>
+            <div class="ln sp"></div>
+            <div class="ln"><span class="c-c">φ casa</span> <span class="c-m">· últimos 7 dias</span></div>
+            <div class="ln">🍽️ <span class="c-w">mercado</span>   <span class="c-m">R$ 847,30</span>    <span class="c-g">↓12%</span></div>
+            <div class="ln">🏠 <span class="c-w">moradia</span>   <span class="c-m">R$ 1.200,00</span>  <span class="c-m">—</span></div>
+            <div class="ln">📚 <span class="c-w">escola</span>    <span class="c-m">R$ 650,00</span>    <span class="c-m">—</span></div>
+            <div class="ln">🏥 <span class="c-w">saúde</span>     <span class="c-m">R$ 320,00</span>    <span class="c-r">↑8%</span></div>
+            <div class="ln"><span class="c-m">──────────────────────────────</span></div>
+            <div class="ln"><span class="c-w">saldo</span>  <span class="c-m">· +R$ 4.012,70</span>  <span class="c-g">✓</span></div>
+            <div class="ln sp"></div>
+            <div class="ln"><span class="c-p">$</span> <span class="c-w">phai budget casa</span></div>
+            <div class="ln"><span class="c-w">mercado</span>  <span class="c-m">R$ 3.500 / R$ 3.247</span>  <span class="c-g">dentro ✓</span></div>
+            <div class="ln"><span class="c-w">escola</span>   <span class="c-m">R$ 650 / R$ 650</span>      <span class="c-m">no limite</span></div>
+            <div class="ln"><span class="c-w">lazer</span>    <span class="c-m">R$ 800 / R$ 1.150</span>    <span class="c-r">acima ✗</span></div>
+            <div class="ln sp"></div>
+            <div class="ln"><span class="c-p">$</span> <span class="c-w">phai alertas</span></div>
+            <div class="ln"><span class="c-a">⚡ escola</span>  <span class="c-m">· vencimento em 3 dias</span></div>
+            <div class="ln"><span class="c-a">⚡ lazer</span>   <span class="c-m">· 43% acima do orçamento</span></div>
+            <div class="ln sp"></div>
+            <div class="ln"><span class="c-p">$</span> <span class="c-c">▊</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RULES FIRST -->
+    <section>
+      <div class="container">
+        <h2><em>Rules</em> first, AI second</h2>
+        <p style="color: var(--muted); max-width: 560px; margin-bottom: 1.5rem">
+          phai é uma camada
+          <strong style="color: var(--white)">determinística</strong> que coloca
+          sua LLM nos trilhos. Chega de alucinação financeira com ChatGPT e
+          Claude.
+        </p>
+        <div class="dna-grid">
+          <div class="dna-item">
+            <div class="dna-icon">◇</div>
+            <div>
+              <strong>Regras primeiro</strong><span>Categorização, budgets, alertas — tudo determinístico. A LLM só entra depois que os dados estão certos.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">⊹</div>
+            <div>
+              <strong>LLM nos trilhos</strong><span>A IA não inventa transação, não arredonda valor, não alucina categoria. Ela opera sobre dados que já passaram pela camada de regras.</span>
+            </div>
+          </div>
+          <div class="dna-item">
+            <div class="dna-icon">✓</div>
+            <div>
+              <strong>Zero surpresas</strong><span>"Gastei quanto no mercado?" → resposta determinística. "O que mudou esse mês?" → LLM com contexto real.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LLM NEUTRAL -->
+    <section class="alt">
+      <div class="container">
+        <h2><em>LLM</em> Neutral</h2>
+        <p style="color: var(--muted); max-width: 560px; margin-bottom: 1.5rem">
+          Via <strong style="color: var(--cyan)">OpenClaw</strong>, escolha a IA
+          que quiser — e que cabe no bolso. Nossa preferida? Claude CLI +
+          DeepSeek.
+        </p>
+        <div class="price-row">
+          <div style="text-align: center">
+            <div class="price-big">$10</div>
+            <div class="price-sub">por mês</div>
+            <div class="price-fine">e não dá conta de gastar</div>
+          </div>
+          <div class="price-op">+</div>
+          <div style="text-align: center">
+            <div class="price-mono" style="font-size: 1.1rem; color: var(--white)">
+              Claude CLI
+            </div>
+            <div class="price-mono" style="font-size: 1.1rem; color: var(--purple)">
+              DeepSeek
+            </div>
+            <div class="price-mono" style="font-size: 0.8rem; color: var(--muted)">
+              Gemini · GPT
+            </div>
+            <div class="price-fine">ou a que você preferir</div>
+          </div>
+        </div>
+        <p style="text-align: center; color: var(--muted); font-size: 0.82rem">
+          Sem vendor lock-in. Sem "só funciona com OpenAI". O agente é seu.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <h2><em>Cores</em></h2>
+        <div class="palette">
+          <div class="swatch-w">
+            <div class="swatch" style="background: #a78bfa"></div>
+            <div class="swatch-n">Purple</div>
+            <div class="swatch-h">#A78BFA</div>
+          </div>
+          <div class="swatch-w">
+            <div class="swatch" style="background: #2dd4bf"></div>
+            <div class="swatch-n">Cyan</div>
+            <div class="swatch-h">#2DD4BF</div>
+          </div>
+          <div class="swatch-w">
+            <div class="swatch" style="background: #fbbf24"></div>
+            <div class="swatch-n">Amber</div>
+            <div class="swatch-h">#FBBF24</div>
+          </div>
+          <div class="swatch-w">
+            <div class="swatch" style="background: #fb7185"></div>
+            <div class="swatch-n">Rose</div>
+            <div class="swatch-h">#FB7185</div>
+          </div>
+          <div class="swatch-w">
+            <div class="swatch" style="background: #4ade80"></div>
+            <div class="swatch-n">Green</div>
+            <div class="swatch-h">#4ADE80</div>
+          </div>
+          <div class="swatch-w">
+            <div
+              class="swatch"
+              style="background: #08060b; border: 1px solid var(--border)"
+            ></div>
+            <div class="swatch-n">Deep Void</div>
+            <div class="swatch-h">#08060B</div>
+          </div>
+          <div class="swatch-w">
+            <div class="swatch" style="background: #f1f5f9"></div>
+            <div class="swatch-n">White</div>
+            <div class="swatch-h">#F1F5F9</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="alt">
+      <div class="container">
+        <h2><em>Voz</em></h2>
+        <div class="tags">
+          <div class="tag">
+            seu dinheiro em equilíbrio. <small>principal</small>
+          </div>
+          <div class="tag">
+            finanças da casa, inteligência de verdade. <small>landing</small>
+          </div>
+          <div class="tag">
+            φ = 1.618. sua família também. <small>nerd/geek</small>
+          </div>
+          <div class="tag">menos planilha. mais phi. <small>direto</small></div>
+          <div class="tag">
+            entenda o dinheiro da sua casa. <small>conversa</small>
+          </div>
+          <div class="tag">
+            seu agente financeiro familiar. <small>app stores</small>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <h2><em>Presença</em></h2>
+        <div class="grid-3">
+          <div class="card">
+            <div class="val" style="color: var(--cyan)">phai.run</div>
+            <div class="lbl">website</div>
+          </div>
+          <div class="card">
+            <div class="val" style="color: var(--purple)">@phai</div>
+            <div class="lbl">twitter</div>
+          </div>
+          <div class="card">
+            <div class="val" style="color: var(--muted)">gh/phai-run</div>
+            <div class="lbl">github org</div>
+          </div>
+          <div class="card">
+            <div class="val" style="color: var(--muted)">npm · crates.io</div>
+            <div class="lbl">packages</div>
+          </div>
+          <div class="card">
+            <div class="val" style="color: var(--muted)">@usephai</div>
+            <div class="lbl">instagram</div>
+          </div>
+          <div class="card">
+            <div class="val" style="color: var(--muted)">phai · PyPI</div>
+            <div class="lbl">python</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="alt" style="text-align: center">
+      <div class="container">
+        <h2>Comece em <em>1 minuto</em></h2>
+        <div class="term" style="max-width: 600px; margin: 1.5rem auto; text-align: left">
+          <div class="term-bar">
+            <div class="td"></div>
+            <div class="td"></div>
+            <div class="td"></div>
+            <span class="term-t">install</span>
+          </div>
+          <div class="term-b">
+            <div class="ln"><span class="c-p">$</span> <span class="c-w">curl -fsSL https://raw.githubusercontent.com/phai-run/phai/main/install.sh | bash</span></div>
+            <div class="ln"><span class="c-m">▸ baixando phai…</span></div>
+            <div class="ln"><span class="c-g">✓ instalado em ~/.local/bin/phai</span></div>
+            <div class="ln sp"></div>
+            <div class="ln"><span class="c-p">$</span> <span class="c-w">phai sync pluggy</span></div>
+            <div class="ln"><span class="c-m">▸ conectando seus bancos…</span></div>
+            <div class="ln"><span class="c-g">✓ pronto. suas finanças em equilíbrio.</span></div>
+            <div class="ln sp"></div>
+            <div class="ln"><span class="c-p">$</span> <span class="c-c">▊</span></div>
+          </div>
+        </div>
+        <p style="color: var(--muted); font-size: 0.78rem; margin-top: 0.5rem">
+          phai.run/install.sh em breve, quando o DNS estiver no ar.
+        </p>
+        <div class="cta-row">
+          <a class="cta cy" href="https://github.com/phai-run/phai">github →</a>
+          <a class="cta pu" href="https://phai.run">phai.run →</a>
+        </div>
+        <p style="color: var(--muted); font-size: 0.8rem; margin-top: 2rem">
+          OpenClaw ready · WebApp em breve · Rust · SQLite · BigQuery
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <svg class="phi-foot" viewBox="0 0 256 256" role="img" aria-label="phai">
+        <defs>
+          <linearGradient id="phi-foot-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#2DD4BF" />
+            <stop offset="50%" stop-color="#A78BFA" />
+            <stop offset="100%" stop-color="#FBBF24" />
+          </linearGradient>
+        </defs>
+        <g transform="translate(53.249, 188) scale(0.0878906, -0.0878906)">
+          <path
+            fill="url(#phi-foot-grad)"
+            d="M1634 614Q1634 458 1564.0 337.5Q1494 217 1388 139Q1281 61 1148.5 17.0Q1016 -27 889 -31L800 -444H472L561 -31Q321 -19 194.0 97.0Q67 213 67 397Q67 631 225.0 791.0Q383 951 649 1008L675 930Q567 863 496.0 692.5Q425 522 425 324Q425 206 463.5 131.0Q502 56 579 53L729 737Q746 813 784.5 865.5Q823 918 880 952Q932 982 1004.0 998.0Q1076 1014 1163 1014Q1259 1014 1347.0 988.0Q1435 962 1497 914Q1562 863 1598.0 790.5Q1634 718 1634 614ZM1284 707Q1284 818 1253.0 877.5Q1222 937 1176 937Q1137 937 1113.5 909.0Q1090 881 1075 817L907 53Q979 60 1047.5 111.5Q1116 163 1168 250Q1222 340 1253.0 452.5Q1284 565 1284 707Z"
+          />
+        </g>
+      </svg>
+      <p style="margin-top: 0.3rem">phai</p>
+      <p style="color: var(--muted); font-size: 0.9rem">
+        finanças da casa, inteligência de verdade.
+      </p>
+    </footer>
+  </body>
+</html>
