@@ -3,6 +3,13 @@
 > Living plan. Each phase is sized to run as its **own session**. Check items off as you go.
 > Source of truth for the brand is [DESIGN.md](../DESIGN.md) (to be added in Phase 4). `BRAND_BOOK.md` is **deprecated** — do not follow it; useful bits are extracted into "Reference" below.
 
+> ## ⚠️ Resuming an in-progress run — read first
+> Work lives on branch **`chore/rename-phai`** (NOT `main`). Before doing anything:
+> 1. `git switch chore/rename-phai` (or branch off it) — Phase 1's rename commits are here, not on main. If you start from main you will redo or conflict with completed work.
+> 2. Check the **Progress log** at the bottom of this file for the last completed phase + commit hash.
+> 3. Read **Locked decisions** + **Working agreements** below before editing.
+> Then continue with the next unchecked phase.
+
 ---
 
 ## Locked decisions
