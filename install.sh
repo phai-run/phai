@@ -61,13 +61,8 @@ esac
 
 # ─── Resolve version ────────────────────────────────────────────────────────
 if [ "$VERSION" = "latest" ]; then
-  # The monorepo publishes finance-core-vX.Y.Z releases alongside finance-cli
-  # ones. GitHub may flag a finance-core release as "latest", so we list the
-  # 20 most recent releases and pick the first tag that is NOT a finance-core
-  # release (i.e. doesn't start with "finance-core-").
-  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=20" \
+  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
     | grep '"tag_name"' \
-    | grep -v '"finance-core-' \
     | head -1 \
     | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
   if [ -z "$TAG" ]; then
