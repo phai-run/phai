@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.1](https://github.com/feliperun/finance-os/compare/v3.2.0...v3.2.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **cli:** pin finance-core 1.1.1 and link release-please versions ([#87](https://github.com/feliperun/finance-os/issues/87)) ([337501c](https://github.com/feliperun/finance-os/commit/337501c011f29d7c59db22009397819e1d8dae65))
+
 ## [3.2.0](https://github.com/feliperun/finance-os/compare/v3.1.0...v3.2.0) (2026-05-27)
 
 
