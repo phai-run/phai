@@ -1,6 +1,6 @@
 [package]
 name = "finance-core"
-version = "3.2.3"
+version = "3.2.4"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
