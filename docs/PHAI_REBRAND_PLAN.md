@@ -43,7 +43,7 @@
 
 ---
 
-## Phase 1 — Crate + binary rename (foundation; must compile)
+## Phase 1 — Crate + binary rename (foundation; must compile) ✅ DONE (commit 1fa5f8c)
 
 **Goal:** `finance-core`→`phai-core`, `finance-cli`→`phai-cli`, binary `fin`→`phai`. Pure identity rename, no behavior change. This unblocks every later phase.
 
@@ -206,4 +206,5 @@ Commit: `feat(site): publish phai.run landing via GitHub Pages`
 
 | Date | Phase | Note |
 |------|-------|------|
-| 2026-05-28 | 0 | Plan created. Decisions locked. Repo moved to phai-run/phai. |
+| 2026-05-28 | 0 | Plan created. Decisions locked. Repo moved to phai-run/phai. Branch `chore/rename-phai`. Sentrux baseline Quality 6995. |
+| 2026-05-28 | 1 | ✅ Crate+binary rename done (commit 1fa5f8c). fmt/clippy/test green (400 pass), sentrux 6995→6995. Binary is now `phai`. Release-asset wiring + brand strings deferred to Phases 2–3 (see notes in those phases). git remote NOT yet updated (still feliperun URL, redirects fine). |
