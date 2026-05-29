@@ -72,6 +72,7 @@ proposed → active → superseded
 | [0018](0018-serve-local-dashboard.md) | `fin serve`: local HTTP+WebSocket dashboard for forecast review | superseded by [0019](0019-serve-loopback-only-localhost-alias.md) |
 | [0019](0019-serve-loopback-only-localhost-alias.md) | `fin serve` uses loopback-only binding with a localhost alias | active |
 | [0020](0020-single-workspace-version.md) | Single workspace version: one number for the whole product | active |
+| [0021](0021-web-app-on-livestore-client-only.md) | Web app on LiveStore (client-only) bridged to the store | accepted |
 
 ---
 
