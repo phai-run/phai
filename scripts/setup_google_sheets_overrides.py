@@ -27,7 +27,7 @@ def default_config_path() -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create a Google Sheets-backed override layer for Finance OS BigQuery reads.",
+        description="Create a Google Sheets-backed override layer for phai BigQuery reads.",
     )
     parser.add_argument("--sheet-url", required=True, help="Google Sheets URL")
     parser.add_argument(
@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "--config-file",
         type=Path,
         default=default_config_path(),
-        help="Finance OS config.toml path",
+        help="phai config.toml path",
     )
     parser.add_argument("--project-id", help="Override project_id from config.toml")
     parser.add_argument("--dataset-id", help="Override dataset_id from config.toml")

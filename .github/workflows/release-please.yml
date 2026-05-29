@@ -16,8 +16,8 @@ jobs:
     outputs:
       # For the root package (path "."), release-please-action emits outputs
       # WITHOUT a path prefix — see setPathOutput in the action source.
-      finance-cli-released: ${{ steps.release.outputs.release_created }}
-      finance-cli-tag: ${{ steps.release.outputs.tag_name }}
+      phai-cli-released: ${{ steps.release.outputs.release_created }}
+      phai-cli-tag: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -27,7 +27,7 @@ jobs:
 
   release-assets:
     needs: release-please
-    if: needs.release-please.outputs.finance-cli-released == 'true'
+    if: needs.release-please.outputs.phai-cli-released == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -42,28 +42,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.finance-cli-tag }}
+          ref: ${{ needs.release-please.outputs.phai-cli-tag }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Add cross-compile target
         if: matrix.cross == true
         run: rustup target add ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --package finance-cli ${{ matrix.cross && format('--target {0}', matrix.target) || '' }}
+        run: cargo build --release --package phai-cli ${{ matrix.cross && format('--target {0}', matrix.target) || '' }}
       - name: Package and checksum
         run: |
           BIN_DIR=${{ matrix.cross && format('target/{0}/release', matrix.target) || 'target/release' }}
           cd "$BIN_DIR"
-          tar czf finance-cli-${{ matrix.target }}.tar.gz fin
-          shasum -a 256 finance-cli-${{ matrix.target }}.tar.gz \
-            > finance-cli-${{ matrix.target }}.tar.gz.sha256
-          mv finance-cli-${{ matrix.target }}.tar.gz \
-             finance-cli-${{ matrix.target }}.tar.gz.sha256 \
+          tar czf phai-cli-${{ matrix.target }}.tar.gz phai
+          shasum -a 256 phai-cli-${{ matrix.target }}.tar.gz \
+            > phai-cli-${{ matrix.target }}.tar.gz.sha256
+          mv phai-cli-${{ matrix.target }}.tar.gz \
+             phai-cli-${{ matrix.target }}.tar.gz.sha256 \
              "${GITHUB_WORKSPACE}/"
       - name: Upload to release
         run: |
-          gh release upload "${{ needs.release-please.outputs.finance-cli-tag }}" \
-            finance-cli-${{ matrix.target }}.tar.gz \
-            finance-cli-${{ matrix.target }}.tar.gz.sha256 \
+          gh release upload "${{ needs.release-please.outputs.phai-cli-tag }}" \
+            phai-cli-${{ matrix.target }}.tar.gz \
+            phai-cli-${{ matrix.target }}.tar.gz.sha256 \
             --clobber
         env:
           GH_TOKEN: ${{ github.token }}

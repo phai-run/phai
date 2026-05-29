@@ -6,7 +6,7 @@ WORKSPACE_ROOT="${FORD_WORKSPACE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 resolve_runtime_root() {
   if [[ -n "${FINANCE_OS_RUNTIME_ROOT:-}" ]]; then
-    if [[ -x "$FINANCE_OS_RUNTIME_ROOT/bin/finance-cli" || -x "$FINANCE_OS_RUNTIME_ROOT/target/release/finance-cli" ]]; then
+    if [[ -x "$FINANCE_OS_RUNTIME_ROOT/bin/phai" || -x "$FINANCE_OS_RUNTIME_ROOT/target/release/phai" ]]; then
       printf '%s\n' "$FINANCE_OS_RUNTIME_ROOT"
       return
     fi
@@ -23,28 +23,28 @@ resolve_runtime_root() {
 
   local root
   for root in "${candidates[@]}"; do
-    if [[ -n "$root" && ( -x "$root/bin/finance-cli" || -x "$root/target/release/finance-cli" ) ]]; then
+    if [[ -n "$root" && ( -x "$root/bin/phai" || -x "$root/target/release/phai" ) ]]; then
       printf '%s\n' "$root"
       return
     fi
   done
 
-  echo "finance-cli runtime not found" >&2
+  echo "phai runtime not found" >&2
   exit 1
 }
 
 RUNTIME_ROOT="$(resolve_runtime_root)"
 
-if [[ -x "$RUNTIME_ROOT/bin/finance-cli" ]]; then
-  BIN_PATH="$RUNTIME_ROOT/bin/finance-cli"
+if [[ -x "$RUNTIME_ROOT/bin/phai" ]]; then
+  BIN_PATH="$RUNTIME_ROOT/bin/phai"
   DEFAULT_CONFIG_DIR="$RUNTIME_ROOT/config"
   DEFAULT_DATA_DIR="$RUNTIME_ROOT/data"
-elif [[ -x "$RUNTIME_ROOT/target/release/finance-cli" ]]; then
-  BIN_PATH="$RUNTIME_ROOT/target/release/finance-cli"
+elif [[ -x "$RUNTIME_ROOT/target/release/phai" ]]; then
+  BIN_PATH="$RUNTIME_ROOT/target/release/phai"
   DEFAULT_CONFIG_DIR="${FINANCE_OS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/finance-os}"
   DEFAULT_DATA_DIR="${FINANCE_OS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/finance-os}"
 else
-  echo "finance-cli binary not found" >&2
+  echo "phai binary not found" >&2
   exit 1
 fi
 

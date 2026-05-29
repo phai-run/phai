@@ -1,6 +1,6 @@
-# finance-cli
+# phai-cli
 
-Command-line interface for **Finance OS** — the personal finance pipeline
+Command-line interface for **phai** — the personal finance pipeline
 that keeps your Pluggy / OFX / manual transactions categorized, audited,
 and ready to query.
 
@@ -11,13 +11,13 @@ match. The pipeline combines four signals — CNPJ lookup (BrasilAPI),
 Pluggy's coarse category, temporal context, and an LLM call — to either
 auto-apply a category, suggest one to the user, or ask for clarification.
 
-See `crates/finance-core/src/enrichment/` for the full architecture and
+See `crates/phai-core/src/enrichment/` for the full architecture and
 `/.claude/plans/inherited-roaming-milner.md` for the plan that landed it.
 
-### Manual: `finance tx enrich`
+### Manual: `phai tx enrich`
 
 ```sh
-finance tx enrich [--days 30] [--limit 20] [--dry-run] [--auto]
+phai tx enrich [--days 30] [--limit 20] [--dry-run] [--auto]
                   [--retry] [--no-rule] [--retroactive-threshold 80]
                   [--provider <name>] [--model <id>]
                   [--machine] [--machine-timeout 60]
@@ -42,20 +42,20 @@ Notable flags:
 - `--transaction-id <id>` — process exactly one transaction by id,
   bypassing the `--days` / `--limit` filter.
 
-### Automatic: hook on `finance sync`
+### Automatic: hook on `phai sync`
 
-After a successful `finance sync pluggy`, the CLI automatically runs
+After a successful `phai sync pluggy`, the CLI automatically runs
 enrichment on the newly upserted transactions. The hook is **non-fatal**:
 if the LLM is unreachable, BrasilAPI is throttled, or anything else
 fails, sync still returns success — the failure is logged and the
-affected transactions are re-tried on the next `finance tx enrich`.
+affected transactions are re-tried on the next `phai tx enrich`.
 
 ```sh
 # Default — enrichment runs automatically:
-finance sync pluggy
+phai sync pluggy
 
 # Disable the hook (useful in CI / cron / batch jobs):
-finance sync pluggy --no-enrich
+phai sync pluggy --no-enrich
 ```
 
 Sample output:
@@ -69,16 +69,16 @@ Sync Pluggy concluído:
 - backend: Local
 Sincronização concluída: 42 transações novas
 Enrichment automático: 18 categorizadas | 22 adiadas para revisão | 2 falhas
-Para revisar as adiadas: finance tx enrich --days 7
+Para revisar as adiadas: phai tx enrich --days 7
 ```
 
 For quick human cleanup of transaction anatomy, use the interactive
-review loop locally. `finance review` opens a dense terminal UI with
+review loop locally. `phai review` opens a dense terminal UI with
 editable human fields, read-only raw bank data, category autocomplete,
 filters, a searchable details modal, and Ctrl+S to save:
 
 ```bash
-finance review
+phai review
 ```
 
 The lower-level command is still available when you need explicit queue
@@ -86,14 +86,14 @@ selection. The shortcut loads a long local TUI queue by default; keep small
 limits for OpenClaw/WhatsApp JSON flows.
 
 ```bash
-finance tx review-human --kind all --limit 500 --tui --sound
+phai tx review-human --kind all --limit 500 --tui --sound
 ```
 
 Filter the queue before opening the TUI or emitting JSON:
 
 ```bash
-finance review --month 2026-03 --account-id shared_credit --category gas-stations --merchant posto
-finance tx review-human --kind all --json --month 2026-03 --filter-category gas-stations
+phai review --month 2026-03 --account-id shared_credit --category gas-stations --merchant posto
+phai tx review-human --kind all --json --month 2026-03 --filter-category gas-stations
 ```
 
 Inside the TUI, press `Ctrl+F` to open the filter menu, then choose `m`, `a`,
@@ -104,9 +104,9 @@ For OpenClaw/WhatsApp, list machine-readable pending items and then
 apply one response by transaction id:
 
 ```bash
-finance tx review-human --summary --json
-finance tx review-human --kind all --limit 5 --json
-finance tx review-human --transaction-id TX_ID \
+phai tx review-human --summary --json
+phai tx review-human --kind all --limit 5 --json
+phai tx review-human --transaction-id TX_ID \
   --description "Compra de mercado" \
   --merchant-name "Mercado Exemplo" \
   --category alimentacao:mercado \
@@ -121,7 +121,7 @@ Behavior summary:
 - `Suggest` / `AskUser` decisions are **deferred**: the transaction is
   marked `enrichment_attempted_at = now` (so it's not retried by
   default), but its category is untouched. The user can pick it up
-  later with `finance tx enrich --days 7`.
+  later with `phai tx enrich --days 7`.
 - Any error inside the hook increments the `failures` counter and the
   loop continues with the next transaction.
 
@@ -145,4 +145,4 @@ API keys are **never** stored in `config.toml` — read from env only.
 
 If none of the above are set when the hook runs, the failure is logged
 ("aviso: enrichment indisponível…") and sync exits cleanly — the user
-can configure a provider later and re-run `finance tx enrich` by hand.
+can configure a provider later and re-run `phai tx enrich` by hand.

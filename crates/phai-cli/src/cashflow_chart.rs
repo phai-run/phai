@@ -13,8 +13,8 @@
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
-use finance_core::migrations::run_migrations;
-use finance_core::storage::{open_store, FinanceStore};
+use phai_core::migrations::run_migrations;
+use phai_core::storage::{open_store, FinanceStore};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use std::path::{Path, PathBuf};

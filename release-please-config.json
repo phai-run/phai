@@ -6,10 +6,10 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "package-name": "finance-os",
+      "package-name": "phai",
       "extra-files": [
-        { "type": "toml", "path": "crates/finance-cli/Cargo.toml", "jsonpath": "$.package.version" },
-        { "type": "toml", "path": "crates/finance-core/Cargo.toml", "jsonpath": "$.package.version" }
+        { "type": "toml", "path": "crates/phai-cli/Cargo.toml", "jsonpath": "$.package.version" },
+        { "type": "toml", "path": "crates/phai-core/Cargo.toml", "jsonpath": "$.package.version" }
       ]
     }
   }

@@ -1,4 +1,4 @@
-# Sentrux architectural constraints for finance-os.
+# Sentrux architectural constraints for phai.
 #
 # Picked to ratchet against the current state of the repo (May 2026) without
 # blocking work in flight. Tighten thresholds in a follow-up PR once the

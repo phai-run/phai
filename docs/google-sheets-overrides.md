@@ -1,6 +1,6 @@
 # Google Sheets Category Overrides
 
-Finance OS keeps shared classification logic in the database and shared codebase, but the actual sheet URL and private categorization workflow should stay outside the repository.
+phai keeps shared classification logic in the database and shared codebase, but the actual sheet URL and private categorization workflow should stay outside the repository.
 
 This repository exposes a single read layer, `v_transactions_effective`, that can be replaced in a private BigQuery runtime. In a private environment, you can rewire that view to read an external Google Sheet and override `category_id` plus human transaction fields without mutating the canonical transaction rows.
 
@@ -16,8 +16,8 @@ Create a tab such as `category_overrides` with this header row:
 
 Notes:
 
-- `transaction_id` must match the Finance OS transaction ID already stored in BigQuery.
-- `category_id` must use the canonical Finance OS category key (example: `alimentacao:mercado`).
+- `transaction_id` must match the phai transaction ID already stored in BigQuery.
+- `category_id` must use the canonical phai category key (example: `alimentacao:mercado`).
 - Human fields are optional; leave a column blank when the canonical value should stand.
 - `updated_at` is optional but recommended. When multiple rows target the same transaction, the latest timestamp wins.
 - `enabled` is optional. Empty values are treated as enabled.
@@ -25,11 +25,11 @@ Notes:
 ## Private Setup
 
 1. Share the sheet with the BigQuery service account configured in your local `config.toml`.
-   The querying runtime must also request Google Drive read access; Finance OS does this automatically in the BigQuery backend.
+   The querying runtime must also request Google Drive read access; phai does this automatically in the BigQuery backend.
 2. Apply migrations so the dataset has the default `v_transactions_effective` and dependent views:
 
 ```bash
-./target/release/finance-cli admin migrate
+./target/release/phai admin migrate
 ```
 
 3. Replace `v_transactions_effective` with a Sheets-backed version:

@@ -9,14 +9,14 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn cargo_bin() -> Command {
-    Command::cargo_bin("fin").expect("fin binary")
+    Command::cargo_bin("phai").expect("phai binary")
 }
 
 fn envs<'a>(cmd: &'a mut Command, config_dir: &Path, data_dir: &Path) -> &'a mut Command {
     cmd.env("FINANCE_OS_CONFIG_DIR", config_dir)
         .env("FINANCE_OS_DATA_DIR", data_dir)
         // Tests must never trigger the self-updater: it overwrites the
-        // very `target/debug/finance-cli` binary cargo just built, causing
+        // very `target/debug/phai` binary cargo just built, causing
         // subsequent assertions to run against an old release artifact
         // and producing false negatives.
         .env("FINANCE_OS_NO_AUTO_UPDATE", "1")

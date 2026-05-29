@@ -1,6 +1,6 @@
 # Abstractions
 
-The domain models, traits, and conventions that shape Finance OS. Read [ARCHITECTURE.md](ARCHITECTURE.md) for the system map first; this document zooms into the types and the contracts between them.
+The domain models, traits, and conventions that shape phai. Read [ARCHITECTURE.md](ARCHITECTURE.md) for the system map first; this document zooms into the types and the contracts between them.
 
 ## Design Philosophy
 
@@ -13,7 +13,7 @@ The full set of design principles is in [ARCHITECTURE.md §Design Principles](AR
 
 ## The Storage Trait — `FinanceStore`
 
-`FinanceStore` (in `crates/finance-core/src/storage/mod.rs`) is the only seam between domain logic and persistence. It is `async` and `Send + Sync`, with one implementation per backend:
+`FinanceStore` (in `crates/phai-core/src/storage/mod.rs`) is the only seam between domain logic and persistence. It is `async` and `Send + Sync`, with one implementation per backend:
 
 | Backend | Module | Use case |
 |---|---|---|
@@ -73,7 +73,7 @@ validate_table_name(table)     // standalone fn — allowlist gate for any dynam
 
 ## Core Domain Types
 
-Models live in `crates/finance-core/src/models.rs`. The shapes are intentionally flat: a row in, a row out. Joining and shaping happen in SQL views.
+Models live in `crates/phai-core/src/models.rs`. The shapes are intentionally flat: a row in, a row out. Joining and shaping happen in SQL views.
 
 ### `TransactionRecord`
 
@@ -151,7 +151,7 @@ Adding a new report:
 2. Add a method to `FinanceStore` returning a `Vec<…Row>` shape.
 3. Implement in `local.rs` and `bigquery.rs`.
 4. Add a `human_format::…` formatter. The CLI dispatches `--raw` to JSON via `serde_json`.
-5. Add an E2E test in `crates/finance-cli/tests/` using SQLite.
+5. Add an E2E test in `crates/phai-cli/tests/` using SQLite.
 
 ## Rules Engine
 

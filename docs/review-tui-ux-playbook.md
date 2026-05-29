@@ -1,8 +1,8 @@
 # Playbook UX — Revisão de categorias e transações
 
-Documento de referência para tornar `tx review-human --tui` fluido ao analisar e recategorizar **centenas** de transações. Consolida padrões dos TUIs mais usados (opencode, codex, fzf, lazygit, yazi, lazydocker, tmux, etc.) aplicados ao que já existe em `crates/finance-cli/src/main.rs`.
+Documento de referência para tornar `tx review-human --tui` fluido ao analisar e recategorizar **centenas** de transações. Consolida padrões dos TUIs mais usados (opencode, codex, fzf, lazygit, yazi, lazydocker, tmux, etc.) aplicados ao que já existe em `crates/phai-cli/src/main.rs`.
 
-**Comando hoje:** `finance tx review-human --kind all --limit N --tui [--sound] [--bulk identical]`
+**Comando hoje:** `phai tx review-human --kind all --limit N --tui [--sound] [--bulk identical]`
 
 ---
 
@@ -10,7 +10,7 @@ Documento de referência para tornar `tx review-human --tui` fluido ao analisar 
 
 A TUI atual já implementa várias “sacadas” dos projetos de referência:
 
-| Padrão (referência) | Já no Finance OS | Onde |
+| Padrão (referência) | Já no phai | Onde |
 |---------------------|------------------|------|
 | Master–detail + fila (lazygit, dive) | Fila \| editor \| contexto | `draw_review_tui_body`, `draw_review_tui_queue` |
 | Contexto para decisão (dive, yazi) | Idênticas, mesmo dia, similares, dica de regra | `ReviewTuiContext`, `load_review_tui_context` |
@@ -60,7 +60,7 @@ Entrada → Resumo (--summary) → Carregar fila grande (--limit 500)
 
 ---
 
-## 3. Sacadas dos TUIs top 10 → regras para o Finance OS
+## 3. Sacadas dos TUIs top 10 → regras para o phai
 
 ### 3.1 Velocidade = menos campos por padrão (fzf, lazygit)
 
@@ -135,7 +135,7 @@ Entrada → Resumo (--summary) → Carregar fila grande (--limit 500)
 ## 4. Layout alvo (wireframe mental)
 
 ```
-┌─ Finance OS  revisão  [████████░░] 84/312  │ bulk: ON │ faltam cat: 41 ─┐
+┌─ phai  revisão  [████████░░] 84/312  │ bulk: ON │ faltam cat: 41 ─┐
 ├─ Fila (/ filtrar) ─┬─ Transação + campos ───┬─ Contexto ─────────────────┤
 │ > 84 R$ -42 Mercado│  R$ -42,00  2026-05-01 │ idênticas: 6  bulk: ON    │
 │   85 R$ -9  Uber   │  cat: alimentacao:…   │ regra: promover…          │
@@ -207,7 +207,7 @@ Ao guiar revisão fora da TUI, espelhar o que a TUI faz bem:
 
 ---
 
-## 8. Referências de código (Finance OS)
+## 8. Referências de código (phai)
 
 | Área | Funções / tipos |
 |------|-----------------|

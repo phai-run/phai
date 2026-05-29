@@ -15,7 +15,7 @@ supersedes: "0007"
 
 The 2026-05 audit re-examined that gate and concluded it should be tripped pre-emptively, not after an incident. SHA-256 alone guarantees **integrity** (the bytes you received match the bytes the publisher uploaded), but it carries **zero authentication** — the digest is fetched from the same GitHub Releases bucket as the tarball. If that bucket is compromised (account takeover, OAuth leak, malicious workflow), an attacker can publish a malicious binary alongside a matching `.sha256` sidecar and every auto-updating CLI instance accepts it without complaint.
 
-Because Finance OS auto-updates with no user confirmation (see ADR-0007 §Decision), the trust boundary is wider than it looks: the same compromise propagates to every laptop running the CLI within 24 hours.
+Because phai auto-updates with no user confirmation (see ADR-0007 §Decision), the trust boundary is wider than it looks: the same compromise propagates to every laptop running the CLI within 24 hours.
 
 ## Decision
 

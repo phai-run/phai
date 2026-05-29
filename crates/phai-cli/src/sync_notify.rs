@@ -260,7 +260,7 @@ pub fn render_release_notes(
 ) -> String {
     let mut out = String::new();
 
-    let _ = writeln!(out, "🛠️ *finance-cli atualizado*");
+    let _ = writeln!(out, "🛠️ *phai atualizado*");
     let _ = writeln!(out);
     let _ = writeln!(out, "Versão: *{prev_version} → {new_version}*");
     let _ = writeln!(out);
@@ -619,7 +619,7 @@ struct RealExpenseCalc {
 
 fn compute_real_expenses(
     transactions: &[SyncSummaryTransaction],
-    accounts: &[finance_core::models::AccountRecord],
+    accounts: &[phai_core::models::AccountRecord],
 ) -> RealExpenseCalc {
     let card_payment_pairs = detect_card_payment_pairs(transactions, accounts);
 
@@ -693,7 +693,7 @@ fn compute_real_expenses(
 /// same amount (1% tolerance), on same or adjacent dates.
 fn detect_card_payment_pairs(
     transactions: &[SyncSummaryTransaction],
-    accounts: &[finance_core::models::AccountRecord],
+    accounts: &[phai_core::models::AccountRecord],
 ) -> Vec<(String, String, Decimal)> {
     let checking_ids: BTreeSet<&str> = accounts
         .iter()
@@ -1174,8 +1174,8 @@ fn suggest_name(description: &str) -> Option<String> {
 #[allow(dead_code)]
 pub struct SyncMessageInput {
     pub new_transactions: Vec<SyncSummaryTransaction>,
-    pub accounts: Vec<finance_core::models::AccountRecord>,
-    pub snapshots: Vec<finance_core::models::AccountSnapshotRecord>,
+    pub accounts: Vec<phai_core::models::AccountRecord>,
+    pub snapshots: Vec<phai_core::models::AccountSnapshotRecord>,
     pub review_items: Vec<ReviewItem>,
     pub balance: Option<Decimal>,
     pub sync_time: chrono::DateTime<Utc>,
@@ -1348,8 +1348,8 @@ mod tests {
         }
     }
 
-    fn make_account(id: &str, account_type: &str) -> finance_core::models::AccountRecord {
-        finance_core::models::AccountRecord {
+    fn make_account(id: &str, account_type: &str) -> phai_core::models::AccountRecord {
+        phai_core::models::AccountRecord {
             account_id: id.to_string(),
             owner: "test".to_string(),
             account_type: account_type.to_string(),

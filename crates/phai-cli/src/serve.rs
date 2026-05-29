@@ -17,14 +17,14 @@ use axum::{
     Json, Router,
 };
 use chrono::{NaiveDate, Utc};
-use finance_core::idempotency::ensure_forecast_idempotency;
-use finance_core::migrations::run_migrations;
-use finance_core::models::{
+use futures::{SinkExt, StreamExt};
+use phai_core::idempotency::ensure_forecast_idempotency;
+use phai_core::migrations::run_migrations;
+use phai_core::models::{
     AccountRecord, AuditEvent, CategoryRecord, ForecastRecord, ForecastTemplateRecord,
 };
-use finance_core::storage::{open_store, FinanceStore};
-use finance_core::AppConfig;
-use futures::{SinkExt, StreamExt};
+use phai_core::storage::{open_store, FinanceStore};
+use phai_core::AppConfig;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,7 +91,7 @@ enum StoreRequest {
     },
 }
 
-use finance_core::models::TransactionRecord;
+use phai_core::models::TransactionRecord;
 
 async fn store_actor_loop(store: Box<dyn FinanceStore>, mut rx: mpsc::Receiver<StoreRequest>) {
     while let Some(req) = rx.recv().await {

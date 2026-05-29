@@ -1,5 +1,5 @@
 use anyhow::Result;
-use finance_core::models::{
+use phai_core::models::{
     CardSummaryRow, CashflowRow, ForecastVsActualRow, MonthlySpendRow, UncategorizedRow,
 };
 use serde::Serialize;

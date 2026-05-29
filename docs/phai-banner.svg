@@ -1,0 +1,33 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="phi-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2DD4BF"/>
+      <stop offset="50%" stop-color="#A78BFA"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#08060B"/>
+
+  <g transform="translate(200, 420) scale(0.1660156, -0.1660156)">
+    <path fill="url(#phi-grad)" d="M1634 614Q1634 458 1564.0 337.5Q1494 217 1388 139Q1281 61 1148.5 17.0Q1016 -27 889 -31L800 -444H472L561 -31Q321 -19 194.0 97.0Q67 213 67 397Q67 631 225.0 791.0Q383 951 649 1008L675 930Q567 863 496.0 692.5Q425 522 425 324Q425 206 463.5 131.0Q502 56 579 53L729 737Q746 813 784.5 865.5Q823 918 880 952Q932 982 1004.0 998.0Q1076 1014 1163 1014Q1259 1014 1347.0 988.0Q1435 962 1497 914Q1562 863 1598.0 790.5Q1634 718 1634 614ZM1284 707Q1284 818 1253.0 877.5Q1222 937 1176 937Q1137 937 1113.5 909.0Q1090 881 1075 817L907 53Q979 60 1047.5 111.5Q1116 163 1168 250Q1222 340 1253.0 452.5Q1284 565 1284 707Z"/>
+  </g>
+
+  <text x="440" y="280"
+        font-family="'Space Grotesk', 'Inter', sans-serif"
+        font-size="72"
+        fill="#F1F5F9"
+        font-weight="bold"
+        letter-spacing="-1">phai</text>
+
+  <text x="440" y="340"
+        font-family="'Inter', 'Helvetica Neue', sans-serif"
+        font-size="24"
+        fill="#7C7C9A">finanças da casa, inteligência de verdade.</text>
+
+  <line x1="440" y1="370" x2="600" y2="370" stroke="#2DD4BF" stroke-width="2" opacity="0.5"/>
+
+  <text x="440" y="410"
+        font-family="'JetBrains Mono', monospace"
+        font-size="20"
+        fill="#4A4A5E">phai.run</text>
+</svg>

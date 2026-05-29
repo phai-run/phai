@@ -14,15 +14,15 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::Args;
-use finance_core::config::AppConfig;
-use finance_core::enrichment::fuzzy::score_to_percent;
-use finance_core::enrichment::llm::LlmProvider;
-use finance_core::enrichment::pipeline::{mark_attempted, EnrichmentPipeline};
-use finance_core::enrichment::replication::{compute_replication, ReplicationOutcome};
-use finance_core::enrichment::rule_gen::{build_rule_record, keyword_from_result};
-use finance_core::enrichment::types::{CnpjInfo, EnrichmentDecision, EnrichmentResult};
-use finance_core::models::{AuditEvent, RuleRecord, TransactionRecord, UncategorizedRow};
-use finance_core::storage::{FinanceStore, TransactionAnatomyPatch};
+use phai_core::config::AppConfig;
+use phai_core::enrichment::fuzzy::score_to_percent;
+use phai_core::enrichment::llm::LlmProvider;
+use phai_core::enrichment::pipeline::{mark_attempted, EnrichmentPipeline};
+use phai_core::enrichment::replication::{compute_replication, ReplicationOutcome};
+use phai_core::enrichment::rule_gen::{build_rule_record, keyword_from_result};
+use phai_core::enrichment::types::{CnpjInfo, EnrichmentDecision, EnrichmentResult};
+use phai_core::models::{AuditEvent, RuleRecord, TransactionRecord, UncategorizedRow};
+use phai_core::storage::{FinanceStore, TransactionAnatomyPatch};
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -346,10 +346,10 @@ async fn try_replicate_anatomy(
         _ => return,
     };
     let idempotency_key = format!("anatomy_rep:{}:{}", transaction_id, uuid::Uuid::now_v7());
-    let patch = finance_core::storage::TransactionAnatomyPatch {
+    let patch = phai_core::storage::TransactionAnatomyPatch {
         description: rep.description.as_deref(),
         purpose: rep.purpose.as_deref(),
-        ..finance_core::storage::TransactionAnatomyPatch::default()
+        ..phai_core::storage::TransactionAnatomyPatch::default()
     };
     if let Err(err) = store
         .update_transaction_anatomy(transaction_id, patch, actor_id, &idempotency_key)
@@ -1552,7 +1552,7 @@ mod tests {
     }
 
     use crate::enrich::test_support::{clear_llm_env, NoopStore};
-    use finance_core::config::AppConfig;
+    use phai_core::config::AppConfig;
 
     #[tokio::test]
     async fn test_enrich_after_sync_skips_when_no_ids() {
@@ -1600,24 +1600,24 @@ mod test_support {
     use anyhow::Result;
     use async_trait::async_trait;
     use chrono::NaiveDate;
-    use finance_core::enrichment::types::ContextTx;
-    use finance_core::models::{
+    use phai_core::enrichment::types::ContextTx;
+    use phai_core::models::{
         AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
         CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord,
         CategoryRecord, CheckingBalance, DailyPulseItem, ForecastRecord, ForecastVsActualRow,
         MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
     };
-    use finance_core::splits::{
+    use phai_core::splits::{
         ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
         TransactionSplitLineRecord, TransactionSplitRecord,
     };
-    use finance_core::storage::{FinanceStore, TransactionAnatomyPatch};
+    use phai_core::storage::{FinanceStore, TransactionAnatomyPatch};
     use rust_decimal::Decimal;
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
     /// Clear every LLM-related env var. Mirrors the helper used in
-    /// `finance-core::enrichment::llm::tests`. Caller must hold the
+    /// `phai-core::enrichment::llm::tests`. Caller must hold the
     /// `#[serial_test::serial]` lock.
     pub fn clear_llm_env() {
         const VARS: [&str; 6] = [
@@ -1679,7 +1679,7 @@ mod test_support {
         }
         async fn upsert_forecast_templates(
             &self,
-            _: &[finance_core::ForecastTemplateRecord],
+            _: &[phai_core::ForecastTemplateRecord],
         ) -> Result<usize> {
             Ok(0)
         }
@@ -1687,13 +1687,13 @@ mod test_support {
             &self,
             _: Option<&str>,
             _: Option<&str>,
-        ) -> Result<Vec<finance_core::ForecastTemplateRecord>> {
+        ) -> Result<Vec<phai_core::ForecastTemplateRecord>> {
             Ok(vec![])
         }
         async fn get_forecast_template(
             &self,
             _: &str,
-        ) -> Result<Option<finance_core::ForecastTemplateRecord>> {
+        ) -> Result<Option<phai_core::ForecastTemplateRecord>> {
             Ok(None)
         }
         async fn upcoming_forecasts(
@@ -1717,7 +1717,7 @@ mod test_support {
         async fn get_categories(&self) -> Result<Vec<CategoryRecord>> {
             Ok(vec![])
         }
-        async fn cards_open_now(&self) -> Result<Vec<finance_core::models::CardSummaryRow>> {
+        async fn cards_open_now(&self) -> Result<Vec<phai_core::models::CardSummaryRow>> {
             Ok(vec![])
         }
         async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
@@ -1935,13 +1935,13 @@ mod test_support {
             &self,
             _: &str,
             _: &str,
-        ) -> Result<Vec<finance_core::models::TransactionRecord>> {
+        ) -> Result<Vec<phai_core::models::TransactionRecord>> {
             Ok(vec![])
         }
         async fn replicable_anatomy_candidates(
             &self,
             _: usize,
-        ) -> Result<Vec<finance_core::models::TransactionRecord>> {
+        ) -> Result<Vec<phai_core::models::TransactionRecord>> {
             Ok(vec![])
         }
     }

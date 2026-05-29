@@ -1,4 +1,4 @@
-# Contributing to Finance OS
+# Contributing to phai
 
 Thank you for your interest in contributing!
 
@@ -10,8 +10,8 @@ Thank you for your interest in contributing!
 ## Getting Started
 
 ```bash
-git clone https://github.com/feliperun/finance-os.git
-cd finance-os
+git clone https://github.com/phai-run/phai.git
+cd phai
 cargo build
 cargo test --workspace
 ```
@@ -50,7 +50,7 @@ Use Conventional Commits so Release Please can infer the next version and change
 End-to-end tests run against the SQLite (local) backend using temporary directories:
 
 ```bash
-cargo test --package finance-cli
+cargo test --package phai-cli
 ```
 
 ## Reporting Issues

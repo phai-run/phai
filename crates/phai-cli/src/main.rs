@@ -1,28 +1,28 @@
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use finance_core::enrichment::replication::{find_and_replicate, ReplicationOutcome};
-use finance_core::idempotency::{
+use nucleo::pattern::{Atom, AtomKind, CaseMatching, Normalization};
+use nucleo::{Config as NucleoConfig, Matcher, Utf32Str};
+use phai_core::enrichment::replication::{find_and_replicate, ReplicationOutcome};
+use phai_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
     ensure_transaction_idempotency, manual_transaction_idempotency,
 };
-use finance_core::installments::{group_into_chains, InstallmentChain};
-use finance_core::legacy::load_legacy_bundle;
-use finance_core::migrations::run_migrations;
-use finance_core::models::{
+use phai_core::installments::{group_into_chains, InstallmentChain};
+use phai_core::legacy::load_legacy_bundle;
+use phai_core::migrations::run_migrations;
+use phai_core::models::{
     decimal_from_str, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, ForecastRecord,
     ForecastVsActualRow, RuleRecord, TransactionRecord,
 };
-use finance_core::pluggy::{sync_pluggy, SyncPluggyParams};
-use finance_core::rules::{apply_rules_with_facts, compile_rules};
-use finance_core::splits::{
+use phai_core::pluggy::{sync_pluggy, SyncPluggyParams};
+use phai_core::rules::{apply_rules_with_facts, compile_rules};
+use phai_core::splits::{
     build_split_records, parse_split_payload, validate_split_payload, SplitPayload, SplitPreview,
 };
-use finance_core::storage::{open_store, FinanceStore, TransactionAnatomyPatch};
-use finance_core::{AppConfig, BackendKind, ConfigPaths};
-use nucleo::pattern::{Atom, AtomKind, CaseMatching, Normalization};
-use nucleo::{Config as NucleoConfig, Matcher, Utf32Str};
+use phai_core::storage::{open_store, FinanceStore, TransactionAnatomyPatch};
+use phai_core::{AppConfig, BackendKind, ConfigPaths};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Position, Rect},
@@ -71,12 +71,29 @@ const DEFAULT_TUI_REVIEW_LIMIT: usize = 500;
 const REVIEW_TUI_CATEGORY_MATCH_LIMIT: usize = 9;
 const REVIEW_TUI_RECENT_CATEGORY_LIMIT: usize = 5;
 
+/// Branded `--version` output. Plain text by design: it is piped, screenshotted,
+/// and copied into issues, so it must render identically without a TTY.
+const VERSION_BANNER: &str = concat!(
+    "φ phai v",
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "finanças da casa, inteligência de verdade.\n",
+    "phai.run · github.com/phai-run/phai\n",
+);
+
 #[derive(Parser)]
-#[command(name = "fin", version, about = "Finance OS — `fin` abre a revisão TUI")]
+#[command(
+    name = "phai",
+    disable_version_flag = true,
+    about = "phai — finanças da casa, inteligência de verdade."
+)]
 struct Cli {
     /// Skip the automatic update check on startup.
     #[arg(long, global = true)]
     no_auto_update: bool,
+    /// Print version information.
+    #[arg(short = 'V', long = "version")]
+    version: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -1644,7 +1661,7 @@ enum ForecastCommand {
         name = "refresh-installments",
         about = "detecta cadeias de parcelamento ativas e gera os forecasts restantes",
         long_about = "Detecta cadeias de parcelamento (X/N) na janela de --lookback-months \
-                      via finance-core::installments, agrupa por (account, descrição base, total), \
+                      via phai-core::installments, agrupa por (account, descrição base, total), \
                       e materializa: 1 forecast_template por cadeia + N forecasts (um por parcela \
                       restante), ambos com idempotency keys estáveis para que execuções repetidas \
                       sejam no-ops. Camada 1 do pipeline da ADR-0016."
@@ -2084,7 +2101,7 @@ fn normalize_inline_text(value: &str) -> String {
 fn render_sync_notify_summary(
     summary: &SyncSummaryOutput,
     accounts: &[AccountRecord],
-    snapshots: &[finance_core::models::AccountSnapshotRecord],
+    snapshots: &[phai_core::models::AccountSnapshotRecord],
 ) -> String {
     // Compute total checking balance from snapshots.
     let checking_ids: BTreeSet<String> = accounts
@@ -2360,7 +2377,7 @@ fn detect_installment_marker(row: &CardClosedTransactionRow) -> Option<String> {
 /// Pluggy metadata when the stored description text lacks one. Used to make
 /// `report installments` work with data synced before the Pluggy fix landed.
 pub(crate) fn enrich_description_from_metadata(description: &str, metadata: &Value) -> String {
-    if finance_core::installments::parse_installment_description(description).is_some() {
+    if phai_core::installments::parse_installment_description(description).is_some() {
         return description.to_string();
     }
     // Try descriptionRaw first.
@@ -2368,7 +2385,7 @@ pub(crate) fn enrich_description_from_metadata(description: &str, metadata: &Val
         .get("raw")
         .and_then(|r| r.get("descriptionRaw"))
         .and_then(|v| v.as_str())
-        .filter(|s| finance_core::installments::parse_installment_description(s).is_some())
+        .filter(|s| phai_core::installments::parse_installment_description(s).is_some())
     {
         return raw.to_string();
     }
@@ -2946,6 +2963,11 @@ fn should_run_auto_check(cli: &Cli) -> bool {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if cli.version {
+        print!("{VERSION_BANNER}");
+        return Ok(());
+    }
+
     // If we were just re-execed by a self-update, show the release notes
     // for the new version once, then continue with the user's command.
     // The sentinel only lives in the immediate post-exec env, so this
@@ -3365,7 +3387,7 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     // Always run on the latest binary before touching external data.
     // Skip when we just re-execed after an upgrade (FINANCE_OS_UPDATED) or
     // when the user opted out of auto-update (FINANCE_OS_NO_AUTO_UPDATE) —
-    // CI and e2e tests rely on the latter to keep `target/debug/finance-cli`
+    // CI and e2e tests rely on the latter to keep `target/debug/phai`
     // stable across subprocess invocations.
     if std::env::var_os("FINANCE_OS_UPDATED").is_none()
         && std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_none()
@@ -3717,7 +3739,7 @@ async fn report_balances(args: BalancesArgs) -> Result<()> {
 
     // Only checking accounts have a meaningful "saldo em conta". Credit
     // cards expose debt via card_summary; mixing them here would mislead.
-    let rows: Vec<(&AccountRecord, &finance_core::models::AccountSnapshotRecord)> = snapshots
+    let rows: Vec<(&AccountRecord, &phai_core::models::AccountSnapshotRecord)> = snapshots
         .iter()
         .filter_map(|s| {
             account_by_id
@@ -3754,7 +3776,7 @@ async fn report_balances(args: BalancesArgs) -> Result<()> {
     // Group by owner so "Aline · Felipe · Total" reads naturally.
     let mut by_owner: BTreeMap<
         String,
-        Vec<(&AccountRecord, &finance_core::models::AccountSnapshotRecord)>,
+        Vec<(&AccountRecord, &phai_core::models::AccountSnapshotRecord)>,
     > = BTreeMap::new();
     for (acc, snap) in &rows {
         by_owner
@@ -3822,7 +3844,7 @@ async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_monthly_spend_human(rows: &[finance_core::models::MonthlySpendRow], month: Option<&str>) {
+fn print_monthly_spend_human(rows: &[phai_core::models::MonthlySpendRow], month: Option<&str>) {
     use human_format::{
         bold, brl, category_emoji, category_family, family_label, month_label, pct,
     };
@@ -4551,7 +4573,7 @@ fn cashflow_card_summary_total(card_bills: &[CashflowCardBillDetail]) -> Decimal
 
 fn cashflow_account_balances(
     accounts: &[AccountRecord],
-    snapshots: &[finance_core::models::AccountSnapshotRecord],
+    snapshots: &[phai_core::models::AccountSnapshotRecord],
 ) -> Vec<CashflowAccountBalance> {
     let account_by_id: BTreeMap<&str, &AccountRecord> = accounts
         .iter()
@@ -6240,7 +6262,7 @@ fn cashflow_card_paid_label(summary: &CashflowCardSummary) -> String {
 }
 
 fn print_cashflow_human(
-    row: &finance_core::models::CashflowRow,
+    row: &phai_core::models::CashflowRow,
     accounts_considered: usize,
     snapshot_anchor: Option<chrono::NaiveDate>,
 ) {
@@ -6272,7 +6294,7 @@ fn print_cashflow_reduction(expense_reduction: Decimal) {
     }
 }
 
-fn print_cashflow_closing_balance(row: &finance_core::models::CashflowRow) {
+fn print_cashflow_closing_balance(row: &phai_core::models::CashflowRow) {
     use human_format::{brl, brl_signed};
 
     match (row.opening_balance, row.closing_balance) {
@@ -6329,7 +6351,7 @@ async fn report_forecast_vs_actual(args: ForecastVsActualArgs) -> Result<()> {
 }
 
 fn print_forecast_vs_actual_human(
-    rows: &[finance_core::models::ForecastVsActualRow],
+    rows: &[phai_core::models::ForecastVsActualRow],
     month: Option<&str>,
 ) {
     use human_format::bold;
@@ -6356,7 +6378,7 @@ fn print_forecast_vs_actual_human(
 }
 
 fn forecast_month_display(
-    rows: &[finance_core::models::ForecastVsActualRow],
+    rows: &[phai_core::models::ForecastVsActualRow],
     month: Option<&str>,
 ) -> String {
     month
@@ -6366,8 +6388,8 @@ fn forecast_month_display(
 }
 
 fn forecast_rows_by_family(
-    rows: &[finance_core::models::ForecastVsActualRow],
-) -> std::collections::HashMap<String, Vec<&finance_core::models::ForecastVsActualRow>> {
+    rows: &[phai_core::models::ForecastVsActualRow],
+) -> std::collections::HashMap<String, Vec<&phai_core::models::ForecastVsActualRow>> {
     let mut family_rows = std::collections::HashMap::new();
     for row in rows {
         let family = human_format::category_family(row.category_id.as_deref())
@@ -6378,10 +6400,7 @@ fn forecast_rows_by_family(
 }
 
 fn sorted_forecast_families(
-    family_rows: &std::collections::HashMap<
-        String,
-        Vec<&finance_core::models::ForecastVsActualRow>,
-    >,
+    family_rows: &std::collections::HashMap<String, Vec<&phai_core::models::ForecastVsActualRow>>,
 ) -> Vec<String> {
     use std::cmp::Reverse;
 
@@ -6397,7 +6416,7 @@ fn sorted_forecast_families(
     families
 }
 
-fn print_forecast_family(family: &str, rows: &[&finance_core::models::ForecastVsActualRow]) {
+fn print_forecast_family(family: &str, rows: &[&phai_core::models::ForecastVsActualRow]) {
     let emoji = category_emoji(Some(family), None);
     let label = human_format::family_label(family);
     println!("{emoji} *{}*", label);
@@ -6408,8 +6427,8 @@ fn print_forecast_family(family: &str, rows: &[&finance_core::models::ForecastVs
 }
 
 fn sorted_forecast_family_rows<'a>(
-    rows: &'a [&finance_core::models::ForecastVsActualRow],
-) -> Vec<&'a finance_core::models::ForecastVsActualRow> {
+    rows: &'a [&phai_core::models::ForecastVsActualRow],
+) -> Vec<&'a phai_core::models::ForecastVsActualRow> {
     use std::cmp::Reverse;
 
     let mut sorted = rows.to_vec();
@@ -6417,7 +6436,7 @@ fn sorted_forecast_family_rows<'a>(
     sorted
 }
 
-fn print_forecast_row(row: &finance_core::models::ForecastVsActualRow) {
+fn print_forecast_row(row: &phai_core::models::ForecastVsActualRow) {
     let forecast = -row.forecast_amount;
     let actual = -row.actual_amount;
     let variance = -row.variance;
@@ -6451,7 +6470,7 @@ fn forecast_due_label(due_date: Option<NaiveDate>) -> String {
         .unwrap_or_default()
 }
 
-fn print_forecast_totals(rows: &[finance_core::models::ForecastVsActualRow]) {
+fn print_forecast_totals(rows: &[phai_core::models::ForecastVsActualRow]) {
     let total_forecast: Decimal = rows.iter().map(|r| -r.forecast_amount).sum();
     let total_actual: Decimal = rows.iter().map(|r| -r.actual_amount).sum();
     let total_variance: Decimal = rows.iter().map(|r| -r.variance).sum();
@@ -11113,12 +11132,12 @@ async fn apply_split_from_modal(
         return Ok(true);
     }
 
-    let lines: Vec<finance_core::splits::SplitPayloadLine> = state
+    let lines: Vec<phai_core::splits::SplitPayloadLine> = state
         .session
         .split_lines
         .iter()
         .enumerate()
-        .map(|(i, l)| finance_core::splits::SplitPayloadLine {
+        .map(|(i, l)| phai_core::splits::SplitPayloadLine {
             description: if l.description.is_empty() {
                 format!("Parte {}", i + 1)
             } else {
@@ -11138,7 +11157,7 @@ async fn apply_split_from_modal(
         })
         .collect();
 
-    let payload = finance_core::splits::SplitPayload {
+    let payload = phai_core::splits::SplitPayload {
         source: Some("review-tui".to_string()),
         notes: None,
         metadata: None,
@@ -11148,8 +11167,7 @@ async fn apply_split_from_modal(
 
     let transaction_id = state.rows[state.session.index].transaction_id.clone();
     let preview =
-        match finance_core::splits::validate_split_payload(&transaction_id, parent_amount, payload)
-        {
+        match phai_core::splits::validate_split_payload(&transaction_id, parent_amount, payload) {
             Ok(p) => p,
             Err(e) => {
                 state.session.status = format!("split inválido: {e}");
@@ -11158,7 +11176,7 @@ async fn apply_split_from_modal(
         };
 
     let now = chrono::Utc::now();
-    let (split, split_lines, items) = match finance_core::splits::build_split_records(
+    let (split, split_lines, items) = match phai_core::splits::build_split_records(
         &transaction_id,
         &config.actor_id,
         Some("review-tui"),
@@ -12333,7 +12351,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
         let local_store: Option<Rc<dyn FinanceStore>> = if config.local_db_path.is_some()
             && config.effective_backend() == BackendKind::Bigquery
         {
-            match finance_core::storage::local::LocalStore::new(config.clone()) {
+            match phai_core::storage::local::LocalStore::new(config.clone()) {
                 Ok(ls) => {
                     // Run SQLite migrations (not BigQuery!) against the local DB.
                     // The global config has backend=bigquery, so we need a
@@ -13968,8 +13986,8 @@ mod tests {
     };
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use finance_core::models::TransactionRecord;
-    use finance_core::storage::FinanceStore;
+    use phai_core::models::TransactionRecord;
+    use phai_core::storage::FinanceStore;
     use rust_decimal::Decimal;
     use serde_json::json;
 
@@ -14333,13 +14351,13 @@ mod tests {
     async fn local_sqlite_save_upserts_and_updates_row() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("test.db");
-        let config = finance_core::AppConfig {
+        let config = phai_core::AppConfig {
             local_db_path: Some(db_path.clone()),
             ..Default::default()
         };
 
-        let store = finance_core::storage::local::LocalStore::new(config.clone()).unwrap();
-        finance_core::migrations::run_migrations(&store, &config)
+        let store = phai_core::storage::local::LocalStore::new(config.clone()).unwrap();
+        phai_core::migrations::run_migrations(&store, &config)
             .await
             .unwrap();
 
@@ -14386,21 +14404,21 @@ mod tests {
         let local_path = tmp.path().join("local.db");
         let remote_path = tmp.path().join("remote.db");
 
-        let local_cfg = finance_core::AppConfig {
+        let local_cfg = phai_core::AppConfig {
             local_db_path: Some(local_path.clone()),
             ..Default::default()
         };
-        let local = finance_core::storage::local::LocalStore::new(local_cfg.clone()).unwrap();
-        finance_core::migrations::run_migrations(&local, &local_cfg)
+        let local = phai_core::storage::local::LocalStore::new(local_cfg.clone()).unwrap();
+        phai_core::migrations::run_migrations(&local, &local_cfg)
             .await
             .unwrap();
 
-        let remote_cfg = finance_core::AppConfig {
+        let remote_cfg = phai_core::AppConfig {
             local_db_path: Some(remote_path.clone()),
             ..Default::default()
         };
-        let remote = finance_core::storage::local::LocalStore::new(remote_cfg.clone()).unwrap();
-        finance_core::migrations::run_migrations(&remote, &remote_cfg)
+        let remote = phai_core::storage::local::LocalStore::new(remote_cfg.clone()).unwrap();
+        phai_core::migrations::run_migrations(&remote, &remote_cfg)
             .await
             .unwrap();
 
@@ -14474,18 +14492,18 @@ mod tests {
         let local_path = tmp.path().join("local.db");
         let remote_path = tmp.path().join("remote.db");
 
-        let mut cfg = finance_core::AppConfig {
+        let mut cfg = phai_core::AppConfig {
             local_db_path: Some(local_path.clone()),
             ..Default::default()
         };
-        let local = finance_core::storage::local::LocalStore::new(cfg.clone()).unwrap();
-        finance_core::migrations::run_migrations(&local, &cfg)
+        let local = phai_core::storage::local::LocalStore::new(cfg.clone()).unwrap();
+        phai_core::migrations::run_migrations(&local, &cfg)
             .await
             .unwrap();
 
         cfg.local_db_path = Some(remote_path.clone());
-        let remote = finance_core::storage::local::LocalStore::new(cfg.clone()).unwrap();
-        finance_core::migrations::run_migrations(&remote, &cfg)
+        let remote = phai_core::storage::local::LocalStore::new(cfg.clone()).unwrap();
+        phai_core::migrations::run_migrations(&remote, &cfg)
             .await
             .unwrap();
 

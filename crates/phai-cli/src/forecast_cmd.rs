@@ -8,9 +8,9 @@
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate, Utc};
-use finance_core::migrations::run_migrations;
-use finance_core::storage::{open_store, FinanceStore};
-use finance_core::{
+use phai_core::migrations::run_migrations;
+use phai_core::storage::{open_store, FinanceStore};
+use phai_core::{
     group_into_chains, AccountRecord, AppConfig, AuditEvent, ForecastRecord,
     ForecastTemplateRecord, InstallmentChain,
 };
@@ -304,7 +304,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 // Layer 2/3 — subscriptions + fixed bills
 // ---------------------------------------------------------------------------
 
-use finance_core::TransactionRecord;
+use phai_core::TransactionRecord;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::MathematicalOps;
 
@@ -365,7 +365,7 @@ pub(crate) fn detect_recurring_candidates(
             continue;
         }
         let raw = enrich_description_from_metadata(&tx.raw_description, &tx.metadata_json);
-        if finance_core::parse_installment_description(&raw).is_some() {
+        if phai_core::parse_installment_description(&raw).is_some() {
             continue;
         }
         let label = tx
@@ -585,7 +585,7 @@ pub(crate) fn detect_envelope_candidates(
             continue;
         }
         let raw = enrich_description_from_metadata(&tx.raw_description, &tx.metadata_json);
-        if finance_core::parse_installment_description(&raw).is_some() {
+        if phai_core::parse_installment_description(&raw).is_some() {
             continue;
         }
         let category_id = match tx.category_id.as_ref().filter(|c| !c.is_empty()) {

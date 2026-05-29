@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# finance-os installer
+# phai installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/feliperun/finance-os/main/install.sh | bash -s -- --prefix=$HOME/.local
+#   curl -fsSL https://raw.githubusercontent.com/phai-run/phai/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/phai-run/phai/main/install.sh | bash -s -- --prefix=$HOME/.local
 #
 set -euo pipefail
 
-REPO="feliperun/finance-os"
-ASSET_PREFIX="finance-cli"   # prefix used in GitHub release asset filenames
-BINARY_NAME="fin"            # actual binary name inside the tarball and on disk
+REPO="phai-run/phai"
+ASSET_PREFIX="phai-cli"      # prefix used in GitHub release asset filenames
+BINARY_NAME="phai"           # actual binary name inside the tarball and on disk
 DEFAULT_PREFIX="${HOME}/.local"
 PREFIX="${DEFAULT_PREFIX}"
 VERSION="latest"
@@ -22,7 +22,7 @@ for arg in "$@"; do
     --version=*) VERSION="${arg#*=}" ;;
     --help|-h)
       cat <<EOF
-finance-os installer
+phai installer
 
 Options:
   --prefix=PATH    Install directory (default: \$HOME/.local). Binary goes to PREFIX/bin/${BINARY_NAME}.
@@ -47,7 +47,7 @@ case "$OS-$ARCH" in
   Darwin-x86_64)  TARGET="x86_64-apple-darwin" ;;
   *)
     cat <<EOF >&2
-finance-os: unsupported platform: $OS-$ARCH
+phai: unsupported platform: $OS-$ARCH
 
 Currently supported targets:
   Darwin-arm64   (macOS Apple Silicon)
@@ -66,7 +66,7 @@ if [ "$VERSION" = "latest" ]; then
     | head -1 \
     | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
   if [ -z "$TAG" ]; then
-    echo "finance-os: could not resolve latest release tag" >&2
+    echo "phai: could not resolve latest release tag" >&2
     exit 1
   fi
 else
@@ -87,7 +87,7 @@ echo "→ Verifying SHA-256..."
 EXPECTED="$(awk '{print $1}' "${TMPDIR}/${ASSET}.sha256")"
 ACTUAL="$(shasum -a 256 "${TMPDIR}/${ASSET}" | awk '{print $1}')"
 if [ "$EXPECTED" != "$ACTUAL" ]; then
-  echo "finance-os: checksum mismatch (expected $EXPECTED, got $ACTUAL)" >&2
+  echo "phai: checksum mismatch (expected $EXPECTED, got $ACTUAL)" >&2
   exit 1
 fi
 

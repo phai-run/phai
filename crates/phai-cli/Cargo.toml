@@ -1,5 +1,5 @@
 [package]
-name = "finance-cli"
+name = "phai-cli"
 version = "3.2.4"
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "fin"
+name = "phai"
 path = "src/main.rs"
 
 [dependencies]
@@ -15,7 +15,7 @@ anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
-finance-core = { path = "../finance-core" }
+phai-core = { path = "../phai-core" }
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,7 +1,7 @@
 ---
 name: finance-os
 description: >
-  Runtime financeiro da OpenClaw baseado em Finance OS + BigQuery. Sincroniza Pluggy,
+  Runtime financeiro da OpenClaw baseado em phai + BigQuery. Sincroniza Pluggy,
   grava descrição/estabelecimento/propósito/categoria direto no banco canônico e gera relatórios determinísticos
   via CLI única.
 metadata:
@@ -13,18 +13,18 @@ metadata:
   }
 ---
 
-# Finance OS
+# phai
 
 Use esta skill para qualquer operação financeira da OpenClaw.
 
 ## Princípios
 
 - Fonte de verdade dos dados: BigQuery (dataset configurado no runtime)
-- Fonte de verdade do processamento: binário `finance-cli`
+- Fonte de verdade do processamento: binário `phai`
 - Não usar `skills/finance-analyzer/*`
 - Não rodar scripts Python de planilha; os dashboards leem BigQuery via Connected Sheets
 - Não inventar formato de report quando a CLI já fornece saída padrão suficiente
-- Priorizar os padrões de UX e classificação definidos em `FINANCE_OS.md`
+- Priorizar os padrões de UX e classificação definidos em `REPORTING_UX.md`
 - Fluxo de `tx split` é BigQuery-only no runtime Ford; backend `local` deve ser tratado como não suportado
 
 ## Wrapper oficial
@@ -43,7 +43,7 @@ Sincronizar Pluggy com resumo estruturado:
 bash skills/finance-os/finance.sh sync pluggy --json-summary
 ```
 
-Sincronizar Pluggy com mensagem pronta para notificação (UX centralizada no Finance OS):
+Sincronizar Pluggy com mensagem pronta para notificação (UX centralizada no phai):
 
 ```bash
 bash skills/finance-os/finance.sh sync pluggy --notify-summary
@@ -266,7 +266,7 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
   - para repasse 1:1 em texto (sem remontar mensagem na Ford), usar `--notify-summary`
   - **depois de listar as transações novas, perguntar a anatomia (descrição/estabelecimento/propósito) de cada uma, uma por vez** — não esperar o usuário iniciar (ver "Trigger proativo no sync horário" acima). Use `tx review-human --transaction-id ID --description … --merchant-name … --purpose … --owner <pessoa> --json` para gravar a resposta.
 - Para interações com usuário:
-  - sempre priorizar labels efetivos da CLI (description/merchant_name/raw_description e categoria já aplicados no Finance OS)
+  - sempre priorizar labels efetivos da CLI (description/merchant_name/raw_description e categoria já aplicados no phai)
   - não remontar manualmente listagens de transação, exceto se o usuário pedir uma visão específica
   - em caso de solicitação de visão customizada, deixar explícito que é um formato adicional sobre dados da CLI
 - Para perguntas sobre cartão/fatura, desambiguar antes de responder:

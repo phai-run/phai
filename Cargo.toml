@@ -1,13 +1,13 @@
 [workspace]
-members = ["crates/finance-core", "crates/finance-cli"]
+members = ["crates/phai-core", "crates/phai-cli"]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-authors = ["Finance OS contributors"]
+authors = ["phai contributors"]
 rust-version = "1.90"
-repository = "https://github.com/feliperun/finance-os"
+repository = "https://github.com/phai-run/phai"
 
 [workspace.dependencies]
 anyhow = "1.0"
