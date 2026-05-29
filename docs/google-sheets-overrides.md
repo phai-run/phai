@@ -46,7 +46,8 @@ By default the script reads:
 - `dataset_id`
 - `service_account_path`
 
-from `~/.config/finance-os/config.toml`.
+from `~/.config/phai/config.toml` (the legacy `~/.config/finance-os/config.toml`
+is still read if present — see [ADR-0021](adr/0021-ondisk-identity-migration-to-phai.md)).
 
 ## What Changes
 
@@ -61,12 +62,12 @@ After the script runs:
 For assistant/runtime operations tied to itemized transaction splits, use CLI commands directly (not ad-hoc sheet logic):
 
 ```bash
-bash skills/finance-os/finance.sh tx split preview --transaction-id ID --payload split.json
-bash skills/finance-os/finance.sh tx split apply --transaction-id ID --payload split.json
-bash skills/finance-os/finance.sh tx split show --transaction-id ID
-bash skills/finance-os/finance.sh tx split clear --transaction-id ID
-bash skills/finance-os/finance.sh report split-candidates
-bash skills/finance-os/finance.sh report item-prices --query "item"
+bash skills/phai/finance.sh tx split preview --transaction-id ID --payload split.json
+bash skills/phai/finance.sh tx split apply --transaction-id ID --payload split.json
+bash skills/phai/finance.sh tx split show --transaction-id ID
+bash skills/phai/finance.sh tx split clear --transaction-id ID
+bash skills/phai/finance.sh report split-candidates
+bash skills/phai/finance.sh report item-prices --query "item"
 ```
 
 Notes:

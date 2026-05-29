@@ -58,14 +58,23 @@ pub struct ConfigPaths {
     pub local_db_file: PathBuf,
 }
 
+/// Canonical on-disk identity. The product was renamed `finance-os` → `phai`;
+/// resolution always prefers the new `phai` name and falls back to the legacy
+/// `finance-os` name only when the new one is absent, so existing installs keep
+/// working with zero data movement. See ADR-0021.
+const APP_DIR: &str = "phai";
+const LEGACY_APP_DIR: &str = "finance-os";
+const DB_FILE: &str = "phai.local.db";
+const LEGACY_DB_FILE: &str = "finance-os.local.db";
+
 impl ConfigPaths {
     pub fn discover() -> Result<Self> {
-        let config_root = std::env::var_os("FINANCE_OS_CONFIG_DIR")
+        let config_root = crate::compat::env_var_os("PHAI_CONFIG_DIR", "FINANCE_OS_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(Self::resolve_config_root)
             .context("Não foi possível resolver o diretório de configuração")?;
 
-        let data_root = std::env::var_os("FINANCE_OS_DATA_DIR")
+        let data_root = crate::compat::env_var_os("PHAI_DATA_DIR", "FINANCE_OS_DATA_DIR")
             .map(PathBuf::from)
             .or_else(Self::resolve_data_root)
             .context("Não foi possível resolver o diretório de dados")?;
@@ -74,59 +83,89 @@ impl ConfigPaths {
             config_dir: config_root.clone(),
             data_dir: data_root.clone(),
             config_file: config_root.join("config.toml"),
-            local_db_file: data_root.join("finance-os.local.db"),
+            local_db_file: Self::resolve_db_file(&data_root),
         })
     }
 
-    /// Resolve the config directory with XDG precedence over platform native.
+    /// Resolve the config directory with XDG precedence over platform native,
+    /// and the new `phai` name preferred over the legacy `finance-os` name.
     ///
     /// Order:
-    /// 1. `$XDG_CONFIG_HOME/finance-os` (or `$HOME/.config/finance-os`) if it
-    ///    contains a `config.toml` — this matches the production launcher and
-    ///    keeps Linux/macOS configs portable.
+    /// 1. `$XDG_CONFIG_HOME/phai` if it carries a `config.toml`; then the same
+    ///    for the legacy `$XDG_CONFIG_HOME/finance-os` — this keeps existing
+    ///    Linux/macOS configs portable and matches the production launcher.
     /// 2. The platform-native directory from `dirs::config_dir()` (on macOS
-    ///    that's `~/Library/Application Support/finance-os`).
+    ///    that's `~/Library/Application Support/<app>`), preferring `phai` and
+    ///    falling back to a pre-existing `finance-os` dir.
     ///
     /// Falling back to native only when XDG has no `config.toml` avoids the
     /// classic macOS trap where a user puts their config under `~/.config`
     /// (the XDG default) but the binary silently reads a stale config from
     /// `~/Library/Application Support`.
     fn resolve_config_root() -> Option<PathBuf> {
-        if let Some(xdg) = Self::xdg_config_finance_os() {
-            if xdg.join("config.toml").is_file() {
-                return Some(xdg);
+        for app in [APP_DIR, LEGACY_APP_DIR] {
+            if let Some(xdg) = Self::xdg_config(app) {
+                if xdg.join("config.toml").is_file() {
+                    return Some(xdg);
+                }
             }
         }
-        dirs::config_dir().map(|dir| dir.join("finance-os"))
+        let base = dirs::config_dir()?;
+        Some(Self::prefer_existing(
+            base.join(APP_DIR),
+            base.join(LEGACY_APP_DIR),
+        ))
     }
 
     fn resolve_data_root() -> Option<PathBuf> {
-        // Mirror the config resolver: when the user has an XDG config that
-        // ships a local_db_path, the platform-native data dir is never
-        // touched. For cases without an explicit local_db_path, prefer the
-        // XDG data dir when it exists.
-        if let Some(xdg) = Self::xdg_data_finance_os() {
-            if xdg.exists() {
-                return Some(xdg);
+        // Mirror the config resolver: prefer the XDG data dir when it exists
+        // (new name first, then legacy), else fall back to the platform-native
+        // data dir, preferring `phai` over a pre-existing `finance-os` dir.
+        for app in [APP_DIR, LEGACY_APP_DIR] {
+            if let Some(xdg) = Self::xdg_data(app) {
+                if xdg.exists() {
+                    return Some(xdg);
+                }
             }
         }
-        dirs::data_dir().map(|dir| dir.join("finance-os"))
+        let base = dirs::data_dir()?;
+        Some(Self::prefer_existing(
+            base.join(APP_DIR),
+            base.join(LEGACY_APP_DIR),
+        ))
     }
 
-    fn xdg_config_finance_os() -> Option<PathBuf> {
+    /// Resolve the local DB filename inside `data_root`, preferring the new
+    /// `phai.local.db` and falling back to a pre-existing `finance-os.local.db`
+    /// so existing databases are still found. Fresh installs use the new name.
+    fn resolve_db_file(data_root: &Path) -> PathBuf {
+        Self::prefer_existing(data_root.join(DB_FILE), data_root.join(LEGACY_DB_FILE))
+    }
+
+    /// Pick the legacy path only when the new path is absent and the legacy
+    /// one exists; otherwise pick the new path (covers fresh installs).
+    fn prefer_existing(new: PathBuf, legacy: PathBuf) -> PathBuf {
+        if !new.exists() && legacy.exists() {
+            legacy
+        } else {
+            new
+        }
+    }
+
+    fn xdg_config(app: &str) -> Option<PathBuf> {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|root| root.join("finance-os"))
+            .map(|root| root.join(app))
     }
 
-    fn xdg_data_finance_os() -> Option<PathBuf> {
+    fn xdg_data(app: &str) -> Option<PathBuf> {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .or_else(|| {
                 std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
             })
-            .map(|root| root.join("finance-os"))
+            .map(|root| root.join(app))
     }
 
     pub fn ensure(&self) -> Result<()> {
@@ -235,12 +274,16 @@ mod tests {
             }
             std::env::remove_var("FINANCE_OS_CONFIG_DIR");
             std::env::remove_var("FINANCE_OS_DATA_DIR");
+            std::env::remove_var("PHAI_CONFIG_DIR");
+            std::env::remove_var("PHAI_DATA_DIR");
         }
     }
 
     #[test]
     #[serial]
-    fn discover_prefers_xdg_config_when_config_toml_exists() {
+    fn discover_finds_legacy_finance_os_xdg_config() {
+        // Backward compat: an existing `~/.config/finance-os/config.toml`
+        // (and no `phai` dir) must still be discovered after the rename.
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let xdg = home.join(".config").join("finance-os");
@@ -250,6 +293,24 @@ mod tests {
         setup_env(home, None, None);
         let paths = ConfigPaths::discover().unwrap();
         assert_eq!(paths.config_dir, xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn discover_prefers_phai_xdg_over_legacy_finance_os() {
+        // When both names carry a config.toml, the new `phai` dir wins.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let phai = home.join(".config").join("phai");
+        let legacy = home.join(".config").join("finance-os");
+        fs::create_dir_all(&phai).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(phai.join("config.toml"), "backend = \"local\"").unwrap();
+        fs::write(legacy.join("config.toml"), "backend = \"bigquery\"").unwrap();
+
+        setup_env(home, None, None);
+        let paths = ConfigPaths::discover().unwrap();
+        assert_eq!(paths.config_dir, phai);
     }
 
     #[test]
@@ -297,5 +358,64 @@ mod tests {
         unsafe {
             std::env::remove_var("FINANCE_OS_CONFIG_DIR");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn discover_prefers_phai_env_over_legacy_env() {
+        // PHAI_CONFIG_DIR wins over FINANCE_OS_CONFIG_DIR.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let phai_dir = home.join("phai-cfg");
+        let legacy_dir = home.join("legacy-cfg");
+        fs::create_dir_all(&phai_dir).unwrap();
+        fs::create_dir_all(&legacy_dir).unwrap();
+        setup_env(home, None, None);
+        unsafe {
+            std::env::set_var("PHAI_CONFIG_DIR", &phai_dir);
+            std::env::set_var("FINANCE_OS_CONFIG_DIR", &legacy_dir);
+        }
+
+        let paths = ConfigPaths::discover().unwrap();
+        assert_eq!(paths.config_dir, phai_dir);
+
+        unsafe {
+            std::env::remove_var("PHAI_CONFIG_DIR");
+            std::env::remove_var("FINANCE_OS_CONFIG_DIR");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn discover_uses_legacy_db_file_when_present() {
+        // An existing `finance-os.local.db` in the data dir must keep being
+        // used; the new `phai.local.db` name only applies to fresh data dirs.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let xdg_data = home.join("xdg-data");
+        let legacy_data = xdg_data.join("finance-os");
+        fs::create_dir_all(&legacy_data).unwrap();
+        fs::write(legacy_data.join("finance-os.local.db"), b"db").unwrap();
+
+        setup_env(home, None, Some(&xdg_data));
+        let paths = ConfigPaths::discover().unwrap();
+        assert_eq!(paths.data_dir, legacy_data);
+        assert_eq!(paths.local_db_file, legacy_data.join("finance-os.local.db"));
+    }
+
+    #[test]
+    #[serial]
+    fn discover_uses_phai_db_file_for_fresh_install() {
+        // No pre-existing data dir or db: everything resolves to the new name.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let xdg_data = home.join("xdg-data");
+        setup_env(home, None, Some(&xdg_data));
+
+        let paths = ConfigPaths::discover().unwrap();
+        assert_eq!(
+            paths.local_db_file.file_name().unwrap().to_str().unwrap(),
+            "phai.local.db"
+        );
     }
 }

@@ -4,20 +4,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="${FORD_WORKSPACE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
+# Prefer new `phai` env/paths; fall back to the legacy `finance-os` names so
+# existing deployments keep working (ADR-0021).
+RUNTIME_ROOT_ENV="${PHAI_RUNTIME_ROOT:-${FINANCE_OS_RUNTIME_ROOT:-}}"
+
+# Pick the new path unless it is absent and the legacy one exists.
+pick_existing_dir() {
+  local new="$1" legacy="$2"
+  if [[ ! -e "$new" && -e "$legacy" ]]; then
+    printf '%s\n' "$legacy"
+  else
+    printf '%s\n' "$new"
+  fi
+}
+
 resolve_runtime_root() {
-  if [[ -n "${FINANCE_OS_RUNTIME_ROOT:-}" ]]; then
-    if [[ -x "$FINANCE_OS_RUNTIME_ROOT/bin/phai" || -x "$FINANCE_OS_RUNTIME_ROOT/target/release/phai" ]]; then
-      printf '%s\n' "$FINANCE_OS_RUNTIME_ROOT"
+  if [[ -n "$RUNTIME_ROOT_ENV" ]]; then
+    if [[ -x "$RUNTIME_ROOT_ENV/bin/phai" || -x "$RUNTIME_ROOT_ENV/target/release/phai" ]]; then
+      printf '%s\n' "$RUNTIME_ROOT_ENV"
       return
     fi
   fi
 
   local candidates=(
+    "$WORKSPACE_ROOT/.phai-runtime"
     "$WORKSPACE_ROOT/.finance-os-runtime"
+    "$WORKSPACE_ROOT/../phai-runtime"
     "$WORKSPACE_ROOT/../finance-os-runtime"
     "$WORKSPACE_ROOT"
+    "${HOME:-}/.local/share/phai/runtime"
     "${HOME:-}/.local/share/finance-os/runtime"
+    "${HOME:-}/.phai/runtime"
     "${HOME:-}/.finance-os/runtime"
+    "${HOME:-}/phai"
     "${HOME:-}/finance-os"
   )
 
@@ -41,15 +60,23 @@ if [[ -x "$RUNTIME_ROOT/bin/phai" ]]; then
   DEFAULT_DATA_DIR="$RUNTIME_ROOT/data"
 elif [[ -x "$RUNTIME_ROOT/target/release/phai" ]]; then
   BIN_PATH="$RUNTIME_ROOT/target/release/phai"
-  DEFAULT_CONFIG_DIR="${FINANCE_OS_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/finance-os}"
-  DEFAULT_DATA_DIR="${FINANCE_OS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/finance-os}"
+  cfg_base="${XDG_CONFIG_HOME:-${HOME:?HOME is unset; set HOME or XDG_CONFIG_HOME}/.config}"
+  data_base="${XDG_DATA_HOME:-${HOME:?HOME is unset; set HOME or XDG_DATA_HOME}/.local/share}"
+  DEFAULT_CONFIG_DIR="$(pick_existing_dir "$cfg_base/phai" "$cfg_base/finance-os")"
+  DEFAULT_DATA_DIR="$(pick_existing_dir "$data_base/phai" "$data_base/finance-os")"
 else
   echo "phai binary not found" >&2
   exit 1
 fi
 
-export FINANCE_OS_CONFIG_DIR="${FINANCE_OS_CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
-export FINANCE_OS_DATA_DIR="${FINANCE_OS_DATA_DIR:-$DEFAULT_DATA_DIR}"
+# Resolve once (env override wins, new name before legacy), then export under
+# both names so a new `phai` binary and an older `finance-os` one both read it.
+RESOLVED_CONFIG_DIR="${PHAI_CONFIG_DIR:-${FINANCE_OS_CONFIG_DIR:-$DEFAULT_CONFIG_DIR}}"
+RESOLVED_DATA_DIR="${PHAI_DATA_DIR:-${FINANCE_OS_DATA_DIR:-$DEFAULT_DATA_DIR}}"
+export PHAI_CONFIG_DIR="$RESOLVED_CONFIG_DIR"
+export PHAI_DATA_DIR="$RESOLVED_DATA_DIR"
+export FINANCE_OS_CONFIG_DIR="$RESOLVED_CONFIG_DIR"
+export FINANCE_OS_DATA_DIR="$RESOLVED_DATA_DIR"
 
 load_pluggy_env() {
   # Parse pluggy.env as `KEY=VALUE` pairs instead of `source`-ing it. The
@@ -95,7 +122,7 @@ load_pluggy_env() {
   done <"$env_path"
 }
 
-load_pluggy_env "$FINANCE_OS_CONFIG_DIR/pluggy.env"
+load_pluggy_env "$RESOLVED_CONFIG_DIR/pluggy.env"
 
 args=("$@")
 

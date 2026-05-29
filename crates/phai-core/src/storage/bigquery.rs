@@ -4252,15 +4252,17 @@ mod param_smoke {
     //! Live BigQuery smoke tests for the typed-parameter path. Skipped by
     //! default; run with:
     //!
-    //!   FINANCE_OS_BQ_SMOKE=1 cargo test -p phai-core --test '*' -- --ignored bq_param
+    //!   PHAI_BQ_SMOKE=1 cargo test -p phai-core --test '*' -- --ignored bq_param
     //!
     //! …or simply `cargo test -p phai-core bq_param_smoke -- --ignored`
-    //! once `FINANCE_OS_BQ_SMOKE=1` is exported. Reads from `~/.config/finance-os/config.toml`.
+    //! once `PHAI_BQ_SMOKE=1` is exported (the legacy `FINANCE_OS_BQ_SMOKE` is
+    //! still honored). Reads from `~/.config/phai/config.toml` (or the legacy
+    //! `~/.config/finance-os/config.toml`).
     use super::*;
     use crate::config::AppConfig;
 
     async fn store() -> Option<BigQueryStore> {
-        if std::env::var("FINANCE_OS_BQ_SMOKE").ok().as_deref() != Some("1") {
+        if crate::compat::env_var("PHAI_BQ_SMOKE", "FINANCE_OS_BQ_SMOKE").as_deref() != Some("1") {
             return None;
         }
         let paths = crate::config::ConfigPaths::discover().ok()?;
@@ -4272,7 +4274,7 @@ mod param_smoke {
     #[ignore]
     async fn bq_param_scalars_roundtrip() {
         let Some(store) = store().await else {
-            eprintln!("FINANCE_OS_BQ_SMOKE=1 not set or config missing; skipping");
+            eprintln!("PHAI_BQ_SMOKE=1 not set or config missing; skipping");
             return;
         };
         let params = vec![
@@ -4309,7 +4311,7 @@ mod param_smoke {
     #[ignore]
     async fn bq_param_struct_array_unnest() {
         let Some(store) = store().await else {
-            eprintln!("FINANCE_OS_BQ_SMOKE=1 not set; skipping");
+            eprintln!("PHAI_BQ_SMOKE=1 not set; skipping");
             return;
         };
         let param = batch_array_param(

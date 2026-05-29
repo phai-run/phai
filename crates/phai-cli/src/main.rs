@@ -190,9 +190,10 @@ struct ReviewShortcutArgs {
 enum NotifyCommand {
     /// POST the rendered daily-pulse to a webhook (WhatsApp gateway).
     ///
-    /// Reads `FINANCE_OS_WHATSAPP_WEBHOOK_URL` (required) and
-    /// `FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN` (optional, sent as
-    /// `Authorization: Bearer <token>`). Posts JSON `{ "text": "..." }`.
+    /// Reads `PHAI_WHATSAPP_WEBHOOK_URL` (required) and
+    /// `PHAI_WHATSAPP_WEBHOOK_TOKEN` (optional, sent as
+    /// `Authorization: Bearer <token>`); the legacy `FINANCE_OS_*` names are
+    /// still honored. Posts JSON `{ "text": "..." }`.
     /// Designed for cron / scheduled tasks.
     Whatsapp(NotifyWhatsappArgs),
 }
@@ -2939,10 +2940,13 @@ async fn load_split_payload_preview(
 }
 
 fn should_run_auto_check(cli: &Cli) -> bool {
-    if cli.no_auto_update || std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_some() {
+    if cli.no_auto_update
+        || phai_core::compat::env_var_os("PHAI_NO_AUTO_UPDATE", "FINANCE_OS_NO_AUTO_UPDATE")
+            .is_some()
+    {
         return false;
     }
-    if let Some(updated_ver) = std::env::var_os("FINANCE_OS_UPDATED") {
+    if let Some(updated_ver) = phai_core::compat::env_var_os("PHAI_UPDATED", "FINANCE_OS_UPDATED") {
         let updated_ver = updated_ver.to_string_lossy();
         if updated_ver != env!("CARGO_PKG_VERSION") {
             eprintln!(
@@ -2972,7 +2976,7 @@ async fn main() -> Result<()> {
     // for the new version once, then continue with the user's command.
     // The sentinel only lives in the immediate post-exec env, so this
     // fires exactly once per upgrade.
-    if let Some(updated_to) = std::env::var_os("FINANCE_OS_UPDATED") {
+    if let Some(updated_to) = phai_core::compat::env_var_os("PHAI_UPDATED", "FINANCE_OS_UPDATED") {
         let version = updated_to.to_string_lossy().to_string();
         if version == env!("CARGO_PKG_VERSION") {
             update::print_release_notes(&version).await;
@@ -3117,8 +3121,10 @@ async fn main() -> Result<()> {
     }
 }
 
-const WHATSAPP_WEBHOOK_URL_ENV: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_URL";
-const WHATSAPP_WEBHOOK_TOKEN_ENV: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN";
+const WHATSAPP_WEBHOOK_URL_ENV: &str = "PHAI_WHATSAPP_WEBHOOK_URL";
+const WHATSAPP_WEBHOOK_URL_ENV_LEGACY: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_URL";
+const WHATSAPP_WEBHOOK_TOKEN_ENV: &str = "PHAI_WHATSAPP_WEBHOOK_TOKEN";
+const WHATSAPP_WEBHOOK_TOKEN_ENV_LEGACY: &str = "FINANCE_OS_WHATSAPP_WEBHOOK_TOKEN";
 
 async fn notify_whatsapp(args: NotifyWhatsappArgs) -> Result<()> {
     let (_, config) = load_config().await?;
@@ -3138,12 +3144,16 @@ async fn notify_whatsapp(args: NotifyWhatsappArgs) -> Result<()> {
         return Ok(());
     }
 
-    let url = std::env::var(WHATSAPP_WEBHOOK_URL_ENV).map_err(|_| {
-        anyhow::anyhow!(
-            "{WHATSAPP_WEBHOOK_URL_ENV} not set. Export the webhook URL or use --dry-run."
-        )
-    })?;
-    let token = std::env::var(WHATSAPP_WEBHOOK_TOKEN_ENV).ok();
+    let url = phai_core::compat::env_var(WHATSAPP_WEBHOOK_URL_ENV, WHATSAPP_WEBHOOK_URL_ENV_LEGACY)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{WHATSAPP_WEBHOOK_URL_ENV} not set. Export the webhook URL or use --dry-run."
+            )
+        })?;
+    let token = phai_core::compat::env_var(
+        WHATSAPP_WEBHOOK_TOKEN_ENV,
+        WHATSAPP_WEBHOOK_TOKEN_ENV_LEGACY,
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
@@ -3385,12 +3395,13 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     }
 
     // Always run on the latest binary before touching external data.
-    // Skip when we just re-execed after an upgrade (FINANCE_OS_UPDATED) or
-    // when the user opted out of auto-update (FINANCE_OS_NO_AUTO_UPDATE) —
-    // CI and e2e tests rely on the latter to keep `target/debug/phai`
-    // stable across subprocess invocations.
-    if std::env::var_os("FINANCE_OS_UPDATED").is_none()
-        && std::env::var_os("FINANCE_OS_NO_AUTO_UPDATE").is_none()
+    // Skip when we just re-execed after an upgrade (PHAI_UPDATED) or when the
+    // user opted out of auto-update (PHAI_NO_AUTO_UPDATE) — CI and e2e tests
+    // rely on the latter to keep `target/debug/phai` stable across subprocess
+    // invocations. Legacy FINANCE_OS_* names are still honored (ADR-0021).
+    if phai_core::compat::env_var_os("PHAI_UPDATED", "FINANCE_OS_UPDATED").is_none()
+        && phai_core::compat::env_var_os("PHAI_NO_AUTO_UPDATE", "FINANCE_OS_NO_AUTO_UPDATE")
+            .is_none()
     {
         if let Ok(paths) = ConfigPaths::discover() {
             update::force_check(&paths.data_dir).await;
@@ -7904,7 +7915,7 @@ async fn tx_upsert_manual(args: ManualTransactionArgs) -> Result<()> {
         source: "manual".to_string(),
         actor_id: config.actor_id.clone(),
         idempotency_key: manual_transaction_idempotency(&config.actor_id),
-        metadata_json: json!({"origin": "finance-cli"}),
+        metadata_json: json!({"origin": "phai-cli"}),
         created_at: now,
         updated_at: now,
         enrichment_attempted_at: None,
@@ -12788,7 +12799,7 @@ async fn forecast_upsert(args: ForecastUpsertArgs) -> Result<()> {
         recurrence: args.recurrence,
         actor_id: config.actor_id.clone(),
         idempotency_key: String::new(),
-        metadata_json: json!({"origin": "finance-cli"}),
+        metadata_json: json!({"origin": "phai-cli"}),
         created_at: Utc::now(),
         updated_at: Utc::now(),
         template_id: None,
@@ -12924,7 +12935,7 @@ async fn account_upsert(args: AccountUpsertArgs) -> Result<()> {
         status: args.status,
         actor_id: config.actor_id.clone(),
         idempotency_key: String::new(),
-        metadata_json: json!({"origin": "finance-cli"}),
+        metadata_json: json!({"origin": "phai-cli"}),
         created_at: now,
         updated_at: now,
     };

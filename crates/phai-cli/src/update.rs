@@ -342,7 +342,7 @@ pub(crate) fn exec_new_binary(new_version: &str) {
     let args: Vec<String> = std::env::args().collect();
     let err = std::process::Command::new(&exe)
         .args(&args[1..]) // skip argv[0]
-        .env("FINANCE_OS_UPDATED", new_version)
+        .env("PHAI_UPDATED", new_version)
         .exec();
     // exec replaces the process image on success; reaching here means failure
     eprintln!("Warning: failed to re-exec after update: {err}");
@@ -387,10 +387,12 @@ pub(crate) async fn download_and_replace(
     validate_tarball_sha256(&tarball, &expected_sha256)?;
 
     // Then verify the minisign signature (authenticity gate). See ADR-0017.
-    let skip_sig = std::env::var("FINANCE_OS_SKIP_SIG_VERIFY").ok().as_deref() == Some("1");
+    let skip_sig = phai_core::compat::env_var("PHAI_SKIP_SIG_VERIFY", "FINANCE_OS_SKIP_SIG_VERIFY")
+        .as_deref()
+        == Some("1");
     if skip_sig {
         eprintln!(
-            "Warning: signature verification skipped via FINANCE_OS_SKIP_SIG_VERIFY=1 \
+            "Warning: signature verification skipped via PHAI_SKIP_SIG_VERIFY=1 \
              — only use this for break-glass scenarios."
         );
     } else {
