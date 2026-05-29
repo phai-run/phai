@@ -48,6 +48,70 @@ export interface FlushResult {
   failed: { writeId: string; error: string }[]
 }
 
+/**
+ * Cash-evolution chart shape (Rust `ChartData`). Amounts are decimal strings.
+ * Field names mirror the Rust serde shape; we tolerate a couple of aliases the
+ * backend might use for the closing balance (see `chart.ts`).
+ */
+export interface ChartMonthApi {
+  label: string
+  inflows: string
+  outflows: string
+  forecast_inflows_remaining?: string
+  forecast_outflows_remaining?: string
+  closing_balance?: string
+  projected_closing_balance?: string
+  is_future?: boolean
+}
+export interface ChartData {
+  months: ChartMonthApi[]
+}
+
+/** Forecast domain record (snake_case). Amount is a decimal string. */
+export interface ForecastRecord {
+  forecast_id: string
+  due_date: string | null
+  description: string
+  amount: string
+  category_id: string | null
+  account_id: string | null
+  status: string
+}
+
+/** Forecast template domain record (snake_case). */
+export interface ForecastTemplateRecord {
+  template_id: string
+  description: string
+  kind: string | null
+  cadence: string | null
+  amount: string
+  status: string
+  confidence: number | string | null
+}
+
+export interface NewForecast {
+  description: string
+  amount: string // decimal string; negative = saída
+  due_date?: string
+  category_id?: string
+  account_id?: string
+}
+
+const trimParams = (record: Record<string, string | null | undefined>): URLSearchParams => {
+  const p = new URLSearchParams()
+  for (const [k, v] of Object.entries(record)) {
+    if (v != null && v !== '') p.set(k, v)
+  }
+  return p
+}
+
+const postJson = <T>(url: string, body: unknown): Promise<T> =>
+  fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((r) => json<T>(r))
+
 export const api = {
   reviewQueue: (params: URLSearchParams): Promise<{ rows: TxRow[] }> =>
     fetch(`/api/review-queue?${params}`).then((r) => json<{ rows: TxRow[] }>(r)),
@@ -55,11 +119,45 @@ export const api = {
     fetch('/api/categories').then((r) => json<{ ids: string[] }>(r)),
   accounts: (): Promise<{ rows: AccountRow[] }> =>
     fetch('/api/accounts').then((r) => json<{ rows: AccountRow[] }>(r)),
+
+  chart: (monthsBack: number, monthsAhead: number): Promise<ChartData> =>
+    fetch(
+      `/api/chart?${trimParams({
+        months_back: String(monthsBack),
+        months_ahead: String(monthsAhead),
+      })}`,
+    ).then((r) => json<ChartData>(r)),
+
+  forecasts: (filters: {
+    status?: string | null
+    from?: string | null
+    until?: string | null
+  }): Promise<{ forecasts: ForecastRecord[] }> =>
+    fetch(`/api/forecasts?${trimParams(filters)}`).then((r) =>
+      json<{ forecasts: ForecastRecord[] }>(r),
+    ),
+
+  forecastTemplates: (filters: {
+    kind?: string | null
+    status?: string | null
+  }): Promise<{ templates: ForecastTemplateRecord[] }> =>
+    fetch(`/api/forecast-templates?${trimParams(filters)}`).then((r) =>
+      json<{ templates: ForecastTemplateRecord[] }>(r),
+    ),
+
+  createForecast: (forecast: NewForecast): Promise<{ forecast_id: string }> =>
+    postJson<{ forecast_id: string }>('/api/forecast', forecast),
+
+  acceptForecastTemplate: (templateId: string, materializeMonths = 6): Promise<unknown> =>
+    postJson('/api/forecast-template/accept', {
+      template_id: templateId,
+      materialize_months: materializeMonths,
+    }),
+
+  dismissForecastTemplate: (templateId: string): Promise<unknown> =>
+    postJson('/api/forecast-template/dismiss', { template_id: templateId }),
+
   /** Apply a batch of committed writes; returns the writeIds that succeeded. */
   flush: (items: FlushItem[]): Promise<FlushResult> =>
-    fetch('/api/events', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ writes: items }),
-    }).then((r) => json<FlushResult>(r)),
+    postJson<FlushResult>('/api/events', { writes: items }),
 }
