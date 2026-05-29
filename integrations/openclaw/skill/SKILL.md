@@ -22,7 +22,7 @@ Use esta skill para qualquer operação financeira da OpenClaw.
 - Fonte de verdade dos dados: BigQuery (dataset configurado no runtime)
 - Fonte de verdade do processamento: binário `phai`
 - Não usar `skills/finance-analyzer/*`
-- Não rodar scripts Python de planilha; os dashboards leem BigQuery via Connected Sheets
+- Não rodar scripts Python de planilha; o app web (`phai serve`) lê o BigQuery via o binário `phai`
 - Não inventar formato de report quando a CLI já fornece saída padrão suficiente
 - Priorizar os padrões de UX e classificação definidos em `REPORTING_UX.md`
 - Fluxo de `tx split` é BigQuery-only no runtime Ford; backend `local` deve ser tratado como não suportado

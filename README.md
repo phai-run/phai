@@ -174,8 +174,6 @@ phai auth setup \
 phai admin migrate
 ```
 
-Optional: use a Google Sheet as a category/human-field override source so your manual classifications survive across machines. See [docs/google-sheets-overrides.md](docs/google-sheets-overrides.md).
-
 ## Configuration
 
 | Variable | Description |
