@@ -30,7 +30,10 @@
   --space-unit: 8px;
   --card-pad: 20px;
   --section-gap: 80px;
-  --container: 780px;
+  /* The web app is a full-width workspace, not a 780px editorial column. */
+  --container: min(1680px, 96vw);
+  /* The one sanctioned shadow (DESIGN.md): a dragged element signalling lift. */
+  --drag-shadow: 0 8px 24px rgba(21, 19, 31, 0.18);
 }
 
 * {

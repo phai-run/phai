@@ -5,9 +5,10 @@ import { events, tables } from '../livestore/schema'
 import {
   api,
   type ChartData,
-  type FlushItem,
   type ForecastRecord,
   type ForecastTemplateRecord,
+  type ReviewFlushItem,
+  type TxRow,
 } from './api'
 
 const pendingWrites$ = queryDb(tables.pendingWrites)
@@ -18,15 +19,27 @@ export interface SyncStatus {
   seeded: boolean
 }
 
+interface PendingRow {
+  writeId: string
+  type: string
+  transactionId: string
+  forecastId: string
+  payload: unknown
+}
+
+const bool = (v: unknown): number => (v ? 1 : 0)
+
 /**
  * Wires LiveStore to the Rust bridge:
  *  1. On mount, seed reference data (categories, accounts) from the bridge.
- *  2. Continuously drain `pendingWrites` to `POST /api/events`, committing
- *     `writeAcked` / `writeFailed` on the result. Retries on the next tick.
+ *  2. Continuously drain `pendingWrites`, routing each row to its endpoint by
+ *     `type` (review → /api/events, forecastMove → /api/forecast/move). On
+ *     success, commit `writeAcked`; on failure, `writeFailed`. Retries on the
+ *     next tick.
  *
- * The per-view re-seed of the review queue, chart, forecasts and templates is
- * handled by the dedicated hooks below (`useReviewQueueSeed`, etc.), which the
- * views call so a seed only fires when that view is mounted.
+ * The per-view re-seed of the transaction window, chart, forecasts and templates
+ * is handled by the dedicated hooks below, which the views call so a seed only
+ * fires when that view is mounted.
  */
 export const useBridgeSync = (): SyncStatus => {
   const { store } = useStore()
@@ -51,26 +64,17 @@ export const useBridgeSync = (): SyncStatus => {
     }
   }, [store])
 
-  // 2. Drain the pending-write queue.
+  // 2. Drain the typed pending-write queue.
   useEffect(() => {
     const flush = async () => {
       if (flushing.current) return
-      const rows = store.query(pendingWrites$)
+      const rows = store.query(pendingWrites$) as ReadonlyArray<PendingRow>
       setPending(rows.length)
       if (rows.length === 0) return
       flushing.current = true
       try {
-        const items: FlushItem[] = rows.map((r) => ({
-          writeId: r.writeId,
-          transactionId: r.transactionId,
-          patch: r.payload as FlushItem['patch'],
-        }))
-        const res = await api.flush(items)
-        store.commit(...res.acked.map((writeId) => events.writeAcked({ writeId })))
-        store.commit(
-          ...res.failed.map((f) => events.writeFailed({ writeId: f.writeId, error: f.error })),
-        )
-        setError(res.failed.length > 0 ? res.failed[0].error : null)
+        const failures = await drainQueue(store, rows)
+        setError(failures.length > 0 ? failures[0] : null)
       } catch (e: unknown) {
         setError(String(e))
       } finally {
@@ -90,6 +94,57 @@ export const useBridgeSync = (): SyncStatus => {
   return { pending, error, seeded }
 }
 
+type StoreApi = ReturnType<typeof useStore>['store']
+
+/**
+ * Routes each pending write to the right endpoint by `type`. Reviews flush as a
+ * single batch (the bridge accepts `{ writes }`); forecast moves flush one at a
+ * time. Returns the error strings of any failures (for the status chip).
+ */
+const drainQueue = async (
+  store: StoreApi,
+  rows: ReadonlyArray<PendingRow>,
+): Promise<string[]> => {
+  const errors: string[] = []
+
+  const reviews = rows.filter((r) => r.type === 'review')
+  if (reviews.length > 0) {
+    const items: ReviewFlushItem[] = reviews.map((r) => ({
+      writeId: r.writeId,
+      transactionId: r.transactionId,
+      patch: r.payload as ReviewFlushItem['patch'],
+    }))
+    try {
+      const res = await api.flushReviews(items)
+      store.commit(...res.acked.map((writeId) => events.writeAcked({ writeId })))
+      store.commit(
+        ...res.failed.map((f) => events.writeFailed({ writeId: f.writeId, error: f.error })),
+      )
+      for (const f of res.failed) errors.push(f.error)
+    } catch (e: unknown) {
+      // Whole batch failed (network) — mark each so the chip surfaces it.
+      const msg = String(e)
+      store.commit(...reviews.map((r) => events.writeFailed({ writeId: r.writeId, error: msg })))
+      errors.push(msg)
+    }
+  }
+
+  for (const r of rows) {
+    if (r.type !== 'forecastMove') continue
+    const dueDate = (r.payload as { dueDate: string }).dueDate
+    try {
+      await api.moveForecast(r.forecastId, dueDate)
+      store.commit(events.writeAcked({ writeId: r.writeId }))
+    } catch (e: unknown) {
+      const msg = String(e)
+      store.commit(events.writeFailed({ writeId: r.writeId, error: msg }))
+      errors.push(msg)
+    }
+  }
+
+  return errors
+}
+
 export interface SeedState {
   loading: boolean
   error: string | null
@@ -98,7 +153,7 @@ export interface SeedState {
 
 /**
  * Generic "fetch from bridge → commit a seed event" hook. Re-runs whenever
- * `deps` change (e.g. filters) and exposes a manual `reload`.
+ * `deps` change (e.g. window controls) and exposes a manual `reload`.
  */
 const useSeed = (
   fetcher: () => Promise<void>,
@@ -133,37 +188,39 @@ const useSeed = (
   return { loading, error, reload }
 }
 
-export interface ReviewFilters {
-  month: string | null
-  owner: string | null
-  accountId: string | null
-  merchant: string | null
-  category: string | null
-  includeReviewed: boolean
-}
+const normalizeTransactions = (rows: TxRow[]) =>
+  rows.map((r) => ({
+    id: r.id,
+    accountId: r.accountId ?? '',
+    postedAt: r.postedAt ?? '',
+    amount: r.amount ?? '0',
+    rawDescription: r.rawDescription ?? '',
+    description: r.description ?? null,
+    merchantName: r.merchantName ?? null,
+    purpose: r.purpose ?? null,
+    categoryId: r.categoryId ?? null,
+    month: r.month ?? '',
+    paymentStatus: r.paymentStatus ?? '',
+    reviewed: bool(r.reviewed),
+    isInstallment: bool(r.isInstallment),
+    isSubscription: bool(r.isSubscription),
+  }))
 
-/** Re-seed the review queue from the bridge whenever filters change. */
-export const useReviewQueueSeed = (filters: ReviewFilters): SeedState => {
+/**
+ * Seed the full transaction window from the bridge. The whole window lives in
+ * LiveStore so every filter/sum in the Review view is computed locally.
+ */
+export const useTransactionsSeed = (monthsBack: number, monthsAhead: number): SeedState => {
   const { store } = useStore()
   const fetcher = useCallback(async () => {
-    const params = new URLSearchParams()
-    if (filters.month) params.set('month', filters.month)
-    if (filters.owner) params.set('owner', filters.owner)
-    if (filters.accountId) params.set('account_id', filters.accountId)
-    if (filters.merchant) params.set('merchant', filters.merchant)
-    if (filters.category) params.set('category', filters.category)
-    if (filters.includeReviewed) params.set('include_reviewed', 'true')
-    const { rows } = await api.reviewQueue(params)
-    store.commit(events.queueSeeded({ rows }))
-  }, [
-    store,
-    filters.month,
-    filters.owner,
-    filters.accountId,
-    filters.merchant,
-    filters.category,
-    filters.includeReviewed,
-  ])
+    const { rows } = await api.transactions({
+      monthsBack,
+      monthsAhead,
+      includeReviewed: true,
+      limit: 5000,
+    })
+    store.commit(events.transactionsSeeded({ rows: normalizeTransactions(rows) }))
+  }, [store, monthsBack, monthsAhead])
   return useSeed(fetcher, [fetcher])
 }
 
@@ -199,6 +256,8 @@ const normalizeForecasts = (forecasts: ForecastRecord[]) =>
     categoryId: f.category_id ?? null,
     accountId: f.account_id ?? null,
     status: f.status ?? '',
+    kind: f.kind ?? 'manual',
+    draggable: bool(f.draggable),
   }))
 
 const normalizeTemplates = (templates: ForecastTemplateRecord[]) =>

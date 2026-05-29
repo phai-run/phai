@@ -2,8 +2,11 @@
  * Bridge client — talks to the Rust `phai serve` HTTP API.
  *
  * Reads (GET) pull the system-of-record data (BigQuery/SQLite) to seed
- * LiveStore. Writes (POST /api/events) flush committed review submissions so
- * the Rust side can apply them with an audit trail.
+ * LiveStore. Writes flush committed user actions so the Rust side can apply them
+ * with an audit trail. Each flush kind has its own endpoint:
+ *  - review edits   → POST /api/events
+ *  - forecast moves → POST /api/forecast/move
+ *  - forecast adds  → POST /api/forecast
  */
 
 export interface TxRow {
@@ -17,6 +20,10 @@ export interface TxRow {
   purpose: string | null
   categoryId: string | null
   month: string
+  paymentStatus: string
+  reviewed: boolean
+  isInstallment: boolean
+  isSubscription: boolean
 }
 
 export interface AccountRow {
@@ -32,7 +39,7 @@ export interface ReviewPatch {
   categoryId: string | null
 }
 
-export interface FlushItem {
+export interface ReviewFlushItem {
   writeId: string
   transactionId: string
   patch: ReviewPatch
@@ -51,7 +58,7 @@ export interface FlushResult {
 /**
  * Cash-evolution chart shape (Rust `ChartData`). Amounts are decimal strings.
  * Field names mirror the Rust serde shape; we tolerate a couple of aliases the
- * backend might use for the closing balance (see `chart.ts`).
+ * backend might use for the closing balance (see `sync.ts`).
  */
 export interface ChartMonthApi {
   label: string
@@ -76,6 +83,8 @@ export interface ForecastRecord {
   category_id: string | null
   account_id: string | null
   status: string
+  kind?: string
+  draggable?: boolean
 }
 
 /** Forecast template domain record (snake_case). */
@@ -113,8 +122,22 @@ const postJson = <T>(url: string, body: unknown): Promise<T> =>
   }).then((r) => json<T>(r))
 
 export const api = {
-  reviewQueue: (params: URLSearchParams): Promise<{ rows: TxRow[] }> =>
-    fetch(`/api/review-queue?${params}`).then((r) => json<{ rows: TxRow[] }>(r)),
+  /** Seed the full transaction window — filtering/summing is then all local. */
+  transactions: (params: {
+    monthsBack: number
+    monthsAhead: number
+    includeReviewed?: boolean
+    limit?: number
+  }): Promise<{ rows: TxRow[] }> =>
+    fetch(
+      `/api/transactions?${trimParams({
+        months_back: String(params.monthsBack),
+        months_ahead: String(params.monthsAhead),
+        include_reviewed: String(params.includeReviewed ?? true),
+        limit: String(params.limit ?? 5000),
+      })}`,
+    ).then((r) => json<{ rows: TxRow[] }>(r)),
+
   categories: (): Promise<{ ids: string[] }> =>
     fetch('/api/categories').then((r) => json<{ ids: string[] }>(r)),
   accounts: (): Promise<{ rows: AccountRow[] }> =>
@@ -148,6 +171,10 @@ export const api = {
   createForecast: (forecast: NewForecast): Promise<{ forecast_id: string }> =>
     postJson<{ forecast_id: string }>('/api/forecast', forecast),
 
+  /** Re-date a forecast (drag-and-drop in Planejamento). */
+  moveForecast: (forecastId: string, dueDate: string): Promise<unknown> =>
+    postJson('/api/forecast/move', { forecastId, dueDate }),
+
   acceptForecastTemplate: (templateId: string, materializeMonths = 6): Promise<unknown> =>
     postJson('/api/forecast-template/accept', {
       template_id: templateId,
@@ -157,7 +184,7 @@ export const api = {
   dismissForecastTemplate: (templateId: string): Promise<unknown> =>
     postJson('/api/forecast-template/dismiss', { template_id: templateId }),
 
-  /** Apply a batch of committed writes; returns the writeIds that succeeded. */
-  flush: (items: FlushItem[]): Promise<FlushResult> =>
+  /** Apply a batch of committed review writes; returns the writeIds that succeeded. */
+  flushReviews: (items: ReviewFlushItem[]): Promise<FlushResult> =>
     postJson<FlushResult>('/api/events', { writes: items }),
 }

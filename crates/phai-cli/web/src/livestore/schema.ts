@@ -10,19 +10,25 @@ import {
  * phai web — LiveStore schema (client-only).
  *
  * Two kinds of state live here:
- *  - **Server reads** (transactions to review, categories, accounts) are seeded
- *    from the Rust bridge via `*Seeded` events and materialised into read
- *    tables. The bridge is the system of record (BigQuery/SQLite).
- *  - **User writes** (a review submitted in the UI) are event-sourced as
- *    `reviewSubmitted`, materialised into `pendingWrites` (the flush queue) and
- *    an optimistic `reviewOverlay`. The background flusher (bridge/sync.ts)
- *    POSTs pending rows to the bridge and emits `writeAcked` on success.
+ *  - **Server reads** (the transaction window, categories, accounts, chart,
+ *    forecasts) are seeded from the Rust bridge via `*Seeded` events and
+ *    materialised into read tables. The bridge is the system of record
+ *    (BigQuery/SQLite).
+ *  - **User writes** (a review edit, a forecast created, a forecast dragged to a
+ *    new month) are event-sourced, materialised into `pendingWrites` (the flush
+ *    queue) and an optimistic overlay so the UI reflects them in the same frame.
+ *    The background flusher (bridge/sync.ts) drains `pendingWrites`, routing each
+ *    row to the right endpoint by its `type`, then emits `writeAcked` /
+ *    `writeFailed`.
  *
- * No LiveStore sync backend is configured — see ADR on the client-only design.
+ * Every sum/filter/month-selection in the UI is computed client-side from these
+ * tables — never a network round-trip. No LiveStore sync backend is configured
+ * (client-only design, see ADR-0001).
  */
 
 export const tables = {
-  // Review queue + general transactions, seeded from the bridge.
+  // The full transaction window, seeded from /api/transactions. Drives the
+  // review list and the per-month panel in Planejamento.
   transactions: State.SQLite.table({
     name: 'transactions',
     columns: {
@@ -36,11 +42,15 @@ export const tables = {
       purpose: State.SQLite.text({ nullable: true }),
       categoryId: State.SQLite.text({ nullable: true }),
       month: State.SQLite.text({ default: '' }), // YYYY-MM, for filtering
+      paymentStatus: State.SQLite.text({ default: '' }),
+      reviewed: State.SQLite.integer({ default: 0 }), // 0/1 — SQLite has no bool
+      isInstallment: State.SQLite.integer({ default: 0 }),
+      isSubscription: State.SQLite.integer({ default: 0 }),
     },
   }),
 
-  // Optimistic overlay of the user's edits, applied on top of `transactions`
-  // until the bridge acks them.
+  // Optimistic overlay of the user's review edits, applied on top of
+  // `transactions` until the bridge acks them.
   reviewOverlay: State.SQLite.table({
     name: 'reviewOverlay',
     columns: {
@@ -52,13 +62,18 @@ export const tables = {
     },
   }),
 
-  // The flush queue: one row per unsynced review submission.
+  // The flush queue: one row per unsynced write. `type` routes the flush:
+  //  - 'review'         → POST /api/events
+  //  - 'forecastMove'   → POST /api/forecast/move
+  //  - 'forecastCreate' → POST /api/forecast
   pendingWrites: State.SQLite.table({
     name: 'pendingWrites',
     columns: {
       writeId: State.SQLite.text({ primaryKey: true }),
-      transactionId: State.SQLite.text({ default: '' }),
-      payload: State.SQLite.json({ default: {} }), // HumanReviewPatch shape
+      type: State.SQLite.text({ default: 'review' }),
+      transactionId: State.SQLite.text({ default: '' }), // review only
+      forecastId: State.SQLite.text({ default: '' }), // forecast moves only
+      payload: State.SQLite.json({ default: {} }),
       createdAt: State.SQLite.integer({ default: 0 }),
       attempts: State.SQLite.integer({ default: 0 }),
       lastError: State.SQLite.text({ nullable: true }),
@@ -109,6 +124,18 @@ export const tables = {
       categoryId: State.SQLite.text({ nullable: true }),
       accountId: State.SQLite.text({ nullable: true }),
       status: State.SQLite.text({ default: '' }),
+      kind: State.SQLite.text({ default: 'manual' }),
+      draggable: State.SQLite.integer({ default: 0 }), // 0/1 — installments/subs locked
+    },
+  }),
+
+  // Optimistic overlay of dragged-forecast re-dating, applied on top of
+  // `forecasts` until the bridge acks the move.
+  forecastOverlay: State.SQLite.table({
+    name: 'forecastOverlay',
+    columns: {
+      forecastId: State.SQLite.text({ primaryKey: true }),
+      dueDate: State.SQLite.text({ nullable: true }),
     },
   }),
 
@@ -127,34 +154,39 @@ export const tables = {
     },
   }),
 
-  // Session-local UI state (current tab, filters, selection cursor).
+  // Session-local UI state (current view, month selection, filters).
   ui: State.SQLite.clientDocument({
     name: 'ui',
     schema: Schema.Struct({
-      tab: Schema.Literal('review', 'cashflow', 'forecasts'),
-      monthFilter: Schema.NullOr(Schema.String),
+      view: Schema.Literal('review', 'planning'),
+      // Planejamento: the bar the user clicked drives the panel below.
+      selectedMonth: Schema.NullOr(Schema.String),
+      // Review filters (all applied client-side over the seeded window).
       ownerFilter: Schema.NullOr(Schema.String),
       accountFilter: Schema.NullOr(Schema.String),
       merchantFilter: Schema.NullOr(Schema.String),
       categoryFilter: Schema.NullOr(Schema.String),
-      includeReviewed: Schema.Boolean,
+      unreviewedOnly: Schema.Boolean,
+      subscriptionsOnly: Schema.Boolean,
+      installmentsOnly: Schema.Boolean,
       cursor: Schema.Number,
-      // Cashflow controls
+      // Window controls (drive both the seed and the chart range).
       monthsBack: Schema.Number,
       monthsAhead: Schema.Number,
-      // Forecasts controls
       forecastStatusFilter: Schema.NullOr(Schema.String),
     }),
     default: {
       id: SessionIdSymbol,
       value: {
-        tab: 'review',
-        monthFilter: null,
+        view: 'review',
+        selectedMonth: null,
         ownerFilter: null,
         accountFilter: null,
         merchantFilter: null,
         categoryFilter: null,
-        includeReviewed: false,
+        unreviewedOnly: true,
+        subscriptionsOnly: false,
+        installmentsOnly: false,
         cursor: 0,
         monthsBack: 6,
         monthsAhead: 6,
@@ -175,6 +207,10 @@ const TxRow = Schema.Struct({
   purpose: Schema.NullOr(Schema.String),
   categoryId: Schema.NullOr(Schema.String),
   month: Schema.String,
+  paymentStatus: Schema.String,
+  reviewed: Schema.Number, // 0/1
+  isInstallment: Schema.Number,
+  isSubscription: Schema.Number,
 })
 
 const ReviewPatch = Schema.Struct({
@@ -204,6 +240,8 @@ const ForecastRow = Schema.Struct({
   categoryId: Schema.NullOr(Schema.String),
   accountId: Schema.NullOr(Schema.String),
   status: Schema.String,
+  kind: Schema.String,
+  draggable: Schema.Number, // 0/1
 })
 
 const ForecastTemplateRow = Schema.Struct({
@@ -218,8 +256,8 @@ const ForecastTemplateRow = Schema.Struct({
 
 export const events = {
   // ── Server reads → seed events ──────────────────────────────────────────
-  queueSeeded: Events.synced({
-    name: 'v1.QueueSeeded',
+  transactionsSeeded: Events.synced({
+    name: 'v1.TransactionsSeeded',
     schema: Schema.Struct({ rows: Schema.Array(TxRow) }),
   }),
   categoriesSeeded: Events.synced({
@@ -251,7 +289,7 @@ export const events = {
     schema: Schema.Struct({ rows: Schema.Array(ForecastTemplateRow) }),
   }),
 
-  // ── User writes → review flow ───────────────────────────────────────────
+  // ── User writes ─────────────────────────────────────────────────────────
   reviewSubmitted: Events.synced({
     name: 'v1.ReviewSubmitted',
     schema: Schema.Struct({
@@ -259,6 +297,16 @@ export const events = {
       transactionId: Schema.String,
       patch: ReviewPatch,
       submittedAt: Schema.Number,
+    }),
+  }),
+  // A manual forecast dragged to a new month (re-dated). Optimistic.
+  forecastMoved: Events.synced({
+    name: 'v1.ForecastMoved',
+    schema: Schema.Struct({
+      writeId: Schema.String,
+      forecastId: Schema.String,
+      dueDate: Schema.String, // YYYY-MM-DD
+      movedAt: Schema.Number,
     }),
   }),
   writeAcked: Events.synced({
@@ -274,7 +322,7 @@ export const events = {
 }
 
 const materializers = State.SQLite.materializers(events, {
-  'v1.QueueSeeded': ({ rows }) => [
+  'v1.TransactionsSeeded': ({ rows }) => [
     tables.transactions.delete(),
     ...rows.map((r) => tables.transactions.insert(r)),
   ],
@@ -301,6 +349,7 @@ const materializers = State.SQLite.materializers(events, {
   'v1.ReviewSubmitted': ({ writeId, transactionId, patch, submittedAt }) => [
     tables.pendingWrites.insert({
       writeId,
+      type: 'review',
       transactionId,
       payload: patch,
       createdAt: submittedAt,
@@ -310,6 +359,20 @@ const materializers = State.SQLite.materializers(events, {
     tables.reviewOverlay
       .insert({ transactionId, ...patch })
       .onConflict('transactionId', 'replace'),
+  ],
+  'v1.ForecastMoved': ({ writeId, forecastId, dueDate, movedAt }) => [
+    tables.pendingWrites.insert({
+      writeId,
+      type: 'forecastMove',
+      forecastId,
+      payload: { dueDate },
+      createdAt: movedAt,
+      attempts: 0,
+    }),
+    // optimistic overlay so bars + totals recompute in the same frame
+    tables.forecastOverlay
+      .insert({ forecastId, dueDate })
+      .onConflict('forecastId', 'replace'),
   ],
   'v1.WriteAcked': ({ writeId }) =>
     tables.pendingWrites.delete().where({ writeId }),
