@@ -16,13 +16,16 @@ pub fn env_var_os(new_name: &str, legacy_name: &str) -> Option<OsString> {
     std::env::var_os(new_name).or_else(|| std::env::var_os(legacy_name))
 }
 
-/// String variant of [`env_var_os`]. A value that is set but not valid UTF-8
-/// is treated as absent for that name (matching `std::env::var` semantics)
-/// before the fallback is tried.
+/// String variant of [`env_var_os`]. The new name wins whenever it is *set at
+/// all*: if `new_name` is present we never consult `legacy_name`, even when the
+/// new value is not valid UTF-8 (in which case it resolves to `None` rather
+/// than silently falling back to the legacy name). Only an entirely unset new
+/// name defers to the legacy one.
 pub fn env_var(new_name: &str, legacy_name: &str) -> Option<String> {
-    std::env::var(new_name)
-        .ok()
-        .or_else(|| std::env::var(legacy_name).ok())
+    if std::env::var_os(new_name).is_some() {
+        return std::env::var(new_name).ok();
+    }
+    std::env::var(legacy_name).ok()
 }
 
 #[cfg(test)]

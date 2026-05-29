@@ -60,8 +60,8 @@ if [[ -x "$RUNTIME_ROOT/bin/phai" ]]; then
   DEFAULT_DATA_DIR="$RUNTIME_ROOT/data"
 elif [[ -x "$RUNTIME_ROOT/target/release/phai" ]]; then
   BIN_PATH="$RUNTIME_ROOT/target/release/phai"
-  cfg_base="${XDG_CONFIG_HOME:-$HOME/.config}"
-  data_base="${XDG_DATA_HOME:-$HOME/.local/share}"
+  cfg_base="${XDG_CONFIG_HOME:-${HOME:?HOME is unset; set HOME or XDG_CONFIG_HOME}/.config}"
+  data_base="${XDG_DATA_HOME:-${HOME:?HOME is unset; set HOME or XDG_DATA_HOME}/.local/share}"
   DEFAULT_CONFIG_DIR="$(pick_existing_dir "$cfg_base/phai" "$cfg_base/finance-os")"
   DEFAULT_DATA_DIR="$(pick_existing_dir "$data_base/phai" "$data_base/finance-os")"
 else
