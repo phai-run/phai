@@ -1,5 +1,28 @@
 # Changelog
 
+## [4.0.0](https://github.com/phai-run/phai/compare/v3.2.4...v4.0.0) (2026-05-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** the CLI binary is renamed from `fin` to `phai` and the crates from finance-core/finance-cli to phai-core/phai-cli. Existing installs must reinstall (curl -fsSL https://raw.githubusercontent.com/phai-run/phai/main/install.sh | bash); the old `fin` command no longer exists.
+* the installed binary is now `phai` (was `fin`). Existing users must reinstall; the old `fin` binary is not upgraded in place.
+
+### Features
+
+* **cli:** add phai branding to version and help ([075f704](https://github.com/phai-run/phai/commit/075f704af6c536d06ca6c9f62fd1e45f3624e4e9))
+* **site:** publish phai.run landing via GitHub Pages ([1aa1967](https://github.com/phai-run/phai/commit/1aa1967b98c5b6f76cb6f3704821f420c35b0d42))
+
+
+### Bug Fixes
+
+* **cli:** correct remaining finance-cli/-core brand strings in user-facing output ([9cd4705](https://github.com/phai-run/phai/commit/9cd470517d82a7c2d471856d24f1ff2dd62e25f1))
+
+
+### Code Refactoring
+
+* rename crates to phai-core/phai-cli and binary to phai ([1fa5f8c](https://github.com/phai-run/phai/commit/1fa5f8cb62b864f182b33ced8999e2dea05b7b77))
+
 ## [3.2.4](https://github.com/feliperun/finance-os/compare/v3.2.3...v3.2.4) (2026-05-28)
 
 
