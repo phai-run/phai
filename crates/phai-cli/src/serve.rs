@@ -37,7 +37,7 @@ use uuid::Uuid;
 
 const STORE_CHANNEL_CAP: usize = 64;
 const LOCAL_BIND_HOST: &str = "127.0.0.1";
-const LOCAL_APP_HOST: &str = "meuapp.localhost";
+const LOCAL_APP_HOST: &str = "phai.localhost";
 /// Default number of review-queue rows returned when the caller omits `limit`.
 const DEFAULT_REVIEW_QUEUE_LIMIT: usize = 200;
 /// Actor id stamped on writes that originate from the web bridge.
@@ -888,6 +888,8 @@ pub async fn run(port: u16) -> Result<()> {
             post(post_dismiss_template),
         )
         .layer(axum::middleware::from_fn(guard_origin))
+        // Operation log (debug builds only): method, path, status, latency.
+        .layer(axum::middleware::from_fn(log_ops))
         .with_state(app_state);
 
     let app = api
@@ -896,12 +898,26 @@ pub async fn run(port: u16) -> Result<()> {
         .fallback(crate::serve_assets::static_handler);
 
     let addr = format!("{LOCAL_BIND_HOST}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("falha ao escutar em {addr}"))?;
+    let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| {
+        if port < 1024 {
+            format!("falha ao escutar em {addr} — a porta {port} é privilegiada; rode com sudo")
+        } else {
+            format!("falha ao escutar em {addr}")
+        }
+    })?;
 
-    println!("🌐 Dashboard em http://{LOCAL_APP_HOST}:{port}");
+    // Port 80 is implicit in the URL the browser shows.
+    let url = if port == 80 {
+        format!("http://{LOCAL_APP_HOST}")
+    } else {
+        format!("http://{LOCAL_APP_HOST}:{port}")
+    };
+    println!("🌐 phai em {url}");
+    if cfg!(debug_assertions) {
+        println!("   (build debug — log de operações ativo)");
+    }
     println!("   Pressione Ctrl+C para parar");
+    open_browser(&url);
 
     local
         .run_until(async move {
@@ -926,6 +942,53 @@ async fn guard_origin(
     next.run(req).await
 }
 
+/// Log every `/api` operation in debug builds: method, path, status, latency.
+/// No-op in release builds (the closure is elided by the compiler).
+async fn log_ops(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !cfg!(debug_assertions) {
+        return next.run(req).await;
+    }
+    let method = req.method().clone();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let started = std::time::Instant::now();
+    let resp = next.run(req).await;
+    eprintln!(
+        "[phai serve] {method} {path} → {} ({} ms)",
+        resp.status().as_u16(),
+        started.elapsed().as_millis()
+    );
+    resp
+}
+
+/// Open the web app in the user's default browser. Best-effort — failures are
+/// logged (debug) and never block the server. When running under `sudo`, open
+/// as the invoking user so the browser attaches to their GUI session.
+fn open_browser(url: &str) {
+    use std::process::Command;
+    let result = if cfg!(target_os = "macos") {
+        match std::env::var("SUDO_USER") {
+            Ok(user) if !user.is_empty() => Command::new("sudo")
+                .args(["-u", &user, "open", url])
+                .spawn(),
+            _ => Command::new("open").arg(url).spawn(),
+        }
+    } else {
+        Command::new("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = result {
+        if cfg!(debug_assertions) {
+            eprintln!("[phai serve] não consegui abrir o browser automaticamente: {e}");
+        }
+    }
+}
+
 /// Permite apenas conexões de localhost ou sem Origin (curl, integração direta).
 /// Rejeita qualquer outro Origin para prevenir Cross-Site Request Forgery.
 fn is_origin_allowed(headers: &HeaderMap) -> bool {
@@ -935,7 +998,10 @@ fn is_origin_allowed(headers: &HeaderMap) -> bool {
             let origin = v.to_str().unwrap_or("");
             origin.starts_with("http://localhost:")
                 || origin.starts_with("http://127.0.0.1:")
-                || origin.starts_with("http://meuapp.localhost:")
+                // phai.localhost with an explicit port, or bare (port 80 → no
+                // port in the Origin header).
+                || origin.starts_with("http://phai.localhost:")
+                || origin == "http://phai.localhost"
                 || origin == "null"
         }
     }
@@ -972,8 +1038,16 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(
             "origin",
-            HeaderValue::from_static("http://meuapp.localhost:8080"),
+            HeaderValue::from_static("http://phai.localhost:8080"),
         );
+        assert!(is_origin_allowed(&h));
+    }
+
+    #[test]
+    fn localhost_alias_bare_origin_allowed() {
+        // Port 80 → the browser omits the port from the Origin header.
+        let mut h = HeaderMap::new();
+        h.insert("origin", HeaderValue::from_static("http://phai.localhost"));
         assert!(is_origin_allowed(&h));
     }
 

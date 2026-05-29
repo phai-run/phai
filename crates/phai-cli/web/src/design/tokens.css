@@ -1,17 +1,20 @@
-/* phai design tokens — canonical source is /DESIGN.md (token → CSS var table).
-   void + neon, one accent per view, terminal-precise. Keep names in sync. */
+/* phai design tokens. The brand spec (/DESIGN.md) defines a dark "void" canvas,
+   but the live web app ships a light base (white background) per product
+   decision. Same token *names* — accents are darkened for AA contrast on white,
+   and `--white` keeps its name but now carries the primary ink color.
+   One accent per view, terminal-precise. Keep names in sync. */
 :root {
-  --bg: #08060b;
-  --surface: #100c1a;
-  --purple: #a78bfa;
-  --cyan: #2dd4bf;
-  --amber: #fbbf24;
-  --rose: #fb7185;
-  --green: #4ade80;
-  --white: #f1f5f9;
-  --muted: #7c7c9a;
-  --muted2: #4a4a5e;
-  --border: #1e1832;
+  --bg: #ffffff;        /* white base background */
+  --surface: #f6f6fb;   /* elevated cards, just above the white base */
+  --purple: #6d4aff;    /* intelligence / AI — primary interactive (AA on white) */
+  --cyan: #0d9488;      /* clarity / data — positive financial signal */
+  --amber: #b45309;     /* alerts — used sparingly */
+  --rose: #e11d48;      /* danger — overspend / expense */
+  --green: #15803d;     /* success — income / within budget */
+  --white: #15131f;     /* primary text (dark ink on white; name kept for parity) */
+  --muted: #5b5b70;     /* secondary text, metadata */
+  --muted2: #9a9aae;    /* decorative only — never body text */
+  --border: #e5e3ef;    /* card and hairline edges */
 
   --font-display: "Space Grotesk", system-ui, sans-serif;
   --font-body: "Inter", system-ui, sans-serif;

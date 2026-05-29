@@ -100,7 +100,7 @@ export const CashflowChart = ({ months }: { months: ReadonlyArray<ChartMonthView
                 y={PAD.top}
                 width={slot}
                 height={innerH}
-                fill={hover === i ? 'rgba(255,255,255,0.03)' : 'transparent'}
+                fill={hover === i ? 'rgba(0,0,0,0.04)' : 'transparent'}
               />
               {/* inflow (cyan, up) */}
               <rect

@@ -117,10 +117,14 @@ enum Commands {
         #[command(subcommand)]
         command: BudgetCommand,
     },
-    /// Start a web dashboard with WebSocket API for interactive forecast review.
+    /// Start the local web app (LiveStore UI) bridged to your store.
     #[command(name = "serve")]
     Serve {
-        #[arg(long, default_value_t = 8080, help = "porta do servidor web")]
+        #[arg(
+            long,
+            default_value_t = 80,
+            help = "porta do servidor web (80 = http://phai.localhost; portas <1024 exigem sudo)"
+        )]
         port: u16,
     },
     /// Push the daily pulse to an external channel (WhatsApp via webhook).

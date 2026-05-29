@@ -75,7 +75,7 @@ export const Pill = ({
     onClick={onClick}
     className="mono"
     style={{
-      background: active ? 'rgba(255,255,255,0.03)' : 'transparent',
+      background: active ? 'rgba(0,0,0,0.04)' : 'transparent',
       color: active ? accent : 'var(--muted)',
       border: `1px solid ${active ? accent + '55' : 'var(--border)'}`,
       borderRadius: 'var(--radius-full)',
