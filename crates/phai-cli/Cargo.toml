@@ -31,9 +31,6 @@ tower-http.workspace = true
 uuid.workspace = true
 hostname = "0.4.2"
 include_dir = "0.7"
-crossterm = "0.28"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-nucleo.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

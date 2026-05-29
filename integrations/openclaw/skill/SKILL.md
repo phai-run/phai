@@ -177,11 +177,11 @@ Persistir categoria manual:
 bash skills/phai/finance.sh tx categorize --transaction-id ID --category Categoria --subcategory "Subcategoria opcional" --context "texto opcional"
 ```
 
-Revisão humana interativa/local:
+Revisão humana interativa: rode `phai serve` e use o app web. Para revisão
+headless (listar/aplicar), use `tx review-human` com `--json`/`--summary`/`--transaction-id`:
 
 ```bash
-bash skills/phai/finance.sh review
-bash skills/phai/finance.sh tx review-human --kind all --limit 20 --tui --sound
+bash skills/phai/finance.sh tx review-human --kind all --limit 20 --json
 ```
 
 Fluxo recomendado via WhatsApp/OpenClaw:
