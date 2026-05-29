@@ -1,5 +1,5 @@
 ---
-name: finance-os
+name: phai
 description: >
   Runtime financeiro da OpenClaw baseado em phai + BigQuery. Sincroniza Pluggy,
   grava descrição/estabelecimento/propósito/categoria direto no banco canônico e gera relatórios determinísticos
@@ -32,7 +32,7 @@ Use esta skill para qualquer operação financeira da OpenClaw.
 Todos os comandos devem passar por:
 
 ```bash
-bash skills/finance-os/finance.sh ...
+bash skills/phai/finance.sh ...
 ```
 
 ## Comandos principais
@@ -40,54 +40,54 @@ bash skills/finance-os/finance.sh ...
 Sincronizar Pluggy com resumo estruturado:
 
 ```bash
-bash skills/finance-os/finance.sh sync pluggy --json-summary
+bash skills/phai/finance.sh sync pluggy --json-summary
 ```
 
 Sincronizar Pluggy com mensagem pronta para notificação (UX centralizada no phai):
 
 ```bash
-bash skills/finance-os/finance.sh sync pluggy --notify-summary
+bash skills/phai/finance.sh sync pluggy --notify-summary
 ```
 
 Pulso diário:
 
 ```bash
-bash skills/finance-os/finance.sh report daily-pulse --days 7
+bash skills/phai/finance.sh report daily-pulse --days 7
 ```
 
 Resumo de gastos do mês:
 
 ```bash
-bash skills/finance-os/finance.sh report monthly-spend --month YYYY-MM
+bash skills/phai/finance.sh report monthly-spend --month YYYY-MM
 ```
 
 Fluxo de caixa (competência de caixa, somente contas correntes — saldo inicial, entradas, saídas, saldo final do mês):
 
 ```bash
-bash skills/finance-os/finance.sh report cashflow --month YYYY-MM
+bash skills/phai/finance.sh report cashflow --month YYYY-MM
 ```
 
 Gráfico de evolução de caixa (SVG; opcionalmente sobreposto com forecast):
 
 ```bash
 # Default: últimos 6 meses, SVG em ./finance-cashflow.svg
-bash skills/finance-os/finance.sh report cashflow-chart
+bash skills/phai/finance.sh report cashflow-chart
 
 # Janela e arquivo customizados, com sparkline ASCII no terminal:
-bash skills/finance-os/finance.sh report cashflow-chart \
+bash skills/phai/finance.sh report cashflow-chart \
   --months 12 \
   --output ~/Downloads/cashflow.svg \
   --text
 
 # Com overlay de forecast (linhas tracejadas de entradas/saídas previstas):
-bash skills/finance-os/finance.sh report cashflow-chart --forecast
+bash skills/phai/finance.sh report cashflow-chart --forecast
 ```
 
 Auto-gerar forecasts de parcelamentos ativos (idempotente — pode ser rodado depois de cada sync):
 
 ```bash
-bash skills/finance-os/finance.sh forecast refresh-installments
-bash skills/finance-os/finance.sh forecast refresh-installments --raw   # JSON
+bash skills/phai/finance.sh forecast refresh-installments
+bash skills/phai/finance.sh forecast refresh-installments --raw   # JSON
 ```
 
 Detectar e gerenciar templates recorrentes (subscriptions, contas fixas e envelopes por categoria):
@@ -100,13 +100,13 @@ Detectar e gerenciar templates recorrentes (subscriptions, contas fixas e envelo
 #    cobertas por subscriptions/fixed ativos para não duplicar)
 # Persistidos como status='proposto'. Idempotente — re-rodar não
 # re-sugere candidatos já em proposto/ativo/descartado.
-bash skills/finance-os/finance.sh forecast suggest --raw
+bash skills/phai/finance.sh forecast suggest --raw
 
 # Aceita um candidato → vira 'ativo' e materializa 6 forecasts futuros.
-bash skills/finance-os/finance.sh forecast accept --template-id <id>
+bash skills/phai/finance.sh forecast accept --template-id <id>
 
 # Descarta um candidato → vira 'descartado' (não volta a ser sugerido).
-bash skills/finance-os/finance.sh forecast dismiss --template-id <id>
+bash skills/phai/finance.sh forecast dismiss --template-id <id>
 ```
 
 Simulação what-if (read-only — não grava nada):
@@ -116,7 +116,7 @@ Simulação what-if (read-only — não grava nada):
 #  Mostra saldo projetado baseline vs com cenário, delta total no horizonte,
 #  e (se passar --minimum-balance) o primeiro mês em que o saldo cairia
 #  abaixo do limite.
-bash skills/finance-os/finance.sh forecast scenario \
+bash skills/phai/finance.sh forecast scenario \
   --amount=-250 \
   --description "atividade extra" \
   --start 2026-08 \
@@ -140,48 +140,48 @@ o agente deve:
 Forecast vs realizado:
 
 ```bash
-bash skills/finance-os/finance.sh report forecast-vs-actual --month YYYY-MM
+bash skills/phai/finance.sh report forecast-vs-actual --month YYYY-MM
 ```
 
 Resumo de cartões:
 
 ```bash
-bash skills/finance-os/finance.sh report card-summary --month YYYY-MM
+bash skills/phai/finance.sh report card-summary --month YYYY-MM
 ```
 
 Pendências sem categoria:
 
 ```bash
-bash skills/finance-os/finance.sh report uncategorized --limit 20
+bash skills/phai/finance.sh report uncategorized --limit 20
 ```
 
 Pendências de campos humanos:
 
 ```bash
-bash skills/finance-os/finance.sh tx pending-human --kind description --limit 20
-bash skills/finance-os/finance.sh tx pending-human --kind merchant --limit 20
-bash skills/finance-os/finance.sh tx pending-human --kind purpose --min-abs-amount 30 --limit 20
+bash skills/phai/finance.sh tx pending-human --kind description --limit 20
+bash skills/phai/finance.sh tx pending-human --kind merchant --limit 20
+bash skills/phai/finance.sh tx pending-human --kind purpose --min-abs-amount 30 --limit 20
 ```
 
 Persistir descrição, estabelecimento ou propósito:
 
 ```bash
-bash skills/finance-os/finance.sh tx set-anatomy --transaction-id ID --description "texto curto"
-bash skills/finance-os/finance.sh tx set-anatomy --transaction-id ID --merchant-name "Nome limpo"
-bash skills/finance-os/finance.sh tx set-anatomy --transaction-id ID --purpose "finalidade humana"
+bash skills/phai/finance.sh tx set-anatomy --transaction-id ID --description "texto curto"
+bash skills/phai/finance.sh tx set-anatomy --transaction-id ID --merchant-name "Nome limpo"
+bash skills/phai/finance.sh tx set-anatomy --transaction-id ID --purpose "finalidade humana"
 ```
 
 Persistir categoria manual:
 
 ```bash
-bash skills/finance-os/finance.sh tx categorize --transaction-id ID --category Categoria --subcategory "Subcategoria opcional" --context "texto opcional"
+bash skills/phai/finance.sh tx categorize --transaction-id ID --category Categoria --subcategory "Subcategoria opcional" --context "texto opcional"
 ```
 
 Revisão humana interativa/local:
 
 ```bash
-bash skills/finance-os/finance.sh review
-bash skills/finance-os/finance.sh tx review-human --kind all --limit 20 --tui --sound
+bash skills/phai/finance.sh review
+bash skills/phai/finance.sh tx review-human --kind all --limit 20 --tui --sound
 ```
 
 Fluxo recomendado via WhatsApp/OpenClaw:
@@ -190,9 +190,9 @@ Fluxo recomendado via WhatsApp/OpenClaw:
 # Sempre passar --owner <nome> para escopar pela pessoa que está conversando
 # (Ford = "felipe", OpenClaw da Aline = "aline"). Isso filtra a fila para
 # as contas daquele owner — ver accounts.owner no BigQuery.
-bash skills/finance-os/finance.sh tx review-human --summary --owner felipe --json
-bash skills/finance-os/finance.sh tx review-human --kind all --limit 5 --owner felipe --json
-bash skills/finance-os/finance.sh tx review-human --transaction-id ID \
+bash skills/phai/finance.sh tx review-human --summary --owner felipe --json
+bash skills/phai/finance.sh tx review-human --kind all --limit 5 --owner felipe --json
+bash skills/phai/finance.sh tx review-human --transaction-id ID \
   --description "texto curto" \
   --merchant-name "Nome limpo" \
   --purpose "finalidade opcional" \
@@ -204,37 +204,37 @@ bash skills/finance-os/finance.sh tx review-human --transaction-id ID \
 Pré-visualizar split de transação (BigQuery-only):
 
 ```bash
-bash skills/finance-os/finance.sh tx split preview --transaction-id ID --payload split.json
+bash skills/phai/finance.sh tx split preview --transaction-id ID --payload split.json
 ```
 
 Aplicar split de transação (BigQuery-only):
 
 ```bash
-bash skills/finance-os/finance.sh tx split apply --transaction-id ID --payload split.json
+bash skills/phai/finance.sh tx split apply --transaction-id ID --payload split.json
 ```
 
 Consultar split aplicado (BigQuery-only):
 
 ```bash
-bash skills/finance-os/finance.sh tx split show --transaction-id ID
+bash skills/phai/finance.sh tx split show --transaction-id ID
 ```
 
 Limpar split aplicado (BigQuery-only):
 
 ```bash
-bash skills/finance-os/finance.sh tx split clear --transaction-id ID
+bash skills/phai/finance.sh tx split clear --transaction-id ID
 ```
 
 Listar candidatos a split (BigQuery-only):
 
 ```bash
-bash skills/finance-os/finance.sh report split-candidates
+bash skills/phai/finance.sh report split-candidates
 ```
 
 Listar preços por item (BigQuery-only):
 
 ```bash
-bash skills/finance-os/finance.sh report item-prices --query "item"
+bash skills/phai/finance.sh report item-prices --query "item"
 ```
 
 ## Regras operacionais
@@ -274,7 +274,7 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
   - "fecharam", "fatura fechada", "última fatura" => foco em fatura fechada; usar último mês fechado por padrão quando não houver mês explícito
   - se o texto incluir "esse mês" + "fechada/fecharam", converter para mês fechado inferido e explicitar o `YYYY-MM` na resposta
 - Quando o usuário pedir "como fecharam os cartões":
-  - executar `bash skills/finance-os/finance.sh report card-summary --month YYYY-MM`
+  - executar `bash skills/phai/finance.sh report card-summary --month YYYY-MM`
   - calcular e destacar `total fechado = total_charges - open_amount` por cartão
   - trazer `em aberto` apenas como contexto secundário
 - Quando o usuário pedir visão customizada de fatura fechada (categorias, recorrentes, assinaturas, parcelados):
@@ -283,5 +283,5 @@ bash skills/finance-os/finance.sh report item-prices --query "item"
 - Ao citar versão do runtime, usar:
 
 ```bash
-bash skills/finance-os/finance.sh --version
+bash skills/phai/finance.sh --version
 ```

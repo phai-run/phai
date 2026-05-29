@@ -1,3 +1,4 @@
+pub mod compat;
 pub mod config;
 pub mod enrichment;
 pub mod idempotency;

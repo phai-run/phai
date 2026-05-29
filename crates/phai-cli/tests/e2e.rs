@@ -109,7 +109,7 @@ fn transaction_anatomy_fields_and_pending_commands_work() {
     setup_local_auth_migrate(&config_dir, &data_dir);
     seed_fixture_sync(&temp, &config_dir, &data_dir);
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     let (raw, description): (String, Option<String>) = conn
         .query_row(
@@ -502,7 +502,7 @@ fn import_legacy_is_idempotent() {
         .stdout(predicate::str::contains("- transactions: 1"));
     }
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let tx_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
@@ -807,7 +807,7 @@ fn mutating_commands_feed_reporting_views() {
     assert_eq!(scenario_json["extraExpense"], "80");
     assert_ne!(scenario_json["carryoverOpenCardAmount"], "0");
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let saved_context: String = conn
         .query_row(
@@ -1098,7 +1098,7 @@ fn report_views_exclude_legacy_manual_statement_when_pluggy_match_exists() {
     .assert()
     .success();
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     conn.execute(
         "UPDATE transactions SET source = 'legacy' WHERE transaction_id = 'manual_statement_test_dup'",
@@ -1197,7 +1197,7 @@ fn card_summary_excludes_legacy_manual_shadow() {
     .assert()
     .success();
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     conn.execute(
         "UPDATE transactions SET source = 'legacy' WHERE transaction_id = 'manual_statement_cashflow_dup'",
@@ -1270,7 +1270,7 @@ fn cashflow_details_expands_paid_card_bill_and_forecast() {
         .success();
     }
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     conn.execute(
         "UPDATE accounts
@@ -1993,7 +1993,7 @@ fn sync_json_summary_survives_missing_effective_view() {
         "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\nshared_credit,secondary,credit,fintech,Shared Credit Card,fixture-credit,item-2,3,10\n",
     );
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     {
         let conn = Connection::open(&db_path).expect("open db");
         conn.execute("DROP VIEW v_transactions_effective", [])
@@ -2164,7 +2164,7 @@ fn sync_rebinds_fixture_account_by_item_id() {
     .success()
     .stdout(predicate::str::contains("- transactions: 4"));
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let rebound_checking: String = conn
         .query_row(
@@ -2460,7 +2460,7 @@ fn sync_applies_db_rules_without_hardcoded_personal_logic() {
     .success()
     .stdout(predicate::str::contains("- linhas: 0"));
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let category_id: String = conn
         .query_row(
@@ -2727,7 +2727,7 @@ fn account_snapshot_idempotent_same_day() {
     seed_fixture_sync(&temp, &config_dir, &data_dir);
     seed_fixture_sync(&temp, &config_dir, &data_dir);
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM account_snapshots", [], |row| {
@@ -2748,7 +2748,7 @@ fn account_snapshot_records_balance() {
 
     seed_fixture_sync(&temp, &config_dir, &data_dir);
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
 
     // Checking account fixture balance is 1342.44.
@@ -2780,7 +2780,7 @@ fn account_snapshot_source_is_pluggy() {
 
     seed_fixture_sync(&temp, &config_dir, &data_dir);
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
 
     let distinct_sources: Vec<String> = {
@@ -3088,7 +3088,7 @@ fn tx_set_context_by_desc_dry_run_writes_nothing() {
     .stdout(predicate::str::contains("pluggy-fixture-001"));
 
     // Verify nothing was written to DB.
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let ctx: Option<String> = conn
         .query_row(
@@ -3124,7 +3124,7 @@ fn tx_set_context_by_desc_real_applies_context() {
     .success()
     .stdout(predicate::str::contains("1 transação"));
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let ctx: Option<String> = conn
         .query_row(
@@ -3172,7 +3172,7 @@ fn tx_set_context_by_desc_idempotent_rerun() {
         .success();
     }
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(db_path).expect("open db");
     let ctx: Option<String> = conn
         .query_row(
@@ -3923,7 +3923,7 @@ fn cards_installments_only_preserves_paid_status() {
     // not import the value from the accounts CSV on first sync. Inject it
     // directly so the bill clustering uses the synthetic close date that
     // makes target_month=2026-05 resolve to a closed bill with a payment.
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open sqlite");
     conn.execute(
         "UPDATE accounts SET metadata_json = json_set(metadata_json, '$.billing_closing_day', '3') WHERE account_id = 'cc'",
@@ -4083,7 +4083,7 @@ fn amount_cents_exact_integer_sum_regression() {
     }
 
     // Verify amount_cents column directly via SQLite.
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
 
     // Every row must have a non-NULL amount_cents that matches ROUND(amount * 100).
@@ -4286,7 +4286,7 @@ fn cashflow_is_cash_basis_on_checking_accounts() {
     // Seed a snapshot for the checking account at 2026-04-30 (last day of
     // previous month) so opening_balance can be anchored. Closing then
     // rolls forward by sum(amount) on checking up to today.
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     conn.execute(
         "INSERT INTO account_snapshots (
@@ -4453,7 +4453,7 @@ fn cashflow_chart_emits_svg_and_optional_sparkline() {
     // anchor. We just put it at "today minus 200 days" — plenty of head
     // room for the default 6-month window.
     let snap_date = today - chrono::Duration::days(200);
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     conn.execute(
         "INSERT INTO account_snapshots (
@@ -4715,7 +4715,7 @@ fn forecast_refresh_installments_materialises_remaining_parcelas() {
     assert_eq!(report["templates_upserted"].as_u64(), Some(1));
     assert_eq!(report["forecasts_upserted"].as_u64(), Some(9));
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     let tpl_count: i64 = conn
         .query_row(
@@ -4880,7 +4880,7 @@ fn forecast_suggest_accept_dismiss_subscription_round_trip() {
     .assert()
     .success();
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     let status: String = conn
         .query_row(
@@ -5102,7 +5102,7 @@ fn forecast_suggest_envelope_groups_by_category() {
     .assert()
     .success();
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     let fc_count: i64 = conn
         .query_row(
@@ -5147,7 +5147,7 @@ fn forecast_scenario_eval_projects_with_and_without_commitment() {
 
     // Seed today's snapshot at R$ 10.000.
     let today = chrono::Local::now().date_naive();
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
     conn.execute(
         "INSERT INTO account_snapshots (
@@ -5328,7 +5328,7 @@ fn sync_pluggy_runs_forecast_orchestrator_on_installments() {
         "expected the orchestrator one-liner in stdout, got:\n{stdout}"
     );
 
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open db");
 
     // Exactly one installment template was detected and persisted.
@@ -5456,7 +5456,7 @@ fn forecast_refresh_materialises_open_card_bill() {
     .success();
 
     // Inject billing metadata directly (account upsert has no billing-day flags).
-    let db_path = data_dir.join("finance-os.local.db");
+    let db_path = data_dir.join("phai.local.db");
     let conn = Connection::open(&db_path).expect("open sqlite");
     conn.execute(
         "UPDATE accounts SET metadata_json = json_set(metadata_json, \
