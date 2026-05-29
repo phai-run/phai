@@ -25,7 +25,7 @@ const templates$ = queryDb(tables.forecastTemplates.orderBy('description', 'asc'
 const categories$ = queryDb(tables.categories.orderBy('id', 'asc'))
 const accounts$ = queryDb(tables.accounts.orderBy('label', 'asc'))
 
-const STATUSES = ['pending', 'confirmed', 'cancelled']
+const STATUSES = ['ativo', 'realizado', 'descartado']
 
 /**
  * Forecasts view — planned cash movements, proposed templates, and a manual
@@ -241,7 +241,9 @@ const AddForecastForm = ({
   const [categoryId, setCategoryId] = useState('')
   const [accountId, setAccountId] = useState('')
 
-  const canSubmit = description.trim() !== '' && amount.trim() !== ''
+  // The bridge derives the forecast idempotency key from due_date, so it is
+  // required here — a null due date is rejected with a 500.
+  const canSubmit = description.trim() !== '' && amount.trim() !== '' && dueDate !== ''
 
   const submit = () => {
     if (!canSubmit) return
@@ -250,7 +252,7 @@ const AddForecastForm = ({
     onCreate({
       description: description.trim(),
       amount: signed,
-      due_date: dueDate || undefined,
+      due_date: dueDate,
       category_id: categoryId || undefined,
       account_id: accountId || undefined,
     })
