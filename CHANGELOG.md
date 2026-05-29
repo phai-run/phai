@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.1.0](https://github.com/phai-run/phai/compare/v4.0.0...v4.1.0) (2026-05-29)
+
+
+### Features
+
+* migrate on-disk identity to phai (finance-os fallback) ([f57ac4a](https://github.com/phai-run/phai/commit/f57ac4abe6fb8c62977dfddd2970115f76754f8d))
+* migrate on-disk identity to phai with finance-os fallback ([0f0ae83](https://github.com/phai-run/phai/commit/0f0ae83f0b7bf0314f21b7e456665c8bb5190ccf))
+
+
+### Bug Fixes
+
+* address code review on identity migration ([5088b3b](https://github.com/phai-run/phai/commit/5088b3bb3997a855afe8fae564cdc7de3a5ec96c))
+
 ## [4.0.0](https://github.com/phai-run/phai/compare/v3.2.4...v4.0.0) (2026-05-29)
 
 
