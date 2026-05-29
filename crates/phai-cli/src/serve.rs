@@ -12,7 +12,7 @@ use axum::{
         State,
     },
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
+    response::IntoResponse,
     routing::get,
     Json, Router,
 };
@@ -625,10 +625,6 @@ async fn process_request(req: WsRequest, tx: &mpsc::Sender<StoreRequest>) -> WsR
 
 // ── HTTP handlers ────────────────────────────────────────────────────────
 
-async fn dashboard_page() -> impl IntoResponse {
-    Html(include_str!("serve_dashboard.html"))
-}
-
 async fn api_status() -> Json<Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -655,10 +651,12 @@ pub async fn run(port: u16) -> Result<()> {
     let app_state = Arc::new(store_tx);
 
     let app = Router::new()
-        .route("/", get(dashboard_page))
         .route("/api", get(api_status))
         .route("/ws", get(ws_handler))
-        .with_state(app_state);
+        .with_state(app_state)
+        // Serve the embedded LiveStore SPA for everything else (index + assets
+        // + client-side routes).
+        .fallback(crate::serve_assets::static_handler);
 
     let addr = format!("{LOCAL_BIND_HOST}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)

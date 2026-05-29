@@ -55,6 +55,7 @@ mod pulse;
 mod review;
 mod self_cmd;
 mod serve;
+mod serve_assets;
 mod sync_notify;
 mod update;
 mod update_state;

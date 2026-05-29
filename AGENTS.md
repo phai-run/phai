@@ -172,6 +172,7 @@ The reporting voice and disambiguation rules are documented in [REPORTING_UX.md]
 crates/
   phai-core/   Domain models, storage trait, Pluggy client, rules, splits, enrichment
   phai-cli/    Binary, report formatters, auto-update, command surface
+    web/       LiveStore + React web app for `phai serve` (built to web/dist, embedded)
 schema/
   sqlite/         SQLite migrations (local backend)
   bigquery/       BigQuery migrations (production backend)
@@ -191,6 +192,23 @@ cargo test -p phai-core                    # core unit tests
 cargo deny check licenses                     # license policy
 cargo audit                                   # vulnerability scan
 ```
+
+### Web app (`phai serve`)
+
+The interactive UI is a LiveStore + React (Vite) app under `crates/phai-cli/web/`, embedded
+into the binary via `include_dir!("web/dist")`. It is **client-only** (no LiveStore sync
+backend); writes flush to the Rust bridge (`/api/*`), which is the BigQuery/SQLite system of
+record. The JS build runs only in CI / locally — never on the end user's machine (ADR-0001).
+
+```bash
+cd crates/phai-cli/web
+pnpm install            # one-time
+pnpm typecheck          # tsc
+pnpm build              # → web/dist (commit it; it's embedded at compile time)
+```
+
+`web/dist` is **committed** so `cargo build` stays pure-Rust. After changing anything under
+`web/src`, rebuild and commit `web/dist` in the same change; CI fails if it is stale.
 
 ### Versioning & release
 

@@ -1,0 +1,4 @@
+node_modules/
+*.tsbuildinfo
+.vite/
+# dist/ is intentionally committed — it is embedded into the phai binary.
