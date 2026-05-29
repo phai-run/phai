@@ -55,6 +55,7 @@ mod pulse;
 mod review;
 mod self_cmd;
 mod serve;
+mod serve_assets;
 mod sync_notify;
 mod update;
 mod update_state;
@@ -1325,7 +1326,7 @@ struct CategorizeTransactionArgs {
     context: Option<String>,
 }
 
-fn category_key_from_input(category: &str, subcategory: Option<&str>) -> String {
+pub(crate) fn category_key_from_input(category: &str, subcategory: Option<&str>) -> String {
     match subcategory {
         Some(value) => category_id(category, Some(value)),
         None => match category.split_once(':') {
@@ -1375,7 +1376,7 @@ enum PendingHumanKind {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum ReviewHumanKind {
+pub(crate) enum ReviewHumanKind {
     All,
     Description,
     Merchant,
@@ -1383,18 +1384,18 @@ enum ReviewHumanKind {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ReviewFilters {
-    month: Option<String>,
-    account_id: Option<String>,
+pub(crate) struct ReviewFilters {
+    pub(crate) month: Option<String>,
+    pub(crate) account_id: Option<String>,
     /// Set of account_ids belonging to a specific owner. Populated when
     /// `--owner` is supplied (resolved against `accounts.owner` at startup).
     /// When `Some`, a row matches only if its `account_id` is in this set;
     /// `account_id` (singular) is still ANDed on top for finer scoping.
-    owner_accounts: Option<BTreeSet<String>>,
+    pub(crate) owner_accounts: Option<BTreeSet<String>>,
     /// Original owner name (for display/summary purposes).
-    owner: Option<String>,
-    merchant: Option<String>,
-    category: Option<String>,
+    pub(crate) owner: Option<String>,
+    pub(crate) merchant: Option<String>,
+    pub(crate) category: Option<String>,
 }
 
 impl ReviewFilters {
@@ -8275,7 +8276,7 @@ struct ReviewHumanQueueItem {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ReviewHumanApplyResult {
+pub(crate) struct ReviewHumanApplyResult {
     transaction_id: String,
     updated_description: bool,
     updated_merchant_name: bool,
@@ -8364,7 +8365,7 @@ fn effective_review_human_limit(limit: Option<usize>, tui: bool) -> usize {
     })
 }
 
-async fn review_human_rows(
+pub(crate) async fn review_human_rows(
     store: &dyn FinanceStore,
     kind: ReviewHumanKind,
     limit: usize,
@@ -8510,11 +8511,11 @@ fn prompt_value(label: &str, current: Option<&str>) -> Result<PromptValue> {
 }
 
 #[derive(Debug, Clone)]
-struct HumanReviewPatch {
-    description: Option<String>,
-    merchant_name: Option<String>,
-    purpose: Option<String>,
-    category_id: Option<String>,
+pub(crate) struct HumanReviewPatch {
+    pub(crate) description: Option<String>,
+    pub(crate) merchant_name: Option<String>,
+    pub(crate) purpose: Option<String>,
+    pub(crate) category_id: Option<String>,
 }
 
 impl HumanReviewPatch {
@@ -8526,7 +8527,7 @@ impl HumanReviewPatch {
     }
 }
 
-async fn apply_human_review(
+pub(crate) async fn apply_human_review(
     store: &dyn FinanceStore,
     config: &AppConfig,
     transaction_id: &str,
@@ -11635,7 +11636,7 @@ async fn reload_review_tui_queue(
 /// Fetch every transaction matching the filters, regardless of review status.
 /// Used by the "ver todas" toggle (Ctrl+R) so the user can navigate through
 /// already-curated rows alongside the pending ones.
-async fn all_transactions_for_review(
+pub(crate) async fn all_transactions_for_review(
     store: &dyn FinanceStore,
     limit: usize,
     min_abs_amount: Decimal,
