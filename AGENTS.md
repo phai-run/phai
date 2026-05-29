@@ -204,11 +204,14 @@ record. The JS build runs only in CI / locally — never on the end user's machi
 cd crates/phai-cli/web
 pnpm install            # one-time
 pnpm typecheck          # tsc
-pnpm build              # → web/dist (commit it; it's embedded at compile time)
+pnpm build              # → web/dist (generated; embedded at compile time)
 ```
 
-`web/dist` is **committed** so `cargo build` stays pure-Rust. After changing anything under
-`web/src`, rebuild and commit `web/dist` in the same change; CI fails if it is stale.
+`web/dist` is a **generated artifact and is NOT committed** (it would pollute the source-quality
+gate and bloat the repo). `crates/phai-cli/build.rs` guarantees it exists at compile time: CI and
+the release workflow run `pnpm build` first; a plain `cargo build` with no web build falls back to
+a placeholder page, so `cargo build` stays pure-Rust (no Node on the user's machine — ADR-0001).
+After changing `web/src`, run `pnpm build` locally to see it in `phai serve`.
 
 ### Versioning & release
 

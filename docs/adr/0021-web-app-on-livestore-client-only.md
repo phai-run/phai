@@ -22,7 +22,7 @@ LiveStore (livestore.dev) is a local-first, event-sourced, reactive SQLite data 
 
 - **Client-only LiveStore.** The app runs entirely in the browser: OPFS-persisted, event-sourced, reactive. **No LiveStore sync backend is configured.** Source lives under `crates/phai-cli/web/`.
 - **The Rust bridge is the system-of-record seam.** `phai serve` exposes `/api/*`: reads project `FinanceStore` data into LiveStore (seed events); writes (a review submitted, a forecast upserted) are committed locally for an instant reactive UI, queued in a `pendingWrites` table, and flushed by a background client task to `POST /api/events`, which applies them via the existing domain functions (`apply_human_review`, forecast upsert) with an `AuditEvent`. This replaces the bespoke WebSocket protocol with REST.
-- **Embedded bundle.** The built SPA (`web/dist`) is embedded with `include_dir!` and served by `phai serve`; `web/dist` is committed so `cargo build` stays pure-Rust. The JS build (Vite, pnpm) runs only in CI / locally — never on the end user's machine.
+- **Embedded bundle.** The built SPA (`web/dist`) is embedded with `include_dir!` and served by `phai serve`. `web/dist` is a generated artifact and is **not committed**; `build.rs` guarantees it exists at compile time (CI/release run `pnpm build` first, a plain `cargo build` falls back to a placeholder), so `cargo build` stays pure-Rust. The JS build (Vite, pnpm) runs only in CI / locally — never on the end user's machine.
 - **Isolation preserved.** Loopback-only binding and the `meuapp.localhost` alias from [ADR-0019](0019-serve-loopback-only-localhost-alias.md) are kept. Responses carry `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: credentialless` so LiveStore's OPFS worker gets a `crossOriginIsolated` context while still allowing cross-origin no-cors subresources (web fonts).
 
 ## Options considered
@@ -35,7 +35,7 @@ LiveStore (livestore.dev) is a local-first, event-sourced, reactive SQLite data 
 ## Consequences
 
 - **Easier**: a brandable, reactive, offline-tolerant UI; the review workflow leaves the terminal; audited writes are reused unchanged.
-- **Harder / new**: an in-repo JS/TS toolchain (Vite, pnpm) and a CI step that builds the SPA and fails if committed `web/dist` is stale; the binary grows by a few MB (React + wa-sqlite WASM).
+- **Harder / new**: an in-repo JS/TS toolchain (Vite, pnpm); the release workflow builds the SPA before the binary (and `build.rs` falls back to a placeholder otherwise); the binary grows by a few MB (React + wa-sqlite WASM).
 - **Poll, not push**: changes that land in BigQuery out-of-band (nightly Pluggy sync) surface on the next client refresh, not via live push. A push path would need a future design + ADR.
 - **Re-evaluation trigger**: if real multi-device sync becomes a requirement, revisit the sync-backend options (and ADR-0001).
 - Follow-on: the review/cashflow TUIs, the `report cashflow --tui` flag, and the `report review` static export are removed in a subsequent change; `ratatui`/`crossterm` drop from the dependency graph.

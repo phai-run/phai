@@ -47,6 +47,15 @@ jobs:
       - name: Add cross-compile target
         if: matrix.cross == true
         run: rustup target add ${{ matrix.target }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build web app
+        working-directory: crates/phai-cli/web
+        run: pnpm install --frozen-lockfile && pnpm build
       - name: Build
         run: cargo build --release --package phai-cli ${{ matrix.cross && format('--target {0}', matrix.target) || '' }}
       - name: Package and checksum
