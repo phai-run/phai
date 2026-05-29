@@ -2,13 +2,12 @@ import { queryDb } from '@livestore/livestore'
 import { useStore, useQuery, useClientDocument } from '@livestore/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { events, tables } from '../livestore/schema'
-import { useReviewQueueSeed } from '../bridge/sync'
-import { amountColor, formatMoney } from '../lib/format'
+import { useTransactionsSeed } from '../bridge/sync'
+import { amountColor, formatMoney, formatMoneyNumber, isNegative, sumAmounts } from '../lib/format'
 import {
   Card,
   EmptyState,
   ErrorNote,
-  FilterBar,
   Label,
   LoadingNote,
   Pill,
@@ -19,7 +18,7 @@ import {
 
 const ACCENT = 'var(--purple)'
 
-const queue$ = queryDb(tables.transactions.orderBy('postedAt', 'desc'))
+const txAll$ = queryDb(tables.transactions.orderBy('postedAt', 'desc'))
 const overlay$ = queryDb(tables.reviewOverlay)
 const categories$ = queryDb(tables.categories.orderBy('id', 'asc'))
 const accounts$ = queryDb(tables.accounts.orderBy('label', 'asc'))
@@ -31,44 +30,93 @@ interface Patch {
   categoryId: string | null
 }
 
+interface TxView {
+  id: string
+  accountId: string
+  postedAt: string
+  amount: string
+  rawDescription: string
+  description: string | null
+  merchantName: string | null
+  purpose: string | null
+  categoryId: string | null
+  month: string
+  paymentStatus: string
+  reviewed: number
+  isInstallment: number
+  isSubscription: number
+}
+
 /**
- * Review queue — the keyboard-first workhorse ported from the discontinued TUI.
- * Lists transactions to categorize (newest first), filters drive a bridge
- * re-seed, and inline edits (category + human anatomy) commit a `reviewSubmitted`
- * event (optimistic overlay + queued for flush).
+ * Revisão — the transaction list with live-sum filters. The full window is
+ * seeded into LiveStore once; every filter and the running sums (saídas /
+ * entradas) are computed **client-side** so the list reacts instantly with no
+ * network round-trip. Inline edits commit a `reviewSubmitted` event (optimistic
+ * overlay + queued for flush).
  *
- * Keyboard: ↑/↓ move the selection cursor, Enter focuses the selected row's
- * category input. A fast reviewer never needs the mouse.
+ * Layout: a primary list plus a sticky side rail (filters + running totals) on
+ * wide screens (DESIGN.md multi-pane); single column below 1024px.
  */
 export const Review = () => {
   const { store } = useStore()
   const [ui, setUi] = useClientDocument(tables.ui)
-  const rows = useQuery(queue$)
+  const txRows = useQuery(txAll$) as ReadonlyArray<TxView>
   const overlay = useQuery(overlay$)
   const categories = useQuery(categories$)
   const accounts = useQuery(accounts$)
 
-  const seed = useReviewQueueSeed({
-    month: ui.monthFilter,
-    owner: ui.ownerFilter,
-    accountId: ui.accountFilter,
-    merchant: ui.merchantFilter,
-    category: ui.categoryFilter,
-    includeReviewed: ui.includeReviewed,
-  })
+  // Seed the whole window once; window controls re-seed (rare).
+  const seed = useTransactionsSeed(ui.monthsBack, ui.monthsAhead)
 
   const overlayById = useMemo(
     () => new Map(overlay.map((o) => [o.transactionId, o])),
     [overlay],
   )
-
+  const accountById = useMemo(() => new Map(accounts.map((a) => [a.id, a])), [accounts])
   const categoryIds = useMemo(() => categories.map((c) => c.id), [categories])
   const owners = useMemo(
     () => Array.from(new Set(accounts.map((a) => a.owner).filter(Boolean))),
     [accounts],
   )
 
-  const cursor = Math.min(ui.cursor, Math.max(0, rows.length - 1))
+  // Effective category for a row = overlay (optimistic edit) over the seed.
+  const effectiveCategory = (tx: TxView) =>
+    overlayById.get(tx.id)?.categoryId ?? tx.categoryId
+
+  // All filtering is client-side over the seeded window — instant, no round-trip.
+  const filtered = useMemo(() => {
+    const cat = ui.categoryFilter?.trim().toLowerCase() || null
+    const merchant = ui.merchantFilter?.trim().toLowerCase() || null
+    return txRows.filter((tx) => {
+      if (ui.unreviewedOnly && tx.reviewed) return false
+      if (ui.subscriptionsOnly && !tx.isSubscription) return false
+      if (ui.installmentsOnly && !tx.isInstallment) return false
+      if (ui.accountFilter && tx.accountId !== ui.accountFilter) return false
+      if (ui.ownerFilter) {
+        const owner = accountById.get(tx.accountId)?.owner ?? ''
+        if (owner !== ui.ownerFilter) return false
+      }
+      if (cat) {
+        const c = (effectiveCategory(tx) ?? '').toLowerCase()
+        if (!c.includes(cat)) return false
+      }
+      if (merchant) {
+        const m = (tx.merchantName ?? tx.rawDescription ?? '').toLowerCase()
+        if (!m.includes(merchant)) return false
+      }
+      return true
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [txRows, overlayById, accountById, ui])
+
+  // Running sums for the current selection (exact integer-cents math).
+  const sums = useMemo(() => {
+    const out = filtered.filter((t) => isNegative(t.amount)).map((t) => t.amount)
+    const inc = filtered.filter((t) => !isNegative(t.amount)).map((t) => t.amount)
+    return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) }
+  }, [filtered])
+
+  const cursor = Math.min(ui.cursor, Math.max(0, filtered.length - 1))
   const focusRef = useRef<(() => void) | null>(null)
 
   // Keyboard navigation: ↑/↓ move cursor, Enter focuses selected category.
@@ -78,7 +126,7 @@ export const Review = () => {
       const typing = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
       if (e.key === 'ArrowDown' && !typing) {
         e.preventDefault()
-        setUi({ cursor: Math.min(cursor + 1, rows.length - 1) })
+        setUi({ cursor: Math.min(cursor + 1, filtered.length - 1) })
       } else if (e.key === 'ArrowUp' && !typing) {
         e.preventDefault()
         setUi({ cursor: Math.max(cursor - 1, 0) })
@@ -89,7 +137,7 @@ export const Review = () => {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [cursor, rows.length, setUi])
+  }, [cursor, filtered.length, setUi])
 
   const submit = (transactionId: string, patch: Patch) =>
     store.commit(
@@ -102,65 +150,56 @@ export const Review = () => {
     )
 
   return (
-    <div>
-      <ViewHeader title="Revisão" count={rows.length} accent={ACCENT} />
+    <div className="review-grid" style={{ display: 'grid', gap: 24, alignItems: 'start' }}>
+      <div style={{ minWidth: 0 }}>
+        <ViewHeader title="Revisão" count={filtered.length} accent={ACCENT} />
 
-      <FilterBar>
-        <TextInput
-          type="month"
-          value={ui.monthFilter ?? ''}
-          onChange={(e) => setUi({ monthFilter: e.target.value || null })}
-          aria-label="mês"
-        />
-        <Select
-          value={ui.ownerFilter ?? ''}
-          onChange={(e) => setUi({ ownerFilter: e.target.value || null })}
-          aria-label="responsável"
-        >
-          <option value="">todos · responsável</option>
-          {owners.map((o) => (
-            <option key={o} value={o}>
-              {o}
-            </option>
-          ))}
-        </Select>
-        <Select
-          value={ui.accountFilter ?? ''}
-          onChange={(e) => setUi({ accountFilter: e.target.value || null })}
-          aria-label="conta"
-        >
-          <option value="">todas · conta</option>
-          {accounts.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.label || a.id}
-            </option>
-          ))}
-        </Select>
-        <TextInput
-          placeholder="merchant…"
-          value={ui.merchantFilter ?? ''}
-          onChange={(e) => setUi({ merchantFilter: e.target.value || null })}
-          aria-label="merchant"
-        />
-        <TextInput
-          list="phai-categories"
-          placeholder="categoria…"
-          value={ui.categoryFilter ?? ''}
-          onChange={(e) => setUi({ categoryFilter: e.target.value || null })}
-          style={{ color: 'var(--cyan)' }}
-          aria-label="categoria"
-        />
-        <Pill
-          active={ui.includeReviewed}
-          accent={ACCENT}
-          onClick={() => setUi({ includeReviewed: !ui.includeReviewed })}
-        >
-          {ui.includeReviewed ? 'todas' : 'pendentes'}
-        </Pill>
-        <Pill accent={ACCENT} onClick={() => seed.reload()}>
-          ↻ atualizar
-        </Pill>
-      </FilterBar>
+        {seed.error && <ErrorNote error={seed.error} />}
+        {seed.loading && txRows.length === 0 && <LoadingNote />}
+
+        {filtered.length === 0 && !seed.loading ? (
+          <EmptyState message="Nenhuma transação para este filtro." />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {filtered.map((tx, i) => {
+              const o = overlayById.get(tx.id)
+              return (
+                <ReviewRow
+                  key={tx.id}
+                  selected={i === cursor}
+                  registerFocus={i === cursor ? (fn) => (focusRef.current = fn) : undefined}
+                  onSelect={() => setUi({ cursor: i })}
+                  postedAt={tx.postedAt}
+                  amount={tx.amount}
+                  rawDescription={tx.rawDescription}
+                  description={o?.description ?? tx.description}
+                  merchantName={o?.merchantName ?? tx.merchantName}
+                  purpose={o?.purpose ?? tx.purpose}
+                  category={o?.categoryId ?? tx.categoryId}
+                  reviewed={tx.reviewed === 1}
+                  isSubscription={tx.isSubscription === 1}
+                  isInstallment={tx.isInstallment === 1}
+                  categories={categoryIds}
+                  onSubmit={(patch) => submit(tx.id, patch)}
+                />
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <aside className="review-rail">
+        <Card accent={ACCENT} style={{ position: 'sticky', top: 16 }}>
+          <FilterRail
+            ui={ui}
+            setUi={setUi}
+            owners={owners}
+            accounts={accounts}
+            onReload={() => seed.reload()}
+          />
+          <SumStrip saidas={sums.saidas} entradas={sums.entradas} count={filtered.length} />
+        </Card>
+      </aside>
 
       <datalist id="phai-categories">
         {categoryIds.map((c) => (
@@ -168,38 +207,154 @@ export const Review = () => {
         ))}
       </datalist>
 
-      {seed.error && <ErrorNote error={seed.error} />}
-      {seed.loading && rows.length === 0 && <LoadingNote />}
-
-      {rows.length === 0 && !seed.loading ? (
-        <EmptyState message="Sem pendências para revisar." />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {rows.map((tx, i) => {
-            const o = overlayById.get(tx.id)
-            return (
-              <ReviewRow
-                key={tx.id}
-                selected={i === cursor}
-                registerFocus={i === cursor ? (fn) => (focusRef.current = fn) : undefined}
-                onSelect={() => setUi({ cursor: i })}
-                postedAt={tx.postedAt}
-                amount={tx.amount}
-                rawDescription={tx.rawDescription}
-                description={o?.description ?? tx.description}
-                merchantName={o?.merchantName ?? tx.merchantName}
-                purpose={o?.purpose ?? tx.purpose}
-                category={o?.categoryId ?? tx.categoryId}
-                categories={categoryIds}
-                onSubmit={(patch) => submit(tx.id, patch)}
-              />
-            )
-          })}
-        </div>
-      )}
+      <style>{reviewGridCss}</style>
     </div>
   )
 }
+
+const reviewGridCss = `
+.review-grid { grid-template-columns: 1fr; }
+@media (min-width: 1024px) {
+  .review-grid { grid-template-columns: minmax(0, 1fr) clamp(280px, 24vw, 360px); }
+}
+@media (max-width: 1023px) {
+  .review-rail { order: -1; }
+}
+`
+
+interface RailUi {
+  ownerFilter: string | null
+  accountFilter: string | null
+  merchantFilter: string | null
+  categoryFilter: string | null
+  unreviewedOnly: boolean
+  subscriptionsOnly: boolean
+  installmentsOnly: boolean
+}
+
+const FilterRail = ({
+  ui,
+  setUi,
+  owners,
+  accounts,
+  onReload,
+}: {
+  ui: RailUi
+  setUi: (patch: Partial<RailUi>) => void
+  owners: string[]
+  accounts: ReadonlyArray<{ id: string; label: string; owner: string }>
+  onReload: () => void
+}) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <Label>filtros</Label>
+
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+      <Pill
+        active={ui.unreviewedOnly}
+        accent={ACCENT}
+        onClick={() => setUi({ unreviewedOnly: !ui.unreviewedOnly })}
+      >
+        {ui.unreviewedOnly ? 'não revisadas' : 'todas'}
+      </Pill>
+      <Pill
+        active={ui.subscriptionsOnly}
+        accent="var(--cyan)"
+        onClick={() => setUi({ subscriptionsOnly: !ui.subscriptionsOnly })}
+      >
+        assinaturas
+      </Pill>
+      <Pill
+        active={ui.installmentsOnly}
+        accent="var(--amber)"
+        onClick={() => setUi({ installmentsOnly: !ui.installmentsOnly })}
+      >
+        parcelas
+      </Pill>
+    </div>
+
+    <TextInput
+      list="phai-categories"
+      placeholder="categoria…"
+      value={ui.categoryFilter ?? ''}
+      onChange={(e) => setUi({ categoryFilter: e.target.value || null })}
+      style={{ color: 'var(--cyan)', width: '100%' }}
+      aria-label="categoria"
+    />
+    <TextInput
+      placeholder="merchant…"
+      value={ui.merchantFilter ?? ''}
+      onChange={(e) => setUi({ merchantFilter: e.target.value || null })}
+      style={{ width: '100%' }}
+      aria-label="merchant"
+    />
+    <Select
+      value={ui.ownerFilter ?? ''}
+      onChange={(e) => setUi({ ownerFilter: e.target.value || null })}
+      aria-label="responsável"
+      style={{ width: '100%' }}
+    >
+      <option value="">todos · responsável</option>
+      {owners.map((o) => (
+        <option key={o} value={o}>
+          {o}
+        </option>
+      ))}
+    </Select>
+    <Select
+      value={ui.accountFilter ?? ''}
+      onChange={(e) => setUi({ accountFilter: e.target.value || null })}
+      aria-label="conta"
+      style={{ width: '100%' }}
+    >
+      <option value="">todas · conta</option>
+      {accounts.map((a) => (
+        <option key={a.id} value={a.id}>
+          {a.label || a.id}
+        </option>
+      ))}
+    </Select>
+
+    <Pill accent={ACCENT} onClick={onReload}>
+      ↻ recarregar janela
+    </Pill>
+  </div>
+)
+
+const SumStrip = ({
+  saidas,
+  entradas,
+  count,
+}: {
+  saidas: number
+  entradas: number
+  count: number
+}) => (
+  <div
+    style={{
+      marginTop: 16,
+      paddingTop: 16,
+      borderTop: '1px solid var(--border)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+    }}
+  >
+    <Label>seleção · {count}</Label>
+    <SumLine label="total saídas" value={formatMoneyNumber(-saidas)} color="var(--rose)" />
+    <SumLine label="total entradas" value={formatMoneyNumber(entradas)} color="var(--green)" />
+    <SumLine label="líquido" value={formatMoneyNumber(entradas - saidas)} color="var(--purple)" />
+  </div>
+)
+
+const SumLine = ({ label, value, color }: { label: string; value: string; color: string }) => (
+  <div
+    className="mono"
+    style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 13 }}
+  >
+    <span style={{ color: 'var(--muted)', fontSize: 11 }}>{label}</span>
+    <span style={{ color, fontWeight: 600 }}>{value}</span>
+  </div>
+)
 
 const ReviewRow = (props: {
   selected: boolean
@@ -212,6 +367,9 @@ const ReviewRow = (props: {
   merchantName: string | null
   purpose: string | null
   category: string | null
+  reviewed: boolean
+  isSubscription: boolean
+  isInstallment: boolean
   categories: string[]
   onSubmit: (patch: Patch) => void
 }) => {
@@ -267,8 +425,20 @@ const ReviewRow = (props: {
         style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'center' }}
       >
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <div
+            style={{
+              fontWeight: 500,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              display: 'flex',
+              gap: 6,
+              alignItems: 'center',
+            }}
+          >
             {display}
+            {props.isSubscription && <Tag label="assinatura" color="var(--cyan)" />}
+            {props.isInstallment && <Tag label="parcela" color="var(--amber)" />}
+            {props.reviewed && <Tag label="revisada" color="var(--green)" />}
           </div>
           <div className="mono" style={{ color: 'var(--muted)', fontSize: 12 }}>
             {props.postedAt}
@@ -347,6 +517,22 @@ const ReviewRow = (props: {
     </Card>
   )
 }
+
+const Tag = ({ label, color }: { label: string; color: string }) => (
+  <span
+    className="mono"
+    style={{
+      fontSize: 10,
+      color,
+      border: `1px solid ${color}`,
+      borderRadius: 'var(--radius-full)',
+      padding: '1px 8px',
+      whiteSpace: 'nowrap',
+    }}
+  >
+    {label}
+  </span>
+)
 
 const AnatomyField = ({
   label,

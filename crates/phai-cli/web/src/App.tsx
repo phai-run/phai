@@ -1,24 +1,36 @@
 import { useClientDocument } from '@livestore/react'
 import { tables } from './livestore/schema'
 import { useBridgeSync } from './bridge/sync'
-import { Cashflow } from './views/Cashflow'
-import { Forecasts } from './views/Forecasts'
+import { DndProvider } from './lib/dnd'
+import { Planning } from './views/Planning'
 import { Review } from './views/Review'
 
-type Tab = 'review' | 'cashflow' | 'forecasts'
+type View = 'review' | 'planning'
 
-const TABS: { id: Tab; label: string }[] = [
+const VIEWS: { id: View; label: string }[] = [
   { id: 'review', label: 'Revisão' },
-  { id: 'cashflow', label: 'Caixa' },
-  { id: 'forecasts', label: 'Previsões' },
+  { id: 'planning', label: 'Planejamento' },
 ]
 
+/**
+ * App shell — a full-width responsive workspace (DESIGN.md "Layout"). The shell
+ * caps at `min(1680px, 96vw)` with 24–32px gutters; the views own their own
+ * responsive grids. Two views: Revisão (the transaction list + live-sum filters)
+ * and Planejamento (the cash-evolution chart spine + the selected month's plan,
+ * with drag-and-drop forecast re-dating).
+ */
 export const App = () => {
-  const [{ tab }, setUi] = useClientDocument(tables.ui)
+  const [{ view }, setUi] = useClientDocument(tables.ui)
   const sync = useBridgeSync()
 
   return (
-    <div style={{ maxWidth: 'var(--container)', margin: '0 auto', padding: '0 24px' }}>
+    <div
+      style={{
+        maxWidth: 'var(--container)',
+        margin: '0 auto',
+        padding: '0 clamp(24px, 3vw, 32px)',
+      }}
+    >
       <header
         style={{
           display: 'flex',
@@ -37,22 +49,23 @@ export const App = () => {
           phai
         </strong>
         <nav style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
-          {TABS.map((t) => (
+          {VIEWS.map((v) => (
             <button
-              key={t.id}
-              onClick={() => setUi({ tab: t.id })}
+              key={v.id}
+              onClick={() => setUi({ view: v.id })}
               className="mono"
               style={{
-                background: tab === t.id ? 'rgba(167,139,250,0.08)' : 'transparent',
-                color: tab === t.id ? 'var(--purple)' : 'var(--muted)',
-                border: `1px solid ${tab === t.id ? 'rgba(167,139,250,0.2)' : 'var(--border)'}`,
+                background: view === v.id ? 'rgba(109,74,255,0.08)' : 'transparent',
+                color: view === v.id ? 'var(--purple)' : 'var(--muted)',
+                border: `1px solid ${view === v.id ? 'rgba(109,74,255,0.25)' : 'var(--border)'}`,
                 borderRadius: 'var(--radius-full)',
                 padding: '6px 18px',
                 cursor: 'pointer',
                 fontSize: 13,
+                transition: 'border-color 150ms, color 150ms',
               }}
             >
-              {t.label}
+              {v.label}
             </button>
           ))}
         </nav>
@@ -60,11 +73,12 @@ export const App = () => {
 
       <SyncChip pending={sync.pending} error={sync.error} />
 
-      <main style={{ padding: '24px 0 80px' }}>
-        {tab === 'review' && <Review />}
-        {tab === 'cashflow' && <Cashflow />}
-        {tab === 'forecasts' && <Forecasts />}
-      </main>
+      <DndProvider>
+        <main style={{ padding: '20px 0 80px' }}>
+          {view === 'review' && <Review />}
+          {view === 'planning' && <Planning />}
+        </main>
+      </DndProvider>
     </div>
   )
 }
