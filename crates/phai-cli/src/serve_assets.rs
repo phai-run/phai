@@ -35,12 +35,21 @@ pub async fn static_handler(uri: Uri) -> Response {
 fn asset_response(path: &str, bytes: &'static [u8]) -> Response {
     let mut resp = (StatusCode::OK, bytes).into_response();
     let headers = resp.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type(path)));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type(path)),
+    );
     // Cross-origin isolation: LiveStore's OPFS worker + wa-sqlite need a
     // crossOriginIsolated context. `credentialless` keeps isolation while
     // still allowing cross-origin no-cors subresources (e.g. Google Fonts).
-    headers.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
-    headers.insert("cross-origin-embedder-policy", HeaderValue::from_static("credentialless"));
+    headers.insert(
+        "cross-origin-opener-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        "cross-origin-embedder-policy",
+        HeaderValue::from_static("credentialless"),
+    );
     // Vite emits content-hashed asset filenames → safe to cache immutably.
     // index.html must stay fresh so new bundles are picked up.
     let cache = if path == INDEX {
@@ -88,12 +97,18 @@ mod tests {
 
     #[test]
     fn index_is_embedded() {
-        assert!(DIST.get_file(INDEX).is_some(), "web/dist/index.html must be built + committed");
+        assert!(
+            DIST.get_file(INDEX).is_some(),
+            "web/dist/index.html must be built + committed"
+        );
     }
 
     #[test]
     fn content_type_maps_known_extensions() {
-        assert_eq!(content_type("assets/index-abc.js"), "text/javascript; charset=utf-8");
+        assert_eq!(
+            content_type("assets/index-abc.js"),
+            "text/javascript; charset=utf-8"
+        );
         assert_eq!(content_type("assets/wa-sqlite.wasm"), "application/wasm");
         assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
     }
