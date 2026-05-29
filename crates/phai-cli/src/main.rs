@@ -1661,7 +1661,7 @@ enum ForecastCommand {
         name = "refresh-installments",
         about = "detecta cadeias de parcelamento ativas e gera os forecasts restantes",
         long_about = "Detecta cadeias de parcelamento (X/N) na janela de --lookback-months \
-                      via finance-core::installments, agrupa por (account, descrição base, total), \
+                      via phai-core::installments, agrupa por (account, descrição base, total), \
                       e materializa: 1 forecast_template por cadeia + N forecasts (um por parcela \
                       restante), ambos com idempotency keys estáveis para que execuções repetidas \
                       sejam no-ops. Camada 1 do pipeline da ADR-0016."

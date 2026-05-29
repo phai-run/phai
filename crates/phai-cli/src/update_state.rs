@@ -38,7 +38,7 @@ impl UpdateState {
         let json = serde_json::to_string_pretty(self)?;
         // NamedTempFile gives us a per-process unique name in the same
         // directory as the target, eliminating the TOCTOU race that the
-        // previous `path.with_extension("tmp")` had when two finance-cli
+        // previous `path.with_extension("tmp")` had when two phai
         // processes wrote update state concurrently.
         let dir = if parent.as_os_str().is_empty() {
             Path::new(".")

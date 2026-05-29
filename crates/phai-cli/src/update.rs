@@ -513,7 +513,7 @@ async fn force_check_inner(data_dir: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "finance-cli: atualização disponível: {current_version} → {latest_str}. \
+        "phai: atualização disponível: {current_version} → {latest_str}. \
          Atualizando antes de sincronizar..."
     );
     match download_and_replace(&client, &release).await {
@@ -584,7 +584,7 @@ async fn auto_check_inner(data_dir: &Path) -> Result<()> {
     }
 
     // Update available — try to download and replace
-    eprintln!("finance-cli: update available: {current_version} → {latest_str}. Downloading...");
+    eprintln!("phai: update available: {current_version} → {latest_str}. Downloading...");
 
     match download_and_replace(&client, &release).await {
         Ok(()) => {

@@ -260,7 +260,7 @@ pub fn render_release_notes(
 ) -> String {
     let mut out = String::new();
 
-    let _ = writeln!(out, "🛠️ *finance-cli atualizado*");
+    let _ = writeln!(out, "🛠️ *phai atualizado*");
     let _ = writeln!(out);
     let _ = writeln!(out, "Versão: *{prev_version} → {new_version}*");
     let _ = writeln!(out);

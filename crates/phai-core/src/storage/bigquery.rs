@@ -4252,9 +4252,9 @@ mod param_smoke {
     //! Live BigQuery smoke tests for the typed-parameter path. Skipped by
     //! default; run with:
     //!
-    //!   FINANCE_OS_BQ_SMOKE=1 cargo test -p finance-core --test '*' -- --ignored bq_param
+    //!   FINANCE_OS_BQ_SMOKE=1 cargo test -p phai-core --test '*' -- --ignored bq_param
     //!
-    //! …or simply `cargo test -p finance-core bq_param_smoke -- --ignored`
+    //! …or simply `cargo test -p phai-core bq_param_smoke -- --ignored`
     //! once `FINANCE_OS_BQ_SMOKE=1` is exported. Reads from `~/.config/finance-os/config.toml`.
     use super::*;
     use crate::config::AppConfig;
