@@ -2,17 +2,17 @@
 name: phai
 description: "φ phai — finanças da casa, inteligência de verdade. Rules-first, LLM-neutral personal finance agent."
 colors:
-  void: "#08060B"
-  surface: "#100C1A"
-  purple: "#A78BFA"
-  cyan: "#2DD4BF"
-  amber: "#FBBF24"
-  rose: "#FB7185"
-  green: "#4ADE80"
-  white: "#F1F5F9"
-  muted: "#7C7C9A"
-  muted2: "#4A4A5E"
-  border: "#1E1832"
+  bg: "#FFFFFF"
+  surface: "#F6F6FB"
+  purple: "#6D4AFF"
+  cyan: "#0D9488"
+  amber: "#B45309"
+  rose: "#E11D48"
+  green: "#15803D"
+  ink: "#15131F"
+  muted: "#5B5B70"
+  muted2: "#9A9AAE"
+  border: "#E5E3EF"
 typography:
   display:
     fontFamily: "Space Grotesk"
@@ -148,55 +148,57 @@ Not a bank. Not a brokerage. No gamification, no congratulations, no 🚀, no "5
 
 ## Color
 
-A near-black **void** with neon accents, each carrying one semantic role. **One accent per view** — never compete two against each other.
+A bright **paper** canvas with focused, AA-contrast accents, each carrying one semantic role. **One accent per view** — never compete two against each other. (The original "void" dark palette is preserved at the foot of this section as the heritage theme; the shipping web app and CLI use the light palette below.)
 
 | Token | Hex | Role |
 |-------|-----|------|
-| void | `#08060B` | Canvas. Every page background. |
-| surface | `#100C1A` | Elevated cards, just above the void. |
-| purple | `#A78BFA` | Intelligence / AI — the *ai* in phai. Primary interactive. |
-| cyan | `#2DD4BF` | Clarity / data — the *fi*. Positive financial signal. |
-| amber | `#FBBF24` | Alerts. Used sparingly — only for things needing action. |
-| rose | `#FB7185` | Danger — overspend, budget exceeded. |
-| green | `#4ADE80` | Success — within budget, positive balance. |
-| white | `#F1F5F9` | Primary text. High contrast on void. |
-| muted | `#7C7C9A` | Secondary text, metadata. |
-| muted2 | `#4A4A5E` | Decorative only (hairlines, watermark φ). **Never text** — see Accessibility. |
-| border | `#1E1832` | Card and terminal edges. |
+| bg | `#FFFFFF` | Paper. Every page background. |
+| surface | `#F6F6FB` | Elevated cards/panels, just above the paper. |
+| purple | `#6D4AFF` | Intelligence / AI — the *ai* in phai. Primary interactive. |
+| cyan | `#0D9488` | Clarity / data — the *fi*. Positive financial signal / inflow. |
+| amber | `#B45309` | Alerts. Used sparingly — only for things needing action. |
+| rose | `#E11D48` | Danger / expense — overspend, outflow, budget exceeded. |
+| green | `#15803D` | Success — within budget, positive balance, income. |
+| ink | `#15131F` | Primary text. High contrast on paper. (CSS var keeps the name `--white` for parity.) |
+| muted | `#5B5B70` | Secondary text, metadata. |
+| muted2 | `#9A9AAE` | Decorative only (hairlines, watermark φ). **Never body text** — see Accessibility. |
+| border | `#E5E3EF` | Card and panel edges. |
 
 ### token → CSS var
 
-The same tokens drive the CLI palette, the web app, and the site. Keep these names in sync everywhere.
+The same tokens drive the CLI palette, the web app, and the site. Keep these names in sync everywhere. Note `ink` maps to the CSS var **`--white`** (name kept for backward parity — it carries the primary text color, dark on paper).
 
 | Token | CSS var | Hex |
 |-------|---------|-----|
-| void | `--bg` | `#08060B` |
-| surface | `--surface` | `#100C1A` |
-| purple | `--purple` | `#A78BFA` |
-| cyan | `--cyan` | `#2DD4BF` |
-| amber | `--amber` | `#FBBF24` |
-| rose | `--rose` | `#FB7185` |
-| green | `--green` | `#4ADE80` |
-| white | `--white` | `#F1F5F9` |
-| muted | `--muted` | `#7C7C9A` |
-| muted2 | `--muted2` | `#4A4A5E` |
-| border | `--border` | `#1E1832` |
+| bg | `--bg` | `#FFFFFF` |
+| surface | `--surface` | `#F6F6FB` |
+| purple | `--purple` | `#6D4AFF` |
+| cyan | `--cyan` | `#0D9488` |
+| amber | `--amber` | `#B45309` |
+| rose | `--rose` | `#E11D48` |
+| green | `--green` | `#15803D` |
+| ink | `--white` | `#15131F` |
+| muted | `--muted` | `#5B5B70` |
+| muted2 | `--muted2` | `#9A9AAE` |
+| border | `--border` | `#E5E3EF` |
 
 ```css
 :root {
-  --bg: #08060B;
-  --surface: #100C1A;
-  --purple: #A78BFA;
-  --cyan: #2DD4BF;
-  --amber: #FBBF24;
-  --rose: #FB7185;
-  --green: #4ADE80;
-  --white: #F1F5F9;
-  --muted: #7C7C9A;
-  --muted2: #4A4A5E;
-  --border: #1E1832;
+  --bg: #ffffff;
+  --surface: #f6f6fb;
+  --purple: #6d4aff;
+  --cyan: #0d9488;
+  --amber: #b45309;
+  --rose: #e11d48;
+  --green: #15803d;
+  --white: #15131f; /* primary ink — name kept for parity */
+  --muted: #5b5b70;
+  --muted2: #9a9aae;
+  --border: #e5e3ef;
 }
 ```
+
+> **Heritage (dark "void") palette** — kept for the brand mark, social cards, and the landing hero, which remain on the dark canvas: void `#08060B`, surface `#100C1A`, purple `#A78BFA`, cyan `#2DD4BF`, amber `#FBBF24`, rose `#FB7185`, green `#4ADE80`, white `#F1F5F9`, muted `#7C7C9A`, muted2 `#4A4A5E`, border `#1E1832`. The φ gradient (cyan→purple→amber) is shared by both themes.
 
 ## Typography
 
@@ -213,28 +215,49 @@ Tokens: `display` Space Grotesk 700 / clamp(2.2rem, 7vw, 5rem) / −0.03em · `b
 
 ## Layout
 
-Single column, centered, **max-width 780px**. No sidebars, no multi-column except card grids. Content breathes on an **80px vertical rhythm**.
+Two layout modes, by surface:
 
-- Container: 24px horizontal padding, 780px max.
-- Card grid: `repeat(auto-fit, minmax(180px, 1fr))`, 12px gap.
-- Cards: 20px padding, 1px border, 14px radius.
+**Editorial surfaces** (landing, README hero, brand) — single column, centered, **max-width 780px**, 80px vertical rhythm. The φ is centered, large, the first thing you see.
 
-The φ is always centered, always large, always the first thing you see — the anchor of every view.
+**The web app** (`phai serve`) — a **fluid, full-width workspace** that earns the screen on large monitors. This is a data tool, not a brochure: on a wide display the user should see the chart, the month's plan, and the transaction list together, not a narrow ribbon of whitespace.
+
+- App shell: `max-width: min(1680px, 96vw)`, centered, 24–32px gutters. Never a fixed 780px cap in the app.
+- Responsive grid by breakpoint (content-driven, not device-driven):
+  - `< 900px` — single column, stacked.
+  - `900–1280px` — two columns (e.g. chart/plan beside the list).
+  - `> 1280px` — multi-pane: a primary work area plus a sticky side rail for filters + running totals.
+- Use CSS grid with `minmax()` + `clamp()` so panels grow with the viewport; avoid hard pixel widths.
+- Density over decoration: tables and lists use the mono face and tight rows; whitespace serves scanning, not padding for its own sake.
+- Card grid (where used): `repeat(auto-fit, minmax(200px, 1fr))`, 12px gap. Cards: 20px padding, 1px border, 14px radius.
+
+## Web app — interaction model
+
+The app is **LiveStore-first**: reads are reactive queries over an in-browser SQLite, writes are committed locally (optimistic) and flushed to the Rust bridge → BigQuery/SQLite. **Every interaction is instant — zero perceptible delay.** Never block the UI on the network; reflect the change immediately and reconcile on ack.
+
+- **Unified Caixa + Previsões.** One view. The cash-evolution bar chart is the spine; **clicking a month's bar selects that month**, and the panel below shows that month's transactions and forecasts. Selecting a month is pure client state (instant). The selected month drives the whole view.
+- **Forecast on the bars.** Each month's bar **stacks realized over forecast** in distinct fills (realized = solid accent; forecast = the same hue at a lighter tint / hatch). Hovering a bar opens a **popover** listing that month's forecasts (description · amount), inflow/outflow split, and the projected close.
+- **Filters with live sums.** A persistent filter bar drives the list: by **category**, **unreviewed only**, **subscriptions** (`assinaturas`), and **installments** (`payment_status = installment`). Every active filter shows the **running sum of expenses / income** for the current selection, recomputed reactively from LiveStore (no round-trip).
+- **Drag-and-drop planning.** Manual forecast expenses (everything **except** card installments and subscriptions) are **draggable between months** on the chart/plan. Dropping re-dates the forecast; the bars, the projected balance line, and all totals **update in real time** as you drag. The write flushes in the background. Installments and subscriptions are visually locked (not draggable).
+- **Running totals everywhere.** Sums (per filter, per month, projected close) are derived queries — they recompute the instant the underlying data changes, including mid-drag.
+
+The φ remains the anchor in the header (small, gradient), but the app is a workspace — the data is the hero here, not the glyph.
 
 ## Depth & shape
 
-Depth comes from **tonal contrast, not shadows**: `surface` sits just above `void`, with 1px `border` for edge definition; hover shifts the border to purple. No drop shadows, no blur, no glassmorphism. Flat and precise, like a terminal.
+Depth comes from **tonal contrast, not shadows**: `surface` sits just above the `bg` paper, with 1px `border` for edge definition; hover shifts the border to purple. No glassmorphism. Flat and precise, like a terminal. (A single, very soft shadow is permissible on a dragged element to signal lift — the one exception, and only while dragging.)
 
 Shape language is **soft-rectilinear**: cards 14px, terminal 16px, pills fully rounded (9999px), DNA items 14px with a 3px cyan left border.
 
 ## Motion
 
-Motion is almost absent — restraint *is* the aesthetic. **Exactly one thing moves: the hero φ breathes.**
+**Ambient** motion is almost absent — restraint *is* the aesthetic. The only thing that moves on its own is the hero φ breathing (brightness `0.85 → 1.0 → 0.85`, 6s `ease-in-out`, infinite). Nothing else animates ambiently.
 
-- Property: `brightness` (or opacity), `0.85 → 1.0 → 0.85`.
-- Duration: 6s, `ease-in-out`, infinite.
-- Nothing else animates on its own. Hover transitions (border color, ~150ms) are fine; ambient motion is not.
-- Always honor `prefers-reduced-motion: reduce` — disable the breathe entirely.
+**Functional** motion — feedback the user *causes* — is encouraged in the app, and must feel immediate:
+- Hover/selection transitions ~120–150ms (border, fill, tint).
+- Drag-and-drop: the dragged forecast follows the cursor 1:1; drop targets highlight; bars and totals update live, in the same frame as the data change (LiveStore reactivity, no spinner).
+- Popovers appear on hover with no entrance delay.
+
+Always honor `prefers-reduced-motion: reduce` — disable the breathe and any non-essential transition; functional feedback may remain but without easing flourishes.
 
 ```css
 @keyframes breathe { 0%,100% { filter: brightness(0.85); } 50% { filter: brightness(1); } }
@@ -244,8 +267,8 @@ Motion is almost absent — restraint *is* the aesthetic. **Exactly one thing mo
 
 ## Accessibility
 
-- **Body text is `white` (`#F1F5F9`) or `muted` (`#7C7C9A`) on void.** Both clear WCAG AA.
-- **`muted2` (`#4A4A5E`) on void is ~2:1 contrast — decorative only.** Hairlines, the watermark φ, inert ornament. Never set it on text a user must read.
+- **Body text is `ink` (`#15131F`) or `muted` (`#5B5B70`) on paper (`#FFFFFF`).** Both clear WCAG AA. Accent colors used as text (amounts, links) are the darkened light-palette values, chosen for AA on white.
+- **`muted2` (`#9A9AAE`) on paper is low contrast — decorative only.** Hairlines, the watermark φ, inert ornament. Never set it on text a user must read.
 - Interactive elements (CTA pills, links) need a visible `:focus-visible` state — a 1px purple ring is enough.
 - The breathe animation respects `prefers-reduced-motion` (see Motion).
 
