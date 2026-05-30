@@ -149,17 +149,9 @@ code,
 	}
 }
 
-/* ── Dark mode ───────────────────────────────────────────────────────── */
-
-@media (prefers-color-scheme: dark) {
-	:root {
-		--bg: #0d0b14;
-		--surface: #15131f;
-		--border: #2a2738;
-		--muted: #9a9aae;
-		--muted2: #6b6b80;
-	}
-}
+/* The app ships a light (white) base unconditionally — per product direction.
+   No prefers-color-scheme dark override (it would violate the white requirement
+   and the current palette's ink color is dark). */
 
 /* ── Spin animation for sync indicator ───────────────────────────────── */
 

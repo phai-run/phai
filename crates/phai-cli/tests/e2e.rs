@@ -4796,7 +4796,12 @@ fn forecast_suggest_accept_dismiss_subscription_round_trip() {
     let today = chrono::Local::now().date_naive();
     let amounts = ["-21.90", "-21.90", "-22.10"];
     for (i, amount) in amounts.iter().enumerate() {
-        let date = today - chrono::Duration::days((i as i64 + 1) * 30);
+        // Calendar-month steps (not *30 days) so each offset lands in a
+        // distinct YYYY-MM regardless of today's date — keeps the test
+        // deterministic at month boundaries.
+        let date = today
+            .checked_sub_months(chrono::Months::new(i as u32 + 1))
+            .expect("date in range");
         envs(
             cargo_bin()
                 .arg("tx")
@@ -4903,7 +4908,12 @@ fn forecast_suggest_accept_dismiss_subscription_round_trip() {
     // Dismiss a new candidate (we re-seed a different merchant first so we
     // have a proposto to dismiss).
     for (i, amount) in ["-90.00", "-90.00", "-90.00"].iter().enumerate() {
-        let date = today - chrono::Duration::days((i as i64 + 1) * 30);
+        // Calendar-month steps (not *30 days) so each offset lands in a
+        // distinct YYYY-MM regardless of today's date — keeps the test
+        // deterministic at month boundaries.
+        let date = today
+            .checked_sub_months(chrono::Months::new(i as u32 + 1))
+            .expect("date in range");
         envs(
             cargo_bin()
                 .arg("tx")
@@ -5035,7 +5045,9 @@ fn forecast_suggest_envelope_groups_by_category() {
         ("Padaria C", "-260.00"),
     ];
     for month_offset in 1..=5_i64 {
-        let date = today - chrono::Duration::days(month_offset * 30);
+        let date = today
+            .checked_sub_months(chrono::Months::new(month_offset as u32))
+            .expect("date in range");
         for (i, (merchant, amount)) in merchants_per_month.iter().enumerate() {
             envs(
                 cargo_bin()
