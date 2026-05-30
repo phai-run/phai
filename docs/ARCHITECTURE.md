@@ -52,7 +52,6 @@ flowchart LR
     SQLite[("SQLite\nlocal backend")]
     BQ[("BigQuery\nproduction backend")]
     Pluggy["🏦 Pluggy API\n(open finance aggregator)"]
-    Sheets["📊 Google Sheets\n(override source, optional)"]
     Releases["📦 GitHub Releases\n(self-update target)"]
 
     User -->|"shell + pipes"| CLI
@@ -60,7 +59,6 @@ flowchart LR
     Core -->|"SQL"| SQLite
     Core -->|"REST + service-account JWT"| BQ
     Core -->|"REST + HMAC"| Pluggy
-    Core -.->|"category/human-field overrides"| Sheets
     CLI -.->|"24h check, SHA-256 verify, atomic rename"| Releases
 
     style SQLite fill:#d4edda,stroke:#28a745,color:#000

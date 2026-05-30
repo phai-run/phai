@@ -89,6 +89,11 @@ pub async fn refresh_installments(
         ..Default::default()
     };
 
+    // Map every known identity to its canonical template_id so re-derivation
+    // reuses the existing row instead of forking a duplicate (ADR-0022).
+    let existing_templates = store.list_forecast_templates(None, None).await?;
+    let dedup_plan = plan_template_dedup(&existing_templates);
+
     let mut templates = Vec::new();
     let mut forecasts = Vec::new();
 
@@ -98,7 +103,8 @@ pub async fn refresh_installments(
         }
         report.chains_active += 1;
 
-        let (template, instances) = build_template_and_instances(chain, &config.actor_id)?;
+        let (template, instances) =
+            build_template_and_instances(chain, &config.actor_id, &dedup_plan)?;
         templates.push(template);
         forecasts.extend(instances);
     }
@@ -158,10 +164,14 @@ fn audit_event_for_forecast(
 fn build_template_and_instances(
     chain: &InstallmentChain,
     actor_id: &str,
+    dedup_plan: &TemplateDedupPlan,
 ) -> Result<(ForecastTemplateRecord, Vec<ForecastRecord>)> {
     let now = Utc::now();
-    let chain_key = chain_idempotency_key(chain);
-    let template_id = format!("installment-{chain_key}");
+    // Reuse the existing id for this identity when one is known, so a drifted
+    // hash updates the canonical row in place instead of forking a duplicate.
+    let derived_id = format!("installment-{}", chain_idempotency_key(chain));
+    let natural_key = installment_natural_key(chain);
+    let template_id = dedup_plan.resolve(&natural_key, &derived_id).to_string();
 
     // Per-installment amount: prefer the most recent parcela's amount (it
     // tends to reflect any rate adjustments). The `amount` is stored signed
@@ -267,6 +277,186 @@ fn chain_idempotency_key(chain: &InstallmentChain) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Idempotency hardening — natural keys + self-healing dedup (ADR-0022)
+// ---------------------------------------------------------------------------
+//
+// `template_id` is a content hash, so it is only stable while the hashing
+// algorithm AND its inputs stay byte-identical. A release that tweaks the
+// hashing, or a detector revision, re-derives a *different* id for the *same*
+// real commitment; because the upsert dedups solely on `template_id`, the new
+// id is INSERTed instead of updating the old row, forking the template (and,
+// via `tpl-{template_id}-{yyyymm}` / `{template_id}-{n}`, every materialised
+// forecast) into a duplicate that `refresh` then re-materialises forever.
+//
+// The natural key is a canonical, hash-independent identity. Two templates
+// that share one describe the same commitment and must never coexist as live
+// rows. We use it to (a) reuse an existing id when re-deriving, so drift
+// updates in place, and (b) collapse any duplicates that already slipped in.
+
+/// ASCII unit separator — keeps the joined key fields unambiguous.
+const NATURAL_KEY_SEP: char = '\u{1f}';
+
+/// Canonical identity of a forecast template, independent of the `template_id`
+/// hash. Installments include their total so two distinct plans at the same
+/// merchant stay separate; recurring kinds key on account + merchant + category.
+fn template_natural_key(t: &ForecastTemplateRecord) -> String {
+    let account = t.account_id.as_deref().unwrap_or("");
+    let merchant = t.merchant_pattern.as_deref().unwrap_or("").to_lowercase();
+    let category = t.category_id.as_deref().unwrap_or("");
+    let total = if t.kind == "installment" {
+        match t.metadata_json.get("installments_total") {
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    join_natural_key([
+        t.kind.as_str(),
+        account,
+        merchant.as_str(),
+        category,
+        &total,
+    ])
+}
+
+/// Natural key of an installment chain. Must equal `template_natural_key` of
+/// the template built from the same chain (asserted in tests).
+fn installment_natural_key(chain: &InstallmentChain) -> String {
+    join_natural_key([
+        "installment",
+        chain.account_id.as_str(),
+        chain.base_description.to_lowercase().as_str(),
+        "",
+        chain.total.to_string().as_str(),
+    ])
+}
+
+fn join_natural_key<const N: usize>(parts: [&str; N]) -> String {
+    parts.join(&NATURAL_KEY_SEP.to_string())
+}
+
+/// Outcome of analysing existing templates for duplicate identities.
+#[derive(Debug, Default)]
+struct TemplateDedupPlan {
+    /// natural key -> the `template_id` that should own that identity.
+    canonical_id: std::collections::HashMap<String, String>,
+    /// `template_id`s that lost the election and must be demoted.
+    demote_ids: std::collections::HashSet<String>,
+}
+
+impl TemplateDedupPlan {
+    /// The canonical id to use for a freshly-derived template, falling back to
+    /// the derived id when this identity is new.
+    fn resolve<'a>(&'a self, natural_key: &str, derived_id: &'a str) -> &'a str {
+        self.canonical_id
+            .get(natural_key)
+            .map(String::as_str)
+            .unwrap_or(derived_id)
+    }
+}
+
+/// Group existing templates by natural key and elect one canonical row per
+/// identity. The oldest row wins (ties broken by `template_id` for
+/// determinism); already-`descartado` rows never win and are never re-demoted.
+fn plan_template_dedup(existing: &[ForecastTemplateRecord]) -> TemplateDedupPlan {
+    use std::collections::HashMap;
+    let mut groups: HashMap<String, Vec<&ForecastTemplateRecord>> = HashMap::new();
+    for t in existing {
+        groups.entry(template_natural_key(t)).or_default().push(t);
+    }
+    let mut plan = TemplateDedupPlan::default();
+    for (natural_key, mut rows) in groups {
+        rows.sort_by(|a, b| {
+            let a_dismissed = u8::from(a.status == "descartado");
+            let b_dismissed = u8::from(b.status == "descartado");
+            a_dismissed
+                .cmp(&b_dismissed)
+                .then(a.created_at.cmp(&b.created_at))
+                .then_with(|| a.template_id.cmp(&b.template_id))
+        });
+        let canonical = rows[0];
+        plan.canonical_id
+            .insert(natural_key, canonical.template_id.clone());
+        for dup in &rows[1..] {
+            if dup.status != "descartado" {
+                plan.demote_ids.insert(dup.template_id.clone());
+            }
+        }
+    }
+    plan
+}
+
+/// Forecast statuses that record a realised commitment — never auto-deactivated
+/// by the dedup pass, since they tie a prediction to a real transaction.
+fn is_realized_status(status: &str) -> bool {
+    matches!(status, "realizado" | "realized" | "effected")
+}
+
+/// Collapse duplicate templates that share a natural key: demote the losers to
+/// `descartado` and deactivate their non-realised forecasts to `inativo` so
+/// they stop being projected and re-materialised. Idempotent — a second run
+/// finds nothing to do. Returns the number of templates demoted.
+async fn collapse_duplicate_templates(store: &dyn FinanceStore, actor_id: &str) -> Result<usize> {
+    let existing = store.list_forecast_templates(None, None).await?;
+    let plan = plan_template_dedup(&existing);
+    if plan.demote_ids.is_empty() {
+        return Ok(0);
+    }
+    let now = Utc::now();
+
+    let mut demoted_templates = Vec::new();
+    for t in &existing {
+        if !plan.demote_ids.contains(&t.template_id) {
+            continue;
+        }
+        let mut row = t.clone();
+        row.status = "descartado".to_string();
+        row.updated_at = now;
+        if let serde_json::Value::Object(map) = &mut row.metadata_json {
+            map.insert("dedup_demoted".to_string(), json!(true));
+            if let Some(canonical) = plan.canonical_id.get(&template_natural_key(t)) {
+                map.insert("dedup_canonical".to_string(), json!(canonical));
+            }
+        }
+        demoted_templates.push(row);
+    }
+    store.upsert_forecast_templates(&demoted_templates).await?;
+    let template_events = demoted_templates
+        .iter()
+        .map(|t| audit_event_for_template(t, "dedup-demote", actor_id))
+        .collect::<Result<Vec<_>>>()?;
+    store.insert_audit_events(&template_events).await?;
+
+    // Deactivate the demoted templates' non-realised forecasts.
+    let forecasts = store.list_forecasts(None, None, None).await?;
+    let mut deactivated = Vec::new();
+    for f in &forecasts {
+        let belongs = f
+            .template_id
+            .as_deref()
+            .is_some_and(|tid| plan.demote_ids.contains(tid));
+        if belongs && !is_realized_status(&f.status) && f.status != "inativo" {
+            let mut row = f.clone();
+            row.status = "inativo".to_string();
+            row.updated_at = now;
+            deactivated.push(row);
+        }
+    }
+    if !deactivated.is_empty() {
+        store.upsert_forecasts(&deactivated).await?;
+        let forecast_events = deactivated
+            .iter()
+            .map(|f| audit_event_for_forecast(f, "dedup-deactivate", actor_id))
+            .collect::<Result<Vec<_>>>()?;
+        store.insert_audit_events(&forecast_events).await?;
+    }
+
+    Ok(demoted_templates.len())
+}
+
 fn shift_months_back(date: NaiveDate, n: i32) -> Result<NaiveDate> {
     shift_months(date, -n).context("falha ao deslocar data")
 }
@@ -340,6 +530,24 @@ impl RecurringCandidate {
             "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
         )
+    }
+
+    /// Natural key of this candidate. Must equal `template_natural_key` of the
+    /// template built from it (asserted in tests), so a candidate is recognised
+    /// as already-known even if its derived id has drifted across releases.
+    fn natural_key(&self) -> String {
+        let account = if self.account_id == "any" {
+            ""
+        } else {
+            self.account_id.as_str()
+        };
+        let merchant = if self.kind == "envelope" {
+            String::new()
+        } else {
+            self.merchant_key.to_lowercase()
+        };
+        let category = self.category_id.as_deref().unwrap_or("");
+        join_natural_key([self.kind.as_str(), account, merchant.as_str(), category, ""])
     }
 }
 
@@ -742,22 +950,25 @@ pub(crate) async fn run_suggest(args: ForecastSuggestArgs) -> Result<()> {
     let existing_descartado = store
         .list_forecast_templates(None, Some("descartado"))
         .await?;
-    let mut existing_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut existing_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in existing_proposto
         .iter()
         .chain(existing_ativo.iter())
         .chain(existing_descartado.iter())
     {
-        existing_keys.insert(t.template_id.clone());
+        existing_keys.insert(template_natural_key(t));
     }
 
     let now = Utc::now();
     let mut new_proposals = Vec::new();
     for cand in &candidates {
-        let template_id = format!("{}-{}", cand.kind, cand.idempotency_hash());
-        if existing_keys.contains(&template_id) {
+        // Skip by natural key: a template for this identity already exists
+        // (even one whose derived id drifted across releases), so re-proposing
+        // would fork a duplicate.
+        if existing_keys.contains(&cand.natural_key()) {
             continue;
         }
+        let template_id = format!("{}-{}", cand.kind, cand.idempotency_hash());
         new_proposals.push(template_from_candidate(
             cand,
             template_id,
@@ -1359,6 +1570,8 @@ pub struct RefreshReport {
     pub new_suggestions: usize,
     /// Number of open-bill forecast rows upserted (one per card with pending charges).
     pub open_bill_forecasts: usize,
+    /// Number of duplicate templates demoted by the self-healing dedup pass.
+    pub templates_deduped: usize,
 }
 
 pub(crate) async fn run_refresh(args: ForecastRefreshArgs) -> Result<()> {
@@ -1393,6 +1606,7 @@ pub(crate) async fn run_refresh(args: ForecastRefreshArgs) -> Result<()> {
             "forecasts_materialised": report.forecasts_materialised,
             "open_bill_forecasts": report.open_bill_forecasts,
             "new_suggestions": report.new_suggestions,
+            "templates_deduped": report.templates_deduped,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
@@ -1412,6 +1626,11 @@ pub async fn refresh_all(
     materialize_months: u32,
     skip_suggest: bool,
 ) -> Result<RefreshReport> {
+    // Self-heal first: collapse any duplicate templates (same identity, drifted
+    // id) so the materialisation pass below can't re-emit their duplicate
+    // forecasts. Idempotent — a no-op once the store is clean (ADR-0022).
+    let templates_deduped = collapse_duplicate_templates(store, &config.actor_id).await?;
+
     let installments = refresh_installments(store, config, lookback_months).await?;
     let reconcile = reconcile_forecasts(store, config, RECONCILE_DEFAULT_LOOKBACK_DAYS).await?;
 
@@ -1452,6 +1671,7 @@ pub async fn refresh_all(
         forecasts_materialised,
         new_suggestions,
         open_bill_forecasts,
+        templates_deduped,
     })
 }
 
@@ -1502,22 +1722,24 @@ async fn run_suggest_silent(
     let existing_descartado = store
         .list_forecast_templates(None, Some("descartado"))
         .await?;
-    let mut existing_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut existing_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in existing_proposto
         .iter()
         .chain(active.iter())
         .chain(existing_descartado.iter())
     {
-        existing_keys.insert(t.template_id.clone());
+        existing_keys.insert(template_natural_key(t));
     }
 
     let now = Utc::now();
     let mut new_proposals = Vec::new();
     for cand in &candidates {
-        let template_id = format!("{}-{}", cand.kind, cand.idempotency_hash());
-        if existing_keys.contains(&template_id) {
+        // Skip by natural key (see `run_suggest`): avoids re-proposing an
+        // identity whose derived id has drifted into a duplicate.
+        if existing_keys.contains(&cand.natural_key()) {
             continue;
         }
+        let template_id = format!("{}-{}", cand.kind, cand.idempotency_hash());
         new_proposals.push(template_from_candidate(
             cand,
             template_id,
@@ -1674,6 +1896,12 @@ fn print_refresh_report(report: &RefreshReport) {
         "  Recorrentes    · templates materializados {} · forecasts {}",
         report.templates_materialised, report.forecasts_materialised,
     );
+    if report.templates_deduped > 0 {
+        println!(
+            "  Deduplicação   · {} template(s) duplicado(s) colapsado(s)",
+            report.templates_deduped,
+        );
+    }
     if report.open_bill_forecasts > 0 {
         println!(
             "  Faturas abertas · {} forecast(s) atualizado(s)",
@@ -1799,6 +2027,162 @@ mod tests {
             confidence: 0.0,
         };
         assert_eq!(c.idempotency_hash(), "f25d52649954089b");
+    }
+
+    fn sample_chain(account: &str, desc: &str, total: u32) -> InstallmentChain {
+        InstallmentChain {
+            account_id: account.into(),
+            base_description: desc.into(),
+            total,
+            current: 1,
+            installments: Vec::new(),
+            first_date: NaiveDate::from_ymd_opt(2026, 1, 10).unwrap(),
+            projected_end: NaiveDate::from_ymd_opt(2026, 6, 10).unwrap(),
+            remaining: total.saturating_sub(1),
+            released_next_month: false,
+            total_amount: Decimal::from(600),
+        }
+    }
+
+    fn sample_candidate(kind: &str, account: &str, merchant: &str) -> RecurringCandidate {
+        RecurringCandidate {
+            kind: kind.into(),
+            account_id: account.into(),
+            merchant_key: merchant.into(),
+            label: merchant.into(),
+            category_id: None,
+            median_amount: Decimal::from(-50),
+            amount_lower: Decimal::from(-55),
+            amount_upper: Decimal::from(-45),
+            months_seen: 3,
+            last_seen: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            typical_day_of_month: 1,
+            coefficient_of_variation: 0.0,
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn installment_natural_key_matches_built_template() {
+        // The chain-side and template-side natural keys must agree, otherwise
+        // id reuse and dedup would silently miss each other.
+        let chain = sample_chain("card_a", "Magazine Luiza", 12);
+        let (template, _) =
+            build_template_and_instances(&chain, "actor", &TemplateDedupPlan::default()).unwrap();
+        assert_eq!(
+            installment_natural_key(&chain),
+            template_natural_key(&template)
+        );
+    }
+
+    #[test]
+    fn candidate_natural_key_matches_built_template() {
+        for kind in ["subscription", "fixed", "envelope"] {
+            let cand = sample_candidate(kind, "chk_1", "Netflix");
+            let template = template_from_candidate(
+                &cand,
+                format!("{kind}-x"),
+                "actor",
+                NaiveDate::from_ymd_opt(2026, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc(),
+            );
+            assert_eq!(
+                cand.natural_key(),
+                template_natural_key(&template),
+                "kind {kind} natural keys diverge"
+            );
+        }
+    }
+
+    #[test]
+    fn installment_natural_key_separates_distinct_totals() {
+        // Two plans at the same merchant with different totals are distinct.
+        assert_ne!(
+            installment_natural_key(&sample_chain("card_a", "Loja X", 6)),
+            installment_natural_key(&sample_chain("card_a", "Loja X", 12)),
+        );
+    }
+
+    fn template_with(id: &str, status: &str, created_min: u32) -> ForecastTemplateRecord {
+        let now = NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, created_min, 0)
+            .unwrap()
+            .and_utc();
+        ForecastTemplateRecord {
+            template_id: id.into(),
+            kind: "subscription".into(),
+            description: "Netflix".into(),
+            merchant_pattern: Some("netflix".into()),
+            category_id: None,
+            account_id: Some("chk_1".into()),
+            amount: Decimal::from(-50),
+            amount_lower: None,
+            amount_upper: None,
+            cadence: "monthly".into(),
+            next_due_day: Some(1),
+            start_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            end_date: None,
+            remaining_count: None,
+            source: "detected".into(),
+            confidence: Some(1.0),
+            status: status.into(),
+            metadata_json: json!({}),
+            actor_id: "actor".into(),
+            idempotency_key: format!("forecast-template-{id}"),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn plan_dedup_elects_oldest_and_demotes_younger() {
+        // Same identity (merchant/account/kind), two ids → oldest is canonical.
+        let existing = vec![
+            template_with("sub-new", "ativo", 30),
+            template_with("sub-old", "ativo", 10),
+        ];
+        let plan = plan_template_dedup(&existing);
+        let nk = template_natural_key(&existing[0]);
+        assert_eq!(
+            plan.canonical_id.get(&nk).map(String::as_str),
+            Some("sub-old")
+        );
+        assert!(plan.demote_ids.contains("sub-new"));
+        assert!(!plan.demote_ids.contains("sub-old"));
+        // A fresh derivation reuses the canonical id.
+        assert_eq!(plan.resolve(&nk, "sub-fresh"), "sub-old");
+    }
+
+    #[test]
+    fn plan_dedup_never_elects_or_redemotes_descartado() {
+        let existing = vec![
+            template_with("sub-dismissed", "descartado", 5),
+            template_with("sub-live", "ativo", 20),
+        ];
+        let plan = plan_template_dedup(&existing);
+        let nk = template_natural_key(&existing[1]);
+        // The live row wins even though the dismissed one is older.
+        assert_eq!(
+            plan.canonical_id.get(&nk).map(String::as_str),
+            Some("sub-live")
+        );
+        // The dismissed row is left alone (already terminal).
+        assert!(!plan.demote_ids.contains("sub-dismissed"));
+    }
+
+    #[test]
+    fn plan_dedup_noop_when_all_identities_unique() {
+        let existing = vec![template_with("a", "ativo", 1), {
+            let mut t = template_with("b", "ativo", 2);
+            t.merchant_pattern = Some("spotify".into());
+            t
+        }];
+        let plan = plan_template_dedup(&existing);
+        assert!(plan.demote_ids.is_empty());
     }
 
     #[test]

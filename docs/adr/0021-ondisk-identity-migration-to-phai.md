@@ -1,6 +1,6 @@
 ---
 type: ADR
-id: "0022"
+id: "0021"
 title: "On-disk identity migration from finance-os to phai (legacy fallback)"
 status: active
 date: 2026-05-29

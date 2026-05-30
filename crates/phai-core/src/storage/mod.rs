@@ -226,7 +226,7 @@ pub trait FinanceStore {
     /// cash-basis checking-only [`Self::cashflow`]. Rows are ordered oldest
     /// first; `opening_balance` / `closing_balance` are always `None` (the
     /// chart derives its balance line from the accumulated `net`). See
-    /// ADR-0023.
+    /// ADR-0024.
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>>;
     /// Aggregate balance across all `account_type='checking'` accounts at
     /// `target`. Anchored on the latest snapshot ≤ `target` per account

@@ -142,7 +142,7 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
 /// included, internal categories excluded) so the chart agrees with the
 /// per-category reports. The saldo line is derived from the accumulated
 /// monthly `net` — anchored on the net of all months *before* the window —
-/// rather than from checking-account snapshots (ADR-0023).
+/// rather than from checking-account snapshots (ADR-0024).
 pub(crate) async fn build_chart_data(
     store: &dyn FinanceStore,
     months_back: usize,

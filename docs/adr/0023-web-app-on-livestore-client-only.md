@@ -1,6 +1,6 @@
 ---
 type: ADR
-id: "0021"
+id: "0023"
 title: "Web app on LiveStore (client-only) bridged to the store"
 status: accepted
 date: 2026-05-29

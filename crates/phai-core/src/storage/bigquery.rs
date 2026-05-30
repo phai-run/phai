@@ -26,8 +26,7 @@ use std::time::{Duration, Instant};
 use yup_oauth2::{read_service_account_key, ServiceAccountAuthenticator};
 
 const BIGQUERY_SCOPE: &str = "https://www.googleapis.com/auth/bigquery";
-const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
-const BIGQUERY_SCOPES: &[&str] = &[BIGQUERY_SCOPE, DRIVE_READONLY_SCOPE];
+const BIGQUERY_SCOPES: &[&str] = &[BIGQUERY_SCOPE];
 
 pub struct BigQueryStore {
     config: AppConfig,
@@ -1788,7 +1787,7 @@ impl FinanceStore for BigQueryStore {
               realized_transaction_id,
               FORMAT_TIMESTAMP('%FT%T%Ez', realized_at)
             FROM {}
-            WHERE status = 'ativo'
+            WHERE LOWER(status) IN ('ativo', 'active')
               AND due_date IS NOT NULL
               AND due_date BETWEEN @from AND @until
             ORDER BY due_date ASC, amount DESC

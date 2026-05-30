@@ -49,11 +49,12 @@ const FEW_SHOT_SOURCES: [&str; 2] = ["manual", "enriched:user"];
 
 /// Enrichment pipeline. Owns the moka L1 cache so it is shared across
 /// `run_one` calls within a single CLI invocation. The L2 SQLite cache
-/// lives at `sqlite_path` and persists across runs.
+/// lives at `sqlite_path` when available; `None` means BigQuery-only mode
+/// where L2 is skipped and only L1 moka + BrasilAPI are used.
 pub struct EnrichmentPipeline {
     pub(crate) http: reqwest::Client,
     pub(crate) moka_cache: Cache<String, Option<CnpjInfo>>,
-    pub(crate) sqlite_path: PathBuf,
+    pub(crate) sqlite_path: Option<PathBuf>,
     pub(crate) provider: LlmProvider,
 }
 
@@ -78,10 +79,8 @@ impl EnrichmentPipeline {
             .time_to_live(Duration::from_secs(MOKA_TTL_SECS))
             .time_to_idle(Duration::from_secs(MOKA_TTI_SECS))
             .build();
-        let sqlite_path = config
-            .local_db_path
-            .clone()
-            .context("local_db_path não configurado — necessário para cnpj_cache L2")?;
+        // L2 SQLite cache is optional: absent in BigQuery-only setups.
+        let sqlite_path = config.local_db_path.clone();
         Ok(Self {
             http,
             moka_cache,
@@ -169,7 +168,14 @@ impl EnrichmentPipeline {
         let cnpj_extracted = extract_cnpj(&tx.metadata_json);
         let cnpj_info = match &cnpj_extracted {
             Some(cnpj) => {
-                match lookup_cnpj(&self.http, &self.moka_cache, &self.sqlite_path, cnpj).await {
+                match lookup_cnpj(
+                    &self.http,
+                    &self.moka_cache,
+                    self.sqlite_path.as_deref(),
+                    cnpj,
+                )
+                .await
+                {
                     Ok(info) => info,
                     Err(err) => {
                         eprintln!("aviso: cnpj lookup falhou ({err:#}); seguindo sem cnpj");

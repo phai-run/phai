@@ -1,6 +1,6 @@
 ---
 type: ADR
-id: "0023"
+id: "0024"
 title: "Cashflow chart sources from `v_cashflow` (accrual) with a net-derived saldo line"
 status: accepted
 date: 2026-05-30

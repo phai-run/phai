@@ -72,9 +72,10 @@ proposed → active → superseded
 | [0018](0018-serve-local-dashboard.md) | `fin serve`: local HTTP+WebSocket dashboard for forecast review | superseded by [0019](0019-serve-loopback-only-localhost-alias.md) |
 | [0019](0019-serve-loopback-only-localhost-alias.md) | `fin serve` uses loopback-only binding with a localhost alias | active |
 | [0020](0020-single-workspace-version.md) | Single workspace version: one number for the whole product | active |
-| [0021](0021-web-app-on-livestore-client-only.md) | Web app on LiveStore (client-only) bridged to the store | accepted |
-| [0022](0022-ondisk-identity-migration-to-phai.md) | On-disk identity migration from finance-os to phai (legacy fallback) | active |
-| [0023](0023-cashflow-chart-accrual-source.md) | Cashflow chart sources from `v_cashflow` (accrual) with a net-derived saldo line | accepted |
+| [0021](0021-ondisk-identity-migration-to-phai.md) | On-disk identity migration from finance-os to phai (legacy fallback) | active |
+| [0022](0022-forecast-template-natural-key-idempotency.md) | Forecast template idempotency via natural keys + self-healing dedup | active |
+| [0023](0023-web-app-on-livestore-client-only.md) | Web app on LiveStore (client-only) bridged to the store | accepted |
+| [0024](0024-cashflow-chart-accrual-source.md) | Cashflow chart sources from `v_cashflow` (accrual) with a net-derived saldo line | accepted |
 
 ---
 
