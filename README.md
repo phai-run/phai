@@ -82,12 +82,12 @@ phai report monthly-spend
 phai report card-summary
 ```
 
-See [BigQuery setup](#bigquery-setup) below for the multi-device / Sheets-friendly backend.
+See [BigQuery setup](#bigquery-setup) below for the multi-device backend.
 
 ## Why phai
 
 - 🏦 **Pluggy sync** — Brazilian open-finance aggregator, automatic pagination, idempotent imports, account snapshots for balance history.
-- 🗃 **Dual backend** — SQLite for local/dev (zero setup) or BigQuery for production (multi-device, joinable with Sheets).
+- 🗃 **Dual backend** — SQLite for local/dev (zero setup) or BigQuery for production (multi-device).
 - 📐 **Rules first, AI second** — classification comes from deterministic rules and effective overrides. The LLM reads and proposes; it never silently decides.
 - 🔌 **LLM-neutral** — a single wrapper script exposes phai to [OpenClaw](https://openclaw.io), Claude, or any agent framework that exec's commands. No model lock-in.
 - 📊 **Reports built for humans** — readable in 80 columns, grouped by category, `--raw` for agents that want JSON.
@@ -173,8 +173,6 @@ phai auth setup \
 
 phai admin migrate
 ```
-
-Optional: use a Google Sheet as a category/human-field override source so your manual classifications survive across machines. See [docs/google-sheets-overrides.md](docs/google-sheets-overrides.md).
 
 ## Configuration
 

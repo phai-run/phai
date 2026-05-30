@@ -18,7 +18,7 @@ The full set of design principles is in [ARCHITECTURE.md §Design Principles](AR
 | Backend | Module | Use case |
 |---|---|---|
 | SQLite | `storage::local` | Local single-user, dev, E2E tests, zero setup |
-| BigQuery | `storage::bigquery` | Multi-device, joinable with Sheets, production |
+| BigQuery | `storage::bigquery` | Multi-device, production |
 
 ### Surface (grouped)
 

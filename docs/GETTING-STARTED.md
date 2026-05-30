@@ -54,7 +54,7 @@ Data lives in `~/Library/Application Support/finance-os/finance-os.db` (macOS) o
 
 ## First run (BigQuery backend)
 
-Use this when you want the same dataset on multiple devices or you want to JOIN with Google Sheets.
+Use this when you want the same dataset on multiple devices.
 
 ```bash
 # 1. In GCP: create a project + dataset (e.g. phai), create a service account
@@ -72,8 +72,6 @@ phai auth setup \
 phai admin migrate
 phai sync pluggy --pluggy-config pluggy-config.json
 ```
-
-Optional: wire a Google Sheet as a category/context override source — see [google-sheets-overrides.md](google-sheets-overrides.md).
 
 ## Quick mental model
 

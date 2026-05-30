@@ -26,8 +26,7 @@ use std::time::{Duration, Instant};
 use yup_oauth2::{read_service_account_key, ServiceAccountAuthenticator};
 
 const BIGQUERY_SCOPE: &str = "https://www.googleapis.com/auth/bigquery";
-const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
-const BIGQUERY_SCOPES: &[&str] = &[BIGQUERY_SCOPE, DRIVE_READONLY_SCOPE];
+const BIGQUERY_SCOPES: &[&str] = &[BIGQUERY_SCOPE];
 
 pub struct BigQueryStore {
     config: AppConfig,

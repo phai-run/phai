@@ -41,7 +41,7 @@ The shape that breaks the cycle is not another UI. It is a system that:
 - **Is replayable.** Every write is an event. You can rebuild every report from scratch, audit every change, undo any correction.
 - **Speaks both audiences.** Human reports are formatted for phone reading. `--raw` JSON exists for the same query.
 
-A runtime, not an app. The author's daily WhatsApp pipeline is one consumer of that runtime; an AI agent answering finance questions is another; a Sheets-backed budget is a third. None of them is *the* product. The runtime is.
+A runtime, not an app. The author's daily WhatsApp pipeline is one consumer of that runtime; an AI agent answering finance questions is another; the `phai serve` web app is a third. None of them is *the* product. The runtime is.
 
 ---
 
@@ -95,7 +95,7 @@ Install: a `curl | bash` and you have `phai`. Update: the running binary fetches
 
 ### Dual backend behind one trait
 
-Local-first via SQLite for the user who lives on one machine. BigQuery for the user with multiple devices or a Sheets-backed budget. Same CLI, same reports — the `FinanceStore` trait makes the backend invisible to everything above storage.
+Local-first via SQLite for the user who lives on one machine. BigQuery for the user with multiple devices. Same CLI, same reports — the `FinanceStore` trait makes the backend invisible to everything above storage.
 
 ### Open source, exit-friendly
 
@@ -113,7 +113,7 @@ No personal counterparty names, account labels, or institution-specific fingerpr
 
 **Stage 1: One person, one runtime** *(current)*
 
-A single user runs `phai` on a laptop. Pluggy syncs nightly. Reports run on demand or on a schedule. The user reads them on WhatsApp, an AI agent answers ad-hoc questions, a Google Sheet overrides categories when needed. The runtime is invisible — it just keeps the answers accurate.
+A single user runs `phai` on a laptop. Pluggy syncs nightly. Reports run on demand or on a schedule. The user reads them on WhatsApp, an AI agent answers ad-hoc questions. The runtime is invisible — it just keeps the answers accurate.
 
 **Stage 2: Couples and households**
 
