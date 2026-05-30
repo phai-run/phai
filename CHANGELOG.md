@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.1.1](https://github.com/phai-run/phai/compare/v5.1.0...v5.1.1) (2026-05-30)
+
+
+### Bug Fixes
+
+* **cli:** show snapshot timestamp in balances and auto-clear local_db_path on BigQuery setup ([294e750](https://github.com/phai-run/phai/commit/294e75042e001d5076f33c22b53556ecbaab8acf))
+* **cli:** show snapshot timestamp in balances and auto-clear local_db_path on BigQuery setup ([3f062d8](https://github.com/phai-run/phai/commit/3f062d8561f16ef195e6e8cbc8bee63d8cc1290f))
+
 ## [5.1.0](https://github.com/phai-run/phai/compare/v5.0.0...v5.1.0) (2026-05-30)
 
 
