@@ -3188,7 +3188,20 @@ async fn auth_setup(args: AuthSetupArgs) -> Result<()> {
     config.project_id = args.project_id;
     config.dataset_id = args.dataset_id;
     config.service_account_path = args.service_account_path;
-    config.local_db_path = args.local_db_path.or(config.local_db_path.clone());
+    config.local_db_path = match (&config.backend, &args.local_db_path) {
+        // Explicit flag always wins.
+        (_, Some(p)) => Some(p.clone()),
+        // Switching to BigQuery: clear any residual local_db_path so it
+        // doesn't diverge silently from the remote store.
+        (phai_core::config::BackendKind::Bigquery, None) => {
+            if config.local_db_path.is_some() {
+                eprintln!("aviso: local_db_path removido — não necessário com backend bigquery");
+            }
+            None
+        }
+        // Local backend: keep whatever was set (or None for a fresh install).
+        (phai_core::config::BackendKind::Local, None) => config.local_db_path.clone(),
+    };
     config.pluggy_start_date = args.pluggy_start_date.or(config.pluggy_start_date.clone());
     config.save(&paths)?;
 
@@ -3813,7 +3826,7 @@ async fn report_balances(args: BalancesArgs) -> Result<()> {
                 "  💰 {} · {} ({})",
                 label,
                 human_format::brl_signed(balance),
-                human_format::short_date(snap.snapshot_date),
+                human_format::short_snapshot_ts(snap.created_at),
             );
         }
         if items.len() > 1 {

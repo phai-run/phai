@@ -64,6 +64,20 @@ pub fn short_date(date: NaiveDate) -> String {
     }
 }
 
+/// Like `short_date` but includes HH:MM when the timestamp is from today.
+/// Useful for account snapshots so the user knows the balance may be hours old:
+/// "hoje 00:34" is more informative than just "hoje" when asking why it diverges
+/// from the bank app viewed mid-day.
+pub fn short_snapshot_ts(ts: chrono::DateTime<chrono::Utc>) -> String {
+    let today = Utc::now().date_naive();
+    let local_ts = ts.with_timezone(&chrono::Local);
+    if local_ts.date_naive() == today {
+        format!("hoje {}", local_ts.format("%H:%M"))
+    } else {
+        short_date(local_ts.date_naive())
+    }
+}
+
 pub fn month_pt_short(month: u32) -> &'static str {
     match month {
         1 => "jan",
