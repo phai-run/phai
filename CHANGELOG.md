@@ -1,5 +1,23 @@
 # Changelog
 
+## [5.0.0](https://github.com/phai-run/phai/compare/v4.1.0...v5.0.0) (2026-05-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* BigQuery runtimes that rewired v_transactions_effective to a Google Sheet will lose Drive access — queries against a Sheets-backed external table will fail. Move those overrides into rules / private configuration.
+
+### Features
+
+* remove Google Sheets category-override sync ([3752867](https://github.com/phai-run/phai/commit/37528675f267c3ae59bd6dff01e78486752ba76f))
+
+
+### Bug Fixes
+
+* **storage:** accept both 'ativo' and 'active' forecast status in upcoming_forecasts ([d354325](https://github.com/phai-run/phai/commit/d3543259400366ed0a88e2a0709f95ca54c509e0))
+* **storage:** accept both 'ativo' and 'active' forecast status in upcoming_forecasts ([d354325](https://github.com/phai-run/phai/commit/d3543259400366ed0a88e2a0709f95ca54c509e0))
+* **storage:** accept both 'ativo' and 'active' forecast status in upcoming_forecasts ([c4caaab](https://github.com/phai-run/phai/commit/c4caaabd0a013784362d607846714a25cb8e037f)), closes [#109](https://github.com/phai-run/phai/issues/109)
+
 ## [4.1.0](https://github.com/phai-run/phai/compare/v4.0.0...v4.1.0) (2026-05-29)
 
 
