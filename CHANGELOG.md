@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.1.0](https://github.com/phai-run/phai/compare/v5.0.0...v5.1.0) (2026-05-30)
+
+
+### Features
+
+* **forecast:** harden template idempotency with natural keys + self-healing dedup ([#111](https://github.com/phai-run/phai/issues/111)) ([a646679](https://github.com/phai-run/phai/commit/a646679f674bbdbd944b47d32e67899d6bb0425c))
+
 ## [5.0.0](https://github.com/phai-run/phai/compare/v4.1.0...v5.0.0) (2026-05-30)
 
 
