@@ -595,44 +595,9 @@ async fn handle_dismiss_template(store: &dyn FinanceStore, template_id: &str) ->
 
 // ── REST DTOs ──────────────────────────────────────────────────────────────
 
-/// One row of the review queue, in the shape the frontend consumes. Field
-/// names are camelCase by contract.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReviewQueueRow {
-    id: String,
-    account_id: Option<String>,
-    posted_at: String,
-    /// Decimal serialised as a string (e.g. `"-12.50"`) — never f64.
-    amount: String,
-    raw_description: String,
-    description: Option<String>,
-    merchant_name: Option<String>,
-    purpose: Option<String>,
-    category_id: Option<String>,
-    month: String,
-}
-
-impl ReviewQueueRow {
-    fn from_record(row: &TransactionRecord) -> Self {
-        Self {
-            id: row.transaction_id.clone(),
-            account_id: row.account_id.clone(),
-            posted_at: row.transaction_date.format("%Y-%m-%d").to_string(),
-            amount: format!("{:.2}", row.amount.round_dp(2)),
-            raw_description: row.raw_description.clone(),
-            description: row.description.clone(),
-            merchant_name: row.merchant_name.clone(),
-            purpose: row.purpose.clone(),
-            category_id: row.category_id.clone(),
-            month: row.transaction_date.format("%Y-%m").to_string(),
-        }
-    }
-}
-
 #[derive(Serialize)]
 struct ReviewQueueResponse {
-    rows: Vec<ReviewQueueRow>,
+    rows: Vec<TxRow>,
 }
 
 /// One transaction in the planning workspace shape. Field names are camelCase
@@ -670,7 +635,23 @@ impl TxRow {
             account_id: row.account_id.clone(),
             posted_at: row.transaction_date.format("%Y-%m-%d").to_string(),
             amount: format!("{:.2}", row.amount.round_dp(2)),
-            raw_description: row.raw_description.clone(),
+            raw_description: {
+                debug_assert!(
+                    {
+                        let parsed = rust_decimal::Decimal::from_str(&format!(
+                            "{:.2}",
+                            row.amount.round_dp(2)
+                        ))
+                        .unwrap_or_default();
+                        row.amount == parsed
+                    },
+                    "amount precision lost for tx {}: {} → {:.2}",
+                    row.transaction_id,
+                    row.amount,
+                    row.amount.round_dp(2)
+                );
+                row.raw_description.clone()
+            },
             description: row.description.clone(),
             merchant_name: row.merchant_name.clone(),
             purpose: row.purpose.clone(),
@@ -687,6 +668,8 @@ impl TxRow {
 #[derive(Serialize)]
 struct TransactionsResponse {
     rows: Vec<TxRow>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    truncated: bool,
 }
 
 /// Account summary for the accounts picker.
@@ -899,7 +882,7 @@ async fn get_review_queue(
     }
     match resp_rx.await {
         Ok(Ok(rows)) => Json(ReviewQueueResponse {
-            rows: rows.iter().map(ReviewQueueRow::from_record).collect(),
+            rows: rows.iter().map(TxRow::from_record).collect(),
         })
         .into_response(),
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -920,6 +903,7 @@ async fn get_transactions(
             .unwrap_or(DEFAULT_TRANSACTIONS_LIMIT)
             .min(DEFAULT_TRANSACTIONS_LIMIT),
     };
+    let limit = params.limit;
     let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::TransactionsWindow {
@@ -932,10 +916,14 @@ async fn get_transactions(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(rows)) => Json(TransactionsResponse {
-            rows: rows.iter().map(TxRow::from_record).collect(),
-        })
-        .into_response(),
+        Ok(Ok(rows)) => {
+            let truncated = rows.len() >= limit;
+            Json(TransactionsResponse {
+                rows: rows.iter().map(TxRow::from_record).collect(),
+                truncated,
+            })
+            .into_response()
+        }
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1138,7 +1126,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
     }
     match resp_rx.await {
         Ok(Ok(forecast_id)) => {
-            Json(serde_json::json!({ "forecast_id": forecast_id })).into_response()
+            Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
         }
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
@@ -1385,6 +1373,23 @@ fn open_browser(url: &str) {
                 .spawn(),
             _ => Command::new("open").arg(url).spawn(),
         }
+    } else if cfg!(target_os = "linux") {
+        // Try xdg-open first (X11/Wayland with xdg-utils)
+        let xdg = Command::new("xdg-open").arg(url).spawn();
+        match xdg {
+            Ok(child) => Ok(child),
+            Err(_) => {
+                // Fall back to gio open (GNOME/Wayland without xdg-utils)
+                let gio = Command::new("gio").args(["open", url]).spawn();
+                match gio {
+                    Ok(child) => Ok(child),
+                    Err(_) => {
+                        // Fall back to wslview (WSL)
+                        Command::new("wslview").arg(url).spawn()
+                    }
+                }
+            }
+        }
     } else {
         Command::new("xdg-open").arg(url).spawn()
     };
@@ -1553,8 +1558,8 @@ mod tests {
     }
 
     #[test]
-    fn review_queue_row_serialises_camel_case() {
-        let row = ReviewQueueRow::from_record(&sample_record());
+    fn tx_row_from_record_satisfies_camel_case_contract() {
+        let row = TxRow::from_record(&sample_record());
         let value = serde_json::to_value(&row).unwrap();
         assert_eq!(value["id"], "tx-1");
         assert_eq!(value["accountId"], "acc-1");
