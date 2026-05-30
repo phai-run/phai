@@ -4762,6 +4762,192 @@ fn forecast_refresh_installments_materialises_remaining_parcelas() {
 }
 
 #[test]
+fn forecast_refresh_collapses_duplicate_template_from_id_drift() {
+    // Regression for the idempotency incident (ADR-0022): when a template's
+    // derived id drifts (e.g. the hashing changed across a release), the same
+    // commitment forks into two active templates and `refresh` re-materialises
+    // both forever. `forecast refresh` must self-heal — collapse the duplicate
+    // to `descartado` and deactivate its forecasts — keeping one active row.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("card_a")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Card A"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    for (n, day) in [(1u32, 5u32), (2, 5), (3, 5)] {
+        let date = format!("2026-0{n}-{day:02}");
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(format!("parcel-{n:02}"))
+                .arg("--account-id")
+                .arg("card_a")
+                .arg("--date")
+                .arg(&date)
+                .arg("--description")
+                .arg(format!("Magazine Luiza Notebook XYZ {n}/12"))
+                .arg("--amount=-300.00"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    // Establish the canonical installment template + its 9 forecasts.
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("refresh-installments")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Simulate id drift: clone the template under a *new* id with the *same*
+    // natural identity (account + base description + total) and a later
+    // created_at, plus two active forecasts hanging off it.
+    let db_path = data_dir.join("phai.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let original_id: String = conn
+        .query_row(
+            "SELECT template_id FROM forecast_template WHERE kind = 'installment'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("original template id");
+    assert!(original_id.starts_with("installment-"));
+    conn.execute_batch(&format!(
+        "INSERT INTO forecast_template
+           (template_id, kind, description, merchant_pattern, category_id, account_id, amount,
+            amount_lower, amount_upper, cadence, next_due_day, start_date, end_date, remaining_count,
+            source, confidence, status, metadata_json, actor_id, idempotency_key, created_at, updated_at)
+         SELECT 'installment-drifted-dupe', kind, description, merchant_pattern, category_id, account_id,
+            amount, amount_lower, amount_upper, cadence, next_due_day, start_date, end_date,
+            remaining_count, source, confidence, 'ativo', metadata_json, actor_id,
+            'forecast-template-installment-drifted-dupe',
+            datetime(created_at, '+1 hour'), datetime(updated_at, '+1 hour')
+         FROM forecast_template WHERE template_id = '{original_id}';
+
+         INSERT INTO forecast
+           (forecast_id, due_date, description, amount, category_id, account_id, status, recurrence,
+            actor_id, idempotency_key, metadata_json, created_at, updated_at, template_id,
+            realized_transaction_id, realized_at)
+         SELECT 'dupe-' || forecast_id, due_date, description, amount, category_id, account_id, 'ativo',
+            recurrence, actor_id, 'idem-dupe-' || forecast_id, metadata_json, created_at, updated_at,
+            'installment-drifted-dupe', realized_transaction_id, realized_at
+         FROM forecast WHERE template_id = '{original_id}' LIMIT 2;"
+    ))
+    .expect("seed drifted duplicate");
+
+    let installment_templates: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast_template WHERE kind = 'installment'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count installment templates");
+    assert_eq!(installment_templates, 2, "duplicate seeded");
+    drop(conn);
+
+    // Full refresh must self-heal.
+    let stdout = envs(
+        cargo_bin().arg("forecast").arg("refresh").arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let report: Value = serde_json::from_slice(&stdout).expect("valid refresh json");
+    assert!(
+        report["templates_deduped"].as_u64().unwrap_or(0) >= 1,
+        "refresh report must record the dedup"
+    );
+
+    let conn = Connection::open(&db_path).expect("open db");
+    let original_status: String = conn
+        .query_row(
+            "SELECT status FROM forecast_template WHERE template_id = ?1",
+            [&original_id],
+            |r| r.get(0),
+        )
+        .expect("original status");
+    assert_eq!(original_status, "ativo", "canonical (oldest) stays active");
+    let dupe_status: String = conn
+        .query_row(
+            "SELECT status FROM forecast_template WHERE template_id = 'installment-drifted-dupe'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("dupe status");
+    assert_eq!(dupe_status, "descartado", "younger duplicate demoted");
+    let active_dupe_forecasts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id = 'installment-drifted-dupe' \
+             AND status = 'ativo'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count active dupe forecasts");
+    assert_eq!(active_dupe_forecasts, 0, "dupe forecasts deactivated");
+    let active_installment_templates: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast_template WHERE kind = 'installment' AND status = 'ativo'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count active installment templates");
+    assert_eq!(
+        active_installment_templates, 1,
+        "exactly one active template per identity"
+    );
+
+    // Running again is a no-op for the dedup pass.
+    let stdout2 = envs(
+        cargo_bin().arg("forecast").arg("refresh").arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let report2: Value = serde_json::from_slice(&stdout2).expect("valid refresh json");
+    assert_eq!(
+        report2["templates_deduped"].as_u64(),
+        Some(0),
+        "second refresh finds nothing to dedup"
+    );
+}
+
+#[test]
 fn forecast_suggest_accept_dismiss_subscription_round_trip() {
     // Layer 2/3 (ADR-0016): seed three months of a stable monthly debit
     // (Spotify-like), expect the detector to flag it, persist as
