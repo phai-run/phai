@@ -73,6 +73,7 @@ proposed → active → superseded
 | [0019](0019-serve-loopback-only-localhost-alias.md) | `fin serve` uses loopback-only binding with a localhost alias | active |
 | [0020](0020-single-workspace-version.md) | Single workspace version: one number for the whole product | active |
 | [0021](0021-ondisk-identity-migration-to-phai.md) | On-disk identity migration from finance-os to phai (legacy fallback) | active |
+| [0022](0022-forecast-template-natural-key-idempotency.md) | Forecast template idempotency via natural keys + self-healing dedup | active |
 
 ---
 
