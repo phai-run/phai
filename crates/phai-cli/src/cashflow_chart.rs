@@ -162,8 +162,7 @@ pub(crate) async fn build_chart_data(
 
     // Accrual cashflow across all reportable accounts, keyed by `YYYY-MM`.
     let flows = store.cashflow_reportable().await?;
-    let by_month: HashMap<&str, _> =
-        flows.iter().map(|r| (r.month_ref.as_str(), r)).collect();
+    let by_month: HashMap<&str, _> = flows.iter().map(|r| (r.month_ref.as_str(), r)).collect();
 
     // Derive the saldo anchor from the net of everything *before* the window
     // so the line reflects prior history instead of always starting at zero.
