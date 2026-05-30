@@ -216,6 +216,18 @@ pub trait FinanceStore {
     /// `opening_balance` and `closing_balance` populated when every
     /// checking account has a usable snapshot anchor.
     async fn cashflow_month(&self, month_ref: &str) -> Result<CashflowRow>;
+    /// Accrual monthly cashflow across **all reportable accounts** (reads the
+    /// `v_cashflow` view). Every reportable transaction contributes in the
+    /// month it posted — credit-card swipes included — with
+    /// `internal_categories` (`credit-card-payment`, `transfer-internal`)
+    /// excluded so paying a card bill is not double-counted against the
+    /// swipes it settles. This is the household-spend basis used by the
+    /// per-category reports and the cashflow chart, in contrast to the
+    /// cash-basis checking-only [`Self::cashflow`]. Rows are ordered oldest
+    /// first; `opening_balance` / `closing_balance` are always `None` (the
+    /// chart derives its balance line from the accumulated `net`). See
+    /// ADR-0023.
+    async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>>;
     /// Aggregate balance across all `account_type='checking'` accounts at
     /// `target`. Anchored on the latest snapshot ≤ `target` per account
     /// plus the delta of transactions between snapshot date and `target`.

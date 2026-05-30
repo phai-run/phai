@@ -3391,6 +3391,35 @@ impl FinanceStore for BigQueryStore {
         })
     }
 
+    async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
+        // Accrual basis over all reportable accounts — delegates to the
+        // `v_cashflow` view (same rules as the SQLite backend). Monetary
+        // columns are exact-decimal strings; `opening`/`closing` are unset.
+        let sql = format!(
+            "
+            SELECT month_ref, income, expenses, expense_reduction, net
+            FROM {view}
+            ORDER BY month_ref ASC
+            ",
+            view = self.qualified_table("v_cashflow")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(CashflowRow {
+                month_ref: required_string(&values, 0, "month_ref")?,
+                income: required_decimal(&values, 1, "income")?,
+                expenses: required_decimal(&values, 2, "expenses")?,
+                expense_reduction: required_decimal(&values, 3, "expense_reduction")?,
+                net: required_decimal(&values, 4, "net")?,
+                opening_balance: None,
+                closing_balance: None,
+            });
+        }
+        Ok(items)
+    }
+
     async fn checking_balance_at(&self, target: NaiveDate) -> Result<Option<CheckingBalance>> {
         // Snapshot-anchored aggregate: per checking account, take the latest
         // snapshot ≤ target and add the sum of `amount` for transactions

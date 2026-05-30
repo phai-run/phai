@@ -74,6 +74,7 @@ proposed → active → superseded
 | [0020](0020-single-workspace-version.md) | Single workspace version: one number for the whole product | active |
 | [0021](0021-web-app-on-livestore-client-only.md) | Web app on LiveStore (client-only) bridged to the store | accepted |
 | [0022](0022-ondisk-identity-migration-to-phai.md) | On-disk identity migration from finance-os to phai (legacy fallback) | active |
+| [0023](0023-cashflow-chart-accrual-source.md) | Cashflow chart sources from `v_cashflow` (accrual) with a net-derived saldo line | accepted |
 
 ---
 

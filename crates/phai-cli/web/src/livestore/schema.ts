@@ -26,9 +26,14 @@ import {
  * (client-only design, see ADR-0001).
  */
 
+// Computes current month as "YYYY-MM" for the default selectedMonth.
+const currentMonth = (() => {
+	const d = new Date();
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+})();
+
 export const tables = {
-	// The full transaction window, seeded from /api/transactions. Drives the
-	// review list and the per-month panel in Planejamento.
+	// The full transaction window, seeded from /api/transactions.
 	transactions: State.SQLite.table({
 		name: "transactions",
 		columns: {
@@ -41,16 +46,15 @@ export const tables = {
 			merchantName: State.SQLite.text({ nullable: true }),
 			purpose: State.SQLite.text({ nullable: true }),
 			categoryId: State.SQLite.text({ nullable: true }),
-			month: State.SQLite.text({ default: "" }), // YYYY-MM, for filtering
+			month: State.SQLite.text({ default: "" }), // YYYY-MM
 			paymentStatus: State.SQLite.text({ default: "" }),
-			reviewed: State.SQLite.integer({ default: 0 }), // 0/1 — SQLite has no bool
+			reviewed: State.SQLite.integer({ default: 0 }),
 			isInstallment: State.SQLite.integer({ default: 0 }),
 			isSubscription: State.SQLite.integer({ default: 0 }),
 		},
 	}),
 
-	// Optimistic overlay of the user's review edits, applied on top of
-	// `transactions` until the bridge acks them.
+	// Optimistic overlay of the user's review edits.
 	reviewOverlay: State.SQLite.table({
 		name: "reviewOverlay",
 		columns: {
@@ -62,17 +66,14 @@ export const tables = {
 		},
 	}),
 
-	// The flush queue: one row per unsynced write. `type` routes the flush:
-	//  - 'review'         → POST /api/events
-	//  - 'forecastMove'   → POST /api/forecast/move
-	//  - 'forecastCreate' → POST /api/forecast
+	// The flush queue: one row per unsynced write.
 	pendingWrites: State.SQLite.table({
 		name: "pendingWrites",
 		columns: {
 			writeId: State.SQLite.text({ primaryKey: true }),
 			type: State.SQLite.text({ default: "review" }),
-			transactionId: State.SQLite.text({ default: "" }), // review only
-			forecastId: State.SQLite.text({ default: "" }), // forecast moves only
+			transactionId: State.SQLite.text({ default: "" }),
+			forecastId: State.SQLite.text({ default: "" }),
 			payload: State.SQLite.json({ default: {} }),
 			createdAt: State.SQLite.integer({ default: 0 }),
 			attempts: State.SQLite.integer({ default: 0 }),
@@ -97,20 +98,19 @@ export const tables = {
 	}),
 
 	// Cash-evolution chart: one row per month, seeded from /api/chart.
-	// All monetary fields are decimal-as-string, never float.
 	chartMonths: State.SQLite.table({
 		name: "chartMonths",
 		columns: {
-			label: State.SQLite.text({ primaryKey: true }), // display label, e.g. "mai/26"
-			month: State.SQLite.text({ default: "" }), // YYYY-MM — canonical match key
+			label: State.SQLite.text({ primaryKey: true }),
+			month: State.SQLite.text({ default: "" }),
 			inflows: State.SQLite.text({ default: "0" }),
 			outflows: State.SQLite.text({ default: "0" }),
 			forecastInflowsRemaining: State.SQLite.text({ default: "0" }),
 			forecastOutflowsRemaining: State.SQLite.text({ default: "0" }),
 			closingBalance: State.SQLite.text({ default: "0" }),
 			projectedClosingBalance: State.SQLite.text({ default: "0" }),
-			isFuture: State.SQLite.integer({ default: 0 }), // 0/1 — SQLite has no bool
-			ordinal: State.SQLite.integer({ default: 0 }), // preserves bridge order
+			isFuture: State.SQLite.integer({ default: 0 }),
+			ordinal: State.SQLite.integer({ default: 0 }),
 		},
 	}),
 
@@ -121,17 +121,16 @@ export const tables = {
 			forecastId: State.SQLite.text({ primaryKey: true }),
 			dueDate: State.SQLite.text({ nullable: true }),
 			description: State.SQLite.text({ default: "" }),
-			amount: State.SQLite.text({ default: "0" }), // decimal-as-string
+			amount: State.SQLite.text({ default: "0" }),
 			categoryId: State.SQLite.text({ nullable: true }),
 			accountId: State.SQLite.text({ nullable: true }),
 			status: State.SQLite.text({ default: "" }),
 			kind: State.SQLite.text({ default: "manual" }),
-			draggable: State.SQLite.integer({ default: 0 }), // 0/1 — installments/subs locked
+			draggable: State.SQLite.integer({ default: 0 }),
 		},
 	}),
 
-	// Optimistic overlay of dragged-forecast re-dating, applied on top of
-	// `forecasts` until the bridge acks the move.
+	// Optimistic overlay of dragged-forecast re-dating.
 	forecastOverlay: State.SQLite.table({
 		name: "forecastOverlay",
 		columns: {
@@ -140,8 +139,7 @@ export const tables = {
 		},
 	}),
 
-	// Proposed forecast templates (recurring patterns), seeded from
-	// /api/forecast-templates. Accept/Dismiss act through the bridge.
+	// Proposed forecast templates, seeded from /api/forecast-templates.
 	forecastTemplates: State.SQLite.table({
 		name: "forecastTemplates",
 		columns: {
@@ -149,48 +147,39 @@ export const tables = {
 			description: State.SQLite.text({ default: "" }),
 			kind: State.SQLite.text({ nullable: true }),
 			cadence: State.SQLite.text({ nullable: true }),
-			amount: State.SQLite.text({ default: "0" }), // decimal-as-string
+			amount: State.SQLite.text({ default: "0" }),
 			status: State.SQLite.text({ default: "" }),
 			confidence: State.SQLite.text({ nullable: true }),
 		},
 	}),
 
-	// Session-local UI state (current view, month selection, filters).
+	// Session-local UI state (month selection, filters, chart compact state).
 	ui: State.SQLite.clientDocument({
 		name: "ui",
 		schema: Schema.Struct({
-			view: Schema.Literal("review", "planning"),
-			// Planejamento: the bar the user clicked drives the panel below.
+			// Dashboard: the selected month drives the detail panel below the chart.
 			selectedMonth: Schema.NullOr(Schema.String),
-			// Review filters (all applied client-side over the seeded window).
+			// Month-detail filters (all applied client-side over the seeded window).
 			ownerFilter: Schema.NullOr(Schema.String),
 			accountFilter: Schema.NullOr(Schema.String),
-			merchantFilter: Schema.NullOr(Schema.String),
 			categoryFilter: Schema.NullOr(Schema.String),
-			unreviewedOnly: Schema.Boolean,
-			subscriptionsOnly: Schema.Boolean,
+			textFilter: Schema.NullOr(Schema.String), // text search across description/merchant
 			installmentsOnly: Schema.Boolean,
-			cursor: Schema.Number,
-			// Window controls (drive both the seed and the chart range).
-			monthsBack: Schema.Number,
-			monthsAhead: Schema.Number,
+			subscriptionsOnly: Schema.Boolean,
+			unreviewedOnly: Schema.Boolean,
 			forecastStatusFilter: Schema.NullOr(Schema.String),
 		}),
 		default: {
 			id: SessionIdSymbol,
 			value: {
-				view: "review",
-				selectedMonth: null,
+				selectedMonth: currentMonth,
 				ownerFilter: null,
 				accountFilter: null,
-				merchantFilter: null,
 				categoryFilter: null,
-				unreviewedOnly: false,
-				subscriptionsOnly: false,
+				textFilter: null,
 				installmentsOnly: false,
-				cursor: 0,
-				monthsBack: 6,
-				monthsAhead: 6,
+				subscriptionsOnly: false,
+				unreviewedOnly: false,
 				forecastStatusFilter: null,
 			},
 		},
@@ -209,7 +198,7 @@ const TxRow = Schema.Struct({
 	categoryId: Schema.NullOr(Schema.String),
 	month: Schema.String,
 	paymentStatus: Schema.String,
-	reviewed: Schema.Number, // 0/1
+	reviewed: Schema.Number,
 	isInstallment: Schema.Number,
 	isSubscription: Schema.Number,
 });
@@ -230,7 +219,7 @@ const ChartMonth = Schema.Struct({
 	forecastOutflowsRemaining: Schema.String,
 	closingBalance: Schema.String,
 	projectedClosingBalance: Schema.String,
-	isFuture: Schema.Number, // 0/1
+	isFuture: Schema.Number,
 	ordinal: Schema.Number,
 });
 
@@ -243,7 +232,7 @@ const ForecastRow = Schema.Struct({
 	accountId: Schema.NullOr(Schema.String),
 	status: Schema.String,
 	kind: Schema.String,
-	draggable: Schema.Number, // 0/1
+	draggable: Schema.Number,
 });
 
 const ForecastTemplateRow = Schema.Struct({
@@ -301,17 +290,15 @@ export const events = {
 			submittedAt: Schema.Number,
 		}),
 	}),
-	// A manual forecast dragged to a new month (re-dated). Optimistic.
 	forecastMoved: Events.synced({
 		name: "v1.ForecastMoved",
 		schema: Schema.Struct({
 			writeId: Schema.String,
 			forecastId: Schema.String,
-			dueDate: Schema.String, // YYYY-MM-DD
+			dueDate: Schema.String,
 			movedAt: Schema.Number,
 		}),
 	}),
-	// A manual forecast created from the Planejamento panel. Optimistic.
 	forecastCreated: Events.synced({
 		name: "v1.ForecastCreated",
 		schema: Schema.Struct({
@@ -368,7 +355,6 @@ const materializers = State.SQLite.materializers(events, {
 			createdAt: submittedAt,
 			attempts: 0,
 		}),
-		// optimistic overlay so the row reflects the edit immediately
 		tables.reviewOverlay
 			.insert({ transactionId, ...patch })
 			.onConflict("transactionId", "replace"),
@@ -382,7 +368,6 @@ const materializers = State.SQLite.materializers(events, {
 			createdAt: movedAt,
 			attempts: 0,
 		}),
-		// optimistic overlay so bars + totals recompute in the same frame
 		tables.forecastOverlay
 			.insert({ forecastId, dueDate })
 			.onConflict("forecastId", "replace"),
@@ -401,7 +386,6 @@ const materializers = State.SQLite.materializers(events, {
 			createdAt,
 			attempts: 0,
 		}),
-		// optimistic insert so the chip + bars appear in the same frame
 		tables.forecasts.insert({
 			forecastId: writeId,
 			description,

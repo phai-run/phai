@@ -1,28 +1,65 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { formatMoney, numeric } from "../lib/format";
+import { useMemo, useRef, useState, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { formatMoneyNumber, numeric } from "../lib/format";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView } from "./types";
 
-/**
- * The cash-evolution chart — the spine of Planejamento. Hand-drawn SVG (no
- * charting dep) so the palette stays under our control (DESIGN.md).
- *
- * Per month:
- *  - inflow bar (cyan) up, outflow bar (rose) down, each STACKING realized over
- *    forecast: realized = solid accent, forecast-remaining = same hue at a lighter
- *    tint + diagonal hatch.
- *  - a projected closing-balance line (purple); realized solid, future dashed.
- *
- * An HTML column grid overlays the SVG: each column is the click target (selects
- * the month — instant client state), the hover target (opens a forecast popover),
- * and a drag drop target (re-date a dragged forecast to that month).
- */
-
+// ── SVG dimensions for the full chart ─────────────────────────────────────
 const W = 960;
-const H = 340;
-const PAD = { top: 20, right: 16, bottom: 40, left: 16 };
-const innerW = W - PAD.left - PAD.right;
-const innerH = H - PAD.top - PAD.bottom;
+const H = 290;
+const PAD = { top: 12, right: 8, bottom: 68, left: 8 };
+const innerW = W - PAD.left - PAD.right; // 944
+const innerH = H - PAD.top - PAD.bottom; // 210
+// Y where bars are rooted (baseline)
+const BASELINE = PAD.top + innerH; // 222
+// Max bar height (bars use 75% of innerH)
+const BAR_MAX = innerH * 0.75; // ~157.5
+
+// ── Model ──────────────────────────────────────────────────────────────────
+
+interface ChartModel {
+	realIns: number[];
+	fcIns: number[];
+	realOuts: number[];
+	fcOuts: number[];
+	balances: number[];
+	maxBar: number;
+	minBal: number;
+	balSpan: number;
+}
+
+function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
+	const realIns = months.map((m) => Math.max(0, numeric(m.inflows)));
+	const fcIns = months.map((m) =>
+		Math.max(0, numeric(m.forecastInflowsRemaining)),
+	);
+	const realOuts = months.map((m) => Math.abs(numeric(m.outflows)));
+	const fcOuts = months.map((m) =>
+		Math.abs(numeric(m.forecastOutflowsRemaining)),
+	);
+	const balances = months.map((m) =>
+		m.isFuture
+			? numeric(m.projectedClosingBalance)
+			: numeric(m.closingBalance),
+	);
+	const maxBar = Math.max(
+		1,
+		...months.map((_, i) => realIns[i] + fcIns[i]),
+		...months.map((_, i) => realOuts[i] + fcOuts[i]),
+	);
+	const minBal = Math.min(0, ...balances);
+	const maxBal = Math.max(1, ...balances);
+	const balSpan = maxBal - minBal || 1;
+	return { realIns, fcIns, realOuts, fcOuts, balances, maxBar, minBal, balSpan };
+}
+
+// Convert bar magnitude → SVG height
+const bh = (v: number, maxBar: number) => (v / maxBar) * BAR_MAX;
+// Convert closing balance → SVG y-coord (full innerH range)
+const by = (v: number, minBal: number, balSpan: number) =>
+	PAD.top + (1 - (v - minBal) / balSpan) * innerH;
+
+// ── Public component ───────────────────────────────────────────────────────
 
 export const PlanningChart = ({
 	months,
@@ -30,26 +67,28 @@ export const PlanningChart = ({
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
+	compact,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
 	selectedMonth: string | null;
-	onSelectMonth: (label: string) => void;
+	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
+	compact: boolean;
 }) => {
-	const [hover, setHover] = useState<number | null>(null);
-	const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
+	const model = useMemo(() => buildModel(months), [months]);
 
-	const handleChartKeyDown = (e: React.KeyboardEvent) => {
+	const handleKeyDown = (e: React.KeyboardEvent) => {
 		const n = months.length;
-		if (n === 0) return;
-		let next: number | null = focusedIdx;
+		if (!n) return;
+		const cur = selectedMonth ? months.findIndex((m) => m.month === selectedMonth) : -1;
+		let next = cur;
 		switch (e.key) {
 			case "ArrowLeft":
-				next = focusedIdx != null ? Math.max(0, focusedIdx - 1) : n - 1;
+				next = cur > 0 ? cur - 1 : 0;
 				break;
 			case "ArrowRight":
-				next = focusedIdx != null ? Math.min(n - 1, focusedIdx + 1) : 0;
+				next = cur < n - 1 ? cur + 1 : n - 1;
 				break;
 			case "Home":
 				next = 0;
@@ -61,269 +100,519 @@ export const PlanningChart = ({
 				return;
 		}
 		e.preventDefault();
-		if (next != null) {
-			setFocusedIdx(next);
-			onSelectMonth(months[next].month);
-		}
+		if (next !== cur && next >= 0) onSelectMonth(months[next].month);
 	};
-
-	const model = useMemo(() => {
-		const realIn = (m: ChartMonthView) => Math.max(0, numeric(m.inflows));
-		const fcIn = (m: ChartMonthView) =>
-			Math.max(0, numeric(m.forecastInflowsRemaining));
-		const realOut = (m: ChartMonthView) => Math.abs(numeric(m.outflows));
-		const fcOut = (m: ChartMonthView) =>
-			Math.abs(numeric(m.forecastOutflowsRemaining));
-		const balance = (m: ChartMonthView) =>
-			m.isFuture
-				? numeric(m.projectedClosingBalance)
-				: numeric(m.closingBalance);
-
-		const realIns = months.map(realIn);
-		const fcIns = months.map(fcIn);
-		const realOuts = months.map(realOut);
-		const fcOuts = months.map(fcOut);
-		const balances = months.map(balance);
-
-		const maxBar = Math.max(
-			1,
-			...months.map((_, i) => realIns[i] + fcIns[i]),
-			...months.map((_, i) => realOuts[i] + fcOuts[i]),
-		);
-		const minBal = Math.min(0, ...balances);
-		const maxBal = Math.max(1, ...balances);
-		const balSpan = maxBal - minBal || 1;
-
-		return {
-			realIns,
-			fcIns,
-			realOuts,
-			fcOuts,
-			balances,
-			maxBar,
-			minBal,
-			balSpan,
-		};
-	}, [months]);
 
 	if (months.length === 0) return null;
 
+	return (
+		<div
+			tabIndex={0}
+			role="application"
+			aria-label="gráfico de caixa — use ←→ para navegar entre meses"
+			onKeyDown={handleKeyDown}
+			style={{ outline: "none" }}
+		>
+			<AnimatePresence mode="wait" initial={false}>
+				{compact ? (
+					<motion.div
+						key="compact"
+						initial={{ opacity: 0, y: -4 }}
+						animate={{ opacity: 1, y: 0 }}
+						exit={{ opacity: 0, y: -4 }}
+						transition={{ duration: 0.18 }}
+					>
+						<CompactChart
+							months={months}
+							model={model}
+							selectedMonth={selectedMonth}
+							onSelectMonth={onSelectMonth}
+							onDropForecast={onDropForecast}
+						/>
+					</motion.div>
+				) : (
+					<motion.div
+						key="full"
+						initial={{ opacity: 0 }}
+						animate={{ opacity: 1 }}
+						exit={{ opacity: 0 }}
+						transition={{ duration: 0.18 }}
+					>
+						<FullChart
+							months={months}
+							model={model}
+							forecastsByMonth={forecastsByMonth}
+							selectedMonth={selectedMonth}
+							onSelectMonth={onSelectMonth}
+							onDropForecast={onDropForecast}
+						/>
+					</motion.div>
+				)}
+			</AnimatePresence>
+		</div>
+	);
+};
+
+// ── Full chart ─────────────────────────────────────────────────────────────
+
+const FullChart = ({
+	months,
+	model,
+	forecastsByMonth,
+	selectedMonth,
+	onSelectMonth,
+	onDropForecast,
+}: {
+	months: ReadonlyArray<ChartMonthView>;
+	model: ChartModel;
+	forecastsByMonth: Map<string, ForecastView[]>;
+	selectedMonth: string | null;
+	onSelectMonth: (month: string) => void;
+	onDropForecast: (forecastId: string, targetMonth: string) => void;
+}) => {
+	const [hover, setHover] = useState<number | null>(null);
 	const n = months.length;
 	const slot = innerW / n;
-	const barW = Math.min(26, slot * 0.3);
-	const baseY = PAD.top + innerH / 2;
-	const barH = (v: number) => (v / model.maxBar) * (innerH / 2 - 6);
-	const balY = (v: number) =>
-		PAD.top + innerH - ((v - model.minBal) / model.balSpan) * innerH;
-	const xCenter = (i: number) => PAD.left + slot * i + slot / 2;
+	const barW = Math.min(14, slot * 0.27);
+
+	// Bar X-centers: income (left of slot midpoint), expense (right)
+	const incX = (i: number) => PAD.left + slot * i + slot * 0.3;
+	const expX = (i: number) => PAD.left + slot * i + slot * 0.7;
+	const midX = (i: number) => PAD.left + slot * i + slot * 0.5;
 
 	const firstFuture = months.findIndex((m) => m.isFuture === 1);
-
-	const realizedLine =
+	const realLine =
 		firstFuture === -1
 			? model.balances
 			: model.balances.slice(0, firstFuture + 1);
-	const futureLine =
+	const fcLine =
 		firstFuture === -1 ? [] : model.balances.slice(firstFuture);
 
 	const linePath = (vals: number[], offset = 0) =>
 		vals
-			.map((b, k) => `${k === 0 ? "M" : "L"} ${xCenter(offset + k)} ${balY(b)}`)
+			.map(
+				(b, k) =>
+					`${k === 0 ? "M" : "L"} ${midX(offset + k)} ${by(b, model.minBal, model.balSpan)}`,
+			)
 			.join(" ");
 
+	// Year totals (all months, realized + forecast)
+	const yearIn = model.realIns.reduce(
+		(s, v, i) => s + v + model.fcIns[i],
+		0,
+	);
+	const yearOut = model.realOuts.reduce(
+		(s, v, i) => s + v + model.fcOuts[i],
+		0,
+	);
+
 	return (
-		<div
-			style={{ position: "relative" }}
-			tabIndex={0}
-			role="application"
-			aria-label="gráfico de evolução de caixa"
-			onKeyDown={handleChartKeyDown}
-		>
-			<svg
-				viewBox={`0 0 ${W} ${H}`}
-				width="100%"
-				role="img"
-				aria-label="evolução de caixa"
-				style={{ display: "block" }}
+		<div>
+			{/* Year totals strip */}
+			<div
+				className="mono"
+				style={{
+					display: "flex",
+					gap: 20,
+					fontSize: 11,
+					paddingBottom: 8,
+					flexWrap: "wrap",
+				}}
 			>
-				<defs>
-					<pattern
-						id="hatch-cyan"
-						width="5"
-						height="5"
-						patternTransform="rotate(45)"
-						patternUnits="userSpaceOnUse"
-					>
-						<rect width="5" height="5" fill="var(--cyan)" opacity={0.18} />
-						<line
-							x1="0"
-							y1="0"
-							x2="0"
-							y2="5"
-							stroke="var(--cyan)"
-							strokeWidth="1.4"
-							opacity={0.6}
-						/>
-					</pattern>
-					<pattern
-						id="hatch-rose"
-						width="5"
-						height="5"
-						patternTransform="rotate(45)"
-						patternUnits="userSpaceOnUse"
-					>
-						<rect width="5" height="5" fill="var(--rose)" opacity={0.18} />
-						<line
-							x1="0"
-							y1="0"
-							x2="0"
-							y2="5"
-							stroke="var(--rose)"
-							strokeWidth="1.4"
-							opacity={0.6}
-						/>
-					</pattern>
-				</defs>
+				<span style={{ color: "var(--muted)" }}>
+					{new Date().getFullYear()}
+				</span>
+				<span style={{ color: "var(--cyan)" }}>
+					entradas {formatMoneyNumber(yearIn)}
+				</span>
+				<span style={{ color: "var(--rose)" }}>
+					saídas {formatMoneyNumber(-yearOut)}
+				</span>
+				<span
+					style={{ color: yearIn - yearOut >= 0 ? "var(--green)" : "var(--rose)" }}
+				>
+					resultado{" "}
+					{yearIn - yearOut >= 0 ? "+" : ""}
+					{formatMoneyNumber(yearIn - yearOut)}
+				</span>
+			</div>
 
-				{/* zero baseline */}
-				<line
-					x1={PAD.left}
-					x2={W - PAD.right}
-					y1={baseY}
-					y2={baseY}
-					stroke="var(--border)"
-					strokeWidth={1}
-				/>
-
-				{months.map((m, i) => {
-					const x = xCenter(i);
-					const realInH = barH(model.realIns[i]);
-					const fcInH = barH(model.fcIns[i]);
-					const realOutH = barH(model.realOuts[i]);
-					const fcOutH = barH(model.fcOuts[i]);
-					const isSel = m.month === selectedMonth;
-					return (
-						<g key={m.label}>
-							{(hover === i || isSel) && (
-								<rect
-									x={PAD.left + slot * i}
-									y={PAD.top}
-									width={slot}
-									height={innerH}
-									fill={isSel ? "rgba(13,148,136,0.08)" : "rgba(0,0,0,0.04)"}
-								/>
-							)}
-
-							{/* inflow: realized (solid) then forecast (hatch) stacked above */}
-							<rect
-								x={x - barW - 1}
-								y={baseY - realInH}
-								width={barW}
-								height={realInH}
-								rx={2}
-								fill="var(--cyan)"
+			<div style={{ position: "relative" }}>
+				<svg
+					viewBox={`0 0 ${W} ${H}`}
+					width="100%"
+					role="img"
+					aria-label="gráfico de caixa mensal — barras de entradas e saídas, linha de saldo"
+					style={{ display: "block" }}
+				>
+					<defs>
+						{/* Forecast portion: darker shade + diagonal hatch */}
+						<pattern
+							id="fc-cyan"
+							width="5"
+							height="5"
+							patternTransform="rotate(45)"
+							patternUnits="userSpaceOnUse"
+						>
+							<rect width="5" height="5" fill="#065f5a" />
+							<line
+								x1="0"
+								y1="0"
+								x2="0"
+								y2="5"
+								stroke="#0d9488"
+								strokeWidth="1.5"
+								opacity={0.5}
 							/>
-							{fcInH > 0 && (
-								<rect
-									x={x - barW - 1}
-									y={baseY - realInH - fcInH}
-									width={barW}
-									height={fcInH}
-									rx={2}
-									fill="url(#hatch-cyan)"
-									stroke="var(--cyan)"
-									strokeOpacity={0.4}
-									strokeWidth={0.5}
-								/>
-							)}
-
-							{/* outflow: realized (solid) then forecast (hatch) stacked below */}
-							<rect
-								x={x + 1}
-								y={baseY}
-								width={barW}
-								height={realOutH}
-								rx={2}
-								fill="var(--rose)"
+						</pattern>
+						<pattern
+							id="fc-rose"
+							width="5"
+							height="5"
+							patternTransform="rotate(45)"
+							patternUnits="userSpaceOnUse"
+						>
+							<rect width="5" height="5" fill="#8f1030" />
+							<line
+								x1="0"
+								y1="0"
+								x2="0"
+								y2="5"
+								stroke="#e11d48"
+								strokeWidth="1.5"
+								opacity={0.5}
 							/>
-							{fcOutH > 0 && (
-								<rect
-									x={x + 1}
-									y={baseY + realOutH}
-									width={barW}
-									height={fcOutH}
-									rx={2}
-									fill="url(#hatch-rose)"
-									stroke="var(--rose)"
-									strokeOpacity={0.4}
-									strokeWidth={0.5}
-								/>
-							)}
+						</pattern>
+					</defs>
 
-							<text
-								x={x}
-								y={H - 14}
-								textAnchor="middle"
-								fontSize={10}
-								fontFamily="var(--font-mono)"
-								fill="var(--muted)"
-							>
-								{m.label.slice(2)}
-							</text>
-						</g>
-					);
-				})}
+					{/* Baseline */}
+					<line
+						x1={PAD.left}
+						x2={W - PAD.right}
+						y1={BASELINE}
+						y2={BASELINE}
+						stroke="var(--border)"
+						strokeWidth={0.5}
+					/>
 
-				{/* balance line — realized solid, forecast dashed */}
-				<path
-					d={linePath(realizedLine)}
-					fill="none"
-					stroke="var(--purple)"
-					strokeWidth={2}
-				/>
-				{futureLine.length > 1 && (
+					{months.map((m, i) => {
+						const rIn = bh(model.realIns[i], model.maxBar);
+						const fIn = bh(model.fcIns[i], model.maxBar);
+						const rOut = bh(model.realOuts[i], model.maxBar);
+						const fOut = bh(model.fcOuts[i], model.maxBar);
+						const isSel = m.month === selectedMonth;
+						const isHov = hover === i && !isSel;
+						const ix = incX(i) - barW / 2;
+						const ox = expX(i) - barW / 2;
+						const net =
+							model.realIns[i] +
+							model.fcIns[i] -
+							model.realOuts[i] -
+							model.fcOuts[i];
+
+						return (
+							<g key={m.label}>
+								{/* Column background */}
+								{(isSel || isHov) && (
+									<rect
+										x={PAD.left + slot * i}
+										y={PAD.top}
+										width={slot}
+										height={innerH + 2}
+										fill={
+											isSel
+												? "rgba(13,148,136,0.08)"
+												: "rgba(0,0,0,0.025)"
+										}
+									/>
+								)}
+
+								{/* Income bar — realized (solid cyan) */}
+								{rIn > 0.5 && (
+									<rect
+										x={ix}
+										y={BASELINE - rIn}
+										width={barW}
+										height={rIn}
+										rx={2}
+										fill="var(--cyan)"
+									/>
+								)}
+								{/* Income bar — forecast (darker+hatch on top) */}
+								{fIn > 0.5 && (
+									<rect
+										x={ix}
+										y={BASELINE - rIn - fIn}
+										width={barW}
+										height={fIn}
+										rx={2}
+										fill="url(#fc-cyan)"
+									/>
+								)}
+
+								{/* Expense bar — realized (solid rose) */}
+								{rOut > 0.5 && (
+									<rect
+										x={ox}
+										y={BASELINE - rOut}
+										width={barW}
+										height={rOut}
+										rx={2}
+										fill="var(--rose)"
+									/>
+								)}
+								{/* Expense bar — forecast (darker+hatch on top) */}
+								{fOut > 0.5 && (
+									<rect
+										x={ox}
+										y={BASELINE - rOut - fOut}
+										width={barW}
+										height={fOut}
+										rx={2}
+										fill="url(#fc-rose)"
+									/>
+								)}
+
+								{/* Month label */}
+								<text
+									x={midX(i)}
+									y={BASELINE + 14}
+									textAnchor="middle"
+									fontSize={9.5}
+									fontFamily="var(--font-mono)"
+									fill={isSel ? "var(--cyan)" : "var(--muted)"}
+									fontWeight={isSel ? "600" : "400"}
+								>
+									{m.label}
+								</text>
+
+								{/* Net resultado indicator */}
+								<text
+									x={midX(i)}
+									y={BASELINE + 30}
+									textAnchor="middle"
+									fontSize={8}
+									fontFamily="var(--font-mono)"
+									fill={net >= 0 ? "#15803d" : "#e11d48"}
+								>
+									{net >= 0 ? "+" : ""}
+									{formatMoneyNumber(net)}
+								</text>
+
+								{/* Entradas/saídas micro-labels */}
+								<text
+									x={incX(i)}
+									y={BASELINE + 46}
+									textAnchor="middle"
+									fontSize={7}
+									fontFamily="var(--font-mono)"
+									fill="#0d9488"
+									opacity={0.7}
+								>
+									{formatMoneyNumber(model.realIns[i] + model.fcIns[i])}
+								</text>
+								<text
+									x={expX(i)}
+									y={BASELINE + 46}
+									textAnchor="middle"
+									fontSize={7}
+									fontFamily="var(--font-mono)"
+									fill="#e11d48"
+									opacity={0.7}
+								>
+									{formatMoneyNumber(model.realOuts[i] + model.fcOuts[i])}
+								</text>
+							</g>
+						);
+					})}
+
+					{/* Balance / resultado line */}
 					<path
-						d={linePath(futureLine, Math.max(0, firstFuture))}
+						d={linePath(realLine)}
 						fill="none"
 						stroke="var(--purple)"
-						strokeWidth={2}
-						strokeDasharray="4 4"
-						opacity={0.6}
+						strokeWidth={1.5}
+					/>
+					{fcLine.length > 1 && (
+						<path
+							d={linePath(fcLine, Math.max(0, firstFuture))}
+							fill="none"
+							stroke="var(--purple)"
+							strokeWidth={1.5}
+							strokeDasharray="4 3"
+							opacity={0.6}
+						/>
+					)}
+					{model.balances.map((b, i) => (
+						<circle
+							key={months[i].month}
+							cx={midX(i)}
+							cy={by(b, model.minBal, model.balSpan)}
+							r={2.5}
+							fill="var(--purple)"
+							opacity={months[i].isFuture ? 0.5 : 1}
+						/>
+					))}
+				</svg>
+
+				{/* Interaction overlay */}
+				<ColumnOverlay
+					months={months}
+					selectedMonth={selectedMonth}
+					onSelectMonth={onSelectMonth}
+					onHover={setHover}
+					onDropForecast={onDropForecast}
+				/>
+
+				{/* Hover popover */}
+				{hover != null && (
+					<BarPopover
+						month={months[hover]}
+						forecasts={forecastsByMonth.get(months[hover].month) ?? []}
+						leftPct={((hover + 0.5) / n) * 100}
 					/>
 				)}
-				{model.balances.map((b, i) => (
-					<circle
-						key={months[i].label}
-						cx={xCenter(i)}
-						cy={balY(b)}
-						r={2.5}
-						fill="var(--purple)"
-						opacity={months[i].isFuture ? 0.6 : 1}
-					/>
-				))}
-			</svg>
+			</div>
 
-			{/* HTML column overlay: click / hover / drop-target per month */}
+			{/* Legend */}
+			<div
+				className="mono"
+				style={{
+					display: "flex",
+					flexWrap: "wrap",
+					gap: 14,
+					fontSize: 10,
+					color: "var(--muted)",
+					marginTop: 6,
+				}}
+			>
+				<LegendSwatch color="var(--cyan)" label="entradas" />
+				<LegendSwatch color="var(--rose)" label="saídas" />
+				<LegendSwatch hatch label="forecast" />
+				<LegendSwatch color="var(--purple)" label="saldo" dashed />
+			</div>
+		</div>
+	);
+};
+
+// ── Compact chart ──────────────────────────────────────────────────────────
+
+const CompactChart = ({
+	months,
+	model,
+	selectedMonth,
+	onSelectMonth,
+	onDropForecast,
+}: {
+	months: ReadonlyArray<ChartMonthView>;
+	model: ChartModel;
+	selectedMonth: string | null;
+	onSelectMonth: (month: string) => void;
+	onDropForecast: (forecastId: string, targetMonth: string) => void;
+}) => {
+	const BAR_MAX_C = 30;
+
+	return (
+		<div style={{ position: "relative", height: 56 }}>
+			{/* Visual layer */}
+			<div
+				style={{
+					position: "absolute",
+					inset: 0,
+					display: "flex",
+					alignItems: "flex-end",
+					paddingBottom: 16,
+				}}
+			>
+				{months.map((m, i) => {
+					const inH = Math.max(
+						2,
+						((model.realIns[i] + model.fcIns[i]) / model.maxBar) * BAR_MAX_C,
+					);
+					const outH = Math.max(
+						2,
+						((model.realOuts[i] + model.fcOuts[i]) / model.maxBar) *
+							BAR_MAX_C,
+					);
+					const isSel = m.month === selectedMonth;
+					const hasFC =
+						model.fcIns[i] > 0 || model.fcOuts[i] > 0;
+
+					return (
+						<div
+							key={m.month}
+							style={{
+								flex: 1,
+								display: "flex",
+								flexDirection: "column",
+								alignItems: "center",
+								justifyContent: "flex-end",
+								height: "100%",
+								borderRadius: 4,
+								background: isSel ? "rgba(13,148,136,0.09)" : "transparent",
+								position: "relative",
+							}}
+						>
+							{/* Mini bars */}
+							<div
+								style={{
+									display: "flex",
+									alignItems: "flex-end",
+									gap: 1,
+									marginBottom: 2,
+								}}
+							>
+								<div
+									style={{
+										width: 4,
+										height: inH,
+										background: "var(--cyan)",
+										borderRadius: "1px 1px 0 0",
+										opacity: hasFC ? 0.8 : 1,
+									}}
+								/>
+								<div
+									style={{
+										width: 4,
+										height: outH,
+										background: "var(--rose)",
+										borderRadius: "1px 1px 0 0",
+										opacity: hasFC ? 0.8 : 1,
+									}}
+								/>
+							</div>
+							{/* Month label */}
+							<span
+								className="mono"
+								style={{
+									position: "absolute",
+									bottom: 0,
+									fontSize: 8,
+									color: isSel ? "var(--cyan)" : "var(--muted2)",
+									fontWeight: isSel ? 600 : 400,
+									lineHeight: 1,
+								}}
+							>
+								{m.label.slice(0, 3)}
+							</span>
+						</div>
+					);
+				})}
+			</div>
+
+			{/* Interaction overlay */}
 			<ColumnOverlay
 				months={months}
 				selectedMonth={selectedMonth}
 				onSelectMonth={onSelectMonth}
-				onHover={setHover}
+				onHover={() => {}}
 				onDropForecast={onDropForecast}
 			/>
-
-			{hover != null && (
-				<BarPopover
-					month={months[hover]}
-					forecasts={forecastsByMonth.get(months[hover].month) ?? []}
-					leftPct={((hover + 0.5) / n) * 100}
-				/>
-			)}
-
-			<Legend />
 		</div>
 	);
 };
+
+// ── Shared interaction overlay ─────────────────────────────────────────────
 
 const ColumnOverlay = ({
 	months,
@@ -334,7 +623,7 @@ const ColumnOverlay = ({
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	selectedMonth: string | null;
-	onSelectMonth: (label: string) => void;
+	onSelectMonth: (month: string) => void;
 	onHover: (i: number | null) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
 }) => (
@@ -344,8 +633,6 @@ const ColumnOverlay = ({
 			inset: 0,
 			display: "grid",
 			gridTemplateColumns: `repeat(${months.length}, 1fr)`,
-			// leave room for the x-axis labels (bottom band) so clicks land on bars
-			paddingBottom: `${(PAD.bottom / H) * 100}%`,
 		}}
 	>
 		{months.map((m, i) => (
@@ -365,14 +652,13 @@ const ColumnOverlay = ({
 const MonthColumn = ({
 	month,
 	index,
-	selected,
 	onSelect,
 	onHover,
 	onDropForecast,
 }: {
 	month: string;
 	index: number;
-	selected: boolean;
+	selected: boolean; // visual selection is handled in SVG layer, not overlay
 	onSelect: () => void;
 	onHover: (i: number | null) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
@@ -388,7 +674,8 @@ const MonthColumn = ({
 		});
 	}, [month, registerTarget, onDropForecast]);
 
-	const isDropHover = dragging != null && hoverTargetId === `month:${month}`;
+	const isDropTarget =
+		dragging != null && hoverTargetId === `month:${month}`;
 
 	return (
 		<div
@@ -399,19 +686,19 @@ const MonthColumn = ({
 			style={{
 				cursor: "pointer",
 				borderRadius: "var(--radius-sm)",
-				outline: isDropHover ? "2px solid var(--purple)" : "none",
+				outline: isDropTarget ? "2px solid var(--purple)" : "none",
 				outlineOffset: -2,
-				background: isDropHover
+				background: isDropTarget
 					? "rgba(109,74,255,0.10)"
-					: selected
-						? "transparent"
-						: "transparent",
-				transition: "outline-color 120ms",
+					: "transparent",
+				transition: "outline-color 100ms",
 			}}
-			aria-label={`mês ${month}`}
+			aria-label={`selecionar ${month}`}
 		/>
 	);
 };
+
+// ── Hover popover ──────────────────────────────────────────────────────────
 
 const BarPopover = ({
 	month,
@@ -424,28 +711,27 @@ const BarPopover = ({
 }) => {
 	const ref = useRef<HTMLDivElement>(null);
 	const [side, setSide] = useState<"left" | "right">(
-		leftPct > 60 ? "right" : "left",
+		leftPct > 58 ? "right" : "left",
 	);
 
 	useEffect(() => {
 		const el = ref.current;
 		if (!el) return;
 		const rect = el.getBoundingClientRect();
-		if (side === "left" && rect.right > window.innerWidth - 8) {
-			setSide("right");
-		} else if (side === "right" && rect.left < 8) {
-			setSide("left");
-		}
+		if (side === "left" && rect.right > window.innerWidth - 8) setSide("right");
+		else if (side === "right" && rect.left < 8) setSide("left");
 	}, [side]);
 
-	const inflow =
+	const totalIn =
 		numeric(month.inflows) + numeric(month.forecastInflowsRemaining);
-	const outflow =
+	const totalOut =
 		Math.abs(numeric(month.outflows)) +
 		Math.abs(numeric(month.forecastOutflowsRemaining));
 	const close = month.isFuture
 		? month.projectedClosingBalance
 		: month.closingBalance;
+	const manualForecasts = forecasts.filter((f) => f.kind === "manual");
+
 	return (
 		<div
 			ref={ref}
@@ -453,34 +739,49 @@ const BarPopover = ({
 			style={
 				{
 					position: "absolute",
-					top: 8,
+					top: 6,
 					[side === "right" ? "right" : "left"]:
-						side === "right" ? `${100 - leftPct + 2}%` : `${leftPct + 2}%`,
+						side === "right"
+							? `${100 - leftPct + 2}%`
+							: `${leftPct + 2}%`,
 					background: "var(--surface)",
 					border: "1px solid var(--border)",
-					borderRadius: "var(--radius-sm)",
+					borderRadius: "var(--radius-md)",
 					padding: "10px 12px",
 					fontSize: 11,
-					lineHeight: 1.7,
+					lineHeight: 1.75,
 					pointerEvents: "none",
-					minWidth: 180,
-					maxWidth: 240,
-					zIndex: 5,
+					minWidth: 190,
+					maxWidth: 250,
+					zIndex: 6,
+					boxShadow: "0 4px 16px rgba(21,19,31,0.08)",
 				} as React.CSSProperties
 			}
 		>
-			<div style={{ color: "var(--white)", marginBottom: 4 }}>
+			<div style={{ fontWeight: 600, color: "var(--white)", marginBottom: 4 }}>
 				{month.label}
-				{month.isFuture ? " · previsto" : ""}
+				{month.isFuture ? (
+					<span style={{ color: "var(--muted)", fontWeight: 400 }}>
+						{" "}
+						· previsto
+					</span>
+				) : null}
 			</div>
 			<div style={{ color: "var(--cyan)" }}>
-				entradas {formatMoney(String(inflow))}
+				↑ {formatMoneyNumber(totalIn)}
 			</div>
 			<div style={{ color: "var(--rose)" }}>
-				saídas {formatMoney(String(-outflow))}
+				↑ {formatMoneyNumber(totalOut)}
 			</div>
-			<div style={{ color: "var(--purple)" }}>saldo {formatMoney(close)}</div>
-			{forecasts.length > 0 && (
+			<div
+				style={{
+					color:
+						Number(close) >= 0 ? "var(--purple)" : "var(--rose)",
+				}}
+			>
+				= {formatMoneyNumber(Number(close))}
+			</div>
+			{manualForecasts.length > 0 && (
 				<div
 					style={{
 						marginTop: 6,
@@ -488,10 +789,10 @@ const BarPopover = ({
 						borderTop: "1px solid var(--border)",
 					}}
 				>
-					<div style={{ color: "var(--muted)", marginBottom: 2 }}>
-						previsões
+					<div style={{ color: "var(--muted)", fontSize: 10, marginBottom: 2 }}>
+						previsões manuais
 					</div>
-					{forecasts.slice(0, 6).map((f) => (
+					{manualForecasts.slice(0, 5).map((f) => (
 						<div
 							key={f.forecastId}
 							style={{
@@ -505,17 +806,28 @@ const BarPopover = ({
 									overflow: "hidden",
 									textOverflow: "ellipsis",
 									whiteSpace: "nowrap",
+									color: "var(--muted)",
 								}}
 							>
-								{f.description}
+								⠿ {f.description}
 							</span>
-							<span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
-								{formatMoney(f.amount)}
+							<span
+								style={{
+									color:
+										Number(f.amount) < 0
+											? "var(--rose)"
+											: "var(--cyan)",
+									whiteSpace: "nowrap",
+								}}
+							>
+								{formatMoneyNumber(Math.abs(Number(f.amount)))}
 							</span>
 						</div>
 					))}
-					{forecasts.length > 6 && (
-						<div style={{ color: "var(--muted)" }}>+{forecasts.length - 6}</div>
+					{manualForecasts.length > 5 && (
+						<div style={{ color: "var(--muted2)", fontSize: 10 }}>
+							+{manualForecasts.length - 5} mais
+						</div>
 					)}
 				</div>
 			)}
@@ -523,44 +835,33 @@ const BarPopover = ({
 	);
 };
 
-const Legend = () => (
-	<div
-		className="mono"
-		style={{
-			display: "flex",
-			flexWrap: "wrap",
-			gap: 16,
-			fontSize: 11,
-			color: "var(--muted)",
-			marginTop: 12,
-		}}
-	>
-		<Swatch color="var(--cyan)" label="entradas" />
-		<Swatch color="var(--rose)" label="saídas" />
-		<Swatch hatch label="previsto" />
-		<Swatch color="var(--purple)" label="saldo projetado" />
-	</div>
-);
+// ── Legend ─────────────────────────────────────────────────────────────────
 
-const Swatch = ({
+const LegendSwatch = ({
 	color,
 	label,
 	hatch,
+	dashed,
 }: {
 	color?: string;
 	label: string;
 	hatch?: boolean;
+	dashed?: boolean;
 }) => (
-	<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+	<span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
 		<span
 			style={{
-				width: 10,
-				height: 10,
-				borderRadius: 2,
+				width: dashed ? 14 : 10,
+				height: dashed ? 0 : 10,
+				borderRadius: dashed ? 0 : 2,
 				background: hatch
-					? "repeating-linear-gradient(45deg, var(--muted2) 0 1.4px, transparent 1.4px 4px)"
+					? "repeating-linear-gradient(45deg,#9a9aae 0 1.4px,transparent 1.4px 4px)"
 					: color,
-				border: hatch ? "1px solid var(--muted2)" : "none",
+				border: hatch
+					? "1px solid var(--muted2)"
+					: dashed
+						? `1.5px dashed ${color}`
+						: "none",
 			}}
 		/>
 		{label}

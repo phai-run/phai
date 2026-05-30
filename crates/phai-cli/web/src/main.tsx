@@ -46,7 +46,7 @@ createRoot(document.getElementById('root')!).render(
       // every load), so on a breaking LiveStore *table schema* change we bump
       // the suffix to start a fresh store rather than hang migrating the old one.
       // Bump this when you add/remove/retype a column in livestore/schema.ts.
-      storeId="phai-s2"
+      storeId="phai-s3"
       renderLoading={(status) => <Loading stage={status.stage} />}
       renderError={(error) => (
         <div

@@ -1859,6 +1859,9 @@ mod test_support {
         async fn cashflow(&self, _: usize) -> Result<Vec<CashflowRow>> {
             Ok(vec![])
         }
+        async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
+            Ok(vec![])
+        }
         async fn cashflow_month(&self, _: &str) -> Result<CashflowRow> {
             Ok(CashflowRow {
                 month_ref: String::new(),

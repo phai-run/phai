@@ -1842,6 +1842,45 @@ impl FinanceStore for LocalStore {
         })
     }
 
+    async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
+        // Accrual basis over all reportable accounts — delegates to the
+        // `v_cashflow` view, which already encodes the report rules (split
+        // expansion + effective category via v_transactions_reportable, and
+        // the internal-category exclusion). The view's monetary columns are
+        // exact integer-cent strings (ADR-0003), parsed back into Decimal.
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT month_ref, income, expenses, expense_reduction, net
+            FROM v_cashflow
+            ORDER BY month_ref ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (month_ref, income, expenses, expense_reduction, net) = row?;
+            out.push(CashflowRow {
+                month_ref,
+                income: Decimal::from_str(&income).unwrap_or_default(),
+                expenses: Decimal::from_str(&expenses).unwrap_or_default(),
+                expense_reduction: Decimal::from_str(&expense_reduction).unwrap_or_default(),
+                net: Decimal::from_str(&net).unwrap_or_default(),
+                opening_balance: None,
+                closing_balance: None,
+            });
+        }
+        Ok(out)
+    }
+
     async fn checking_balance_at(&self, target: NaiveDate) -> Result<Option<CheckingBalance>> {
         // Anchor strategy: for each checking account, pick the latest
         // snapshot whose `snapshot_date <= target`, then add the sum of
