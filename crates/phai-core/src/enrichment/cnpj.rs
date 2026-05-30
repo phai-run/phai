@@ -143,7 +143,7 @@ struct BrasilApiSecondaryCnae {
 pub async fn lookup_cnpj(
     http: &reqwest::Client,
     moka_cache: &Cache<String, Option<CnpjInfo>>,
-    sqlite_path: &Path,
+    sqlite_path: Option<&Path>,
     cnpj: &str,
 ) -> Result<Option<CnpjInfo>> {
     let normalized = match normalize_cnpj(cnpj) {
@@ -156,17 +156,19 @@ pub async fn lookup_cnpj(
         return Ok(hit);
     }
 
-    // L2: SQLite
-    match read_sqlite_cache(sqlite_path, &normalized) {
-        Ok(Some(entry)) => {
-            moka_cache.insert(normalized.clone(), entry.clone()).await;
-            return Ok(entry);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            eprintln!(
-                "aviso: cnpj_cache sqlite read falhou para {normalized}: {err:#}; consultando BrasilAPI"
-            );
+    // L2: SQLite — skipped when no local DB is configured (BigQuery-only setups).
+    if let Some(path) = sqlite_path {
+        match read_sqlite_cache(path, &normalized) {
+            Ok(Some(entry)) => {
+                moka_cache.insert(normalized.clone(), entry.clone()).await;
+                return Ok(entry);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!(
+                    "aviso: cnpj_cache sqlite read falhou para {normalized}: {err:#}; consultando BrasilAPI"
+                );
+            }
         }
     }
 
@@ -175,16 +177,22 @@ pub async fn lookup_cnpj(
     match fetched {
         FetchOutcome::Found(info) => {
             let value = Some(info);
-            if let Err(err) = write_sqlite_cache(sqlite_path, &normalized, &value) {
-                eprintln!("aviso: cnpj_cache sqlite write falhou para {normalized}: {err:#}");
+            if let Some(path) = sqlite_path {
+                if let Err(err) = write_sqlite_cache(path, &normalized, &value) {
+                    eprintln!("aviso: cnpj_cache sqlite write falhou para {normalized}: {err:#}");
+                }
             }
             moka_cache.insert(normalized, value.clone()).await;
             Ok(value)
         }
         FetchOutcome::NotFound => {
             // Negative cache: avoid re-querying for 30 days.
-            if let Err(err) = write_sqlite_cache(sqlite_path, &normalized, &None) {
-                eprintln!("aviso: cnpj_cache sqlite write (404) falhou para {normalized}: {err:#}");
+            if let Some(path) = sqlite_path {
+                if let Err(err) = write_sqlite_cache(path, &normalized, &None) {
+                    eprintln!(
+                        "aviso: cnpj_cache sqlite write (404) falhou para {normalized}: {err:#}"
+                    );
+                }
             }
             moka_cache.insert(normalized, None).await;
             Ok(None)

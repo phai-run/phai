@@ -208,7 +208,10 @@ impl AppConfig {
     }
 
     pub fn with_default_paths(mut self, paths: &ConfigPaths) -> Self {
-        if self.local_db_path.is_none() {
+        // Only auto-assign a local DB path for the Local backend. With
+        // BigQuery, the SQLite file is not needed — leave it None unless
+        // the user set it explicitly in config.toml.
+        if self.local_db_path.is_none() && matches!(self.backend, BackendKind::Local) {
             self.local_db_path = Some(paths.local_db_file.clone());
         }
         self
