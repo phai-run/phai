@@ -18,7 +18,8 @@ import type { ForecastView } from './Planning'
  * and a drag drop target (re-date a dragged forecast to that month).
  */
 export interface ChartMonthView {
-  label: string
+  label: string // display label, e.g. "mai/26"
+  month: string // YYYY-MM — the canonical selection/match key
   inflows: string
   outflows: string
   forecastInflowsRemaining: string
@@ -126,7 +127,7 @@ export const PlanningChart = ({
           const fcInH = barH(model.fcIns[i])
           const realOutH = barH(model.realOuts[i])
           const fcOutH = barH(model.fcOuts[i])
-          const isSel = m.label === selectedMonth
+          const isSel = m.month === selectedMonth
           return (
             <g key={m.label}>
               {(hover === i || isSel) && (
@@ -214,7 +215,7 @@ export const PlanningChart = ({
       {hover != null && (
         <BarPopover
           month={months[hover]}
-          forecasts={forecastsByMonth.get(months[hover].label) ?? []}
+          forecasts={forecastsByMonth.get(months[hover].month) ?? []}
           leftPct={((hover + 0.5) / n) * 100}
         />
       )}
@@ -249,11 +250,11 @@ const ColumnOverlay = ({
   >
     {months.map((m, i) => (
       <MonthColumn
-        key={m.label}
-        month={m.label}
+        key={m.month}
+        month={m.month}
         index={i}
-        selected={m.label === selectedMonth}
-        onSelect={() => onSelectMonth(m.label)}
+        selected={m.month === selectedMonth}
+        onSelect={() => onSelectMonth(m.month)}
         onHover={onHover}
         onDropForecast={onDropForecast}
       />

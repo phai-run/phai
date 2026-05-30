@@ -26,7 +26,10 @@ use crate::{load_config, month_ref_for, parse_month_ref, shift_month, CashflowCh
 /// One month's slice of data for the chart.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct MonthDatum {
-    pub label: String, // "mai/26"
+    pub label: String, // display label, e.g. "mai/26"
+    /// Stable month key in `YYYY-MM` (matches `TransactionRecord` month and the
+    /// web client's selection key — never use the display `label` for matching).
+    pub month: String,
     /// Realized inflows (what already hit the checking accounts). Zero for
     /// purely-future months.
     pub inflows: Decimal,
@@ -235,6 +238,7 @@ pub(crate) async fn build_chart_data(
 
         data.push(MonthDatum {
             label: short_month_label(&month_ref),
+            month: month_ref.clone(),
             inflows,
             outflows,
             closing_balance,
@@ -1128,6 +1132,7 @@ mod tests {
             months: vec![
                 MonthDatum {
                     label: "mar/26".into(),
+                    month: "2026-03".into(),
                     inflows: dec!(10000),
                     outflows: dec!(8000),
                     closing_balance: Some(dec!(12000)),
@@ -1138,6 +1143,7 @@ mod tests {
                 },
                 MonthDatum {
                     label: "abr/26".into(),
+                    month: "2026-04".into(),
                     inflows: dec!(11000),
                     outflows: dec!(9500),
                     closing_balance: Some(dec!(13500)),
@@ -1160,6 +1166,7 @@ mod tests {
             months: vec![
                 MonthDatum {
                     label: "mar/26".into(),
+                    month: "2026-03".into(),
                     inflows: dec!(10000),
                     outflows: dec!(8000),
                     closing_balance: Some(dec!(12000)),
@@ -1170,6 +1177,7 @@ mod tests {
                 },
                 MonthDatum {
                     label: "abr/26".into(),
+                    month: "2026-04".into(),
                     inflows: dec!(5000), // partial month
                     outflows: dec!(2000),
                     closing_balance: Some(dec!(15000)),
@@ -1180,6 +1188,7 @@ mod tests {
                 },
                 MonthDatum {
                     label: "mai/26".into(),
+                    month: "2026-05".into(),
                     inflows: dec!(0),
                     outflows: dec!(0),
                     closing_balance: None,

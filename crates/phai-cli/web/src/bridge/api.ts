@@ -62,6 +62,7 @@ export interface FlushResult {
  */
 export interface ChartMonthApi {
   label: string
+  month?: string // YYYY-MM — canonical match key
   inflows: string
   outflows: string
   forecast_inflows_remaining?: string

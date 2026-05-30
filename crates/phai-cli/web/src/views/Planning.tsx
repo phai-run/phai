@@ -105,7 +105,7 @@ export const Planning = () => {
   }, [forecasts])
 
   const months: ReadonlyArray<ChartMonthView> = chartRows
-  const selected = ui.selectedMonth ?? months[months.length - 1]?.label ?? null
+  const selected = ui.selectedMonth ?? months[months.length - 1]?.month ?? null
 
   const moveForecast = (forecastId: string, targetMonth: string) => {
     const f = forecasts.find((x) => x.forecastId === forecastId)
@@ -186,7 +186,7 @@ export const Planning = () => {
           <aside style={{ minWidth: 0 }}>
             <MonthPanel
               month={selected}
-              chart={months.find((m) => m.label === selected) ?? null}
+              chart={months.find((m) => m.month === selected) ?? null}
               forecasts={selected ? (forecastsByMonth.get(selected) ?? []) : []}
               transactions={
                 selected ? txRows.filter((t) => t.month === selected) : []

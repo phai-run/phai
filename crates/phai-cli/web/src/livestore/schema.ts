@@ -101,7 +101,8 @@ export const tables = {
   chartMonths: State.SQLite.table({
     name: 'chartMonths',
     columns: {
-      label: State.SQLite.text({ primaryKey: true }), // YYYY-MM, the x axis key
+      label: State.SQLite.text({ primaryKey: true }), // display label, e.g. "mai/26"
+      month: State.SQLite.text({ default: '' }), // YYYY-MM — canonical match key
       inflows: State.SQLite.text({ default: '0' }),
       outflows: State.SQLite.text({ default: '0' }),
       forecastInflowsRemaining: State.SQLite.text({ default: '0' }),
@@ -184,7 +185,7 @@ export const tables = {
         accountFilter: null,
         merchantFilter: null,
         categoryFilter: null,
-        unreviewedOnly: true,
+        unreviewedOnly: false,
         subscriptionsOnly: false,
         installmentsOnly: false,
         cursor: 0,
@@ -222,6 +223,7 @@ const ReviewPatch = Schema.Struct({
 
 const ChartMonth = Schema.Struct({
   label: Schema.String,
+  month: Schema.String,
   inflows: Schema.String,
   outflows: Schema.String,
   forecastInflowsRemaining: Schema.String,

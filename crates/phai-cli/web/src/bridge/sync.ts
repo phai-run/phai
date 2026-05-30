@@ -227,6 +227,7 @@ export const useTransactionsSeed = (monthsBack: number, monthsAhead: number): Se
 const normalizeChart = (data: ChartData) =>
   data.months.map((m, i) => ({
     label: m.label,
+    month: m.month ?? m.label,
     inflows: m.inflows ?? '0',
     outflows: m.outflows ?? '0',
     forecastInflowsRemaining: m.forecast_inflows_remaining ?? '0',
