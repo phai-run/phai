@@ -1754,7 +1754,7 @@ impl FinanceStore for BigQueryStore {
               realized_transaction_id,
               FORMAT_TIMESTAMP('%FT%T%Ez', realized_at)
             FROM {}
-            WHERE status = 'ativo'
+            WHERE LOWER(status) IN ('ativo', 'active')
               AND due_date IS NOT NULL
               AND due_date BETWEEN @from AND @until
             ORDER BY due_date ASC, amount DESC
