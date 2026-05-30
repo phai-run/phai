@@ -793,7 +793,7 @@ impl FinanceStore for LocalStore {
                    created_at, updated_at,
                    template_id, realized_transaction_id, realized_at
             FROM forecast
-            WHERE status = 'ativo'
+            WHERE LOWER(status) IN ('ativo', 'active')
               AND due_date IS NOT NULL
               AND date(due_date) BETWEEN date(?1) AND date(?2)
             ORDER BY date(due_date) ASC, CAST(amount AS REAL) DESC
