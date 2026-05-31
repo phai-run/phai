@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.1.2](https://github.com/phai-run/phai/compare/v5.1.1...v5.1.2) (2026-05-31)
+
+
+### Bug Fixes
+
+* **serve:** propagate serialization error instead of silently defaulting to empty audit diff ([#116](https://github.com/phai-run/phai/issues/116)) ([29c31b6](https://github.com/phai-run/phai/commit/29c31b6c5e88d223c3c9336b885f27b0f4a35495))
+
 ## [5.1.1](https://github.com/phai-run/phai/compare/v5.1.0...v5.1.1) (2026-05-30)
 
 
