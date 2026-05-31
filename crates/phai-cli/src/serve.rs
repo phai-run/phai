@@ -1114,6 +1114,49 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
         Ok(d) => d,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
+    // Input-length guardrails: prevent extremely long strings from landing in
+    // the database. The limits match typical UX constraints (description is a
+    // short label, not a free-text note).
+    const MAX_DESC_LEN: usize = 500;
+    const MAX_ID_LEN: usize = 100;
+    if body.description.len() > MAX_DESC_LEN {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "description muito longo ({} caracteres; máximo {})",
+                body.description.len(),
+                MAX_DESC_LEN
+            ),
+        );
+    }
+    if body
+        .category_id
+        .as_deref()
+        .is_some_and(|c| c.len() > MAX_ID_LEN)
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "category_id muito longo ({} caracteres; máximo {})",
+                body.category_id.as_deref().unwrap().len(),
+                MAX_ID_LEN
+            ),
+        );
+    }
+    if body
+        .account_id
+        .as_deref()
+        .is_some_and(|a| a.len() > MAX_ID_LEN)
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "account_id muito longo ({} caracteres; máximo {})",
+                body.account_id.as_deref().unwrap().len(),
+                MAX_ID_LEN
+            ),
+        );
+    }
     let record = Box::new(ForecastRecord {
         forecast_id: String::new(),
         due_date,
