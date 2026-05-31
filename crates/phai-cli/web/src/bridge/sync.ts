@@ -296,9 +296,12 @@ const normalizeTransactions = (rows: TxRow[]) =>
 		isSubscription: bool(r.isSubscription),
 	}));
 
+const TRANSACTIONS_PAGE_SIZE = 1000;
+
 /**
- * Seed the full transaction window from the bridge. The whole window lives in
- * LiveStore so every filter/sum in the Review view is computed locally.
+ * Seed the full transaction window from the bridge, paginating automatically.
+ * The first page replaces everything; subsequent pages are appended so the UI
+ * stays responsive while a large window loads.
  */
 export const useTransactionsSeed = (
 	monthsBack: number,
@@ -306,15 +309,27 @@ export const useTransactionsSeed = (
 ): SeedState => {
 	const { store } = useStore();
 	const fetcher = useCallback(async () => {
-		const { rows } = await api.transactions({
-			monthsBack,
-			monthsAhead,
-			includeReviewed: true,
-			limit: 5000,
-		});
-		store.commit(
-			events.transactionsSeeded({ rows: normalizeTransactions(rows) }),
-		);
+		let offset = 0;
+		let isFirstPage = true;
+		// eslint-disable-next-line no-constant-condition
+		while (true) {
+			const page = await api.transactions({
+				monthsBack,
+				monthsAhead,
+				includeReviewed: true,
+				limit: TRANSACTIONS_PAGE_SIZE,
+				offset,
+			});
+			const normalized = normalizeTransactions(page.rows);
+			if (isFirstPage) {
+				store.commit(events.transactionsSeeded({ rows: normalized }));
+				isFirstPage = false;
+			} else if (normalized.length > 0) {
+				store.commit(events.transactionsPageSeeded({ rows: normalized }));
+			}
+			offset += page.rows.length;
+			if (!page.hasMore) break;
+		}
 	}, [store, monthsBack, monthsAhead]);
 	return useSeed(fetcher, [fetcher]);
 };

@@ -251,6 +251,10 @@ export const events = {
 		name: "v1.TransactionsSeeded",
 		schema: Schema.Struct({ rows: Schema.Array(TxRow) }),
 	}),
+	transactionsPageSeeded: Events.synced({
+		name: "v1.TransactionsPageSeeded",
+		schema: Schema.Struct({ rows: Schema.Array(TxRow) }),
+	}),
 	categoriesSeeded: Events.synced({
 		name: "v1.CategoriesSeeded",
 		schema: Schema.Struct({ ids: Schema.Array(Schema.String) }),
@@ -326,6 +330,8 @@ const materializers = State.SQLite.materializers(events, {
 		tables.transactions.delete(),
 		...rows.map((r) => tables.transactions.insert(r)),
 	],
+	"v1.TransactionsPageSeeded": ({ rows }) =>
+		rows.map((r) => tables.transactions.insert(r)),
 	"v1.CategoriesSeeded": ({ ids }) => [
 		tables.categories.delete(),
 		...ids.map((id) => tables.categories.insert({ id })),

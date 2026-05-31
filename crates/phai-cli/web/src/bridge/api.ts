@@ -10,49 +10,49 @@
  */
 
 export interface TxRow {
-  id: string
-  accountId: string
-  postedAt: string
-  amount: string
-  rawDescription: string
-  description: string | null
-  merchantName: string | null
-  purpose: string | null
-  categoryId: string | null
-  month: string
-  paymentStatus: string
-  reviewed: boolean
-  isInstallment: boolean
-  isSubscription: boolean
+	id: string;
+	accountId: string;
+	postedAt: string;
+	amount: string;
+	rawDescription: string;
+	description: string | null;
+	merchantName: string | null;
+	purpose: string | null;
+	categoryId: string | null;
+	month: string;
+	paymentStatus: string;
+	reviewed: boolean;
+	isInstallment: boolean;
+	isSubscription: boolean;
 }
 
 export interface AccountRow {
-  id: string
-  label: string
-  owner: string
+	id: string;
+	label: string;
+	owner: string;
 }
 
 export interface ReviewPatch {
-  description: string | null
-  merchantName: string | null
-  purpose: string | null
-  categoryId: string | null
+	description: string | null;
+	merchantName: string | null;
+	purpose: string | null;
+	categoryId: string | null;
 }
 
 export interface ReviewFlushItem {
-  writeId: string
-  transactionId: string
-  patch: ReviewPatch
+	writeId: string;
+	transactionId: string;
+	patch: ReviewPatch;
 }
 
 const json = async <T>(res: Response): Promise<T> => {
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return (await res.json()) as T
-}
+	if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+	return (await res.json()) as T;
+};
 
 export interface FlushResult {
-  acked: string[]
-  failed: { writeId: string; error: string }[]
+	acked: string[];
+	failed: { writeId: string; error: string }[];
 }
 
 /**
@@ -61,131 +61,145 @@ export interface FlushResult {
  * backend might use for the closing balance (see `sync.ts`).
  */
 export interface ChartMonthApi {
-  label: string
-  month?: string // YYYY-MM — canonical match key
-  inflows: string
-  outflows: string
-  forecast_inflows_remaining?: string
-  forecast_outflows_remaining?: string
-  closing_balance?: string
-  projected_closing_balance?: string
-  is_future?: boolean
+	label: string;
+	month?: string; // YYYY-MM — canonical match key
+	inflows: string;
+	outflows: string;
+	forecast_inflows_remaining?: string;
+	forecast_outflows_remaining?: string;
+	closing_balance?: string;
+	projected_closing_balance?: string;
+	is_future?: boolean;
 }
 export interface ChartData {
-  months: ChartMonthApi[]
+	months: ChartMonthApi[];
 }
 
 /** Forecast domain record (snake_case). Amount is a decimal string. */
 export interface ForecastRecord {
-  forecast_id: string
-  due_date: string | null
-  description: string
-  amount: string
-  category_id: string | null
-  account_id: string | null
-  status: string
-  kind?: string
-  draggable?: boolean
+	forecast_id: string;
+	due_date: string | null;
+	description: string;
+	amount: string;
+	category_id: string | null;
+	account_id: string | null;
+	status: string;
+	kind?: string;
+	draggable?: boolean;
 }
 
 /** Forecast template domain record (snake_case). */
 export interface ForecastTemplateRecord {
-  template_id: string
-  description: string
-  kind: string | null
-  cadence: string | null
-  amount: string
-  status: string
-  confidence: number | string | null
+	template_id: string;
+	description: string;
+	kind: string | null;
+	cadence: string | null;
+	amount: string;
+	status: string;
+	confidence: number | string | null;
 }
 
 export interface NewForecast {
-  description: string
-  amount: string // decimal string; negative = saída
-  due_date?: string
-  category_id?: string
-  account_id?: string
+	description: string;
+	amount: string; // decimal string; negative = saída
+	due_date?: string;
+	category_id?: string;
+	account_id?: string;
 }
 
-const trimParams = (record: Record<string, string | null | undefined>): URLSearchParams => {
-  const p = new URLSearchParams()
-  for (const [k, v] of Object.entries(record)) {
-    if (v != null && v !== '') p.set(k, v)
-  }
-  return p
-}
+const trimParams = (
+	record: Record<string, string | null | undefined>,
+): URLSearchParams => {
+	const p = new URLSearchParams();
+	for (const [k, v] of Object.entries(record)) {
+		if (v != null && v !== "") p.set(k, v);
+	}
+	return p;
+};
 
 const postJson = <T>(url: string, body: unknown): Promise<T> =>
-  fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  }).then((r) => json<T>(r))
+	fetch(url, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	}).then((r) => json<T>(r));
+
+export interface TransactionsPage {
+	rows: TxRow[];
+	total: number;
+	offset: number;
+	hasMore: boolean;
+}
 
 export const api = {
-  /** Seed the full transaction window — filtering/summing is then all local. */
-  transactions: (params: {
-    monthsBack: number
-    monthsAhead: number
-    includeReviewed?: boolean
-    limit?: number
-  }): Promise<{ rows: TxRow[] }> =>
-    fetch(
-      `/api/transactions?${trimParams({
-        months_back: String(params.monthsBack),
-        months_ahead: String(params.monthsAhead),
-        include_reviewed: String(params.includeReviewed ?? true),
-        limit: String(params.limit ?? 5000),
-      })}`,
-    ).then((r) => json<{ rows: TxRow[] }>(r)),
+	/** Fetch one page of the transaction window. Use offset to paginate. */
+	transactions: (params: {
+		monthsBack: number;
+		monthsAhead: number;
+		includeReviewed?: boolean;
+		limit?: number;
+		offset?: number;
+	}): Promise<TransactionsPage> =>
+		fetch(
+			`/api/transactions?${trimParams({
+				months_back: String(params.monthsBack),
+				months_ahead: String(params.monthsAhead),
+				include_reviewed: String(params.includeReviewed ?? true),
+				limit: String(params.limit ?? 5000),
+				offset: params.offset != null ? String(params.offset) : null,
+			})}`,
+		).then((r) => json<TransactionsPage>(r)),
 
-  categories: (): Promise<{ ids: string[] }> =>
-    fetch('/api/categories').then((r) => json<{ ids: string[] }>(r)),
-  accounts: (): Promise<{ rows: AccountRow[] }> =>
-    fetch('/api/accounts').then((r) => json<{ rows: AccountRow[] }>(r)),
+	categories: (): Promise<{ ids: string[] }> =>
+		fetch("/api/categories").then((r) => json<{ ids: string[] }>(r)),
+	accounts: (): Promise<{ rows: AccountRow[] }> =>
+		fetch("/api/accounts").then((r) => json<{ rows: AccountRow[] }>(r)),
 
-  chart: (monthsBack: number, monthsAhead: number): Promise<ChartData> =>
-    fetch(
-      `/api/chart?${trimParams({
-        months_back: String(monthsBack),
-        months_ahead: String(monthsAhead),
-      })}`,
-    ).then((r) => json<ChartData>(r)),
+	chart: (monthsBack: number, monthsAhead: number): Promise<ChartData> =>
+		fetch(
+			`/api/chart?${trimParams({
+				months_back: String(monthsBack),
+				months_ahead: String(monthsAhead),
+			})}`,
+		).then((r) => json<ChartData>(r)),
 
-  forecasts: (filters: {
-    status?: string | null
-    from?: string | null
-    until?: string | null
-  }): Promise<{ forecasts: ForecastRecord[] }> =>
-    fetch(`/api/forecasts?${trimParams(filters)}`).then((r) =>
-      json<{ forecasts: ForecastRecord[] }>(r),
-    ),
+	forecasts: (filters: {
+		status?: string | null;
+		from?: string | null;
+		until?: string | null;
+	}): Promise<{ forecasts: ForecastRecord[] }> =>
+		fetch(`/api/forecasts?${trimParams(filters)}`).then((r) =>
+			json<{ forecasts: ForecastRecord[] }>(r),
+		),
 
-  forecastTemplates: (filters: {
-    kind?: string | null
-    status?: string | null
-  }): Promise<{ templates: ForecastTemplateRecord[] }> =>
-    fetch(`/api/forecast-templates?${trimParams(filters)}`).then((r) =>
-      json<{ templates: ForecastTemplateRecord[] }>(r),
-    ),
+	forecastTemplates: (filters: {
+		kind?: string | null;
+		status?: string | null;
+	}): Promise<{ templates: ForecastTemplateRecord[] }> =>
+		fetch(`/api/forecast-templates?${trimParams(filters)}`).then((r) =>
+			json<{ templates: ForecastTemplateRecord[] }>(r),
+		),
 
-  createForecast: (forecast: NewForecast): Promise<{ forecast_id: string }> =>
-    postJson<{ forecast_id: string }>('/api/forecast', forecast),
+	createForecast: (forecast: NewForecast): Promise<{ forecast_id: string }> =>
+		postJson<{ forecast_id: string }>("/api/forecast", forecast),
 
-  /** Re-date a forecast (drag-and-drop in Planejamento). */
-  moveForecast: (forecastId: string, dueDate: string): Promise<unknown> =>
-    postJson('/api/forecast/move', { forecastId, dueDate }),
+	/** Re-date a forecast (drag-and-drop in Planejamento). */
+	moveForecast: (forecastId: string, dueDate: string): Promise<unknown> =>
+		postJson("/api/forecast/move", { forecastId, dueDate }),
 
-  acceptForecastTemplate: (templateId: string, materializeMonths = 6): Promise<unknown> =>
-    postJson('/api/forecast-template/accept', {
-      template_id: templateId,
-      materialize_months: materializeMonths,
-    }),
+	acceptForecastTemplate: (
+		templateId: string,
+		materializeMonths = 6,
+	): Promise<unknown> =>
+		postJson("/api/forecast-template/accept", {
+			template_id: templateId,
+			materialize_months: materializeMonths,
+		}),
 
-  dismissForecastTemplate: (templateId: string): Promise<unknown> =>
-    postJson('/api/forecast-template/dismiss', { template_id: templateId }),
+	dismissForecastTemplate: (templateId: string): Promise<unknown> =>
+		postJson("/api/forecast-template/dismiss", { template_id: templateId }),
 
-  /** Apply a batch of committed review writes; returns the writeIds that succeeded. */
-  flushReviews: (items: ReviewFlushItem[]): Promise<FlushResult> =>
-    postJson<FlushResult>('/api/events', { writes: items }),
-}
+	/** Apply a batch of committed review writes; returns the writeIds that succeeded. */
+	flushReviews: (items: ReviewFlushItem[]): Promise<FlushResult> =>
+		postJson<FlushResult>("/api/events", { writes: items }),
+};

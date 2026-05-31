@@ -116,7 +116,7 @@ enum StoreRequest {
     /// the planning workspace (`GET /api/transactions`).
     TransactionsWindow {
         params: TransactionsWindowParams,
-        resp: oneshot::Sender<Result<Vec<TransactionRecord>>>,
+        resp: oneshot::Sender<Result<TransactionsWindowResult>>,
     },
     /// Forecasts enriched with the linked template `kind` so each row can carry
     /// the derived `kind`/`draggable` fields (`GET /api/forecasts`).
@@ -271,18 +271,28 @@ struct TransactionsWindowParams {
     months_ahead: u32,
     /// When `false`, only rows still pending human review are returned.
     include_reviewed: bool,
-    /// Hard cap on the number of rows returned.
+    /// Page size (rows per page).
     limit: usize,
+    /// Row offset for pagination (0-based).
+    offset: usize,
 }
 
-/// Load every transaction whose posted month is within
+/// Result of a paginated transaction-window load.
+struct TransactionsWindowResult {
+    rows: Vec<TransactionRecord>,
+    total: usize,
+    offset: usize,
+    has_more: bool,
+}
+
+/// Load transactions whose posted month is within
 /// `[now - months_back, now + months_ahead]`, optionally restricted to rows
-/// still pending review. Returns ALL matching rows up to `limit` (the planning
-/// workspace sums client-side, so we do not apply the review queue's 200 cap).
+/// still pending review. Returns a page of up to `limit` rows starting at
+/// `offset`, plus the total matching count so the client can paginate.
 async fn load_transactions_window(
     store: &dyn FinanceStore,
     params: TransactionsWindowParams,
-) -> Result<Vec<TransactionRecord>> {
+) -> Result<TransactionsWindowResult> {
     let today = Utc::now().date_naive();
     let from = first_of_month(shift_months(today, -(params.months_back as i64)));
     let until = last_of_month(shift_months(today, params.months_ahead as i64));
@@ -293,8 +303,17 @@ async fn load_transactions_window(
     if !params.include_reviewed {
         rows.retain(is_pending_review);
     }
-    rows.truncate(params.limit);
-    Ok(rows)
+    let total = rows.len();
+    let offset = params.offset.min(total);
+    let end = (offset + params.limit).min(total);
+    let page: Vec<TransactionRecord> = rows.drain(offset..end).collect();
+    let has_more = end < total;
+    Ok(TransactionsWindowResult {
+        rows: page,
+        total,
+        offset,
+        has_more,
+    })
 }
 
 /// A transaction is "reviewed" when it has a concrete category that is not the
@@ -417,12 +436,14 @@ enum MoveForecastResult {
     Moved { forecast_id: String, status: String },
     NotFound,
     NotMovable,
+    PastMonth,
 }
 
 /// Reschedule a forecast in place. Installments and subscriptions are pinned to
-/// their template schedule and are rejected. The idempotency key is recomputed
-/// from the new due date and the row is upserted under its existing id (not a
-/// new row), with an `AuditEvent`.
+/// their template schedule and are rejected. The target month must be the
+/// current month or a future month — past months are rejected. The idempotency
+/// key is recomputed from the new due date and the row is upserted under its
+/// existing id (not a new row), with an `AuditEvent`.
 async fn move_forecast(
     store: &dyn FinanceStore,
     forecast_id: &str,
@@ -439,6 +460,13 @@ async fn move_forecast(
     let kind = forecast_kind(record.template_id.as_deref(), &template_kinds);
     if !kind_is_draggable(&kind) {
         return Ok(MoveForecastResult::NotMovable);
+    }
+
+    // Target must be the current month or a future month — no retroactive moves.
+    let now = Utc::now().date_naive();
+    let this_month = first_of_month(now);
+    if due_date < this_month {
+        return Ok(MoveForecastResult::PastMonth);
     }
 
     record.due_date = Some(due_date);
@@ -670,8 +698,10 @@ impl TxRow {
 #[derive(Serialize)]
 struct TransactionsResponse {
     rows: Vec<TxRow>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    truncated: bool,
+    total: usize,
+    offset: usize,
+    #[serde(rename = "hasMore")]
+    has_more: bool,
 }
 
 /// Account summary for the accounts picker.
@@ -733,6 +763,7 @@ struct TransactionsQuery {
     months_ahead: Option<u32>,
     include_reviewed: Option<bool>,
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -900,12 +931,9 @@ async fn get_transactions(
         months_back: q.months_back.unwrap_or(DEFAULT_TRANSACTIONS_MONTHS_BACK),
         months_ahead: q.months_ahead.unwrap_or(0),
         include_reviewed: q.include_reviewed.unwrap_or(true),
-        limit: q
-            .limit
-            .unwrap_or(DEFAULT_TRANSACTIONS_LIMIT)
-            .min(DEFAULT_TRANSACTIONS_LIMIT),
+        limit: q.limit.unwrap_or(DEFAULT_TRANSACTIONS_LIMIT),
+        offset: q.offset.unwrap_or(0),
     };
-    let limit = params.limit;
     let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::TransactionsWindow {
@@ -918,14 +946,13 @@ async fn get_transactions(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(rows)) => {
-            let truncated = rows.len() >= limit;
-            Json(TransactionsResponse {
-                rows: rows.iter().map(TxRow::from_record).collect(),
-                truncated,
-            })
-            .into_response()
-        }
+        Ok(Ok(result)) => Json(TransactionsResponse {
+            rows: result.rows.iter().map(TxRow::from_record).collect(),
+            total: result.total,
+            offset: result.offset,
+            has_more: result.has_more,
+        })
+        .into_response(),
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1176,6 +1203,10 @@ async fn post_forecast_move(
         Ok(Ok(MoveForecastResult::NotMovable)) => error_response(
             StatusCode::BAD_REQUEST,
             "forecast não é movível (parcelamento/assinatura)",
+        ),
+        Ok(Ok(MoveForecastResult::PastMonth)) => error_response(
+            StatusCode::BAD_REQUEST,
+            "não é possível mover forecast para um mês passado",
         ),
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
@@ -2004,6 +2035,67 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(outcome, MoveForecastResult::NotFound));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn move_forecast_rejects_past_month() {
+        let (_dir, _config, store) = temp_store().await;
+        let mut forecast = sample_forecast("f-manual", None);
+        ensure_forecast_idempotency(&mut forecast).unwrap();
+        store.upsert_forecasts(&[forecast]).await.unwrap();
+
+        // Move to a date that is definitely in the past (year 2020).
+        let past_due = NaiveDate::from_ymd_opt(2020, 3, 15).unwrap();
+        let outcome = move_forecast(store.as_ref(), "f-manual", past_due)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MoveForecastResult::PastMonth));
+
+        // Due date unchanged.
+        let stored = store.get_forecast("f-manual").await.unwrap().unwrap();
+        assert_eq!(
+            stored.due_date,
+            Some(NaiveDate::from_ymd_opt(2026, 4, 10).unwrap())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn move_forecast_allows_current_and_future_month() {
+        let (_dir, _config, store) = temp_store().await;
+        let mut forecast = sample_forecast("f-manual", None);
+        ensure_forecast_idempotency(&mut forecast).unwrap();
+        let original_due = forecast.due_date;
+        store.upsert_forecasts(&[forecast]).await.unwrap();
+
+        // Move to the current month (first-of-month from now).
+        let current_month = first_of_month(Utc::now().date_naive());
+        let outcome = move_forecast(store.as_ref(), "f-manual", current_month)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MoveForecastResult::Moved { .. }));
+
+        // Due date updated.
+        let stored = store.get_forecast("f-manual").await.unwrap().unwrap();
+        assert_eq!(stored.due_date, Some(current_month));
+        assert_ne!(stored.due_date, original_due);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn move_forecast_allows_far_future_month() {
+        let (_dir, _config, store) = temp_store().await;
+        let mut forecast = sample_forecast("f-manual", None);
+        ensure_forecast_idempotency(&mut forecast).unwrap();
+        store.upsert_forecasts(&[forecast]).await.unwrap();
+
+        // Move to a date far in the future (year 2099).
+        let future_due = NaiveDate::from_ymd_opt(2099, 12, 31).unwrap();
+        let outcome = move_forecast(store.as_ref(), "f-manual", future_due)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, MoveForecastResult::Moved { .. }));
+
+        let stored = store.get_forecast("f-manual").await.unwrap().unwrap();
+        assert_eq!(stored.due_date, Some(future_due));
     }
 
     #[tokio::test(flavor = "current_thread")]
