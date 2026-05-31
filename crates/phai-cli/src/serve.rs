@@ -1479,10 +1479,7 @@ async fn security_headers(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
-    headers.insert(
-        "referrer-policy",
-        HeaderValue::from_static("no-referrer"),
-    );
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert(
         "permissions-policy",
         HeaderValue::from_static("interest-cohort=()"),
