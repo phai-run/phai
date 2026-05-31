@@ -1408,6 +1408,16 @@ async fn guard_origin(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     if !is_origin_allowed(req.headers()) {
+        let origin = req
+            .headers()
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<missing>");
+        eprintln!(
+            "[phai serve] origem rejeitada: {origin} — {} {}",
+            req.method(),
+            req.uri().path()
+        );
         return (StatusCode::FORBIDDEN, "Origin não permitida").into_response();
     }
     next.run(req).await
@@ -1491,9 +1501,7 @@ fn open_browser(url: &str) {
         Command::new("xdg-open").arg(url).spawn()
     };
     if let Err(e) = result {
-        if cfg!(debug_assertions) {
-            eprintln!("[phai serve] não consegui abrir o browser automaticamente: {e}");
-        }
+        eprintln!("[phai serve] não consegui abrir o browser automaticamente: {e}");
     }
 }
 
