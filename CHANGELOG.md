@@ -1,5 +1,18 @@
 # Changelog
 
+## [5.2.0](https://github.com/phai-run/phai/compare/v5.1.3...v5.2.0) (2026-05-31)
+
+
+### Features
+
+* **serve:** paginated transactions API with offset/hasMore + forecast past-month guard ([d7e3f81](https://github.com/phai-run/phai/commit/d7e3f813a3d919a11e7da252dc1048b3f66b6129))
+* **web:** hierarchical category grouping, keyboard shortcuts, chart modes, list performance ([b0d5847](https://github.com/phai-run/phai/commit/b0d5847774fb639078477948b3f23aef90401c53))
+
+
+### Bug Fixes
+
+* **web:** harden serve ux integration ([9a9e35c](https://github.com/phai-run/phai/commit/9a9e35cb7ea2b7411cb7eee8844ce501ea067fc6))
+
 ## [5.1.3](https://github.com/phai-run/phai/compare/v5.1.2...v5.1.3) (2026-05-31)
 
 
