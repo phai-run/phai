@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.2.1](https://github.com/phai-run/phai/compare/v5.2.0...v5.2.1) (2026-05-31)
+
+
+### Bug Fixes
+
+* **ci:** declare web pnpm workspace package ([6fdd05c](https://github.com/phai-run/phai/commit/6fdd05ccf82bc8f4b51caae621e815a4d600ade2))
+
 ## [5.2.0](https://github.com/phai-run/phai/compare/v5.1.3...v5.2.0) (2026-05-31)
 
 
