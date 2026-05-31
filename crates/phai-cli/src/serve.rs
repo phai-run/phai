@@ -36,7 +36,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::LocalSet;
 use uuid::Uuid;
 
-const STORE_CHANNEL_CAP: usize = 64;
+const STORE_CHANNEL_CAP: usize = 256;
 const LOCAL_BIND_HOST: &str = "127.0.0.1";
 const LOCAL_APP_HOST: &str = "phai.localhost";
 /// Default number of review-queue rows returned when the caller omits `limit`.
