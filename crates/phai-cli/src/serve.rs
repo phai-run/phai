@@ -851,7 +851,7 @@ fn actor_silent() -> axum::response::Response {
 /// Clone the current store-actor sender. The read-lock is held only for the
 /// cheap clone so concurrent requests are not serialised.
 async fn clone_actor_tx(
-    tx: &RwLock<mpsc::Sender<StoreRequest>>,
+    tx: &Arc<RwLock<mpsc::Sender<StoreRequest>>>,
 ) -> mpsc::Sender<StoreRequest> {
     tx.read().await.clone()
 }
