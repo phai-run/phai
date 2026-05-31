@@ -28,10 +28,17 @@ import {
  *    transition (the shadow stays — it's a state signal, not motion).
  */
 
+export type DragKind = "forecast" | "transaction";
+
 export interface DragPayload {
-	forecastId: string;
+	kind: DragKind;
 	label: string;
 	amount: string;
+	// forecast-specific
+	forecastId?: string;
+	// transaction-specific
+	txId?: string;
+	categoryId?: string | null;
 }
 
 interface TargetRect {

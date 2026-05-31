@@ -2,7 +2,11 @@ import { queryDb } from "@livestore/livestore";
 import { useStore, useQuery, useClientDocument } from "@livestore/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { events, tables } from "../livestore/schema";
-import { useChartSeed, useForecastsSeed, useTransactionsSeed } from "../bridge/sync";
+import {
+	useChartSeed,
+	useForecastsSeed,
+	useTransactionsSeed,
+} from "../bridge/sync";
 
 import { ErrorNote, LoadingNote } from "../components/ui";
 import { PlanningChart } from "./PlanningChart";
@@ -20,6 +24,26 @@ const forecastOverlay$ = queryDb(tables.forecastOverlay);
 
 const monthOf = (date: string | null): string | null =>
 	date ? date.slice(0, 7) : null;
+
+const currentMonthKey = () => {
+	const d = new Date();
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const daysInMonth = (month: string): number => {
+	const [year, monthNum] = month.split("-").map(Number);
+	if (!year || !monthNum) return 1;
+	return new Date(year, monthNum, 0).getDate();
+};
+
+const dueDateInTargetMonth = (dueDate: string | null, targetMonth: string) => {
+	const currentDay = dueDate ? Number(dueDate.slice(8, 10)) : 1;
+	const day = Math.min(
+		Number.isFinite(currentDay) && currentDay > 0 ? currentDay : 1,
+		daysInMonth(targetMonth),
+	);
+	return `${targetMonth}-${String(day).padStart(2, "0")}`;
+};
 
 /**
  * Dashboard — the unified phai view. The cash-evolution chart sits at the top
@@ -70,18 +94,15 @@ export const Dashboard = () => {
 
 	// Selected month — default to current month
 	const months = chartRows;
-	const currentMonth = (() => {
-		const d = new Date();
-		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-	})();
+	const currentMonth = currentMonthKey();
 	const selected = ui.selectedMonth ?? currentMonth;
 
 	// Drag-drop: move forecast to another month
 	const moveForecast = (forecastId: string, targetMonth: string) => {
 		const f = forecasts.find((x) => x.forecastId === forecastId);
 		if (!f || !f.draggable) return;
-		const day = f.dueDate ? f.dueDate.slice(8, 10) || "01" : "01";
-		const dueDate = `${targetMonth}-${day}`;
+		if (targetMonth < currentMonth) return;
+		const dueDate = dueDateInTargetMonth(f.dueDate, targetMonth);
 		if (dueDate === f.dueDate) return;
 		store.commit(
 			events.forecastMoved({
@@ -123,9 +144,7 @@ export const Dashboard = () => {
 					zIndex: 20,
 					background: "var(--bg)",
 					borderBottom: isCompact ? "1px solid var(--border)" : "none",
-					boxShadow: isCompact
-						? "0 2px 12px rgba(21,19,31,0.06)"
-						: "none",
+					boxShadow: isCompact ? "0 2px 12px rgba(21,19,31,0.06)" : "none",
 					transition: "box-shadow 200ms, border-color 200ms",
 				}}
 			>
@@ -200,6 +219,8 @@ export const Dashboard = () => {
 						chart={months.find((m) => m.month === selected) ?? null}
 						forecasts={forecastsByMonth.get(selected) ?? []}
 						onForecastAdded={() => forecastSeed.reload()}
+						months={months}
+						onMoveForecast={moveForecast}
 					/>
 				)}
 			</div>
