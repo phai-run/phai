@@ -1,6 +1,6 @@
 # Quality Audit — phai (`serve` + general)
 
-> Audit date: 2026-05-30 · Last updated: 2026-05-31
+> Audit date: 2026-05-30 · Last updated: 2026-05-31 (7 fixes applied, see Action Plan)
 > Scope: full codebase review with focus on the `phai serve` web interface.
 >
 > Legend:
@@ -60,7 +60,7 @@ The store actor runs inside `LocalSet`. If `open_store` or `run_migrations` retu
 
 **Fix:** Wrap the actor initialisation + loop in a restart-with-backoff so transient failures (disk full that resolves, DB lock released) self-heal. Use a shared sender (`Arc<RwLock<Sender>>`) so a fresh channel is plumbed on each restart attempt.
 
-**Status:** TODO
+**Status:** ✅ Fixed — commit `93ed219`. The store actor initialisation + event loop is now wrapped in a restart-with-backoff (1 s). A fresh mpsc channel is created on each attempt; handlers reach it via `Arc<RwLock<Sender>>`. On failure the server logs the error and retries instead of staying permanently unavailable.
 
 ---
 
@@ -81,7 +81,7 @@ Note: a `guard_origin` middleware (same-origin check) was added in the rewrite, 
 
 **Fix:** Add a Tower layer with baseline security headers via a simple middleware function.
 
-**Status:** TODO
+**Status:** ✅ Fixed — commit `90a25b9`. A `security_headers` middleware adds Content-Security-Policy, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, and Permissions-Policy headers on every response. The middleware runs as the outermost layer so headers are present even when inner layers short-circuit.
 
 ---
 
@@ -102,7 +102,7 @@ The `null` origin is explicitly allowed. This can be triggered by:
 
 **Fix:** Remove the `null` origin exception. Only allow explicit localhost origins.
 
-**Status:** TODO
+**Status:** ✅ Fixed — commit `429ba50`. The `null` origin exception was removed from `is_origin_allowed()`. Only explicit localhost origins (`localhost`, `127.0.0.1`, `phai.localhost`) are now permitted. The corresponding test was updated to assert rejection.
 
 ---
 
@@ -124,7 +124,7 @@ When the user hits Ctrl+C, the server exits immediately. In-flight store operati
 
 **Fix:** Listen for SIGINT/SIGTERM and call `axum::serve(...).with_graceful_shutdown(shutdown_signal())`.
 
-**Status:** TODO
+**Status:** ✅ Fixed — commit `a085d4f`. A `shutdown_signal()` future listens for both SIGINT (Ctrl+C) and SIGTERM (Unix) and passes them to `axum::serve(...).with_graceful_shutdown(...)`. In-flight requests complete before the process exits.
 
 ---
 
@@ -141,7 +141,7 @@ The store actor errors are silently dropped via `let _ = resp.send(...)`.
 
 **Fix:** Always log errors (`eprintln!` at minimum). Keep the per-request debug log gated but add unconditional ERROR-level output for store failures and panics.
 
-**Status:** TODO
+**Status:** ✅ Fixed — commit `4a0e677`. Security-relevant events (rejected origins with method+path, browser-open failures) now log unconditionally via `eprintln!`. The store-actor crash/restart was already logged unconditionally in the restart-loop commit.
 
 ---
 
@@ -196,7 +196,7 @@ The mpsc channel has a fixed capacity of 64. Under load, senders block until a s
 
 **Fix:** Increase to 256. The memory overhead is negligible (each `StoreRequest` is a few hundred bytes at most).
 
-**Status:** TODO
+**Status:** ✅ Fixed — commit `e35a199`. `STORE_CHANNEL_CAP` increased from 64 to 256. Memory overhead is negligible (~1 KB per request max).
 
 ---
 
@@ -208,7 +208,7 @@ The `post_forecast` handler accepts `description`, `amount`, `category_id`, `acc
 
 **Fix:** Validate `description.len() <= 500`, `category_id.len() <= 100`, `account_id.len() <= 100`, and return clear 400 error messages.
 
-**Status:** TODO
+**Status:** ✅ Fixed — commit `af7d5a1`. `post_forecast` now validates `description.len() <= 500`, `category_id.len() <= 100`, `account_id.len() <= 100` and returns clear 400 error messages with field names, actual lengths, and limits.
 
 ---
 
@@ -276,22 +276,23 @@ These are in display/debug paths, not the audit trail. The types are all `Serial
 
 | Priority | Count | Area |
 |----------|-------|------|
-| 🔴 Critical | 1 | Reliability (store actor crash) |
-| 🟠 High | 3 | Security headers, Origin bypass, Graceful shutdown |
-| 🟡 Medium | 3 | Observability, Channel capacity, Input validation |
+| 🔴 Critical | 0 | — |
+| 🟠 High | 0 | — |
+| 🟡 Medium | 0 | — |
 | 🟢 Low | 3 | Dark mode, Residual unwraps, Feature backlog |
+| ✅ Fixed (this round) | 7 | #3, #4, #5, #6, #7, #11, #12 |
 | ⚪ Resolved/Obsolete | 7 | Rewrite addressed or obsoleted |
-| **Total actionable** | **10** | |
+| **Total actionable remaining** | **3** | |
 
 ---
 
 ## Action Plan
 
-1. **[NOW]** Fix #3 (store actor resilience) — restart loop + shared sender
-2. **[NEXT]** Fix #5 (remove `null` origin) — one-line change
-3. **[NEXT]** Fix #4 (security headers) — middleware layer
-4. **[NEXT]** Fix #6 (graceful shutdown) — `with_graceful_shutdown`
-5. **[NEXT]** Fix #7 (error logging in release) — unconditional `eprintln!`
-6. **[NEXT]** Fix #11 (channel capacity) — 64 → 256
-7. **[NEXT]** Fix #12 (input validation) — length checks on `post_forecast`
-8. **[BACKLOG]** #9, #10, #13, #17 — feature work
+1. ✅ Fix #3 (store actor resilience) — `93ed219`
+2. ✅ Fix #5 (remove `null` origin) — `429ba50`
+3. ✅ Fix #4 (security headers) — `90a25b9`
+4. ✅ Fix #6 (graceful shutdown) — `a085d4f`
+5. ✅ Fix #7 (error logging in release) — `4a0e677`
+6. ✅ Fix #11 (channel capacity) — `e35a199`
+7. ✅ Fix #12 (input validation) — `af7d5a1`
+8. **[BACKLOG]** #9 (edit/delete in UI), #10 (CLI parity), #13 (dark mode), #17 (residual unwraps)
