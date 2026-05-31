@@ -1462,7 +1462,6 @@ fn is_origin_allowed(headers: &HeaderMap) -> bool {
                 // port in the Origin header).
                 || origin.starts_with("http://phai.localhost:")
                 || origin == "http://phai.localhost"
-                || origin == "null"
         }
     }
 }
@@ -1512,10 +1511,10 @@ mod tests {
     }
 
     #[test]
-    fn null_origin_allowed() {
+    fn null_origin_is_rejected() {
         let mut h = HeaderMap::new();
         h.insert("origin", HeaderValue::from_static("null"));
-        assert!(is_origin_allowed(&h));
+        assert!(!is_origin_allowed(&h));
     }
 
     #[test]
