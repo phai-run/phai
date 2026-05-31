@@ -448,7 +448,8 @@ async fn move_forecast(
     record.idempotency_key = String::new();
     ensure_forecast_idempotency(&mut record).context("idempotency")?;
     let status = record.status.clone();
-    let diff = serde_json::to_value(&record).unwrap_or_default();
+    let diff =
+        serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
     store
         .upsert_forecasts(&[record])
         .await
@@ -501,7 +502,8 @@ async fn upsert_forecast(store: &dyn FinanceStore, mut record: ForecastRecord) -
     }
     ensure_forecast_idempotency(&mut record).context("idempotency")?;
     let forecast_id = record.forecast_id.clone();
-    let diff = serde_json::to_value(&record).unwrap_or_default();
+    let diff =
+        serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
     store
         .upsert_forecasts(&[record])
         .await
@@ -1766,6 +1768,38 @@ mod tests {
             Some(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap())
         );
         assert!(parse_opt_date(Some("nope")).is_err());
+    }
+
+    // ── ForecastRecord serialization for audit diff ────────────────────────
+
+    #[test]
+    fn forecast_record_serializes_to_non_empty_diff() {
+        let record = ForecastRecord {
+            forecast_id: "fc-test-1".into(),
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 6, 15).unwrap()),
+            description: "Internet 500Mbps".into(),
+            amount: rust_decimal::Decimal::new(-11990, 2),
+            category_id: Some("moradia:internet".into()),
+            account_id: Some("conjunta".into()),
+            status: "ativo".into(),
+            recurrence: None,
+            actor_id: "serve-dashboard".into(),
+            idempotency_key: "test-key".into(),
+            metadata_json: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            template_id: None,
+            realized_transaction_id: None,
+            realized_at: None,
+        };
+        let diff = serde_json::to_value(&record).expect("ForecastRecord must serialize");
+        assert!(
+            diff.as_object().is_some_and(|o| !o.is_empty()),
+            "audit diff must contain forecast fields, got: {diff}"
+        );
+        assert_eq!(diff["forecast_id"], "fc-test-1");
+        assert_eq!(diff["description"], "Internet 500Mbps");
+        assert_eq!(diff["amount"], "-119.90");
     }
 
     // ── Behavioral: ApplyHumanReview against a real SQLite store ────────────
