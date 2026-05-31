@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.1.3](https://github.com/phai-run/phai/compare/v5.1.2...v5.1.3) (2026-05-31)
+
+
+### Bug Fixes
+
+* **serve:** address quality audit findings [#3](https://github.com/phai-run/phai/issues/3)-[#12](https://github.com/phai-run/phai/issues/12) ([8c09905](https://github.com/phai-run/phai/commit/8c09905a06b8b90a0a2b0bc09907e42238bdda94))
+
 ## [5.1.2](https://github.com/phai-run/phai/compare/v5.1.1...v5.1.2) (2026-05-31)
 
 
