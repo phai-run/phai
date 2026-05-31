@@ -27,7 +27,7 @@ If `serde_json::to_value(&record)` fails (e.g., because a `Decimal` serializatio
 
 **Fix:** Propagate the error instead of swallowing it. Convert the `serde_json::Error` into an `anyhow::Result::Err` so the upsert+audit transaction fails atomically rather than writing a hollow audit.
 
-**Status:** ✅ Fixed — see PR #XXX
+**Status:** ✅ Fixed — see PR #116
 
 ---
 
