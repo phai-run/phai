@@ -105,7 +105,7 @@ All reports produce a human-readable output by default and accept `--raw` for JS
 |---|---|
 | `report daily-pulse` | Recent transactions, grouped by category |
 | `report monthly-spend` | Current month broken down by category |
-| `report cashflow` | Cash-basis monthly summary for checking accounts; use `--details`, `--forecast`, and `--tui` for the interactive month dashboard |
+| `report cashflow` | Cash-basis monthly summary for checking accounts; use `--details` and `--forecast` to expand the breakdown |
 | `report cashflow-chart` | SVG chart of cash-basis evolution (last N months) with optional `--forecast` overlay and `--scenario-amount` what-if line |
 | `report card-summary` | Current credit-card cycle (open + closed bills) |
 | `report card-closed-insights` | What changed in the most recent closed bill |
@@ -128,7 +128,7 @@ phai admin migrate           Apply pending database migrations
 phai admin import-legacy     Import from legacy CSV files
 phai sync pluggy             Sync transactions from Pluggy
 phai report <subcommand>     See "Reports" above
-phai review                  Open the fast terminal review UI (--month/--account-id/--category/--merchant)
+phai serve                   Start the web app — the interactive surface for review and forecasts
 phai tx upsert-manual        Add a manual transaction
 phai tx categorize           Assign category to a transaction
 phai tx set-anatomy          Edit human transaction fields
@@ -136,7 +136,7 @@ phai tx set-context          Deprecated alias for setting a human description
 phai tx find                 Search transactions by description
 phai tx pending              List uncategorized transactions
 phai tx pending-human        List missing description, merchant, or purpose fields
-phai tx review-human         TUI/OpenClaw review of human fields and category, with queue filters
+phai tx review-human         Headless review of human fields and category (--json/--summary/--transaction-id), with queue filters
 phai tx set-context-by-desc  Deprecated alias for setting descriptions by raw match
 phai tx split <subcommand>   Split a transaction into multiple lines
 phai forecast upsert         Create or update a forecast entry

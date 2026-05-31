@@ -4641,6 +4641,84 @@ fn cashflow_chart_emits_svg_and_optional_sparkline() {
 }
 
 #[test]
+fn cashflow_chart_is_accrual_includes_card_swipes() {
+    // ADR-0024: the cashflow chart sources its bars from v_cashflow (accrual,
+    // all reportable accounts) — unlike the cash-basis `report cashflow`,
+    // credit-card swipes DO count here, in the month they posted. A store
+    // with only a credit card (no checking account, no snapshots) must still
+    // render non-zero bars. This is the regression guard for the bug where
+    // the chart read the checking-only path and rendered all zeros.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    // Only a credit card — no checking account, no snapshots.
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("card_x")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Card X"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // A single card swipe of -1000.00 in the current month.
+    let today = chrono::Local::now().date_naive();
+    envs(
+        cargo_bin()
+            .arg("tx")
+            .arg("upsert-manual")
+            .arg("--transaction-id")
+            .arg("swipe-x")
+            .arg("--account-id")
+            .arg("card_x")
+            .arg("--date")
+            .arg(today.format("%Y-%m-%d").to_string())
+            .arg("--description")
+            .arg("Compra cartão")
+            .arg("--amount=-1000.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let svg_path = temp.path().join("accrual.svg");
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("cashflow-chart")
+            .arg("--months")
+            .arg("2")
+            .arg("--output")
+            .arg(&svg_path),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    let svg = fs::read_to_string(&svg_path).expect("svg file exists");
+    // The card swipe shows up as a saída bar labelled "1.0k" (brl_k of 1000).
+    // Under the old checking-only cash-basis path this would be absent.
+    assert!(
+        svg.contains("1.0k"),
+        "card swipe must appear as a saída bar (accrual), got SVG without it"
+    );
+}
+
+#[test]
 fn forecast_refresh_installments_materialises_remaining_parcelas() {
     // End-to-end: seed a credit account with three parcelas of a 12-month
     // chain (3/12), run `fin forecast refresh-installments`, then assert
@@ -4982,9 +5060,9 @@ fn forecast_suggest_accept_dismiss_subscription_round_trip() {
     let today = chrono::Local::now().date_naive();
     let amounts = ["-21.90", "-21.90", "-22.10"];
     for (i, amount) in amounts.iter().enumerate() {
-        // Calendar-month steps so each offset lands in a distinct YYYY-MM
-        // regardless of today's date — keeps the test deterministic at month
-        // boundaries.
+        // Calendar-month steps (not *30 days) so each offset lands in a
+        // distinct YYYY-MM regardless of today's date — keeps the test
+        // deterministic at month boundaries.
         let date = today
             .checked_sub_months(chrono::Months::new(i as u32 + 1))
             .expect("date in range");
@@ -5094,6 +5172,9 @@ fn forecast_suggest_accept_dismiss_subscription_round_trip() {
     // Dismiss a new candidate (we re-seed a different merchant first so we
     // have a proposto to dismiss).
     for (i, amount) in ["-90.00", "-90.00", "-90.00"].iter().enumerate() {
+        // Calendar-month steps (not *30 days) so each offset lands in a
+        // distinct YYYY-MM regardless of today's date — keeps the test
+        // deterministic at month boundaries.
         let date = today
             .checked_sub_months(chrono::Months::new(i as u32 + 1))
             .expect("date in range");

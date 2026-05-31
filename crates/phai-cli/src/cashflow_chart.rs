@@ -17,6 +17,7 @@ use phai_core::migrations::run_migrations;
 use phai_core::storage::{open_store, FinanceStore};
 use rust_decimal::Decimal;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -26,7 +27,10 @@ use crate::{load_config, month_ref_for, parse_month_ref, shift_month, CashflowCh
 /// One month's slice of data for the chart.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct MonthDatum {
-    pub label: String, // "mai/26"
+    pub label: String, // display label, e.g. "mai/26"
+    /// Stable month key in `YYYY-MM` (matches `TransactionRecord` month and the
+    /// web client's selection key — never use the display `label` for matching).
+    pub month: String,
     /// Realized inflows (what already hit the checking accounts). Zero for
     /// purely-future months.
     pub inflows: Decimal,
@@ -132,6 +136,13 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
 /// `months_ahead` (future) months. When `with_forecast` is true, each
 /// month includes the forecast-remaining portion (hatched bar tops) and
 /// projected closing balances (dashed saldo line).
+///
+/// Realized bars come from [`FinanceStore::cashflow_reportable`] (the
+/// `v_cashflow` accrual basis: every reportable transaction, card swipes
+/// included, internal categories excluded) so the chart agrees with the
+/// per-category reports. The saldo line is derived from the accumulated
+/// monthly `net` — anchored on the net of all months *before* the window —
+/// rather than from checking-account snapshots (ADR-0024).
 pub(crate) async fn build_chart_data(
     store: &dyn FinanceStore,
     months_back: usize,
@@ -149,33 +160,42 @@ pub(crate) async fn build_chart_data(
         window.push(shift_month(current_month, delta)?);
     }
 
-    // Anchor for the leftmost month: balance at the last day of the *previous* month.
-    let first_month_start = window[0];
-    let anchor_date = first_month_start
-        .pred_opt()
-        .context("falha ao computar último dia do mês anterior à janela")?;
-    let initial_balance = store
-        .checking_balance_at(anchor_date)
-        .await?
-        .map(|b| b.balance);
+    // Accrual cashflow across all reportable accounts, keyed by `YYYY-MM`.
+    let flows = store.cashflow_reportable().await?;
+    let by_month: HashMap<&str, _> = flows.iter().map(|r| (r.month_ref.as_str(), r)).collect();
+
+    // Derive the saldo anchor from the net of everything *before* the window
+    // so the line reflects prior history instead of always starting at zero.
+    let first_ref = month_ref_for(window[0]);
+    let initial_balance: Decimal = flows
+        .iter()
+        .filter(|r| r.month_ref < first_ref)
+        .map(|r| r.net)
+        .sum();
 
     let realized_count = months_back; // by construction
     let mut data: Vec<MonthDatum> = Vec::with_capacity(total);
-    // For projected_closing rollover: start from initial_balance.
-    let mut running_projection: Option<Decimal> = initial_balance;
+    // Two running balances: `running` advances only on realized net (the
+    // solid saldo line); `running_proj` also absorbs the forecast remainder
+    // (the dashed projection). They coincide through the past and diverge
+    // from the current month onward when forecasts exist.
+    let mut running = initial_balance;
+    let mut running_proj = initial_balance;
 
     for (i, month_start) in window.iter().enumerate() {
         let month_ref = month_ref_for(*month_start);
         parse_month_ref(&month_ref)?;
         let is_future = i >= realized_count;
 
-        // Past + current: realized cashflow comes from the store. Future:
-        // no transactions yet, so zeros — bars are purely the forecast.
-        let (inflows, outflows, closing_balance) = if !is_future {
-            let row = store.cashflow_month(&month_ref).await?;
-            (row.income, row.expenses, row.closing_balance)
+        // Past + current: realized cashflow from v_cashflow. Future months
+        // have no realized rows yet → zeros; their bars are purely forecast.
+        let (inflows, outflows, net_realized) = if is_future {
+            (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
         } else {
-            (Decimal::ZERO, Decimal::ZERO, None)
+            match by_month.get(month_ref.as_str()) {
+                Some(r) => (r.income, r.expenses, r.net),
+                None => (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
+            }
         };
 
         let (fc_in_remaining, fc_out_remaining) = if with_forecast {
@@ -204,37 +224,25 @@ pub(crate) async fn build_chart_data(
             (None, None)
         };
 
-        // Projected closing: realized for past, realized + forecast remaining
-        // for current, prev_projection + (fc_in - fc_out) for future. We do
-        // it in one expression by relying on the fact that for future months
-        // realized is zero, so the formula collapses naturally.
-        let projected = if with_forecast {
-            let net_realized = inflows - outflows;
-            let net_remaining = fc_in_remaining.unwrap_or(Decimal::ZERO)
-                - fc_out_remaining.unwrap_or(Decimal::ZERO);
-            running_projection.map(|prev| prev + net_realized + net_remaining)
-        } else {
-            // No forecast → projection is just the realized closing.
-            closing_balance
-        };
+        // Advance the derived balances. Realized saldo moves only on realized
+        // net; projected saldo also absorbs the forecast remainder.
+        let net_remaining =
+            fc_in_remaining.unwrap_or(Decimal::ZERO) - fc_out_remaining.unwrap_or(Decimal::ZERO);
+        running += net_realized;
+        running_proj += net_realized + net_remaining;
 
-        // Roll the projection forward. Prefer the snapshot-anchored closing
-        // when available (snapshots are ground truth and may differ from
-        // running_projection ± rounding); otherwise carry the projection.
-        running_projection = if !is_future && closing_balance.is_some() {
-            // Use projected (which incorporates forecast remaining) if forecast
-            // is on, else use the realized closing.
-            if with_forecast {
-                projected
-            } else {
-                closing_balance
-            }
+        // Realized closing exists for past/current months (derived, never a
+        // snapshot); future months have no realized closing.
+        let closing_balance = if is_future { None } else { Some(running) };
+        let projected = if with_forecast {
+            Some(running_proj)
         } else {
-            projected
+            closing_balance
         };
 
         data.push(MonthDatum {
             label: short_month_label(&month_ref),
+            month: month_ref.clone(),
             inflows,
             outflows,
             closing_balance,
@@ -247,7 +255,7 @@ pub(crate) async fn build_chart_data(
 
     Ok(ChartData {
         months: data,
-        initial_balance,
+        initial_balance: Some(initial_balance),
         with_forecast,
         realized_count,
         scenario: None,
@@ -1128,6 +1136,7 @@ mod tests {
             months: vec![
                 MonthDatum {
                     label: "mar/26".into(),
+                    month: "2026-03".into(),
                     inflows: dec!(10000),
                     outflows: dec!(8000),
                     closing_balance: Some(dec!(12000)),
@@ -1138,6 +1147,7 @@ mod tests {
                 },
                 MonthDatum {
                     label: "abr/26".into(),
+                    month: "2026-04".into(),
                     inflows: dec!(11000),
                     outflows: dec!(9500),
                     closing_balance: Some(dec!(13500)),
@@ -1160,6 +1170,7 @@ mod tests {
             months: vec![
                 MonthDatum {
                     label: "mar/26".into(),
+                    month: "2026-03".into(),
                     inflows: dec!(10000),
                     outflows: dec!(8000),
                     closing_balance: Some(dec!(12000)),
@@ -1170,6 +1181,7 @@ mod tests {
                 },
                 MonthDatum {
                     label: "abr/26".into(),
+                    month: "2026-04".into(),
                     inflows: dec!(5000), // partial month
                     outflows: dec!(2000),
                     closing_balance: Some(dec!(15000)),
@@ -1180,6 +1192,7 @@ mod tests {
                 },
                 MonthDatum {
                     label: "mai/26".into(),
+                    month: "2026-05".into(),
                     inflows: dec!(0),
                     outflows: dec!(0),
                     closing_balance: None,

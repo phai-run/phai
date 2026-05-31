@@ -39,3 +39,6 @@ gaps.plan.md
 .sentrux/*.json
 .sentrux/*.db
 .sentrux/*.sqlite
+
+# pi-lens tool cache
+.pi-lens/

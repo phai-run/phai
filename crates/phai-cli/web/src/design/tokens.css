@@ -1,0 +1,165 @@
+/* phai design tokens. The brand spec (/DESIGN.md) defines a dark "void" canvas,
+   but the live web app ships a light base (white background) per product
+   decision. Same token *names* — accents are darkened for AA contrast on white,
+   and `--white` keeps its name but now carries the primary ink color.
+   One accent per view, terminal-precise. Keep names in sync. */
+:root {
+	--bg: #ffffff; /* white base background */
+	--surface: #f6f6fb; /* elevated cards, just above the white base */
+	--purple: #6d4aff; /* intelligence / AI — primary interactive (AA on white) */
+	--cyan: #0d9488; /* clarity / data — positive financial signal */
+	--amber: #b45309; /* alerts — used sparingly */
+	--rose: #e11d48; /* danger — overspend / expense */
+	--green: #15803d; /* success — income / within budget */
+	--white: #15131f; /* primary text (dark ink on white; name kept for parity) */
+	--muted: #5b5b70; /* secondary text, metadata */
+	--muted2: #9a9aae; /* decorative only — never body text */
+	--border: #e5e3ef; /* card and hairline edges */
+
+	--font-display: "Space Grotesk", system-ui, sans-serif;
+	--font-body: "Inter", system-ui, sans-serif;
+	--font-mono: "JetBrains Mono", ui-monospace, monospace;
+	--font-phi: Georgia, "Times New Roman", serif; /* carries φ; see DESIGN.md */
+
+	--radius-sm: 8px;
+	--radius-md: 12px;
+	--radius-lg: 14px;
+	--radius-xl: 16px;
+	--radius-full: 9999px;
+
+	--space-unit: 8px;
+	--card-pad: 20px;
+	--section-gap: 80px;
+	/* The web app is a full-width workspace, not a 780px editorial column. */
+	--container: min(1680px, 96vw);
+	/* The one sanctioned shadow (DESIGN.md): a dragged element signalling lift. */
+	--drag-shadow: 0 8px 24px rgba(21, 19, 31, 0.18);
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	background: var(--bg);
+	color: var(--white);
+	font-family: var(--font-body);
+	font-size: 15px;
+	line-height: 1.6;
+	-webkit-font-smoothing: antialiased;
+}
+
+a {
+	color: var(--purple);
+	text-decoration: none;
+}
+
+code,
+.mono {
+	font-family: var(--font-mono);
+}
+
+/* The ceremonial φ — high-contrast italic serif, never body text. */
+.phi {
+	font-family: var(--font-phi);
+	font-style: italic;
+	font-weight: 700;
+	background: linear-gradient(135deg, var(--cyan), var(--purple), var(--amber));
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+}
+
+@keyframes breathe {
+	0%,
+	100% {
+		filter: brightness(0.85);
+	}
+	50% {
+		filter: brightness(1);
+	}
+}
+.phi-hero {
+	animation: breathe 6s ease-in-out infinite;
+}
+
+:focus-visible {
+	outline: 1px solid var(--purple);
+	outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.phi-hero {
+		animation: none;
+	}
+}
+
+/* ── Responsive view grids ───────────────────────────────────────────── */
+
+.review-grid {
+	grid-template-columns: 1fr;
+}
+@media (min-width: 1024px) {
+	.review-grid {
+		grid-template-columns: minmax(0, 1fr) clamp(280px, 24vw, 360px);
+	}
+}
+@media (max-width: 1023px) {
+	.review-rail {
+		order: -1;
+	}
+}
+
+.planning-grid {
+	grid-template-columns: 1fr;
+}
+@media (min-width: 1100px) {
+	.planning-grid {
+		grid-template-columns: minmax(0, 1.6fr) clamp(320px, 32vw, 460px);
+	}
+}
+
+/* ── Skeleton loading ────────────────────────────────────────────────── */
+
+@keyframes shimmer {
+	0% {
+		opacity: 0.4;
+	}
+	50% {
+		opacity: 0.7;
+	}
+	100% {
+		opacity: 0.4;
+	}
+}
+
+.skeleton {
+	background: var(--surface);
+	border-radius: var(--radius-sm);
+	animation: shimmer 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.skeleton {
+		animation: none;
+		opacity: 0.5;
+	}
+}
+
+/* The app ships a light (white) base unconditionally — per product direction.
+   No prefers-color-scheme dark override (it would violate the white requirement
+   and the current palette's ink color is dark). */
+
+/* ── Spin animation for sync indicator ───────────────────────────────── */
+
+@keyframes spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}

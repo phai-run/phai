@@ -1,0 +1,7 @@
+node_modules/
+*.tsbuildinfo
+.vite/
+# dist/ is a generated build artifact embedded into the binary by build.rs.
+# It is NOT committed — CI/release builds it with `pnpm build`; a plain
+# cargo build falls back to a placeholder. See crates/phai-cli/build.rs.
+dist/
