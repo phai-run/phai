@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -31,11 +31,12 @@ use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::LocalSet;
 use uuid::Uuid;
 
-const STORE_CHANNEL_CAP: usize = 64;
+const STORE_CHANNEL_CAP: usize = 256;
 const LOCAL_BIND_HOST: &str = "127.0.0.1";
 const LOCAL_APP_HOST: &str = "phai.localhost";
 /// Default number of review-queue rows returned when the caller omits `limit`.
@@ -826,7 +827,7 @@ struct DismissTemplateBody {
 
 // ── HTTP handlers ────────────────────────────────────────────────────────
 
-type Store = State<Arc<mpsc::Sender<StoreRequest>>>;
+type Store = State<Arc<RwLock<mpsc::Sender<StoreRequest>>>>;
 
 /// Build a JSON error response with the given status.
 fn error_response(status: StatusCode, message: impl Into<String>) -> axum::response::Response {
@@ -845,6 +846,14 @@ fn actor_silent() -> axum::response::Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         "store actor não respondeu",
     )
+}
+
+/// Clone the current store-actor sender. The read-lock is held only for the
+/// cheap clone so concurrent requests are not serialised.
+async fn clone_actor_tx(
+    tx: &Arc<RwLock<mpsc::Sender<StoreRequest>>>,
+) -> mpsc::Sender<StoreRequest> {
+    tx.read().await.clone()
 }
 
 async fn api_status() -> Json<Value> {
@@ -872,6 +881,7 @@ async fn get_review_queue(
         limit: q.limit.unwrap_or(DEFAULT_REVIEW_QUEUE_LIMIT),
     };
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ReviewQueue {
             params,
@@ -907,6 +917,7 @@ async fn get_transactions(
     };
     let limit = params.limit;
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::TransactionsWindow {
             params,
@@ -933,6 +944,7 @@ async fn get_transactions(
 
 async fn get_categories(State(tx): Store) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ListCategoryIds { resp: resp_tx })
         .await
@@ -949,6 +961,7 @@ async fn get_categories(State(tx): Store) -> impl IntoResponse {
 
 async fn get_accounts(State(tx): Store) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::GetAccounts { resp: resp_tx })
         .await
@@ -968,6 +981,7 @@ async fn get_accounts(State(tx): Store) -> impl IntoResponse {
 
 async fn get_chart(State(tx): Store, Query(q): Query<ChartQuery>) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::GetChartData {
             months_back: q.months_back.unwrap_or(6),
@@ -996,6 +1010,7 @@ async fn get_forecasts(State(tx): Store, Query(q): Query<ForecastsQuery>) -> imp
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ListForecastsEnriched {
             status: q.status,
@@ -1025,6 +1040,7 @@ async fn get_forecast_templates(
     Query(q): Query<TemplatesQuery>,
 ) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ListForecastTemplates {
             kind: q.kind,
@@ -1055,6 +1071,7 @@ async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl Int
         })
         .collect();
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ApplyHumanReview {
             writes,
@@ -1097,6 +1114,49 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
         Ok(d) => d,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
+    // Input-length guardrails: prevent extremely long strings from landing in
+    // the database. The limits match typical UX constraints (description is a
+    // short label, not a free-text note).
+    const MAX_DESC_LEN: usize = 500;
+    const MAX_ID_LEN: usize = 100;
+    if body.description.len() > MAX_DESC_LEN {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "description muito longo ({} caracteres; máximo {})",
+                body.description.len(),
+                MAX_DESC_LEN
+            ),
+        );
+    }
+    if body
+        .category_id
+        .as_deref()
+        .is_some_and(|c| c.len() > MAX_ID_LEN)
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "category_id muito longo ({} caracteres; máximo {})",
+                body.category_id.as_deref().unwrap().len(),
+                MAX_ID_LEN
+            ),
+        );
+    }
+    if body
+        .account_id
+        .as_deref()
+        .is_some_and(|a| a.len() > MAX_ID_LEN)
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "account_id muito longo ({} caracteres; máximo {})",
+                body.account_id.as_deref().unwrap().len(),
+                MAX_ID_LEN
+            ),
+        );
+    }
     let record = Box::new(ForecastRecord {
         forecast_id: String::new(),
         due_date,
@@ -1116,6 +1176,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
         realized_at: None,
     });
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::UpsertForecast {
             record,
@@ -1149,6 +1210,7 @@ async fn post_forecast_move(
         }
     };
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::MoveForecast {
             forecast_id: body.forecast_id,
@@ -1187,6 +1249,7 @@ async fn post_accept_template(
     Json(body): Json<AcceptTemplateBody>,
 ) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::AcceptTemplate {
             template_id: body.template_id,
@@ -1211,6 +1274,7 @@ async fn post_dismiss_template(
 ) -> impl IntoResponse {
     let template_id = body.template_id.clone();
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::DismissTemplate {
             template_id: body.template_id,
@@ -1246,20 +1310,47 @@ pub async fn run(port: u16) -> Result<()> {
     let config: AppConfig = config;
     let actor_config = config.clone();
 
-    // Build the channel before entering LocalSet.
-    let (store_tx, store_rx) = mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP);
+    // Shared sender: the store actor replaces the inner sender on each restart
+    // so handlers always reach the live actor. Initialised with a dummy channel
+    // (immediately replaced by the actor on first start).
+    let store_tx: Arc<RwLock<mpsc::Sender<StoreRequest>>> = Arc::new(RwLock::new(
+        mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP).0,
+    ));
 
     let local = LocalSet::new();
 
-    // Spawn the !Send store actor on the local set.
+    // Spawn the !Send store actor on the local set with restart-on-failure.
+    // If open_store / run_migrations fails (e.g. transient disk full), the
+    // actor sleeps 1 s and retries with a fresh channel. Handlers that were
+    // mid-flight with the old sender get "actor unavailable" and the client
+    // retries — the window is ~1 s.
+    let actor_tx = store_tx.clone();
     local.spawn_local(async move {
-        let store = open_store(&actor_config).await?;
-        run_migrations(store.as_ref(), &actor_config).await?;
-        store_actor_loop(store, actor_config, store_rx).await;
-        Ok::<_, anyhow::Error>(())
+        loop {
+            let (tx, rx) = mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP);
+            *actor_tx.write().await = tx;
+
+            match async {
+                let store = open_store(&actor_config).await?;
+                run_migrations(store.as_ref(), &actor_config).await?;
+                store_actor_loop(store, actor_config.clone(), rx).await;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await
+            {
+                Ok(()) => break, // clean shutdown
+                Err(e) => {
+                    eprintln!(
+                        "[phai serve] store actor caiu: {e:#}\n\
+                         [phai serve] reiniciando em 1s..."
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
     });
 
-    let app_state = Arc::new(store_tx);
+    let app_state = store_tx;
 
     // All `/api` routes are guarded by the same-origin check so a malicious
     // page cannot drive the bridge via the user's browser (CSRF). Requests
@@ -1284,6 +1375,9 @@ pub async fn run(port: u16) -> Result<()> {
         .layer(axum::middleware::from_fn(guard_origin))
         // Operation log (debug builds only): method, path, status, latency.
         .layer(axum::middleware::from_fn(log_ops))
+        // Security headers on every response — outermost so they are never
+        // skipped even if an inner layer short-circuits.
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(app_state);
 
     let app = api
@@ -1318,12 +1412,37 @@ pub async fn run(port: u16) -> Result<()> {
     local
         .run_until(async move {
             axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
                 .await
                 .context("servidor web parou")
         })
         .await?;
 
     Ok(())
+}
+
+/// Returns a future that completes when the process receives SIGINT or SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    eprintln!("\n[phai serve] encerrando...");
 }
 
 /// Reject `/api` requests whose `Origin` is not localhost. Runs before every
@@ -1333,9 +1452,47 @@ async fn guard_origin(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     if !is_origin_allowed(req.headers()) {
+        let origin = req
+            .headers()
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<missing>");
+        eprintln!(
+            "[phai serve] origem rejeitada: {origin} — {} {}",
+            req.method(),
+            req.uri().path()
+        );
         return (StatusCode::FORBIDDEN, "Origin não permitida").into_response();
     }
     next.run(req).await
+}
+
+/// Add baseline security headers to every response.
+async fn security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("interest-cohort=()"),
+    );
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+             font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; \
+             frame-ancestors 'none'",
+        ),
+    );
+    resp
 }
 
 /// Log every `/api` operation in debug builds: method, path, status, latency.
@@ -1396,9 +1553,7 @@ fn open_browser(url: &str) {
         Command::new("xdg-open").arg(url).spawn()
     };
     if let Err(e) = result {
-        if cfg!(debug_assertions) {
-            eprintln!("[phai serve] não consegui abrir o browser automaticamente: {e}");
-        }
+        eprintln!("[phai serve] não consegui abrir o browser automaticamente: {e}");
     }
 }
 
@@ -1415,7 +1570,6 @@ fn is_origin_allowed(headers: &HeaderMap) -> bool {
                 // port in the Origin header).
                 || origin.starts_with("http://phai.localhost:")
                 || origin == "http://phai.localhost"
-                || origin == "null"
         }
     }
 }
@@ -1465,10 +1619,10 @@ mod tests {
     }
 
     #[test]
-    fn null_origin_allowed() {
+    fn null_origin_is_rejected() {
         let mut h = HeaderMap::new();
         h.insert("origin", HeaderValue::from_static("null"));
-        assert!(is_origin_allowed(&h));
+        assert!(!is_origin_allowed(&h));
     }
 
     #[test]
