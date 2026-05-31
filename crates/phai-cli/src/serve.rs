@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -1474,15 +1474,26 @@ async fn security_headers(
 ) -> axum::response::Response {
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
-    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-    headers.insert("x-frame-options", "DENY".parse().unwrap());
-    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-    headers.insert("permissions-policy", "interest-cohort=()".parse().unwrap());
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "referrer-policy",
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("interest-cohort=()"),
+    );
     headers.insert(
         "content-security-policy",
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-            .parse()
-            .unwrap(),
+        HeaderValue::from_static(
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+             font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; \
+             frame-ancestors 'none'",
+        ),
     );
     resp
 }
