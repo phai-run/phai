@@ -1,6 +1,6 @@
 # Quality Audit — phai (`serve` + general)
 
-> Audit date: 2026-05-30
+> Audit date: 2026-05-30 · Last updated: 2026-05-31
 > Scope: full codebase review with focus on the `phai serve` web interface.
 >
 > Legend:
@@ -8,6 +8,7 @@
 > - 🟠 High — should fix (security hardening, reliability)
 > - 🟡 Medium — could fix (UX, completeness, observability)
 > - 🟢 Low — nice-to-have (cosmetic, future-proofing)
+> - ⚪ Resolved / Obsolete — no longer applies
 
 ---
 
@@ -15,57 +16,49 @@
 
 ### 1. Silent audit-event data loss via `unwrap_or_default()`
 
-**File:** `crates/phai-cli/src/serve.rs:136`
+**File:** `crates/phai-cli/src/serve.rs` (old line 136)
 
 ```rust
 let diff = serde_json::to_value(&record).unwrap_or_default();
 ```
 
-If `serde_json::to_value(&record)` fails (e.g., because a `Decimal` serialization triggers a panic in `serde_json`, or a future field type causes an error), the `AuditEvent` is still inserted — but its `diff_json` is silently set to `{}` (empty object). The write succeeds, but the audit trail loses the entire payload.
+If `serde_json::to_value(&record)` fails, the `AuditEvent` is still inserted — but its `diff_json` is silently set to `{}` (empty object). The write succeeds, but the audit trail loses the entire payload.
 
-**Why this is critical:** The architecture guarantees "every write is an event" and the audit log is the foundation for corrections (ADR-0004). A silent empty diff makes the audit event useless — you can't reconstruct what was written, defeating the purpose of the audit system.
+**Why this is critical:** The architecture guarantees "every write is an event" and the audit log is the foundation for corrections (ADR-0004). A silent empty diff makes the audit event useless — you can't reconstruct what was written.
 
-**Fix:** Propagate the error instead of swallowing it. Convert the `serde_json::Error` into an `anyhow::Result::Err` so the upsert+audit transaction fails atomically rather than writing a hollow audit.
-
-**Status:** ✅ Fixed — see PR #116
+**Status:** ✅ Fixed — PR #116 (released in v5.1.2). The `serve_dashboard.html` was deleted and the web app rewritten as a React SPA. The `?` operator now propagates the serialization error instead of swallowing it.
 
 ---
 
-### 2. No Subresource Integrity (SRI) on external CDN scripts
+### 2. ~~No Subresource Integrity (SRI) on external CDN scripts~~ ⚪ Obsolete
 
-**File:** `crates/phai-cli/src/serve_dashboard.html:7-8`
+**File:** `crates/phai-cli/src/serve_dashboard.html` (deleted)
 
-```html
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-```
+The old dashboard loaded Chart.js from jsdelivr without `integrity` hashes. The new web app (`crates/phai-cli/web/`) bundles all dependencies via pnpm + Vite — no CDN scripts exist anymore.
 
-Both `<script>` tags load from jsdelivr without `integrity` and `crossorigin` attributes. If the CDN is compromised or a version is tampered with, the dashboard silently runs arbitrary JS. The dashboard connects to a local WebSocket API that reads/writes financial data — the exploit surface is real.
-
-**Fix:** Add SRI hashes (`integrity="sha384-..." crossorigin="anonymous"`).
-
-**Status:** TODO
+**Status:** ⚪ Obsolete — `serve_dashboard.html` deleted in the web-app rewrite. Chart.js is now an npm dependency bundled at build time.
 
 ---
 
 ### 3. Store actor crash takes down the entire server
 
-**File:** `crates/phai-cli/src/serve.rs:646-654`
+**File:** `crates/phai-cli/src/serve.rs:1252-1260`
 
 ```rust
+let local = LocalSet::new();
 local.spawn_local(async move {
-    let store = open_store(&config).await?;
-    run_migrations(store.as_ref(), &config).await?;
-    store_actor_loop(store, store_rx).await;
+    let store = open_store(&actor_config).await?;
+    run_migrations(store.as_ref(), &actor_config).await?;
+    store_actor_loop(store, actor_config, store_rx).await;
     Ok::<_, anyhow::Error>(())
 });
 ```
 
-The store actor runs inside `LocalSet`. If the actor task panics or returns `Err`, the entire `LocalSet` unwinds, the axum server stops, and all connected clients drop. There is no restart logic, no supervisor, no fallback mode.
+The store actor runs inside `LocalSet`. If `open_store` or `run_migrations` returns `Err`, the task exits silently. The HTTP server stays alive but every `/api` request returns "store actor indisponível" permanently — there is no restart logic.
 
-**Impact:** A single unhandled DB error (e.g., corrupt SQLite, disk full) kills the dashboard for everyone immediately.
+**Impact:** A single unhandled DB error (e.g., corrupt SQLite, disk full) makes the dashboard permanently non-functional until manual restart.
 
-**Fix:** Wrap the actor in a restart loop or use `tokio::task::JoinSet` with automatic respawn. At minimum, emit a visible error and keep the HTTP server alive so clients can reconnect.
+**Fix:** Wrap the actor initialisation + loop in a restart-with-backoff so transient failures (disk full that resolves, DB lock released) self-heal. Use a shared sender (`Arc<RwLock<Sender>>`) so a fresh channel is plumbed on each restart attempt.
 
 **Status:** TODO
 
@@ -75,7 +68,7 @@ The store actor runs inside `LocalSet`. If the actor task panics or returns `Err
 
 ### 4. No security headers on HTTP responses
 
-**File:** `crates/phai-cli/src/serve.rs` (the axum router)
+**File:** `crates/phai-cli/src/serve.rs` (axum router, lines 1267-1292)
 
 The server sends no security headers:
 - No `Content-Security-Policy` → XSS risk from injected content
@@ -84,15 +77,17 @@ The server sends no security headers:
 - No `Referrer-Policy` → potential data leakage in referrers
 - No `Permissions-Policy` → browser feature abuse surface
 
-**Fix:** Add a Tower layer (`tower-http::set_header`) with baseline security headers, or use `tower-http::compression` + custom middleware.
+Note: a `guard_origin` middleware (same-origin check) was added in the rewrite, which mitigates CSRF. But the headers above are still missing.
+
+**Fix:** Add a Tower layer with baseline security headers via a simple middleware function.
 
 **Status:** TODO
 
 ---
 
-### 5. `null` origin allowed in WebSocket origin check
+### 5. `null` origin allowed in origin check
 
-**File:** `crates/phai-cli/src/serve.rs:734`
+**File:** `crates/phai-cli/src/serve.rs:1418`
 
 ```rust
 origin == "null"
@@ -103,7 +98,7 @@ The `null` origin is explicitly allowed. This can be triggered by:
 - `data:` URIs loaded directly
 - `file://` pages in some browsers
 
-If a user visits a malicious page that opens a sandboxed iframe and connects to `ws://127.0.0.1:8080/ws`, the origin check passes and the attacker can read/write financial data through the WebSocket API.
+**Context update (2026-05-31):** The WebSocket API was replaced with REST-only endpoints. The attack surface is smaller (no persistent connection), but a malicious page in a sandboxed iframe could still issue `POST /api/events` (review writes) and `POST /api/forecast` if the user visits it while `phai serve` is running.
 
 **Fix:** Remove the `null` origin exception. Only allow explicit localhost origins.
 
@@ -113,7 +108,7 @@ If a user visits a malicious page that opens a sandboxed iframe and connects to 
 
 ### 6. No graceful shutdown
 
-**File:** `crates/phai-cli/src/serve.rs:667-672`
+**File:** `crates/phai-cli/src/serve.rs:1318-1324`
 
 ```rust
 local
@@ -125,7 +120,7 @@ local
     .await?;
 ```
 
-When the user hits Ctrl+C, the server exits immediately. WebSocket connections are dropped without close frames, in-flight store operations may be interrupted, and there's no drain phase.
+When the user hits Ctrl+C, the server exits immediately. In-flight store operations may be interrupted, and there's no drain phase for pending oneshot responses.
 
 **Fix:** Listen for SIGINT/SIGTERM and call `axum::serve(...).with_graceful_shutdown(shutdown_signal())`.
 
@@ -135,87 +130,83 @@ When the user hits Ctrl+C, the server exits immediately. WebSocket connections a
 
 ## 🟡 Medium
 
-### 7. No request/error logging
+### 7. No request/error logging in release builds
 
-The serve command prints only a startup message. There is no:
-- Access log (which endpoint was hit, latency, status)
-- Error log (WebSocket errors, store actor errors)
-- Connection log (client connect/disconnect)
+The serve command has `log_ops` middleware that logs method, path, status, latency — but **only in debug builds** (gated by `cfg!(debug_assertions)`). In release builds there is zero observability:
+- No access log (which endpoint was hit, latency, status)
+- No error log (store actor failures are silent)
+- No connection log
 
-This makes debugging production issues impossible. The store actor errors are silently dropped via `let _ = resp.send(...)`.
+The store actor errors are silently dropped via `let _ = resp.send(...)`.
 
-**Fix:** Add `tracing` instrumentation with at minimum `INFO`-level request logs and `ERROR`-level store failures.
-
-**Status:** TODO
-
----
-
-### 8. No pagination on forecast/template lists
-
-**File:** `crates/phai-cli/src/serve_dashboard.html`
-
-The dashboard loads all forecasts and templates at once with no pagination. With 1000+ forecast records, this would be slow and memory-heavy.
-
-**Fix:** Add `limit`/`offset` parameters to the `list_forecasts` and `list_forecast_templates` store methods, expose them through the WebSocket API, and add pagination controls in the UI.
+**Fix:** Always log errors (`eprintln!` at minimum). Keep the per-request debug log gated but add unconditional ERROR-level output for store failures and panics.
 
 **Status:** TODO
 
 ---
 
-### 9. Missing edit/delete for forecasts in the UI
+### 8. ~~No pagination on forecast/template lists~~ ⚪ Obsolete
 
-The web interface has "Add" but no way to:
-- Edit an existing forecast (change amount, date, category)
-- Delete or dismiss a forecast
-- Mark a forecast as "realized"
+**File:** `crates/phai-cli/src/serve_dashboard.html` (deleted)
 
-Users must drop to the CLI for these operations.
+The old dashboard loaded all forecasts and templates at once. The new web app uses `DEFAULT_TRANSACTIONS_LIMIT = 5000` and `DEFAULT_REVIEW_QUEUE_LIMIT = 200` — pagination is still server-side-only but the React SPA can implement client-side pagination. The API supports `limit` parameters.
 
-**Fix:** Add edit/delete/dismiss buttons to the forecasts table, with corresponding WebSocket messages.
+**Status:** ⚪ Obsolete — old dashboard deleted. Pagination is a frontend concern in the new SPA.
 
-**Status:** TODO
+---
+
+### 9. Missing edit/delete for forecasts in the UI — partially addressed
+
+The old web interface had "Add" but no edit/delete. The new React SPA adds:
+- **Drag-and-drop** forecast rescheduling (`POST /api/forecast/move`) — ✅
+- **Forecast creation** (`POST /api/forecast`) — ✅
+- **Template accept/dismiss** (`POST /api/forecast-template/accept`, `/dismiss`) — ✅
+
+Still missing in the SPA:
+- Inline edit of forecast fields (description, amount, category)
+- Delete/dismiss an individual forecast (not template)
+
+**Status:** 🟡 Partially addressed — drag-to-reschedule covers the main UX gap. Edit/delete remain as future enhancements.
 
 ---
 
 ### 10. Missing CLI parity: no budget, card, or pulse views
 
-The CLI has 17 report subcommands. The web dashboard only has:
-- Cashflow chart (with click-to-drill transactions)
-- Forecast templates (accept/dismiss)
-- Forecast list
-- Manual forecast creation
+The CLI has 17 report subcommands. The web dashboard now has:
+- Cashflow chart (`PlanningChart.tsx`)
+- Month drill-down (`MonthDetail.tsx`)
+- Forecast management (templates + creation + drag-to-reschedule)
+- Review queue editing
 
-Missing: budget status, card summary/bills, daily pulse, installments, uncategorized queue, data health, and more.
+Still missing: budget status, card summary/bills, daily pulse, installments view, uncategorized queue, data health.
 
-This is not a bug but a significant completeness gap between the CLI and web experience.
-
-**Status:** TODO (feature backlog)
+**Status:** 🟡 Feature backlog — the SPA architecture makes these straightforward to add as new views.
 
 ---
 
 ### 11. Channel capacity bottleneck
 
-**File:** `crates/phai-cli/src/serve.rs:36`
+**File:** `crates/phai-cli/src/serve.rs:38`
 
 ```rust
 const STORE_CHANNEL_CAP: usize = 64;
 ```
 
-The mpsc channel has a fixed capacity of 64. If 64 concurrent WebSocket requests are in-flight and a 65th arrives, the sender blocks until a slot frees. WebSocket clients will experience timeout-like behavior with no error message.
+The mpsc channel has a fixed capacity of 64. Under load, senders block until a slot frees. With the REST API, concurrent requests are serialised through this channel — 64 concurrent requests could exhaust it.
 
-**Fix:** Either increase to 256+, use a bounded channel with `try_send` and error feedback, or switch to a `tokio::sync::Semaphore`-based concurrency limiter.
+**Fix:** Increase to 256. The memory overhead is negligible (each `StoreRequest` is a few hundred bytes at most).
 
 **Status:** TODO
 
 ---
 
-### 12. No input-length validation on `upsert_forecast`
+### 12. No input-length validation on `post_forecast`
 
-**File:** `crates/phai-cli/src/serve.rs:426-471`
+**File:** `crates/phai-cli/src/serve.rs:1086-1136`
 
-The `upsert_forecast` handler accepts `description`, `amount`, `category_id`, `account_id` with no max-length validation. A malformed request could insert extremely long strings into the database, causing storage issues or UI rendering problems.
+The `post_forecast` handler accepts `description`, `amount`, `category_id`, `account_id` with no max-length validation. A malformed request could insert extremely long strings into the database.
 
-**Fix:** Validate `description.len() <= 500`, `category_id.len() <= 100`, etc., and return clear error messages.
+**Fix:** Validate `description.len() <= 500`, `category_id.len() <= 100`, `account_id.len() <= 100`, and return clear 400 error messages.
 
 **Status:** TODO
 
@@ -225,65 +216,59 @@ The `upsert_forecast` handler accepts `description`, `amount`, `category_id`, `a
 
 ### 13. No dark mode
 
-The CSS uses hardcoded light-theme colors in `:root`. No dark mode support.
+The new design tokens (`web/src/design/tokens.css`) define light-theme colors on `:root`. There is no `@media (prefers-color-scheme: dark)` override.
 
-**Fix:** Add `@media (prefers-color-scheme: dark)` overrides.
+**Fix:** Add dark-mode media query overrides in `tokens.css`.
 
-**Status:** TODO
-
----
-
-### 14. No offline/CDN-offline fallback
-
-If jsdelivr is unavailable (airplane mode, corporate firewall), the dashboard renders a blank page because Chart.js fails to load. The rest of the UI (templates, forecasts, add form) also breaks because `Chart.register(ChartDataLabels)` fails.
-
-**Fix:** Bundle Chart.js with the binary via `include_str!` + base64 data URI, or detect CDN load failure and show a graceful degraded mode with just the tabular data.
-
-**Status:** TODO
+**Status:** TODO (cosmetic — not a correctness issue)
 
 ---
 
-### 15. HTML template baked into binary
+### 14. ~~No offline/CDN-offline fallback~~ ⚪ Obsolete
 
-**File:** `crates/phai-cli/src/serve.rs:639`
+The old dashboard broke if jsdelivr was unreachable. The new SPA bundles all dependencies via Vite — there is no runtime CDN dependency.
 
-```rust
-Html(include_str!("serve_dashboard.html"))
-```
-
-The 584-line HTML template is compiled into the binary. Users cannot customize the UI without rebuilding from source. For advanced users who want to theme or extend the dashboard, there's no override mechanism.
-
-**Fix:** Look for `$PHAI_CONFIG_DIR/dashboard.html` at startup, fall back to the embedded one.
-
-**Status:** TODO
+**Status:** ⚪ Obsolete — all assets are bundled at build time.
 
 ---
 
-### 16. No WebSocket ping/pong heartbeat
+### 15. ~~HTML template baked into binary~~ ✅ Fixed
 
-The WebSocket connection has no application-level heartbeat. If a TCP connection silently breaks (mobile sleep, NAT timeout), neither the client nor server will notice until the next message send.
+**File:** `crates/phai-cli/src/serve.rs` (old)
 
-**Fix:** Enable `axum`'s automatic ping/pong or implement application-level keepalive.
+The old 584-line HTML template was compiled into the binary via `include_str!("serve_dashboard.html")`. The new code uses `crate::serve_assets::static_handler` which serves the embedded SPA from the `web/` build output, embedded via `include_dir`.
 
-**Status:** TODO
+**Status:** ✅ Fixed — the SPA is embedded at build time via `include_dir` and served through a proper static-handler with MIME types, caching headers, and SPA fallback.
+
+---
+
+### 16. ~~No WebSocket ping/pong heartbeat~~ ⚪ Obsolete
+
+The old WebSocket connection had no application-level heartbeat. The WebSocket API was removed entirely in the rewrite — all communication is now stateless REST over HTTP.
+
+**Status:** ⚪ Obsolete — WebSocket removed. REST is inherently stateless.
 
 ---
 
 ## Non-`serve` findings
 
-### 17. `unwrap_or_default()` used in error-handling-sensitive paths (general)
+### 17. Residual `unwrap_or_default()` in non-critical display paths
 
-**Files:** `serve.rs:317,327,354,543`
+**Files:** `serve.rs:376, 647`
 
 ```rust
-serde_json::to_string(&resp).unwrap_or_default().into()
+// Line 376 — ForecastWithMeta::to_json()
+let mut value = serde_json::to_value(&self.record).unwrap_or_default();
+
+// Line 647 — debug_assert! amount precision check
+.unwrap_or_default();
 ```
 
-In WebSocket message serialization, these should never fail (the types are all `Serialize`), but if they do, the client receives an empty string with no error. This is low-risk today but a latent correctness issue.
+These are in display/debug paths, not the audit trail. The types are all `Serialize` so these should never fail in practice. Low risk but still latent correctness issues.
 
-**Fix:** Same approach as #1 — either explicitly handle (log + error response) or use `expect("serialization of WsResponse is infallible")` to document the invariant.
+**Fix:** Use `expect("ForecastRecord serialization is infallible")` to document the invariant, or propagate the error.
 
-**Status:** TODO (follow-up to #1)
+**Status:** 🟢 Low priority — not audit-critical.
 
 ---
 
@@ -291,19 +276,22 @@ In WebSocket message serialization, these should never fail (the types are all `
 
 | Priority | Count | Area |
 |----------|-------|------|
-| 🔴 Critical | 3 | Data integrity, Security, Reliability |
+| 🔴 Critical | 1 | Reliability (store actor crash) |
 | 🟠 High | 3 | Security headers, Origin bypass, Graceful shutdown |
-| 🟡 Medium | 6 | Observability, UX completeness, Input validation |
-| 🟢 Low | 4 | Cosmetic, Robustness, Extensibility |
-| **Total** | **16** | |
+| 🟡 Medium | 3 | Observability, Channel capacity, Input validation |
+| 🟢 Low | 3 | Dark mode, Residual unwraps, Feature backlog |
+| ⚪ Resolved/Obsolete | 7 | Rewrite addressed or obsoleted |
+| **Total actionable** | **10** | |
 
 ---
 
 ## Action Plan
 
-1. **[NOW]** Fix #1 (silent audit data loss) — one-line change with regression test
-2. **[Next]** Fix #2 (SRI on CDN scripts) — add integrity hashes
-3. **[Next]** Fix #5 (remove `null` origin) — one-line change
-4. **[Next]** Fix #3 (store actor crash resilience) — restart loop
-5. **[Then]** #6 (graceful shutdown), #4 (security headers), #7 (logging)
-6. **[Backlog]** #8-16 — feature work
+1. **[NOW]** Fix #3 (store actor resilience) — restart loop + shared sender
+2. **[NEXT]** Fix #5 (remove `null` origin) — one-line change
+3. **[NEXT]** Fix #4 (security headers) — middleware layer
+4. **[NEXT]** Fix #6 (graceful shutdown) — `with_graceful_shutdown`
+5. **[NEXT]** Fix #7 (error logging in release) — unconditional `eprintln!`
+6. **[NEXT]** Fix #11 (channel capacity) — 64 → 256
+7. **[NEXT]** Fix #12 (input validation) — length checks on `post_forecast`
+8. **[BACKLOG]** #9, #10, #13, #17 — feature work
