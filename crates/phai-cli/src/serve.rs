@@ -1331,6 +1331,9 @@ pub async fn run(port: u16) -> Result<()> {
         .layer(axum::middleware::from_fn(guard_origin))
         // Operation log (debug builds only): method, path, status, latency.
         .layer(axum::middleware::from_fn(log_ops))
+        // Security headers on every response — outermost so they are never
+        // skipped even if an inner layer short-circuits.
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(app_state);
 
     let app = api
@@ -1383,6 +1386,26 @@ async fn guard_origin(
         return (StatusCode::FORBIDDEN, "Origin não permitida").into_response();
     }
     next.run(req).await
+}
+
+/// Add baseline security headers to every response.
+async fn security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+    headers.insert("permissions-policy", "interest-cohort=()".parse().unwrap());
+    headers.insert(
+        "content-security-policy",
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+            .parse()
+            .unwrap(),
+    );
+    resp
 }
 
 /// Log every `/api` operation in debug builds: method, path, status, latency.
