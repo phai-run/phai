@@ -31,7 +31,8 @@ use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::LocalSet;
 use uuid::Uuid;
 
@@ -826,7 +827,7 @@ struct DismissTemplateBody {
 
 // ── HTTP handlers ────────────────────────────────────────────────────────
 
-type Store = State<Arc<mpsc::Sender<StoreRequest>>>;
+type Store = State<Arc<RwLock<mpsc::Sender<StoreRequest>>>>;
 
 /// Build a JSON error response with the given status.
 fn error_response(status: StatusCode, message: impl Into<String>) -> axum::response::Response {
@@ -845,6 +846,14 @@ fn actor_silent() -> axum::response::Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         "store actor não respondeu",
     )
+}
+
+/// Clone the current store-actor sender. The read-lock is held only for the
+/// cheap clone so concurrent requests are not serialised.
+async fn clone_actor_tx(
+    tx: &RwLock<mpsc::Sender<StoreRequest>>,
+) -> mpsc::Sender<StoreRequest> {
+    tx.read().await.clone()
 }
 
 async fn api_status() -> Json<Value> {
@@ -872,6 +881,7 @@ async fn get_review_queue(
         limit: q.limit.unwrap_or(DEFAULT_REVIEW_QUEUE_LIMIT),
     };
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ReviewQueue {
             params,
@@ -907,6 +917,7 @@ async fn get_transactions(
     };
     let limit = params.limit;
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::TransactionsWindow {
             params,
@@ -933,6 +944,7 @@ async fn get_transactions(
 
 async fn get_categories(State(tx): Store) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ListCategoryIds { resp: resp_tx })
         .await
@@ -949,6 +961,7 @@ async fn get_categories(State(tx): Store) -> impl IntoResponse {
 
 async fn get_accounts(State(tx): Store) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::GetAccounts { resp: resp_tx })
         .await
@@ -968,6 +981,7 @@ async fn get_accounts(State(tx): Store) -> impl IntoResponse {
 
 async fn get_chart(State(tx): Store, Query(q): Query<ChartQuery>) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::GetChartData {
             months_back: q.months_back.unwrap_or(6),
@@ -996,6 +1010,7 @@ async fn get_forecasts(State(tx): Store, Query(q): Query<ForecastsQuery>) -> imp
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ListForecastsEnriched {
             status: q.status,
@@ -1025,6 +1040,7 @@ async fn get_forecast_templates(
     Query(q): Query<TemplatesQuery>,
 ) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ListForecastTemplates {
             kind: q.kind,
@@ -1055,6 +1071,7 @@ async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl Int
         })
         .collect();
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::ApplyHumanReview {
             writes,
@@ -1116,6 +1133,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
         realized_at: None,
     });
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::UpsertForecast {
             record,
@@ -1149,6 +1167,7 @@ async fn post_forecast_move(
         }
     };
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::MoveForecast {
             forecast_id: body.forecast_id,
@@ -1187,6 +1206,7 @@ async fn post_accept_template(
     Json(body): Json<AcceptTemplateBody>,
 ) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::AcceptTemplate {
             template_id: body.template_id,
@@ -1211,6 +1231,7 @@ async fn post_dismiss_template(
 ) -> impl IntoResponse {
     let template_id = body.template_id.clone();
     let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
     if tx
         .send(StoreRequest::DismissTemplate {
             template_id: body.template_id,
@@ -1246,20 +1267,46 @@ pub async fn run(port: u16) -> Result<()> {
     let config: AppConfig = config;
     let actor_config = config.clone();
 
-    // Build the channel before entering LocalSet.
-    let (store_tx, store_rx) = mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP);
+    // Shared sender: the store actor replaces the inner sender on each restart
+    // so handlers always reach the live actor. Initialised with a dummy channel
+    // (immediately replaced by the actor on first start).
+    let store_tx: Arc<RwLock<mpsc::Sender<StoreRequest>>> =
+        Arc::new(RwLock::new(mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP).0));
 
     let local = LocalSet::new();
 
-    // Spawn the !Send store actor on the local set.
+    // Spawn the !Send store actor on the local set with restart-on-failure.
+    // If open_store / run_migrations fails (e.g. transient disk full), the
+    // actor sleeps 1 s and retries with a fresh channel. Handlers that were
+    // mid-flight with the old sender get "actor unavailable" and the client
+    // retries — the window is ~1 s.
+    let actor_tx = store_tx.clone();
     local.spawn_local(async move {
-        let store = open_store(&actor_config).await?;
-        run_migrations(store.as_ref(), &actor_config).await?;
-        store_actor_loop(store, actor_config, store_rx).await;
-        Ok::<_, anyhow::Error>(())
+        loop {
+            let (tx, rx) = mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP);
+            *actor_tx.write().await = tx;
+
+            match async {
+                let store = open_store(&actor_config).await?;
+                run_migrations(store.as_ref(), &actor_config).await?;
+                store_actor_loop(store, actor_config.clone(), rx).await;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await
+            {
+                Ok(()) => break, // clean shutdown
+                Err(e) => {
+                    eprintln!(
+                        "[phai serve] store actor caiu: {e:#}\n\
+                         [phai serve] reiniciando em 1s..."
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
     });
 
-    let app_state = Arc::new(store_tx);
+    let app_state = store_tx;
 
     // All `/api` routes are guarded by the same-origin check so a malicious
     // page cannot drive the bridge via the user's browser (CSRF). Requests
