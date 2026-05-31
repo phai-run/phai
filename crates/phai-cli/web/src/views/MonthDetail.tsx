@@ -1,6 +1,6 @@
 import { queryDb } from "@livestore/livestore";
 import { useStore, useQuery, useClientDocument } from "@livestore/react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { events, tables } from "../livestore/schema";
 import {
@@ -11,6 +11,15 @@ import {
 	sumAmounts,
 } from "../lib/format";
 import { useDnd } from "../lib/dnd";
+import { useDebounce } from "../hooks/useDebounce";
+import { TxRow } from "../components/TxRow";
+import { CategoryPicker } from "../components/CategoryPicker";
+import {
+	groupHierarchical,
+	toHierarchicalArray,
+	type HierarchicalParentGroup,
+	type HierarchicalSubGroup,
+} from "../lib/derivations";
 import type { ChartMonthView, ForecastView } from "./types";
 
 // ── LiveStore queries (module-level for stable refs) ──────────────────────
@@ -52,11 +61,15 @@ export const MonthDetail = ({
 	chart,
 	forecasts,
 	onForecastAdded,
+	months,
+	onMoveForecast,
 }: {
 	month: string;
 	chart: ChartMonthView | null;
 	forecasts: ForecastView[];
 	onForecastAdded: () => void;
+	months: ReadonlyArray<ChartMonthView>;
+	onMoveForecast: (forecastId: string, targetMonth: string) => void;
 }) => {
 	const { store } = useStore();
 	const [ui, setUi] = useClientDocument(tables.ui);
@@ -80,8 +93,10 @@ export const MonthDetail = ({
 	);
 
 	// Effective category (overlay first, then seed)
-	const effectiveCat = (tx: TxView) =>
-		overlayById.get(tx.id)?.categoryId ?? tx.categoryId;
+	const effectiveCat = useCallback(
+		(tx: TxView) => overlayById.get(tx.id)?.categoryId ?? tx.categoryId,
+		[overlayById],
+	);
 
 	// Transactions for this month
 	const monthTxs = useMemo(
@@ -89,10 +104,20 @@ export const MonthDetail = ({
 		[txRows, month],
 	);
 
+	// ── Debounced text filter ───────────────────────────────────────────
+	const [textInput, setTextInput] = useState(ui.textFilter ?? "");
+	const debouncedText = useDebounce(textInput, 200);
+
+	// Sync debounced text back to LiveStore UI
+	useEffect(() => {
+		setUi({ textFilter: debouncedText || null });
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [debouncedText]);
+
 	// Apply filters
 	const filtered = useMemo(() => {
 		const cat = ui.categoryFilter?.trim().toLowerCase() ?? null;
-		const text = ui.textFilter?.trim().toLowerCase() ?? null;
+		const text = debouncedText.trim().toLowerCase() || null;
 		return monthTxs.filter((tx) => {
 			if (ui.installmentsOnly && !tx.isInstallment) return false;
 			if (ui.subscriptionsOnly && !tx.isSubscription) return false;
@@ -120,58 +145,299 @@ export const MonthDetail = ({
 			return true;
 		});
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [monthTxs, overlayById, accountById, ui]);
+	}, [monthTxs, overlayById, accountById, ui, debouncedText, effectiveCat]);
 
-	// Group by income / expense-by-category
+	// Group hierarchically: parent → sub
 	const groups = useMemo(() => {
-		const income: TxView[] = [];
-		const expMap = new Map<string, TxView[]>();
-		for (const tx of filtered) {
-			if (!isNegative(tx.amount)) {
-				income.push(tx);
-			} else {
-				const cat = effectiveCat(tx) ?? "—";
-				if (!expMap.has(cat)) expMap.set(cat, []);
-				expMap.get(cat)!.push(tx);
-			}
-		}
-		// Sort expense categories by absolute sum desc
-		const expEntries = Array.from(expMap.entries()).sort((a, b) => {
-			const sumA = Math.abs(sumAmounts(a[1].map((t) => t.amount)));
-			const sumB = Math.abs(sumAmounts(b[1].map((t) => t.amount)));
-			return sumB - sumA;
-		});
-		return { income, expEntries };
+		return toHierarchicalArray(groupHierarchical(filtered, overlayById));
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filtered, overlayById]);
 
 	// Filter sums
 	const sums = useMemo(() => {
-		const out = filtered.filter((t) => isNegative(t.amount)).map((t) => t.amount);
-		const inc = filtered.filter((t) => !isNegative(t.amount)).map((t) => t.amount);
+		const out = filtered
+			.filter((t) => isNegative(t.amount))
+			.map((t) => t.amount);
+		const inc = filtered
+			.filter((t) => !isNegative(t.amount))
+			.map((t) => t.amount);
 		return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
 	}, [filtered]);
 
 	// Month summary (all month transactions, no filter)
 	const monthSums = useMemo(() => {
-		const out = monthTxs.filter((t) => isNegative(t.amount)).map((t) => t.amount);
-		const inc = monthTxs.filter((t) => !isNegative(t.amount)).map((t) => t.amount);
+		const out = monthTxs
+			.filter((t) => isNegative(t.amount))
+			.map((t) => t.amount);
+		const inc = monthTxs
+			.filter((t) => !isNegative(t.amount))
+			.map((t) => t.amount);
 		return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
 	}, [monthTxs]);
 
-	// Modal state
+	// Modal state — stable setter
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
 
-	const submit = (transactionId: string, patch: ReviewPatch) => {
-		store.commit(
-			events.reviewSubmitted({
-				writeId: crypto.randomUUID(),
-				transactionId,
-				patch,
-				submittedAt: Date.now(),
-			}),
-		);
-	};
+	const onEdit = useCallback((tx: TxView) => setModalTx(tx), []);
+
+	// ── Keyboard selection / batch selection ────────────────────────────
+	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+	const [focusedIdx, setFocusedIdx] = useState<number>(-1);
+	const lastClickedIdx = useRef<number>(-1);
+
+	// Quick category picker state
+	const [quickPicker, setQuickPicker] = useState<{
+		anchorRect: DOMRect;
+	} | null>(null);
+
+	// Recently used categories (track across quick picks)
+	const [recentCats, setRecentCats] = useState<string[]>([]);
+
+	// Drag-to-recategorize setup
+	const { startDrag, registerTarget } = useDnd();
+
+	// Build a flat index list of visible (filtered) transactions for keyboard nav
+	const flatTxs = useMemo(() => {
+		const result: TxView[] = [];
+		for (const parent of groups.expenses) {
+			for (const sub of parent.subs) {
+				for (const tx of sub.txs) {
+					result.push(tx);
+				}
+			}
+		}
+		for (const tx of groups.income) {
+			result.push(tx);
+		}
+		return result;
+	}, [groups]);
+
+	// Clear selection when filtered list changes significantly
+	const flatIds = useMemo(() => flatTxs.map((t) => t.id), [flatTxs]);
+	useEffect(() => {
+		setSelectedIds(new Set());
+		setFocusedIdx(-1);
+		lastClickedIdx.current = -1;
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [flatIds.length]); // reset only on count change, not identity
+
+	// ── Click handler with modifier support ─────────────────────────────
+	const handleTxClick = useCallback(
+		(tx: TxView, e: React.MouseEvent) => {
+			const idx = flatTxs.findIndex((t) => t.id === tx.id);
+			if (idx === -1) {
+				onEdit(tx);
+				return;
+			}
+
+			if (e.shiftKey && lastClickedIdx.current >= 0) {
+				// Shift+click: select range
+				const start = Math.min(lastClickedIdx.current, idx);
+				const end = Math.max(lastClickedIdx.current, idx);
+				const rangeIds = flatTxs.slice(start, end + 1).map((t) => t.id);
+				setSelectedIds(new Set(rangeIds));
+				setFocusedIdx(idx);
+			} else if (e.ctrlKey || e.metaKey) {
+				// Ctrl/Cmd+click: toggle selection
+				setSelectedIds((prev) => {
+					const next = new Set(prev);
+					if (next.has(tx.id)) next.delete(tx.id);
+					else next.add(tx.id);
+					return next;
+				});
+				setFocusedIdx(idx);
+				lastClickedIdx.current = idx;
+			} else {
+				// Plain click: select single, open for editing
+				setSelectedIds(new Set([tx.id]));
+				setFocusedIdx(idx);
+				lastClickedIdx.current = idx;
+				onEdit(tx);
+			}
+		},
+		[flatTxs, onEdit],
+	);
+
+	// ── Keyboard handler ────────────────────────────────────────────────
+	const handleKeyDown = useCallback(
+		(e: React.KeyboardEvent) => {
+			if (modalTx) return; // don't intercept when modal is open
+			if (quickPicker) return; // don't intercept when picker is open
+
+			const target = e.target as HTMLElement;
+			// Don't intercept when user is typing in input/textarea/select
+			if (
+				target.tagName === "INPUT" ||
+				target.tagName === "TEXTAREA" ||
+				target.tagName === "SELECT"
+			)
+				return;
+
+			switch (true) {
+				case e.key === "ArrowDown":
+					e.preventDefault();
+					setFocusedIdx((i) => {
+						const next = Math.min(i + 1, flatTxs.length - 1);
+						if (e.shiftKey) {
+							// Extend selection
+							const start = Math.min(lastClickedIdx.current, next);
+							const end = Math.max(lastClickedIdx.current, next);
+							const rangeIds = flatTxs.slice(start, end + 1).map((t) => t.id);
+							setSelectedIds(new Set(rangeIds));
+						} else {
+							setSelectedIds(new Set(flatTxs[next] ? [flatTxs[next].id] : []));
+							lastClickedIdx.current = next;
+						}
+						return next;
+					});
+					break;
+				case e.key === "ArrowUp":
+					e.preventDefault();
+					setFocusedIdx((i) => {
+						const next = Math.max(i - 1, 0);
+						if (e.shiftKey) {
+							const start = Math.min(lastClickedIdx.current, next);
+							const end = Math.max(lastClickedIdx.current, next);
+							const rangeIds = flatTxs.slice(start, end + 1).map((t) => t.id);
+							setSelectedIds(new Set(rangeIds));
+						} else {
+							setSelectedIds(new Set(flatTxs[next] ? [flatTxs[next].id] : []));
+							lastClickedIdx.current = next;
+						}
+						return next;
+					});
+					break;
+				case e.key === "Enter": {
+					e.preventDefault();
+					if (focusedIdx >= 0 && flatTxs[focusedIdx]) {
+						onEdit(flatTxs[focusedIdx]);
+					}
+					break;
+				}
+				case (e.ctrlKey || e.metaKey) && e.key === "k": {
+					e.preventDefault();
+					if (focusedIdx >= 0) {
+						// Find the focused row element to anchor the picker
+						const txId = flatTxs[focusedIdx]?.id;
+						if (txId) {
+							const el = document.querySelector(`[data-tx-id="${txId}"]`);
+							const rect =
+								el?.getBoundingClientRect() ?? new DOMRect(100, 200, 100, 40);
+							setQuickPicker({ anchorRect: rect });
+						}
+					}
+					break;
+				}
+				case e.key === "Escape":
+					e.preventDefault();
+					if (selectedIds.size > 0) {
+						setSelectedIds(new Set());
+						setFocusedIdx(-1);
+						lastClickedIdx.current = -1;
+					} else {
+						setModalTx(null);
+					}
+					break;
+			}
+		},
+		[modalTx, quickPicker, flatTxs, focusedIdx, selectedIds, onEdit],
+	);
+
+	const handleOpenModal = useCallback((tx: TxView) => setModalTx(tx), []);
+	const handleCloseModal = useCallback(() => setModalTx(null), []);
+
+	const submit = useCallback(
+		(transactionId: string, patch: ReviewPatch) => {
+			store.commit(
+				events.reviewSubmitted({
+					writeId: crypto.randomUUID(),
+					transactionId,
+					patch,
+					submittedAt: Date.now(),
+				}),
+			);
+		},
+		[store],
+	);
+
+	// ── Quick category picker actions ───────────────────────────────────
+	const handleQuickCategory = useCallback(
+		(categoryId: string) => {
+			const idsToUpdate = selectedIds.size > 0 ? Array.from(selectedIds) : [];
+			for (const txId of idsToUpdate) {
+				submit(txId, {
+					description: null,
+					merchantName: null,
+					purpose: null,
+					categoryId,
+				});
+			}
+			// Track recent
+			setRecentCats((prev) => {
+				const next = [categoryId, ...prev.filter((c) => c !== categoryId)];
+				return next.slice(0, 10);
+			});
+			setQuickPicker(null);
+			setSelectedIds(new Set());
+		},
+		[selectedIds, submit],
+	);
+
+	const handleClosePicker = useCallback(() => setQuickPicker(null), []);
+
+	// ── Drag-to-recategorize ────────────────────────────────────────────
+	const handleTxDragStart = useCallback(
+		(tx: TxView, e: React.PointerEvent) => {
+			startDrag(
+				{
+					kind: "transaction",
+					txId: tx.id,
+					categoryId: effectiveCat(tx),
+					label: tx.description ?? tx.merchantName ?? tx.rawDescription,
+					amount: formatMoney(tx.amount),
+				},
+				e,
+			);
+		},
+		[startDrag, effectiveCat],
+	);
+
+	// Register category headers as drop targets
+	const registerDropTarget = useCallback(
+		(catId: string, el: HTMLElement | null) => {
+			if (!el) return;
+			const target = {
+				id: catId,
+				getRect: () => el.getBoundingClientRect(),
+				onDrop: (payload: import("../lib/dnd").DragPayload) => {
+					if (payload.kind !== "transaction" || !payload.txId) return;
+					// Determine target category
+					let targetCat = catId;
+					// If the drop target is a subcategory, use the full compound category
+					if (catId.includes(":")) {
+						targetCat = catId;
+					}
+					submit(payload.txId, {
+						description: null,
+						merchantName: null,
+						purpose: null,
+						categoryId: targetCat,
+					});
+				},
+			};
+			const unreg = registerTarget(target);
+			return unreg;
+		},
+		[registerTarget, submit],
+	);
+
+	const handleModalSubmit = useCallback(
+		(txId: string, patch: ReviewPatch) => {
+			submit(txId, patch);
+			setModalTx(null);
+		},
+		[submit],
+	);
 
 	const hasFilters =
 		ui.installmentsOnly ||
@@ -198,7 +464,7 @@ export const MonthDetail = ({
 		: null;
 
 	return (
-		<div style={{ paddingBottom: 80 }}>
+		<div style={{ paddingBottom: 80 }} onKeyDown={handleKeyDown}>
 			{/* ── Month summary strip ── */}
 			<MonthSummary
 				month={month}
@@ -217,13 +483,17 @@ export const MonthDetail = ({
 					month={month}
 					forecasts={forecasts}
 					onAdded={onForecastAdded}
+					months={months}
+					onMoveForecast={onMoveForecast}
 				/>
 			) : null}
 
 			{/* ── Filter bar ── */}
 			<FilterBar
 				ui={ui}
+				textInput={textInput}
 				setUi={setUi}
+				onTextInput={setTextInput}
 				owners={owners}
 				accounts={accounts}
 				hasFilters={hasFilters}
@@ -242,6 +512,7 @@ export const MonthDetail = ({
 							count={filtered.length}
 							saidas={sums.saidas}
 							entradas={sums.entradas}
+							selectedCount={selectedIds.size}
 						/>
 					</motion.div>
 				)}
@@ -256,19 +527,35 @@ export const MonthDetail = ({
 						isIncome
 						txs={groups.income}
 						overlayById={overlayById}
-						onEdit={setModalTx}
+						onEdit={handleOpenModal}
+						selectedIds={selectedIds}
+						focusedTxId={
+							focusedIdx >= 0 && flatTxs[focusedIdx]
+								? flatTxs[focusedIdx].id
+								: null
+						}
+						onTxClick={handleTxClick}
+						onTxDragStart={handleTxDragStart}
+						registerDropTarget={registerDropTarget}
 					/>
 				)}
 
-				{/* Expenses by category */}
-				{groups.expEntries.map(([cat, txs]) => (
-					<CategoryGroup
-						key={cat}
-						label={cat}
-						isIncome={false}
-						txs={txs}
+				{/* Expenses — hierarchical: parent → sub */}
+				{groups.expenses.map((parent) => (
+					<HierarchicalCategoryGroup
+						key={parent.parent}
+						parent={parent}
 						overlayById={overlayById}
-						onEdit={setModalTx}
+						onEdit={handleOpenModal}
+						selectedIds={selectedIds}
+						focusedTxId={
+							focusedIdx >= 0 && flatTxs[focusedIdx]
+								? flatTxs[focusedIdx].id
+								: null
+						}
+						onTxClick={handleTxClick}
+						onTxDragStart={handleTxDragStart}
+						registerDropTarget={registerDropTarget}
 					/>
 				))}
 
@@ -299,15 +586,25 @@ export const MonthDetail = ({
 							(t) =>
 								t.id !== modalTx.id &&
 								(effectiveCat(t) === effectiveCat(modalTx) ||
-									(t.merchantName &&
-										t.merchantName === modalTx.merchantName)),
+									(t.merchantName && t.merchantName === modalTx.merchantName)),
 						)}
 						overlayById={overlayById}
-						onSubmit={(patch) => {
-							submit(modalTx.id, patch);
-							setModalTx(null);
-						}}
-						onClose={() => setModalTx(null)}
+						onSubmit={(patch) => handleModalSubmit(modalTx.id, patch)}
+						onClose={handleCloseModal}
+					/>
+				)}
+			</AnimatePresence>
+
+			{/* ── Quick category picker (Ctrl/Cmd+K) ── */}
+			<AnimatePresence>
+				{quickPicker && (
+					<CategoryPicker
+						categories={categoryIds}
+						recentCategories={recentCats}
+						anchorRect={quickPicker.anchorRect}
+						selectedCount={selectedIds.size || 1}
+						onSelect={handleQuickCategory}
+						onClose={handleClosePicker}
 					/>
 				)}
 			</AnimatePresence>
@@ -398,7 +695,12 @@ const MonthSummary = ({
 					gap: 8,
 				}}
 			>
-				<SumCard label="entradas" value={entradas} color="var(--cyan)" positive />
+				<SumCard
+					label="entradas"
+					value={entradas}
+					color="var(--cyan)"
+					positive
+				/>
 				<SumCard label="saídas" value={-saidas} color="var(--rose)" />
 				<SumCard
 					label="resultado"
@@ -453,13 +755,13 @@ const SumCard = ({
 			border: "1px solid var(--border)",
 		}}
 	>
-		<div className="mono" style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>
-			{label}
-		</div>
 		<div
 			className="mono"
-			style={{ fontSize: 14, fontWeight: 600, color }}
+			style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}
 		>
+			{label}
+		</div>
+		<div className="mono" style={{ fontSize: 14, fontWeight: 600, color }}>
 			{positive && value > 0 ? "+" : ""}
 			{formatMoneyNumber(value)}
 		</div>
@@ -472,10 +774,14 @@ const ForecastSection = ({
 	month,
 	forecasts,
 	onAdded,
+	months,
+	onMoveForecast,
 }: {
 	month: string;
 	forecasts: ForecastView[];
 	onAdded: () => void;
+	months: ReadonlyArray<ChartMonthView>;
+	onMoveForecast: (forecastId: string, targetMonth: string) => void;
 }) => {
 	const { store } = useStore();
 	const [open, setOpen] = useState(false);
@@ -483,9 +789,79 @@ const ForecastSection = ({
 	const [description, setDescription] = useState("");
 	const [amount, setAmount] = useState("");
 	const [outflow, setOutflow] = useState(true);
+	const [selectedId, setSelectedId] = useState<string | null>(null);
+	const [movingId, setMovingId] = useState<string | null>(null);
+	const [pickerOpen, setPickerOpen] = useState(false);
 	const { startDrag, dragging } = useDnd();
 
-	const submitForecast = () => {
+	// Allowed target months: current month + any future months (no past).
+	const currentMonth = useMemo(() => {
+		const d = new Date();
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+	}, []);
+	const allowedMonths = useMemo(
+		() => months.filter((m) => m.month >= currentMonth),
+		[months, currentMonth],
+	);
+
+	const toggleOpen = useCallback(() => setOpen((v) => !v), []);
+	const openAdd = useCallback(() => setAddOpen(true), []);
+	const closeAdd = useCallback(() => setAddOpen(false), []);
+	const setOut = useCallback(() => setOutflow(true), []);
+	const setIn = useCallback(() => setOutflow(false), []);
+
+	// Move selected forecast to target month. Animates briefly.
+	const doMove = useCallback(
+		(forecastId: string, targetMonth: string) => {
+			setMovingId(forecastId);
+			onMoveForecast(forecastId, targetMonth);
+			setSelectedId(null);
+			setPickerOpen(false);
+			setTimeout(() => setMovingId(null), 400);
+		},
+		[onMoveForecast],
+	);
+
+	// Shift selected forecast by one allowed month.
+	const shiftMonth = useCallback(
+		(direction: -1 | 1) => {
+			if (!selectedId) return;
+			const f = forecasts.find((x) => x.forecastId === selectedId);
+			if (!f || f.draggable !== 1) return;
+			const current = f.month ?? month;
+			const curIdx = allowedMonths.findIndex((m) => m.month >= current);
+			if (curIdx === -1) return;
+			const targetIdx = curIdx + direction;
+			if (targetIdx < 0 || targetIdx >= allowedMonths.length) return;
+			doMove(selectedId, allowedMonths[targetIdx].month);
+		},
+		[selectedId, forecasts, month, allowedMonths, doMove],
+	);
+
+	// Keyboard handler for forecast rows.
+	const handleForecastKeyDown = useCallback(
+		(e: React.KeyboardEvent, forecastId: string) => {
+			const f = forecasts.find((x) => x.forecastId === forecastId);
+			if (!f) return;
+			const mod = e.ctrlKey || e.metaKey;
+			if (mod && e.key === "ArrowLeft") {
+				e.preventDefault();
+				shiftMonth(-1);
+			} else if (mod && e.key === "ArrowRight") {
+				e.preventDefault();
+				shiftMonth(1);
+			} else if (mod && (e.key === "m" || e.key === "M")) {
+				e.preventDefault();
+				if (f.draggable === 1) setPickerOpen(true);
+			} else if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				setSelectedId((prev) => (prev === forecastId ? null : forecastId));
+			}
+		},
+		[forecasts, shiftMonth],
+	);
+
+	const submitForecast = useCallback(() => {
 		const desc = description.trim();
 		const mag = amount.replace(/^-/, "").trim();
 		if (!desc || !mag) return;
@@ -502,16 +878,19 @@ const ForecastSection = ({
 		setAmount("");
 		setAddOpen(false);
 		onAdded();
-	};
+	}, [description, amount, outflow, month, store, onAdded]);
+
+	const handleKeyDown = useCallback(
+		(e: React.KeyboardEvent) => {
+			if (e.key === "Enter") submitForecast();
+		},
+		[submitForecast],
+	);
 
 	if (forecasts.length === 0 && !addOpen) {
 		return (
 			<div style={{ padding: "10px 0" }}>
-				<button
-					onClick={() => setAddOpen(true)}
-					className="mono"
-					style={addBtnStyle}
-				>
+				<button onClick={openAdd} className="mono" style={addBtnStyle}>
 					+ nova previsão
 				</button>
 			</div>
@@ -526,7 +905,7 @@ const ForecastSection = ({
 			}}
 		>
 			<button
-				onClick={() => setOpen((v) => !v)}
+				onClick={toggleOpen}
 				className="mono"
 				style={{
 					background: "transparent",
@@ -566,13 +945,32 @@ const ForecastSection = ({
 							{forecasts.map((f) => {
 								const locked = f.draggable !== 1;
 								const isDragging = dragging?.forecastId === f.forecastId;
+								const isSelected = selectedId === f.forecastId;
+								const isMoving = movingId === f.forecastId;
+								const lockReason =
+									f.kind === "installment"
+										? "parcela — bloqueada"
+										: f.kind === "subscription"
+											? "assinatura — bloqueada"
+											: null;
 								return (
 									<div
 										key={f.forecastId}
+										tabIndex={0}
+										role="option"
+										aria-selected={isSelected}
+										aria-label={`previsão ${f.description}${locked ? " — " + lockReason : ""}`}
+										onClick={() => {
+											setSelectedId((prev) =>
+												prev === f.forecastId ? null : f.forecastId,
+											);
+										}}
+										onKeyDown={(e) => handleForecastKeyDown(e, f.forecastId)}
 										onPointerDown={(e) => {
 											if (locked || e.button !== 0) return;
 											startDrag(
 												{
+													kind: "forecast",
 													forecastId: f.forecastId,
 													label: f.description,
 													amount: formatMoney(f.amount),
@@ -582,8 +980,10 @@ const ForecastSection = ({
 										}}
 										title={
 											locked
-												? "parcela/assinatura — bloqueada"
-												: "arraste para outro mês no gráfico"
+												? (lockReason ?? "bloqueada")
+												: !isSelected
+													? "clique para selecionar; arraste para outro mês"
+													: "Ctrl+←/→ move mês; Ctrl+M abre seletor"
 										}
 										style={{
 											display: "flex",
@@ -592,14 +992,16 @@ const ForecastSection = ({
 											gap: 10,
 											padding: "6px 10px",
 											borderRadius: "var(--radius-sm)",
-											border: "1px dashed var(--border)",
-											background: f.kind === "manual"
-												? "transparent"
-												: "var(--surface)",
+											border: isSelected
+												? "1px solid var(--purple)"
+												: "1px dashed var(--border)",
+											background:
+												f.kind === "manual" ? "transparent" : "var(--surface)",
 											cursor: locked ? "default" : "grab",
-											opacity: isDragging ? 0.35 : 1,
+											opacity: isDragging || isMoving ? 0.35 : 1,
 											touchAction: "none",
 											userSelect: "none",
+											transition: "opacity 150ms, border-color 120ms",
 										}}
 									>
 										<span
@@ -682,14 +1084,14 @@ const ForecastSection = ({
 								<ToggleBtn
 									active={outflow}
 									color="var(--rose)"
-									onClick={() => setOutflow(true)}
+									onClick={setOut}
 								>
 									saída
 								</ToggleBtn>
 								<ToggleBtn
 									active={!outflow}
 									color="var(--green)"
-									onClick={() => setOutflow(false)}
+									onClick={setIn}
 								>
 									entrada
 								</ToggleBtn>
@@ -698,10 +1100,77 @@ const ForecastSection = ({
 									placeholder="0,00"
 									value={amount}
 									onChange={(e) => setAmount(e.target.value)}
-									onKeyDown={(e) => e.key === "Enter" && submitForecast()}
+									onKeyDown={handleKeyDown}
 									className="mono"
 									style={{ ...inputStyle, width: 100 }}
 								/>
+
+								{/* Month picker popover for keyboard move (Ctrl+M) */}
+								<AnimatePresence>
+									{pickerOpen && selectedId != null && (
+										<motion.div
+											initial={{ opacity: 0, scale: 0.96 }}
+											animate={{ opacity: 1, scale: 1 }}
+											exit={{ opacity: 0, scale: 0.96 }}
+											transition={{ duration: 0.12 }}
+											style={{
+												marginTop: 8,
+												padding: 10,
+												border: "1px solid var(--border)",
+												borderRadius: "var(--radius-sm)",
+												background: "var(--surface)",
+											}}
+										>
+											<div
+												className="mono"
+												style={{
+													fontSize: 11,
+													color: "var(--muted)",
+													marginBottom: 6,
+												}}
+											>
+												mover previsão para:
+											</div>
+											<div
+												style={{
+													display: "flex",
+													flexWrap: "wrap",
+													gap: 4,
+													marginBottom: 6,
+												}}
+											>
+												{allowedMonths.map((m) => {
+													const isCurrent = m.month === month;
+													return (
+														<button
+															key={m.month}
+															onClick={() => doMove(selectedId!, m.month)}
+															className="mono"
+															style={{
+																...pillStyle,
+																color: isCurrent
+																	? "var(--cyan)"
+																	: "var(--white)",
+																borderColor: isCurrent
+																	? "var(--cyan)"
+																	: "var(--border)",
+															}}
+														>
+															{m.label}
+														</button>
+													);
+												})}
+											</div>
+											<button
+												onClick={() => setPickerOpen(false)}
+												className="mono"
+												style={pillStyle}
+											>
+												cancelar
+											</button>
+										</motion.div>
+									)}
+								</AnimatePresence>
 							</div>
 							<div style={{ display: "flex", gap: 8 }}>
 								<button
@@ -712,17 +1181,12 @@ const ForecastSection = ({
 										...pillStyle,
 										background: "var(--cyan)",
 										color: "#fff",
-										opacity:
-											!description.trim() || !amount.trim() ? 0.4 : 1,
+										opacity: !description.trim() || !amount.trim() ? 0.4 : 1,
 									}}
 								>
 									adicionar →
 								</button>
-								<button
-									onClick={() => setAddOpen(false)}
-									className="mono"
-									style={pillStyle}
-								>
+								<button onClick={closeAdd} className="mono" style={pillStyle}>
 									cancelar
 								</button>
 							</div>
@@ -734,11 +1198,7 @@ const ForecastSection = ({
 						animate={{ opacity: 1 }}
 						style={{ marginTop: 8 }}
 					>
-						<button
-							onClick={() => setAddOpen(true)}
-							className="mono"
-							style={addBtnStyle}
-						>
+						<button onClick={openAdd} className="mono" style={addBtnStyle}>
 							+ nova previsão
 						</button>
 					</motion.div>
@@ -752,7 +1212,9 @@ const ForecastSection = ({
 
 const FilterBar = ({
 	ui,
+	textInput,
 	setUi,
+	onTextInput,
 	owners,
 	accounts,
 	hasFilters,
@@ -766,154 +1228,198 @@ const FilterBar = ({
 		subscriptionsOnly: boolean;
 		unreviewedOnly: boolean;
 	};
+	textInput: string;
 	setUi: (patch: Partial<typeof ui>) => void;
+	onTextInput: (v: string) => void;
 	owners: string[];
 	accounts: ReadonlyArray<{ id: string; label: string; owner: string }>;
 	hasFilters: boolean;
-}) => (
-	<div
-		style={{
-			display: "flex",
-			flexWrap: "wrap",
-			gap: 8,
-			alignItems: "center",
-			padding: "12px 0 8px",
-		}}
-	>
-		{/* Text search */}
-		<div style={{ position: "relative", flexGrow: 1, maxWidth: 260 }}>
-			<span
-				style={{
-					position: "absolute",
-					left: 9,
-					top: "50%",
-					transform: "translateY(-50%)",
-					color: "var(--muted2)",
-					fontSize: 12,
-					pointerEvents: "none",
-				}}
-			>
-				⌕
-			</span>
+}) => {
+	const handleTextChange = useCallback(
+		(e: React.ChangeEvent<HTMLInputElement>) => onTextInput(e.target.value),
+		[onTextInput],
+	);
+
+	const handleCategoryChange = useCallback(
+		(e: React.ChangeEvent<HTMLInputElement>) =>
+			setUi({ categoryFilter: e.target.value || null }),
+		[setUi],
+	);
+
+	const handleAccountChange = useCallback(
+		(e: React.ChangeEvent<HTMLSelectElement>) =>
+			setUi({ accountFilter: e.target.value || null }),
+		[setUi],
+	);
+
+	const handleOwnerChange = useCallback(
+		(e: React.ChangeEvent<HTMLSelectElement>) =>
+			setUi({ ownerFilter: e.target.value || null }),
+		[setUi],
+	);
+
+	const toggleInstallments = useCallback(
+		() => setUi({ installmentsOnly: !ui.installmentsOnly }),
+		[setUi, ui.installmentsOnly],
+	);
+
+	const toggleSubscriptions = useCallback(
+		() => setUi({ subscriptionsOnly: !ui.subscriptionsOnly }),
+		[setUi, ui.subscriptionsOnly],
+	);
+
+	const toggleUnreviewed = useCallback(
+		() => setUi({ unreviewedOnly: !ui.unreviewedOnly }),
+		[setUi, ui.unreviewedOnly],
+	);
+
+	const clearFilters = useCallback(
+		() =>
+			setUi({
+				textFilter: null,
+				categoryFilter: null,
+				accountFilter: null,
+				ownerFilter: null,
+				installmentsOnly: false,
+				subscriptionsOnly: false,
+				unreviewedOnly: false,
+			}),
+		[setUi],
+	);
+
+	return (
+		<div
+			style={{
+				display: "flex",
+				flexWrap: "wrap",
+				gap: 8,
+				alignItems: "center",
+				padding: "12px 0 8px",
+			}}
+		>
+			{/* Text search */}
+			<div style={{ position: "relative", flexGrow: 1, maxWidth: 260 }}>
+				<span
+					style={{
+						position: "absolute",
+						left: 9,
+						top: "50%",
+						transform: "translateY(-50%)",
+						color: "var(--muted2)",
+						fontSize: 12,
+						pointerEvents: "none",
+					}}
+				>
+					⌕
+				</span>
+				<input
+					placeholder="buscar transações…"
+					value={textInput}
+					onChange={handleTextChange}
+					className="mono"
+					style={{ ...inputStyle, paddingLeft: 26, width: "100%" }}
+					aria-label="busca textual"
+				/>
+			</div>
+
+			{/* Category filter */}
 			<input
-				placeholder="buscar transações…"
-				value={ui.textFilter ?? ""}
-				onChange={(e) => setUi({ textFilter: e.target.value || null })}
+				list="phai-cats"
+				placeholder="categoria…"
+				value={ui.categoryFilter ?? ""}
+				onChange={handleCategoryChange}
 				className="mono"
-				style={{ ...inputStyle, paddingLeft: 26, width: "100%" }}
-				aria-label="busca textual"
+				style={{ ...inputStyle, color: "var(--cyan)", width: 150 }}
+				aria-label="filtrar por categoria"
 			/>
+
+			{/* Account filter */}
+			{accounts.length > 0 && (
+				<select
+					value={ui.accountFilter ?? ""}
+					onChange={handleAccountChange}
+					className="mono"
+					style={selectStyle}
+					aria-label="conta"
+				>
+					<option value="">todas · conta</option>
+					{accounts.map((a) => (
+						<option key={a.id} value={a.id}>
+							{a.label || a.id}
+						</option>
+					))}
+				</select>
+			)}
+
+			{/* Owner filter */}
+			{owners.length > 1 && (
+				<select
+					value={ui.ownerFilter ?? ""}
+					onChange={handleOwnerChange}
+					className="mono"
+					style={selectStyle}
+					aria-label="responsável"
+				>
+					<option value="">todos · responsável</option>
+					{owners.map((o) => (
+						<option key={o} value={o}>
+							{o}
+						</option>
+					))}
+				</select>
+			)}
+
+			{/* Toggle pills */}
+			<ToggleBtn
+				active={ui.installmentsOnly}
+				color="var(--amber)"
+				onClick={toggleInstallments}
+			>
+				parcelas
+			</ToggleBtn>
+			<ToggleBtn
+				active={ui.subscriptionsOnly}
+				color="var(--cyan)"
+				onClick={toggleSubscriptions}
+			>
+				assinaturas
+			</ToggleBtn>
+			<ToggleBtn
+				active={ui.unreviewedOnly}
+				color="var(--purple)"
+				onClick={toggleUnreviewed}
+			>
+				não revisadas
+			</ToggleBtn>
+
+			{/* Clear filters */}
+			{hasFilters && (
+				<button
+					onClick={clearFilters}
+					className="mono"
+					style={{
+						...pillStyle,
+						color: "var(--rose)",
+						borderColor: "var(--rose)",
+					}}
+				>
+					× limpar
+				</button>
+			)}
 		</div>
-
-		{/* Category filter */}
-		<input
-			list="phai-cats"
-			placeholder="categoria…"
-			value={ui.categoryFilter ?? ""}
-			onChange={(e) => setUi({ categoryFilter: e.target.value || null })}
-			className="mono"
-			style={{ ...inputStyle, color: "var(--cyan)", width: 150 }}
-			aria-label="filtrar por categoria"
-		/>
-
-		{/* Account filter */}
-		{accounts.length > 0 && (
-			<select
-				value={ui.accountFilter ?? ""}
-				onChange={(e) => setUi({ accountFilter: e.target.value || null })}
-				className="mono"
-				style={selectStyle}
-				aria-label="conta"
-			>
-				<option value="">todas · conta</option>
-				{accounts.map((a) => (
-					<option key={a.id} value={a.id}>
-						{a.label || a.id}
-					</option>
-				))}
-			</select>
-		)}
-
-		{/* Owner filter */}
-		{owners.length > 1 && (
-			<select
-				value={ui.ownerFilter ?? ""}
-				onChange={(e) => setUi({ ownerFilter: e.target.value || null })}
-				className="mono"
-				style={selectStyle}
-				aria-label="responsável"
-			>
-				<option value="">todos · responsável</option>
-				{owners.map((o) => (
-					<option key={o} value={o}>
-						{o}
-					</option>
-				))}
-			</select>
-		)}
-
-		{/* Toggle pills */}
-		<ToggleBtn
-			active={ui.installmentsOnly}
-			color="var(--amber)"
-			onClick={() =>
-				setUi({ installmentsOnly: !ui.installmentsOnly })
-			}
-		>
-			parcelas
-		</ToggleBtn>
-		<ToggleBtn
-			active={ui.subscriptionsOnly}
-			color="var(--cyan)"
-			onClick={() =>
-				setUi({ subscriptionsOnly: !ui.subscriptionsOnly })
-			}
-		>
-			assinaturas
-		</ToggleBtn>
-		<ToggleBtn
-			active={ui.unreviewedOnly}
-			color="var(--purple)"
-			onClick={() => setUi({ unreviewedOnly: !ui.unreviewedOnly })}
-		>
-			não revisadas
-		</ToggleBtn>
-
-		{/* Clear filters */}
-		{hasFilters && (
-			<button
-				onClick={() =>
-					setUi({
-						textFilter: null,
-						categoryFilter: null,
-						accountFilter: null,
-						ownerFilter: null,
-						installmentsOnly: false,
-						subscriptionsOnly: false,
-						unreviewedOnly: false,
-					})
-				}
-				className="mono"
-				style={{
-					...pillStyle,
-					color: "var(--rose)",
-					borderColor: "var(--rose)",
-				}}
-			>
-				× limpar
-			</button>
-		)}
-	</div>
-);
+	);
+};
 
 const FilterSummary = ({
 	count,
 	saidas,
 	entradas,
+	selectedCount,
 }: {
 	count: number;
 	saidas: number;
 	entradas: number;
+	selectedCount?: number;
 }) => (
 	<div
 		className="mono"
@@ -926,7 +1432,14 @@ const FilterSummary = ({
 			flexWrap: "wrap",
 		}}
 	>
-		<span>{count} transação{count !== 1 ? "ões" : ""}</span>
+		<span>
+			{count} transação{count !== 1 ? "ões" : ""}
+		</span>
+		{selectedCount != null && selectedCount > 0 && (
+			<span style={{ color: "var(--purple)" }}>
+				{selectedCount} selecionada{selectedCount !== 1 ? "s" : ""}
+			</span>
+		)}
 		{saidas > 0 && (
 			<span style={{ color: "var(--rose)" }}>
 				saídas {formatMoneyNumber(-saidas)}
@@ -943,13 +1456,289 @@ const FilterSummary = ({
 					color: entradas - saidas >= 0 ? "var(--green)" : "var(--rose)",
 				}}
 			>
-				líquido{" "}
-				{entradas - saidas >= 0 ? "+" : ""}
+				líquido {entradas - saidas >= 0 ? "+" : ""}
 				{formatMoneyNumber(entradas - saidas)}
 			</span>
 		)}
 	</div>
 );
+
+// ── Hierarchical category group ────────────────────────────────────────────
+
+const HierarchicalCategoryGroup = ({
+	parent,
+	overlayById,
+	onEdit,
+	selectedIds,
+	focusedTxId,
+	onTxClick,
+	onTxDragStart,
+	registerDropTarget,
+}: {
+	parent: HierarchicalParentGroup;
+	overlayById: Map<
+		string,
+		{
+			categoryId: string | null;
+			description: string | null;
+			merchantName: string | null;
+			purpose: string | null;
+		}
+	>;
+	onEdit: (tx: TxView) => void;
+	selectedIds: Set<string>;
+	focusedTxId: string | null;
+	onTxClick: (tx: TxView, e: React.MouseEvent) => void;
+	onTxDragStart: (tx: TxView, e: React.PointerEvent) => void;
+	registerDropTarget: (catId: string, el: HTMLElement | null) => void;
+}) => {
+	const [expanded, setExpanded] = useState(true);
+	const installmentTxs = parent.subs.flatMap((s) =>
+		s.txs.filter((t) => t.isInstallment === 1),
+	);
+	const isUncategorized = parent.parent === "—";
+
+	// Register parent category as a drop target
+	const headerRef = useRef<HTMLButtonElement>(null);
+	useEffect(() => {
+		if (headerRef.current) {
+			registerDropTarget(parent.parent, headerRef.current);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
+	return (
+		<div
+			style={{
+				marginBottom: 8,
+				border: "1px solid var(--border)",
+				borderRadius: "var(--radius-md)",
+				overflow: "hidden",
+			}}
+		>
+			{/* Parent header */}
+			<button
+				ref={headerRef}
+				onClick={() => setExpanded((v) => !v)}
+				style={{
+					width: "100%",
+					display: "flex",
+					alignItems: "center",
+					gap: 10,
+					padding: "10px 14px",
+					background: "var(--surface)",
+					border: "none",
+					cursor: "pointer",
+					textAlign: "left",
+				}}
+			>
+				<span style={{ color: "var(--muted)", fontSize: 11, minWidth: 12 }}>
+					{expanded ? "▾" : "▸"}
+				</span>
+				<span
+					style={{
+						flex: 1,
+						fontWeight: 500,
+						fontSize: 13,
+						color: isUncategorized ? "var(--muted)" : "var(--white)",
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
+					}}
+				>
+					{isUncategorized ? "— sem categoria" : parent.parent}
+				</span>
+				{installmentTxs.length > 0 && (
+					<span
+						className="mono"
+						style={{
+							fontSize: 10,
+							color: "var(--amber)",
+							border: "1px solid var(--amber)",
+							borderRadius: "var(--radius-full)",
+							padding: "1px 6px",
+						}}
+					>
+						{installmentTxs.length}× parcela
+					</span>
+				)}
+				<span
+					className="mono"
+					style={{
+						fontSize: 12,
+						fontWeight: 600,
+						color: "var(--rose)",
+						whiteSpace: "nowrap",
+					}}
+				>
+					{formatMoney(String(parent.total))}
+				</span>
+				<span className="mono" style={{ fontSize: 10, color: "var(--muted2)" }}>
+					{parent.count}
+				</span>
+			</button>
+
+			{/* Body */}
+			<AnimatePresence initial={false}>
+				{expanded && (
+					<motion.div
+						initial={{ height: 0, opacity: 0 }}
+						animate={{ height: "auto", opacity: 1 }}
+						exit={{ height: 0, opacity: 0 }}
+						transition={{ duration: 0.18, ease: "easeInOut" }}
+						style={{ overflow: "hidden" }}
+					>
+						<div style={{ display: "flex", flexDirection: "column" }}>
+							{parent.hasSubs
+								? /* Subcategory groups */
+									parent.subs.map((sub) => (
+										<SubGroup
+											key={sub.sub ?? "_flat_"}
+											sub={sub}
+											parentLabel={parent.parent}
+											overlayById={overlayById}
+											onEdit={onEdit}
+											selectedIds={selectedIds}
+											focusedTxId={focusedTxId}
+											onTxClick={onTxClick}
+											onTxDragStart={onTxDragStart}
+											registerDropTarget={registerDropTarget}
+										/>
+									))
+								: /* Flat parent — render txs directly (no sub header) */
+									parent.subs[0]?.txs.map((tx) => {
+										const o = overlayById.get(tx.id);
+										return (
+											<TxRow
+												key={tx.id}
+												tx={tx}
+												overlay={o}
+												onEdit={onEdit}
+												isSelected={selectedIds.has(tx.id)}
+												isFocused={focusedTxId === tx.id}
+												onClick={onTxClick}
+												showDragHandle
+												onDragStart={onTxDragStart}
+											/>
+										);
+									})}
+						</div>
+					</motion.div>
+				)}
+			</AnimatePresence>
+		</div>
+	);
+};
+
+/** Subcategory header + transactions within a parent. */
+const SubGroup = ({
+	sub,
+	parentLabel,
+	overlayById,
+	onEdit,
+	selectedIds,
+	focusedTxId,
+	onTxClick,
+	onTxDragStart,
+	registerDropTarget,
+}: {
+	sub: HierarchicalSubGroup;
+	parentLabel: string;
+	overlayById: Map<
+		string,
+		{
+			categoryId: string | null;
+			description: string | null;
+			merchantName: string | null;
+			purpose: string | null;
+		}
+	>;
+	onEdit: (tx: TxView) => void;
+	selectedIds: Set<string>;
+	focusedTxId: string | null;
+	onTxClick: (tx: TxView, e: React.MouseEvent) => void;
+	onTxDragStart: (tx: TxView, e: React.PointerEvent) => void;
+	registerDropTarget: (catId: string, el: HTMLElement | null) => void;
+}) => {
+	const subLabel = sub.sub ?? parentLabel;
+
+	// Register subcategory as drop target (compound: parent:sub)
+	const subHeaderRef = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (subHeaderRef.current && sub.sub !== null) {
+			const compoundCat = `${parentLabel}:${sub.sub}`;
+			registerDropTarget(compoundCat, subHeaderRef.current);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
+	return (
+		<div>
+			{/* Sub header */}
+			{sub.sub !== null && (
+				<div
+					ref={subHeaderRef}
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 10,
+						padding: "8px 14px 8px 28px",
+						background: "rgba(255,255,255,0.015)",
+						borderTop: "1px solid var(--border)",
+					}}
+				>
+					<span
+						style={{
+							flex: 1,
+							fontSize: 12,
+							color: "var(--muted)",
+							overflow: "hidden",
+							textOverflow: "ellipsis",
+							whiteSpace: "nowrap",
+						}}
+					>
+						{subLabel}
+					</span>
+					<span
+						className="mono"
+						style={{
+							fontSize: 11,
+							fontWeight: 500,
+							color: "var(--rose)",
+							whiteSpace: "nowrap",
+						}}
+					>
+						{formatMoney(String(sub.total))}
+					</span>
+					<span
+						className="mono"
+						style={{ fontSize: 10, color: "var(--muted2)" }}
+					>
+						{sub.count}
+					</span>
+				</div>
+			)}
+
+			{/* Transactions */}
+			{sub.txs.map((tx) => {
+				const o = overlayById.get(tx.id);
+				return (
+					<TxRow
+						key={tx.id}
+						tx={tx}
+						overlay={o}
+						onEdit={onEdit}
+						isSelected={selectedIds.has(tx.id)}
+						isFocused={focusedTxId === tx.id}
+						onClick={onTxClick}
+						showDragHandle
+						onDragStart={onTxDragStart}
+					/>
+				);
+			})}
+		</div>
+	);
+};
 
 // ── Category group ─────────────────────────────────────────────────────────
 
@@ -959,19 +1748,48 @@ const CategoryGroup = ({
 	txs,
 	overlayById,
 	onEdit,
+	selectedIds,
+	focusedTxId,
+	onTxClick,
+	onTxDragStart,
+	registerDropTarget,
 }: {
 	label: string;
 	isIncome: boolean;
 	txs: TxView[];
 	overlayById: Map<
 		string,
-		{ categoryId: string | null; description: string | null; merchantName: string | null; purpose: string | null }
+		{
+			categoryId: string | null;
+			description: string | null;
+			merchantName: string | null;
+			purpose: string | null;
+		}
 	>;
 	onEdit: (tx: TxView) => void;
+	selectedIds: Set<string>;
+	focusedTxId: string | null;
+	onTxClick: (tx: TxView, e: React.MouseEvent) => void;
+	onTxDragStart: (tx: TxView, e: React.PointerEvent) => void;
+	registerDropTarget: (catId: string, el: HTMLElement | null) => void;
 }) => {
 	const [expanded, setExpanded] = useState(true);
 	const total = sumAmounts(txs.map((t) => t.amount));
-	const installmentTxs = txs.filter((t) => t.isInstallment === 1);
+	const installmentTxs = useMemo(
+		() => txs.filter((t) => t.isInstallment === 1),
+		[txs],
+	);
+
+	const toggleExpanded = useCallback(() => setExpanded((v) => !v), []);
+
+	// Register category as a drop target
+	const headerRef = useRef<HTMLButtonElement>(null);
+	useEffect(() => {
+		if (headerRef.current) {
+			registerDropTarget(label, headerRef.current);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
 
 	return (
 		<div
@@ -984,7 +1802,8 @@ const CategoryGroup = ({
 		>
 			{/* Group header */}
 			<button
-				onClick={() => setExpanded((v) => !v)}
+				ref={headerRef}
+				onClick={toggleExpanded}
 				style={{
 					width: "100%",
 					display: "flex",
@@ -1038,170 +1857,44 @@ const CategoryGroup = ({
 				>
 					{formatMoney(String(total))}
 				</span>
-				<span
-					className="mono"
-					style={{ fontSize: 10, color: "var(--muted2)" }}
-				>
+				<span className="mono" style={{ fontSize: 10, color: "var(--muted2)" }}>
 					{txs.length}
 				</span>
 			</button>
 
-			{/* Transactions */}
-			<AnimatePresence initial={false}>
-				{expanded && (
-					<motion.div
-						initial={{ height: 0, opacity: 0 }}
-						animate={{ height: "auto", opacity: 1 }}
-						exit={{ height: 0, opacity: 0 }}
-						transition={{ duration: 0.18, ease: "easeInOut" }}
-						style={{ overflow: "hidden" }}
-					>
-						<div style={{ display: "flex", flexDirection: "column" }}>
-							{txs.map((tx) => {
-								const o = overlayById.get(tx.id);
-								return (
-									<TxRow
-										key={tx.id}
-										tx={tx}
-										overlay={o}
-										onEdit={() => onEdit(tx)}
-									/>
-								);
-							})}
-						</div>
-					</motion.div>
-				)}
-			</AnimatePresence>
+			{/* Transactions body — CSS grid transition instead of AnimatePresence */}
+			<div
+				style={{
+					display: "grid",
+					gridTemplateRows: expanded ? "1fr" : "0fr",
+					transition: "grid-template-rows 0.2s ease, opacity 0.15s ease",
+					opacity: expanded ? 1 : 0,
+				}}
+			>
+				<div style={{ overflow: "hidden" }}>
+					<div style={{ display: "flex", flexDirection: "column" }}>
+						{txs.map((tx) => {
+							const o = overlayById.get(tx.id);
+							return (
+								<TxRow
+									key={tx.id}
+									tx={tx}
+									overlay={o}
+									onEdit={onEdit}
+									isSelected={selectedIds.has(tx.id)}
+									isFocused={focusedTxId === tx.id}
+									onClick={onTxClick}
+									showDragHandle
+									onDragStart={onTxDragStart}
+								/>
+							);
+						})}
+					</div>
+				</div>
+			</div>
 		</div>
 	);
 };
-
-// ── Transaction row ────────────────────────────────────────────────────────
-
-const TxRow = ({
-	tx,
-	overlay,
-	onEdit,
-}: {
-	tx: TxView;
-	overlay?: {
-		categoryId: string | null;
-		description: string | null;
-		merchantName: string | null;
-		purpose: string | null;
-	};
-	onEdit: () => void;
-}) => {
-	const display =
-		overlay?.description ??
-		tx.description ??
-		overlay?.merchantName ??
-		tx.merchantName ??
-		tx.rawDescription;
-	const cat = overlay?.categoryId ?? tx.categoryId;
-
-	return (
-		<button
-			onClick={onEdit}
-			style={{
-				width: "100%",
-				display: "flex",
-				alignItems: "center",
-				gap: 12,
-				padding: "9px 14px",
-				background: "transparent",
-				border: "none",
-				borderTop: "1px solid var(--border)",
-				cursor: "pointer",
-				textAlign: "left",
-				transition: "background 80ms",
-			}}
-			onMouseEnter={(e) => {
-				(e.currentTarget as HTMLButtonElement).style.background =
-					"rgba(0,0,0,0.02)";
-			}}
-			onMouseLeave={(e) => {
-				(e.currentTarget as HTMLButtonElement).style.background =
-					"transparent";
-			}}
-		>
-			{/* Date + badges */}
-			<div
-				className="mono"
-				style={{ fontSize: 10, color: "var(--muted2)", minWidth: 50 }}
-			>
-				{tx.postedAt.slice(5, 10)}
-			</div>
-
-			{/* Description */}
-			<div style={{ flex: 1, minWidth: 0 }}>
-				<div
-					style={{
-						fontSize: 13,
-						overflow: "hidden",
-						textOverflow: "ellipsis",
-						whiteSpace: "nowrap",
-						display: "flex",
-						gap: 6,
-						alignItems: "center",
-					}}
-				>
-					<span>{display}</span>
-					{tx.isInstallment === 1 && (
-						<TagBadge label="parcela" color="var(--amber)" />
-					)}
-					{tx.isSubscription === 1 && (
-						<TagBadge label="assinatura" color="var(--cyan)" />
-					)}
-					{tx.reviewed === 1 && (
-						<TagBadge label="✓" color="var(--green)" />
-					)}
-				</div>
-				{cat && (
-					<div
-						className="mono"
-						style={{ fontSize: 10, color: "var(--cyan)", marginTop: 1 }}
-					>
-						{cat}
-					</div>
-				)}
-			</div>
-
-			{/* Amount */}
-			<span
-				className="mono"
-				style={{
-					color: amountColor(tx.amount),
-					fontSize: 13,
-					fontWeight: 500,
-					whiteSpace: "nowrap",
-				}}
-			>
-				{formatMoney(tx.amount)}
-			</span>
-
-			{/* Edit hint */}
-			<span style={{ color: "var(--muted2)", fontSize: 10 }}>›</span>
-		</button>
-	);
-};
-
-const TagBadge = ({ label, color }: { label: string; color: string }) => (
-	<span
-		className="mono"
-		style={{
-			fontSize: 9,
-			color,
-			border: `1px solid ${color}`,
-			borderRadius: "var(--radius-full)",
-			padding: "0 5px",
-			whiteSpace: "nowrap",
-			lineHeight: 1.6,
-		}}
-	>
-		{label}
-	</span>
-);
 
 // ── Transaction modal ──────────────────────────────────────────────────────
 
@@ -1223,7 +1916,12 @@ const TransactionModal = ({
 	similarTxs: ReadonlyArray<TxView>;
 	overlayById: Map<
 		string,
-		{ categoryId: string | null; description: string | null; merchantName: string | null; purpose: string | null }
+		{
+			categoryId: string | null;
+			description: string | null;
+			merchantName: string | null;
+			purpose: string | null;
+		}
 	>;
 	onSubmit: (patch: ReviewPatch) => void;
 	onClose: () => void;
@@ -1255,31 +1953,57 @@ const TransactionModal = ({
 	);
 	const { store } = useStore();
 
-	const applyBulk = (newCategory: string) => {
-		for (const id of selectedSimilar) {
-			store.commit(
-				events.reviewSubmitted({
-					writeId: crypto.randomUUID(),
-					transactionId: id,
-					patch: {
-						description: null,
-						merchantName: null,
-						purpose: null,
-						categoryId: newCategory || null,
-					},
-					submittedAt: Date.now(),
-				}),
-			);
-		}
+	const applyBulk = useCallback(
+		(newCategory: string) => {
+			for (const id of selectedSimilar) {
+				store.commit(
+					events.reviewSubmitted({
+						writeId: crypto.randomUUID(),
+						transactionId: id,
+						patch: {
+							description: null,
+							merchantName: null,
+							purpose: null,
+							categoryId: newCategory || null,
+						},
+						submittedAt: Date.now(),
+					}),
+				);
+			}
+			setSelectedSimilar(new Set());
+		},
+		[selectedSimilar, store],
+	);
+
+	const handleToggle = useCallback((id: string) => {
+		setSelectedSimilar((prev) => {
+			const next = new Set(prev);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
+			return next;
+		});
+	}, []);
+
+	const handleSelectAll = useCallback(() => {
+		setSelectedSimilar(new Set(similarTxs.map((t) => t.id)));
+	}, [similarTxs]);
+
+	const handleClearAll = useCallback(() => {
 		setSelectedSimilar(new Set());
-	};
+	}, []);
+
+	const handleSave = useCallback(() => {
+		onSubmit({
+			description: description.trim() || null,
+			merchantName: merchantName.trim() || null,
+			purpose: purpose.trim() || null,
+			categoryId: category.trim() || null,
+		});
+	}, [onSubmit, description, merchantName, purpose, category]);
 
 	return (
 		<>
-			{/* Backdrop — also the flex centering container for the panel. We center
-			    via flexbox (not transform) because Framer Motion drives the panel's
-			    `transform` via scale/y; a transform-based translate would be
-			    clobbered on every animation frame. */}
+			{/* Backdrop */}
 			<motion.div
 				key="modal-backdrop"
 				initial={{ opacity: 0 }}
@@ -1319,199 +2043,181 @@ const TransactionModal = ({
 						boxShadow: "0 20px 60px rgba(21,19,31,0.14)",
 					}}
 				>
-				{/* Header */}
-				<div
-					style={{
-						display: "flex",
-						alignItems: "center",
-						gap: 10,
-						marginBottom: 16,
-					}}
-				>
-					<span
-						className="mono"
+					{/* Header */}
+					<div
 						style={{
-							color: amountColor(tx.amount),
-							fontWeight: 600,
-							fontSize: 15,
+							display: "flex",
+							alignItems: "center",
+							gap: 10,
+							marginBottom: 16,
 						}}
 					>
-						{formatMoney(tx.amount)}
-					</span>
-					<span
-						style={{
-							flex: 1,
-							overflow: "hidden",
-							textOverflow: "ellipsis",
-							whiteSpace: "nowrap",
-							fontSize: 13,
-						}}
-					>
-						{tx.description ?? tx.merchantName ?? tx.rawDescription}
-					</span>
-					<button
-						onClick={onClose}
-						className="mono"
-						style={{
-							background: "transparent",
-							border: "none",
-							cursor: "pointer",
-							color: "var(--muted)",
-							fontSize: 16,
-							padding: "0 4px",
-						}}
-					>
-						×
-					</button>
-				</div>
-
-				{/* Tabs */}
-				<div
-					style={{
-						display: "flex",
-						gap: 4,
-						marginBottom: 18,
-						borderBottom: "1px solid var(--border)",
-						paddingBottom: 8,
-					}}
-				>
-					{(["edit", "raw", "similar"] as Tab[]).map((t) => (
-						<button
-							key={t}
-							onClick={() => setTab(t)}
+						<span
 							className="mono"
 							style={{
-								background:
-									tab === t ? "rgba(109,74,255,0.08)" : "transparent",
-								color: tab === t ? "var(--purple)" : "var(--muted)",
-								border: `1px solid ${tab === t ? "rgba(109,74,255,0.3)" : "transparent"}`,
-								borderRadius: "var(--radius-full)",
-								padding: "4px 14px",
-								cursor: "pointer",
-								fontSize: 12,
+								color: amountColor(tx.amount),
+								fontWeight: 600,
+								fontSize: 15,
 							}}
 						>
-							{t === "edit"
-								? "Editar"
-								: t === "raw"
-									? "JSON"
-									: `Similares (${similarTxs.length})`}
+							{formatMoney(tx.amount)}
+						</span>
+						<span
+							style={{
+								flex: 1,
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap",
+								fontSize: 13,
+							}}
+						>
+							{tx.description ?? tx.merchantName ?? tx.rawDescription}
+						</span>
+						<button
+							onClick={onClose}
+							className="mono"
+							style={{
+								background: "transparent",
+								border: "none",
+								cursor: "pointer",
+								color: "var(--muted)",
+								fontSize: 16,
+								padding: "0 4px",
+							}}
+						>
+							×
 						</button>
-					))}
-				</div>
+					</div>
 
-				{/* Tab content */}
-				<AnimatePresence mode="wait" initial={false}>
-					{tab === "edit" && (
-						<motion.div
-							key="edit"
-							initial={{ opacity: 0, x: -8 }}
-							animate={{ opacity: 1, x: 0 }}
-							exit={{ opacity: 0, x: 8 }}
-							transition={{ duration: 0.12 }}
-						>
-							<EditForm
-								description={description}
-								setDescription={setDescription}
-								merchantName={merchantName}
-								setMerchantName={setMerchantName}
-								purpose={purpose}
-								setPurpose={setPurpose}
-								category={category}
-								setCategory={setCategory}
-								onSave={() =>
-									onSubmit({
-										description: description.trim() || null,
-										merchantName: merchantName.trim() || null,
-										purpose: purpose.trim() || null,
-										categoryId: category.trim() || null,
-									})
-								}
-								onCancel={onClose}
-								postedAt={tx.postedAt}
-								accountId={tx.accountId}
-							/>
-						</motion.div>
-					)}
-
-					{tab === "raw" && (
-						<motion.div
-							key="raw"
-							initial={{ opacity: 0, x: -8 }}
-							animate={{ opacity: 1, x: 0 }}
-							exit={{ opacity: 0, x: 8 }}
-							transition={{ duration: 0.12 }}
-						>
-							<pre
+					{/* Tabs */}
+					<div
+						style={{
+							display: "flex",
+							gap: 4,
+							marginBottom: 18,
+							borderBottom: "1px solid var(--border)",
+							paddingBottom: 8,
+						}}
+					>
+						{(["edit", "raw", "similar"] as Tab[]).map((t) => (
+							<button
+								key={t}
+								onClick={() => setTab(t)}
 								className="mono"
 								style={{
-									background: "var(--surface)",
-									border: "1px solid var(--border)",
-									borderRadius: "var(--radius-sm)",
-									padding: 14,
-									fontSize: 11,
-									overflowX: "auto",
-									whiteSpace: "pre-wrap",
-									wordBreak: "break-all",
-									lineHeight: 1.6,
+									background:
+										tab === t ? "rgba(109,74,255,0.08)" : "transparent",
+									color: tab === t ? "var(--purple)" : "var(--muted)",
+									border: `1px solid ${tab === t ? "rgba(109,74,255,0.3)" : "transparent"}`,
+									borderRadius: "var(--radius-full)",
+									padding: "4px 14px",
+									cursor: "pointer",
+									fontSize: 12,
 								}}
 							>
-								{JSON.stringify(
-									{
-										id: tx.id,
-										accountId: tx.accountId,
-										postedAt: tx.postedAt,
-										amount: tx.amount,
-										rawDescription: tx.rawDescription,
-										description: tx.description,
-										merchantName: tx.merchantName,
-										purpose: tx.purpose,
-										categoryId: tx.categoryId,
-										month: tx.month,
-										paymentStatus: tx.paymentStatus,
-										reviewed: tx.reviewed,
-										isInstallment: tx.isInstallment,
-										isSubscription: tx.isSubscription,
-										_overlay: overlayById.get(tx.id) ?? null,
-									},
-									null,
-									2,
-								)}
-							</pre>
-						</motion.div>
-					)}
+								{t === "edit"
+									? "Editar"
+									: t === "raw"
+										? "JSON"
+										: `Similares (${similarTxs.length})`}
+							</button>
+						))}
+					</div>
 
-					{tab === "similar" && (
-						<motion.div
-							key="similar"
-							initial={{ opacity: 0, x: -8 }}
-							animate={{ opacity: 1, x: 0 }}
-							exit={{ opacity: 0, x: 8 }}
-							transition={{ duration: 0.12 }}
-						>
-							<SimilarPanel
-								similarTxs={similarTxs}
-								overlayById={overlayById}
-								selected={selectedSimilar}
-								onToggle={(id) => {
-									setSelectedSimilar((prev) => {
-										const next = new Set(prev);
-										if (next.has(id)) next.delete(id);
-										else next.add(id);
-										return next;
-									});
-								}}
-								onSelectAll={() =>
-									setSelectedSimilar(
-										new Set(similarTxs.map((t) => t.id)),
-									)
-								}
-								onClearAll={() => setSelectedSimilar(new Set())}
-								onApplyBulk={applyBulk}
-							/>
-						</motion.div>
-					)}
-				</AnimatePresence>
+					{/* Tab content */}
+					<AnimatePresence mode="wait" initial={false}>
+						{tab === "edit" && (
+							<motion.div
+								key="edit"
+								initial={{ opacity: 0, x: -8 }}
+								animate={{ opacity: 1, x: 0 }}
+								exit={{ opacity: 0, x: 8 }}
+								transition={{ duration: 0.12 }}
+							>
+								<EditForm
+									description={description}
+									setDescription={setDescription}
+									merchantName={merchantName}
+									setMerchantName={setMerchantName}
+									purpose={purpose}
+									setPurpose={setPurpose}
+									category={category}
+									setCategory={setCategory}
+									onSave={handleSave}
+									onCancel={onClose}
+									postedAt={tx.postedAt}
+									accountId={tx.accountId}
+								/>
+							</motion.div>
+						)}
+
+						{tab === "raw" && (
+							<motion.div
+								key="raw"
+								initial={{ opacity: 0, x: -8 }}
+								animate={{ opacity: 1, x: 0 }}
+								exit={{ opacity: 0, x: 8 }}
+								transition={{ duration: 0.12 }}
+							>
+								<pre
+									className="mono"
+									style={{
+										background: "var(--surface)",
+										border: "1px solid var(--border)",
+										borderRadius: "var(--radius-sm)",
+										padding: 14,
+										fontSize: 11,
+										overflowX: "auto",
+										whiteSpace: "pre-wrap",
+										wordBreak: "break-all",
+										lineHeight: 1.6,
+									}}
+								>
+									{JSON.stringify(
+										{
+											id: tx.id,
+											accountId: tx.accountId,
+											postedAt: tx.postedAt,
+											amount: tx.amount,
+											rawDescription: tx.rawDescription,
+											description: tx.description,
+											merchantName: tx.merchantName,
+											purpose: tx.purpose,
+											categoryId: tx.categoryId,
+											month: tx.month,
+											paymentStatus: tx.paymentStatus,
+											reviewed: tx.reviewed,
+											isInstallment: tx.isInstallment,
+											isSubscription: tx.isSubscription,
+											_overlay: overlayById.get(tx.id) ?? null,
+										},
+										null,
+										2,
+									)}
+								</pre>
+							</motion.div>
+						)}
+
+						{tab === "similar" && (
+							<motion.div
+								key="similar"
+								initial={{ opacity: 0, x: -8 }}
+								animate={{ opacity: 1, x: 0 }}
+								exit={{ opacity: 0, x: 8 }}
+								transition={{ duration: 0.12 }}
+							>
+								<SimilarPanel
+									similarTxs={similarTxs}
+									overlayById={overlayById}
+									selected={selectedSimilar}
+									onToggle={handleToggle}
+									onSelectAll={handleSelectAll}
+									onClearAll={handleClearAll}
+									onApplyBulk={applyBulk}
+								/>
+							</motion.div>
+						)}
+					</AnimatePresence>
 				</motion.div>
 			</motion.div>
 		</>
@@ -1654,7 +2360,12 @@ const SimilarPanel = ({
 	similarTxs: ReadonlyArray<TxView>;
 	overlayById: Map<
 		string,
-		{ categoryId: string | null; description: string | null; merchantName: string | null; purpose: string | null }
+		{
+			categoryId: string | null;
+			description: string | null;
+			merchantName: string | null;
+			purpose: string | null;
+		}
 	>;
 	selected: Set<string>;
 	onToggle: (id: string) => void;
@@ -1663,6 +2374,10 @@ const SimilarPanel = ({
 	onApplyBulk: (cat: string) => void;
 }) => {
 	const [bulkCat, setBulkCat] = useState("");
+
+	const handleApply = useCallback(() => {
+		onApplyBulk(bulkCat);
+	}, [onApplyBulk, bulkCat]);
 
 	if (similarTxs.length === 0) {
 		return (
@@ -1702,7 +2417,7 @@ const SimilarPanel = ({
 							style={{ ...inputStyle, color: "var(--cyan)", width: 160 }}
 						/>
 						<button
-							onClick={() => onApplyBulk(bulkCat)}
+							onClick={handleApply}
 							disabled={!bulkCat.trim()}
 							className="mono"
 							style={{
@@ -1761,9 +2476,7 @@ const SimilarPanel = ({
 									height: 14,
 									borderRadius: 3,
 									border: `2px solid ${isSelected ? "var(--purple)" : "var(--border)"}`,
-									background: isSelected
-										? "var(--purple)"
-										: "transparent",
+									background: isSelected ? "var(--purple)" : "transparent",
 									flexShrink: 0,
 									display: "flex",
 									alignItems: "center",

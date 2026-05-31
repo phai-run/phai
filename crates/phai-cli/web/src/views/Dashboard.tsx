@@ -2,7 +2,11 @@ import { queryDb } from "@livestore/livestore";
 import { useStore, useQuery, useClientDocument } from "@livestore/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { events, tables } from "../livestore/schema";
-import { useChartSeed, useForecastsSeed, useTransactionsSeed } from "../bridge/sync";
+import {
+	useChartSeed,
+	useForecastsSeed,
+	useTransactionsSeed,
+} from "../bridge/sync";
 
 import { ErrorNote, LoadingNote } from "../components/ui";
 import { PlanningChart } from "./PlanningChart";
@@ -123,9 +127,7 @@ export const Dashboard = () => {
 					zIndex: 20,
 					background: "var(--bg)",
 					borderBottom: isCompact ? "1px solid var(--border)" : "none",
-					boxShadow: isCompact
-						? "0 2px 12px rgba(21,19,31,0.06)"
-						: "none",
+					boxShadow: isCompact ? "0 2px 12px rgba(21,19,31,0.06)" : "none",
 					transition: "box-shadow 200ms, border-color 200ms",
 				}}
 			>
@@ -200,6 +202,8 @@ export const Dashboard = () => {
 						chart={months.find((m) => m.month === selected) ?? null}
 						forecasts={forecastsByMonth.get(selected) ?? []}
 						onForecastAdded={() => forecastSeed.reload()}
+						months={months}
+						onMoveForecast={moveForecast}
 					/>
 				)}
 			</div>
