@@ -1313,8 +1313,9 @@ pub async fn run(port: u16) -> Result<()> {
     // Shared sender: the store actor replaces the inner sender on each restart
     // so handlers always reach the live actor. Initialised with a dummy channel
     // (immediately replaced by the actor on first start).
-    let store_tx: Arc<RwLock<mpsc::Sender<StoreRequest>>> =
-        Arc::new(RwLock::new(mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP).0));
+    let store_tx: Arc<RwLock<mpsc::Sender<StoreRequest>>> = Arc::new(RwLock::new(
+        mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP).0,
+    ));
 
     let local = LocalSet::new();
 
