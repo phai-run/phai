@@ -96,8 +96,14 @@ export const CategoryPicker = ({
 			width,
 			maxHeight,
 			overflowY: "auto",
-			left: Math.min(anchorRect.left, window.innerWidth - width - padding),
-			top: placeBelow ? anchorRect.bottom + 4 : anchorRect.top - maxHeight - 4,
+			left: Math.max(
+				padding,
+				Math.min(anchorRect.left, window.innerWidth - width - padding),
+			),
+			top: Math.max(
+				padding,
+				placeBelow ? anchorRect.bottom + 4 : anchorRect.top - maxHeight - 4,
+			),
 			background: "var(--bg)",
 			border: "1px solid var(--border)",
 			borderRadius: "var(--radius-lg)",

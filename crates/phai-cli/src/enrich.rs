@@ -1620,9 +1620,10 @@ mod test_support {
     /// `phai-core::enrichment::llm::tests`. Caller must hold the
     /// `#[serial_test::serial]` lock.
     pub fn clear_llm_env() {
-        const VARS: [&str; 6] = [
+        const VARS: [&str; 7] = [
             "FINANCE_LLM_PROVIDER",
             "FINANCE_LLM_MODEL",
+            "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "DEEPSEEK_API_KEY",

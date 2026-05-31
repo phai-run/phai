@@ -15,6 +15,11 @@ const BASELINE = PAD.top + innerH; // 222
 // Max bar height (bars use 75% of innerH)
 const BAR_MAX = innerH * 0.75; // ~157.5
 
+const currentMonthKey = () => {
+	const d = new Date();
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
 // ── Model ──────────────────────────────────────────────────────────────────
 
 interface ChartModel {
@@ -1041,12 +1046,18 @@ const MonthColumn = ({
 			id: `month:${month}`,
 			getRect: () => ref.current?.getBoundingClientRect() ?? null,
 			onDrop: (payload) => {
+				if (payload.kind === "forecast" && month < currentMonthKey()) return;
 				if (payload.forecastId) onDropForecast(payload.forecastId, month);
 			},
 		});
 	}, [month, registerTarget, onDropForecast]);
 
-	const isDropTarget = dragging != null && hoverTargetId === `month:${month}`;
+	const isBlockedForecastTarget =
+		dragging?.kind === "forecast" && month < currentMonthKey();
+	const isDropTarget =
+		dragging != null &&
+		!isBlockedForecastTarget &&
+		hoverTargetId === `month:${month}`;
 
 	return (
 		<div

@@ -18,10 +18,24 @@ export default defineConfig({
 	worker: { format: "es" },
 	server: { headers: crossOriginIsolation },
 	preview: { headers: crossOriginIsolation },
+	optimizeDeps: {
+		exclude: ["@livestore/wa-sqlite"],
+	},
 	build: {
 		outDir: "dist",
 		emptyOutDir: true,
 		target: "es2022",
+		rollupOptions: {
+			output: {
+				manualChunks(id) {
+					if (!id.includes("node_modules")) return undefined;
+					if (id.includes("@livestore")) return "vendor-livestore";
+					if (id.includes("framer-motion")) return "vendor-motion";
+					if (id.includes("react")) return "vendor-react";
+					return "vendor";
+				},
+			},
+		},
 	},
 	plugins: [react()],
 	test: {

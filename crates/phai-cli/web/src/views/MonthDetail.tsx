@@ -221,6 +221,9 @@ export const MonthDetail = ({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [flatIds.length]); // reset only on count change, not identity
 
+	const focusedTx =
+		focusedIdx >= 0 && flatTxs[focusedIdx] ? flatTxs[focusedIdx] : null;
+
 	// ── Click handler with modifier support ─────────────────────────────
 	const handleTxClick = useCallback(
 		(tx: TxView, e: React.MouseEvent) => {
@@ -280,10 +283,13 @@ export const MonthDetail = ({
 						const next = Math.min(i + 1, flatTxs.length - 1);
 						if (e.shiftKey) {
 							// Extend selection
-							const start = Math.min(lastClickedIdx.current, next);
-							const end = Math.max(lastClickedIdx.current, next);
+							const anchor =
+								lastClickedIdx.current >= 0 ? lastClickedIdx.current : Math.max(i, 0);
+							const start = Math.min(anchor, next);
+							const end = Math.max(anchor, next);
 							const rangeIds = flatTxs.slice(start, end + 1).map((t) => t.id);
 							setSelectedIds(new Set(rangeIds));
+							lastClickedIdx.current = anchor;
 						} else {
 							setSelectedIds(new Set(flatTxs[next] ? [flatTxs[next].id] : []));
 							lastClickedIdx.current = next;
@@ -296,10 +302,13 @@ export const MonthDetail = ({
 					setFocusedIdx((i) => {
 						const next = Math.max(i - 1, 0);
 						if (e.shiftKey) {
-							const start = Math.min(lastClickedIdx.current, next);
-							const end = Math.max(lastClickedIdx.current, next);
+							const anchor =
+								lastClickedIdx.current >= 0 ? lastClickedIdx.current : Math.max(i, 0);
+							const start = Math.min(anchor, next);
+							const end = Math.max(anchor, next);
 							const rangeIds = flatTxs.slice(start, end + 1).map((t) => t.id);
 							setSelectedIds(new Set(rangeIds));
+							lastClickedIdx.current = anchor;
 						} else {
 							setSelectedIds(new Set(flatTxs[next] ? [flatTxs[next].id] : []));
 							lastClickedIdx.current = next;
@@ -363,7 +372,12 @@ export const MonthDetail = ({
 	// ── Quick category picker actions ───────────────────────────────────
 	const handleQuickCategory = useCallback(
 		(categoryId: string) => {
-			const idsToUpdate = selectedIds.size > 0 ? Array.from(selectedIds) : [];
+			const idsToUpdate =
+				selectedIds.size > 0
+					? Array.from(selectedIds)
+					: focusedTx
+						? [focusedTx.id]
+						: [];
 			for (const txId of idsToUpdate) {
 				submit(txId, {
 					description: null,
@@ -380,7 +394,7 @@ export const MonthDetail = ({
 			setQuickPicker(null);
 			setSelectedIds(new Set());
 		},
-		[selectedIds, submit],
+		[selectedIds, focusedTx, submit],
 	);
 
 	const handleClosePicker = useCallback(() => setQuickPicker(null), []);
@@ -404,29 +418,23 @@ export const MonthDetail = ({
 
 	// Register category headers as drop targets
 	const registerDropTarget = useCallback(
-		(catId: string, el: HTMLElement | null) => {
-			if (!el) return;
+		(categoryId: string | null, el: HTMLElement | null) => {
+			if (!el) return undefined;
+			const targetId = `category:${categoryId ?? "__uncategorized__"}`;
 			const target = {
-				id: catId,
+				id: targetId,
 				getRect: () => el.getBoundingClientRect(),
 				onDrop: (payload: import("../lib/dnd").DragPayload) => {
 					if (payload.kind !== "transaction" || !payload.txId) return;
-					// Determine target category
-					let targetCat = catId;
-					// If the drop target is a subcategory, use the full compound category
-					if (catId.includes(":")) {
-						targetCat = catId;
-					}
 					submit(payload.txId, {
 						description: null,
 						merchantName: null,
 						purpose: null,
-						categoryId: targetCat,
+						categoryId,
 					});
 				},
 			};
-			const unreg = registerTarget(target);
-			return unreg;
+			return registerTarget(target);
 		},
 		[registerTarget, submit],
 	);
@@ -529,11 +537,7 @@ export const MonthDetail = ({
 						overlayById={overlayById}
 						onEdit={handleOpenModal}
 						selectedIds={selectedIds}
-						focusedTxId={
-							focusedIdx >= 0 && flatTxs[focusedIdx]
-								? flatTxs[focusedIdx].id
-								: null
-						}
+						focusedTxId={focusedTx?.id ?? null}
 						onTxClick={handleTxClick}
 						onTxDragStart={handleTxDragStart}
 						registerDropTarget={registerDropTarget}
@@ -548,11 +552,7 @@ export const MonthDetail = ({
 						overlayById={overlayById}
 						onEdit={handleOpenModal}
 						selectedIds={selectedIds}
-						focusedTxId={
-							focusedIdx >= 0 && flatTxs[focusedIdx]
-								? flatTxs[focusedIdx].id
-								: null
-						}
+						focusedTxId={focusedTx?.id ?? null}
 						onTxClick={handleTxClick}
 						onTxDragStart={handleTxDragStart}
 						registerDropTarget={registerDropTarget}
@@ -1105,72 +1105,6 @@ const ForecastSection = ({
 									style={{ ...inputStyle, width: 100 }}
 								/>
 
-								{/* Month picker popover for keyboard move (Ctrl+M) */}
-								<AnimatePresence>
-									{pickerOpen && selectedId != null && (
-										<motion.div
-											initial={{ opacity: 0, scale: 0.96 }}
-											animate={{ opacity: 1, scale: 1 }}
-											exit={{ opacity: 0, scale: 0.96 }}
-											transition={{ duration: 0.12 }}
-											style={{
-												marginTop: 8,
-												padding: 10,
-												border: "1px solid var(--border)",
-												borderRadius: "var(--radius-sm)",
-												background: "var(--surface)",
-											}}
-										>
-											<div
-												className="mono"
-												style={{
-													fontSize: 11,
-													color: "var(--muted)",
-													marginBottom: 6,
-												}}
-											>
-												mover previsão para:
-											</div>
-											<div
-												style={{
-													display: "flex",
-													flexWrap: "wrap",
-													gap: 4,
-													marginBottom: 6,
-												}}
-											>
-												{allowedMonths.map((m) => {
-													const isCurrent = m.month === month;
-													return (
-														<button
-															key={m.month}
-															onClick={() => doMove(selectedId!, m.month)}
-															className="mono"
-															style={{
-																...pillStyle,
-																color: isCurrent
-																	? "var(--cyan)"
-																	: "var(--white)",
-																borderColor: isCurrent
-																	? "var(--cyan)"
-																	: "var(--border)",
-															}}
-														>
-															{m.label}
-														</button>
-													);
-												})}
-											</div>
-											<button
-												onClick={() => setPickerOpen(false)}
-												className="mono"
-												style={pillStyle}
-											>
-												cancelar
-											</button>
-										</motion.div>
-									)}
-								</AnimatePresence>
 							</div>
 							<div style={{ display: "flex", gap: 8 }}>
 								<button
@@ -1200,6 +1134,69 @@ const ForecastSection = ({
 					>
 						<button onClick={openAdd} className="mono" style={addBtnStyle}>
 							+ nova previsão
+						</button>
+					</motion.div>
+				)}
+			</AnimatePresence>
+
+			{/* Month picker popover for keyboard move (Ctrl+M) */}
+			<AnimatePresence>
+				{pickerOpen && selectedId != null && (
+					<motion.div
+						initial={{ opacity: 0, scale: 0.96 }}
+						animate={{ opacity: 1, scale: 1 }}
+						exit={{ opacity: 0, scale: 0.96 }}
+						transition={{ duration: 0.12 }}
+						style={{
+							marginTop: 8,
+							padding: 10,
+							border: "1px solid var(--border)",
+							borderRadius: "var(--radius-sm)",
+							background: "var(--surface)",
+						}}
+					>
+						<div
+							className="mono"
+							style={{
+								fontSize: 11,
+								color: "var(--muted)",
+								marginBottom: 6,
+							}}
+						>
+							mover previsão para:
+						</div>
+						<div
+							style={{
+								display: "flex",
+								flexWrap: "wrap",
+								gap: 4,
+								marginBottom: 6,
+							}}
+						>
+							{allowedMonths.map((m) => {
+								const isCurrent = m.month === month;
+								return (
+									<button
+										key={m.month}
+										onClick={() => doMove(selectedId, m.month)}
+										className="mono"
+										style={{
+											...pillStyle,
+											color: isCurrent ? "var(--cyan)" : "var(--white)",
+											borderColor: isCurrent ? "var(--cyan)" : "var(--border)",
+										}}
+									>
+										{m.label}
+									</button>
+								);
+							})}
+						</div>
+						<button
+							onClick={() => setPickerOpen(false)}
+							className="mono"
+							style={pillStyle}
+						>
+							cancelar
 						</button>
 					</motion.div>
 				)}
@@ -1490,7 +1487,10 @@ const HierarchicalCategoryGroup = ({
 	focusedTxId: string | null;
 	onTxClick: (tx: TxView, e: React.MouseEvent) => void;
 	onTxDragStart: (tx: TxView, e: React.PointerEvent) => void;
-	registerDropTarget: (catId: string, el: HTMLElement | null) => void;
+	registerDropTarget: (
+		categoryId: string | null,
+		el: HTMLElement | null,
+	) => (() => void) | undefined;
 }) => {
 	const [expanded, setExpanded] = useState(true);
 	const installmentTxs = parent.subs.flatMap((s) =>
@@ -1502,10 +1502,11 @@ const HierarchicalCategoryGroup = ({
 	const headerRef = useRef<HTMLButtonElement>(null);
 	useEffect(() => {
 		if (headerRef.current) {
-			registerDropTarget(parent.parent, headerRef.current);
+			const categoryId = isUncategorized ? null : parent.parent;
+			return registerDropTarget(categoryId, headerRef.current);
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
+		return undefined;
+	}, [isUncategorized, parent.parent, registerDropTarget]);
 
 	return (
 		<div
@@ -1658,66 +1659,70 @@ const SubGroup = ({
 	focusedTxId: string | null;
 	onTxClick: (tx: TxView, e: React.MouseEvent) => void;
 	onTxDragStart: (tx: TxView, e: React.PointerEvent) => void;
-	registerDropTarget: (catId: string, el: HTMLElement | null) => void;
+	registerDropTarget: (
+		categoryId: string | null,
+		el: HTMLElement | null,
+	) => (() => void) | undefined;
 }) => {
-	const subLabel = sub.sub ?? parentLabel;
+	const isFlatSub = sub.sub === "—";
+	const subLabel = isFlatSub ? "sem subcategoria" : sub.sub;
+	const targetCategoryId =
+		parentLabel === "—"
+			? null
+			: isFlatSub
+				? parentLabel
+				: `${parentLabel}:${sub.sub}`;
 
 	// Register subcategory as drop target (compound: parent:sub)
 	const subHeaderRef = useRef<HTMLDivElement>(null);
 	useEffect(() => {
-		if (subHeaderRef.current && sub.sub !== null) {
-			const compoundCat = `${parentLabel}:${sub.sub}`;
-			registerDropTarget(compoundCat, subHeaderRef.current);
+		if (subHeaderRef.current) {
+			return registerDropTarget(targetCategoryId, subHeaderRef.current);
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
+		return undefined;
+	}, [registerDropTarget, targetCategoryId]);
 
 	return (
 		<div>
 			{/* Sub header */}
-			{sub.sub !== null && (
-				<div
-					ref={subHeaderRef}
+			<div
+				ref={subHeaderRef}
+				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: 10,
+					padding: "8px 14px 8px 28px",
+					background: "rgba(255,255,255,0.015)",
+					borderTop: "1px solid var(--border)",
+				}}
+			>
+				<span
 					style={{
-						display: "flex",
-						alignItems: "center",
-						gap: 10,
-						padding: "8px 14px 8px 28px",
-						background: "rgba(255,255,255,0.015)",
-						borderTop: "1px solid var(--border)",
+						flex: 1,
+						fontSize: 12,
+						color: "var(--muted)",
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
 					}}
 				>
-					<span
-						style={{
-							flex: 1,
-							fontSize: 12,
-							color: "var(--muted)",
-							overflow: "hidden",
-							textOverflow: "ellipsis",
-							whiteSpace: "nowrap",
-						}}
-					>
-						{subLabel}
-					</span>
-					<span
-						className="mono"
-						style={{
-							fontSize: 11,
-							fontWeight: 500,
-							color: "var(--rose)",
-							whiteSpace: "nowrap",
-						}}
-					>
-						{formatMoney(String(sub.total))}
-					</span>
-					<span
-						className="mono"
-						style={{ fontSize: 10, color: "var(--muted2)" }}
-					>
-						{sub.count}
-					</span>
-				</div>
-			)}
+					{subLabel}
+				</span>
+				<span
+					className="mono"
+					style={{
+						fontSize: 11,
+						fontWeight: 500,
+						color: "var(--rose)",
+						whiteSpace: "nowrap",
+					}}
+				>
+					{formatMoney(String(sub.total))}
+				</span>
+				<span className="mono" style={{ fontSize: 10, color: "var(--muted2)" }}>
+					{sub.count}
+				</span>
+			</div>
 
 			{/* Transactions */}
 			{sub.txs.map((tx) => {
@@ -1771,7 +1776,10 @@ const CategoryGroup = ({
 	focusedTxId: string | null;
 	onTxClick: (tx: TxView, e: React.MouseEvent) => void;
 	onTxDragStart: (tx: TxView, e: React.PointerEvent) => void;
-	registerDropTarget: (catId: string, el: HTMLElement | null) => void;
+	registerDropTarget: (
+		categoryId: string | null,
+		el: HTMLElement | null,
+	) => (() => void) | undefined;
 }) => {
 	const [expanded, setExpanded] = useState(true);
 	const total = sumAmounts(txs.map((t) => t.amount));
@@ -1785,11 +1793,11 @@ const CategoryGroup = ({
 	// Register category as a drop target
 	const headerRef = useRef<HTMLButtonElement>(null);
 	useEffect(() => {
-		if (headerRef.current) {
-			registerDropTarget(label, headerRef.current);
+		if (!isIncome && headerRef.current) {
+			return registerDropTarget(label, headerRef.current);
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
+		return undefined;
+	}, [isIncome, label, registerDropTarget]);
 
 	return (
 		<div

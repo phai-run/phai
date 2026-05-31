@@ -25,6 +25,26 @@ const forecastOverlay$ = queryDb(tables.forecastOverlay);
 const monthOf = (date: string | null): string | null =>
 	date ? date.slice(0, 7) : null;
 
+const currentMonthKey = () => {
+	const d = new Date();
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const daysInMonth = (month: string): number => {
+	const [year, monthNum] = month.split("-").map(Number);
+	if (!year || !monthNum) return 1;
+	return new Date(year, monthNum, 0).getDate();
+};
+
+const dueDateInTargetMonth = (dueDate: string | null, targetMonth: string) => {
+	const currentDay = dueDate ? Number(dueDate.slice(8, 10)) : 1;
+	const day = Math.min(
+		Number.isFinite(currentDay) && currentDay > 0 ? currentDay : 1,
+		daysInMonth(targetMonth),
+	);
+	return `${targetMonth}-${String(day).padStart(2, "0")}`;
+};
+
 /**
  * Dashboard — the unified phai view. The cash-evolution chart sits at the top
  * (position:sticky, compresses on scroll to a mini nav strip). Below it, the
@@ -74,18 +94,15 @@ export const Dashboard = () => {
 
 	// Selected month — default to current month
 	const months = chartRows;
-	const currentMonth = (() => {
-		const d = new Date();
-		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-	})();
+	const currentMonth = currentMonthKey();
 	const selected = ui.selectedMonth ?? currentMonth;
 
 	// Drag-drop: move forecast to another month
 	const moveForecast = (forecastId: string, targetMonth: string) => {
 		const f = forecasts.find((x) => x.forecastId === forecastId);
 		if (!f || !f.draggable) return;
-		const day = f.dueDate ? f.dueDate.slice(8, 10) || "01" : "01";
-		const dueDate = `${targetMonth}-${day}`;
+		if (targetMonth < currentMonth) return;
+		const dueDate = dueDateInTargetMonth(f.dueDate, targetMonth);
 		if (dueDate === f.dueDate) return;
 		store.commit(
 			events.forecastMoved({

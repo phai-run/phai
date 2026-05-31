@@ -20,6 +20,9 @@ importers:
       '@livestore/react':
         specifier: 0.3.1
         version: 0.3.1(f1af9f047758796230a62d1c9b73fa6b)
+      '@livestore/wa-sqlite':
+        specifier: 1.0.5-dev.2
+        version: 1.0.5-dev.2
       framer-motion:
         specifier: ^12.40.0
         version: 12.40.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
