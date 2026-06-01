@@ -1,3 +1,4 @@
+pub mod cashflow;
 pub mod compat;
 pub mod config;
 pub mod enrichment;

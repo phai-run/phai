@@ -909,6 +909,76 @@ impl TxRow {
     }
 }
 
+/// Parse a `billing_closing_day` / `billing_due_day` value (stored as a string
+/// or a number) from account metadata.
+fn account_billing_day(meta: &Value, key: &str) -> Option<u32> {
+    match meta.get(key)? {
+        Value::String(s) => s.trim().parse::<u32>().ok(),
+        Value::Number(n) => n.as_u64().map(|d| d as u32),
+        _ => None,
+    }
+    .filter(|d| (1..=31).contains(d))
+}
+
+/// `account_id → (is_credit, closing_day, due_day)` for cash_month bucketing.
+fn cash_month_lookup(
+    accounts: &[AccountRecord],
+) -> std::collections::HashMap<String, (bool, Option<u32>, Option<u32>)> {
+    accounts
+        .iter()
+        .map(|a| {
+            (
+                a.account_id.clone(),
+                (
+                    a.account_type == "credit",
+                    account_billing_day(&a.metadata_json, "billing_closing_day"),
+                    account_billing_day(&a.metadata_json, "billing_due_day"),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// Build the web transaction rows, overriding `month` with the canonical
+/// `cash_month` so a card purchase appears under the month its bill is paid
+/// (the family cash-flow view — see ADR-0025). Falls back to the posting month
+/// when the account is unknown.
+fn tx_rows_with_cash_month(
+    rows: &[TransactionRecord],
+    lookup: &std::collections::HashMap<String, (bool, Option<u32>, Option<u32>)>,
+) -> Vec<TxRow> {
+    rows.iter()
+        .map(|row| {
+            let mut tr = TxRow::from_record(row);
+            if let Some((is_credit, closing, due)) =
+                row.account_id.as_deref().and_then(|id| lookup.get(id))
+            {
+                tr.month = phai_core::cashflow::cash_month_for(
+                    row.transaction_date,
+                    *is_credit,
+                    *closing,
+                    *due,
+                );
+            }
+            tr
+        })
+        .collect()
+}
+
+/// Fetch accounts via the store actor (best-effort: an empty list just means
+/// rows keep their posting month). Used to resolve `cash_month`.
+async fn fetch_accounts(tx: &mpsc::Sender<StoreRequest>) -> Vec<AccountRecord> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    if tx
+        .send(StoreRequest::GetAccounts { resp: resp_tx })
+        .await
+        .is_err()
+    {
+        return Vec::new();
+    }
+    resp_rx.await.ok().and_then(Result::ok).unwrap_or_default()
+}
+
 #[derive(Serialize)]
 struct TransactionsResponse {
     rows: Vec<TxRow>,
@@ -1124,8 +1194,9 @@ async fn get_review_queue(
         include_reviewed: q.include_reviewed,
         limit: q.limit.unwrap_or(DEFAULT_REVIEW_QUEUE_LIMIT),
     };
-    let (resp_tx, resp_rx) = oneshot::channel();
     let tx = clone_actor_tx(&tx).await;
+    let accounts = fetch_accounts(&tx).await;
+    let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::ReviewQueue {
             params,
@@ -1137,10 +1208,13 @@ async fn get_review_queue(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(rows)) => Json(ReviewQueueResponse {
-            rows: rows.iter().map(TxRow::from_record).collect(),
-        })
-        .into_response(),
+        Ok(Ok(rows)) => {
+            let lookup = cash_month_lookup(&accounts);
+            Json(ReviewQueueResponse {
+                rows: tx_rows_with_cash_month(&rows, &lookup),
+            })
+            .into_response()
+        }
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1157,8 +1231,9 @@ async fn get_transactions(
         limit: q.limit.unwrap_or(DEFAULT_TRANSACTIONS_LIMIT),
         offset: q.offset.unwrap_or(0),
     };
-    let (resp_tx, resp_rx) = oneshot::channel();
     let tx = clone_actor_tx(&tx).await;
+    let accounts = fetch_accounts(&tx).await;
+    let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::TransactionsWindow {
             params,
@@ -1170,13 +1245,16 @@ async fn get_transactions(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(result)) => Json(TransactionsResponse {
-            rows: result.rows.iter().map(TxRow::from_record).collect(),
-            total: result.total,
-            offset: result.offset,
-            has_more: result.has_more,
-        })
-        .into_response(),
+        Ok(Ok(result)) => {
+            let lookup = cash_month_lookup(&accounts);
+            Json(TransactionsResponse {
+                rows: tx_rows_with_cash_month(&result.rows, &lookup),
+                total: result.total,
+                offset: result.offset,
+                has_more: result.has_more,
+            })
+            .into_response()
+        }
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1927,6 +2005,36 @@ mod tests {
             updated_at: Utc::now(),
             enrichment_attempted_at: None,
         }
+    }
+
+    /// A card purchase served to the web is bucketed under its bill's payment
+    /// month (cash_month), not its posting month — the family cash-flow view.
+    #[test]
+    fn tx_rows_use_cash_month_for_card_purchases() {
+        let mut card = sample_account("cc-1", "Card", "me");
+        card.account_type = "credit".into();
+        card.metadata_json = serde_json::json!({
+            "billing_closing_day": "3",
+            "billing_due_day": "10",
+        });
+        let mut rec = sample_record();
+        rec.account_id = Some("cc-1".into());
+        // 2026-04-28 (day 28 > closing 3) closes in the May cycle, due May 10.
+        rec.transaction_date = NaiveDate::from_ymd_opt(2026, 4, 28).unwrap();
+
+        let lookup = cash_month_lookup(&[card]);
+        let rows = tx_rows_with_cash_month(&[rec], &lookup);
+        assert_eq!(rows[0].month, "2026-05");
+    }
+
+    /// A non-card purchase keeps its posting month.
+    #[test]
+    fn tx_rows_keep_posting_month_for_non_card() {
+        let checking = sample_account("acc-1", "Checking", "me");
+        let rec = sample_record(); // dated 2026-03-15 on acc-1
+        let lookup = cash_month_lookup(&[checking]);
+        let rows = tx_rows_with_cash_month(&[rec], &lookup);
+        assert_eq!(rows[0].month, "2026-03");
     }
 
     fn sample_account(account_id: &str, label: &str, owner: &str) -> AccountRecord {
