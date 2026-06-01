@@ -47,10 +47,13 @@ every surface (cashflow chart, CLI reports, web month-detail, pulse) buckets by 
   transaction's own month — cash moves immediately.
 - **Credit cards**: `cash_month` is the month the bill that *contains* the purchase
   is **due/paid**, projected from account metadata — `billing_closing_day` decides
-  which cycle the purchase closes in (mirroring `v_card_summary`: day ≤ closing_day
-  stays in the current cycle), and `billing_due_day` adds a one-month roll when the
-  due day precedes the closing day. v1 assumes each bill is **paid in full on its
-  due date**; revolving/partial payment (*rotativo*) is explicit future work.
+  which cycle the purchase closes in (a charge dated **on or after** the closing day
+  belongs to the cycle that closes next month — the closing day is the first day of
+  the new cycle, as Nubank's OFX `DTSTART` is inclusive; this corrects the off-by-one
+  in `v_card_summary`'s `<= closing_day` boundary), and `billing_due_day` adds a
+  one-month roll when the due day precedes the closing day. v1 assumes each bill is
+  **paid in full on its due date**; revolving/partial payment (*rotativo*) is explicit
+  future work.
 - The credit-card bill **payment** transaction stays in `internal_categories`
   (already excluded by every report view), so the exploded purchases **replace** it
   with no double counting.
@@ -83,9 +86,10 @@ supersedes [ADR-0024](0024-cashflow-chart-accrual-source.md).**
 - The chart's saldo line (accumulated `net`) becomes a meaningful cash position again,
   and a card-only store renders a populated chart (ADR-0024's original objection is
   resolved).
-- The cycle rule must stay aligned with `v_card_summary`/`card_due_label`. A separate
-  `compute_bill_id` helper uses a strict `<` boundary; converging it is tracked as
-  follow-up. Revolving/partial bills are out of scope for v1.
+- `cash_month` uses the `>= closing_day → next cycle` boundary, matching
+  `compute_bill_id` and the real Nubank statement boundary. `v_card_summary` still
+  uses `<= closing_day` (off by one on the closing day itself); converging it is
+  tracked as follow-up. Revolving/partial bills are out of scope for v1.
 - `report cashflow` and the pulse are migrated onto the same canonical basis so all
   surfaces agree (separate change).
 - No data migration: `cash_month` is a derived view column. Changing a card's

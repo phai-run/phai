@@ -16,9 +16,11 @@
 -- it without double counting.
 --
 -- `v_cashflow` and `v_monthly_spend` are redefined to group by `cash_month`
--- instead of the posting month. The cycle rule mirrors `v_card_summary`
--- (day <= closing_day stays in the current cycle). See ADR-0025, which
--- supersedes ADR-0024 (accrual posting-month bucketing).
+-- instead of the posting month. A charge dated on or after the closing day
+-- belongs to the cycle that closes next month (the closing day is the first day
+-- of the new cycle — Nubank's OFX DTSTART is inclusive); this corrects the
+-- off-by-one in `v_card_summary`'s `<= closing_day` boundary. See ADR-0025,
+-- which supersedes ADR-0024 (accrual posting-month bucketing).
 
 DROP VIEW IF EXISTS v_cashflow;
 DROP VIEW IF EXISTS v_monthly_spend;
@@ -38,7 +40,7 @@ SELECT
         CAST(
           (CASE
              WHEN CAST(strftime('%d', t.transaction_date) AS INTEGER)
-                  > CAST(json_extract(a.metadata_json, '$.billing_closing_day') AS INTEGER)
+                  >= CAST(json_extract(a.metadata_json, '$.billing_closing_day') AS INTEGER)
              THEN 1 ELSE 0
            END)
           +

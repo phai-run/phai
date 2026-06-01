@@ -28,9 +28,11 @@ pub fn cash_month_for(
     let Some(closing) = closing_day.filter(|_| is_credit) else {
         return format!("{:04}-{:02}", date.year(), date.month());
     };
-    // Day after the closing day rolls into the cycle that closes next month;
-    // a due day that precedes the closing day rolls payment one more month.
-    let mut offset: i32 = if date.day() > closing { 1 } else { 0 };
+    // A charge on or after the closing day belongs to the cycle that closes
+    // next month — Brazilian statements treat the closing day as the first day
+    // of the new cycle (Nubank's OFX DTSTART = closing day is inclusive). A due
+    // day that precedes the closing day rolls payment one more month.
+    let mut offset: i32 = if date.day() >= closing { 1 } else { 0 };
     if let Some(due) = due_day {
         if due < closing {
             offset += 1;
@@ -74,11 +76,22 @@ mod tests {
     }
 
     #[test]
-    fn card_purchase_on_or_before_closing_stays_in_cycle() {
-        // closing 10, due 17: a 2026-04-05 swipe (<= 10) closes/pays in April.
+    fn card_purchase_before_closing_stays_in_cycle() {
+        // closing 10, due 17: a 2026-04-05 swipe (< 10) closes/pays in April.
         assert_eq!(
             cash_month_for(d(2026, 4, 5), true, Some(10), Some(17)),
             "2026-04"
+        );
+    }
+
+    #[test]
+    fn card_purchase_on_closing_day_rolls_to_next_cycle() {
+        // Felipe's real card: closing 10, due 18. A 2026-04-10 swipe (== closing)
+        // is the first day of the cycle that closes 2026-05-10 and is paid in
+        // May — it must land in 2026-05, not April. See the OFX DTSTART boundary.
+        assert_eq!(
+            cash_month_for(d(2026, 4, 10), true, Some(10), Some(18)),
+            "2026-05"
         );
     }
 
