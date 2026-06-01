@@ -8,6 +8,7 @@ import {
 	formatMoney,
 	formatMoneyNumber,
 	isNegative,
+	numeric,
 	sumAmounts,
 } from "../lib/format";
 import { useDnd } from "../lib/dnd";
@@ -174,6 +175,18 @@ export const MonthDetail = ({
 			.map((t) => t.amount);
 		return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
 	}, [monthTxs]);
+
+	const summarySums = useMemo(() => {
+		if (!chart) return monthSums;
+		return {
+			entradas:
+				Math.max(0, numeric(chart.inflows)) +
+				Math.max(0, numeric(chart.forecastInflowsRemaining)),
+			saidas:
+				Math.abs(numeric(chart.outflows)) +
+				Math.abs(numeric(chart.forecastOutflowsRemaining)),
+		};
+	}, [chart, monthSums]);
 
 	// Modal state — stable setter
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
@@ -477,8 +490,8 @@ export const MonthDetail = ({
 			<MonthSummary
 				month={month}
 				isFuture={chart?.isFuture === 1}
-				entradas={monthSums.entradas}
-				saidas={monthSums.saidas}
+				entradas={summarySums.entradas}
+				saidas={summarySums.saidas}
 				projectedClose={projectedClose}
 				forecastCount={forecasts.length}
 				installmentCount={installments.length}

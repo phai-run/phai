@@ -136,4 +136,43 @@ describe("Incremental transaction seeding", () => {
 		expect(after.length).toBe(1);
 		expect(after[0].id).toBe("orphan");
 	});
+
+	it("bridgeIdentityChanged clears stale local write state", () => {
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "review-stale",
+				transactionId: "tx-stale",
+				patch: {
+					description: "ajuste local",
+					merchantName: null,
+					purpose: null,
+					categoryId: "compras",
+				},
+				submittedAt: 1,
+			}),
+		);
+		store.commit(
+			events.forecastMoved({
+				writeId: "forecast-stale",
+				forecastId: "fc-stale",
+				dueDate: "2026-06-10",
+				movedAt: 2,
+			}),
+		);
+
+		expect(store.query(tables.pendingWrites.select()).length).toBe(2);
+		expect(store.query(tables.reviewOverlay.select()).length).toBe(1);
+		expect(store.query(tables.forecastOverlay.select()).length).toBe(1);
+
+		store.commit(
+			events.bridgeIdentityChanged({
+				oldIdentity: "unknown",
+				newIdentity: "bigquery:test",
+			}),
+		);
+
+		expect(store.query(tables.pendingWrites.select()).length).toBe(0);
+		expect(store.query(tables.reviewOverlay.select()).length).toBe(0);
+		expect(store.query(tables.forecastOverlay.select()).length).toBe(0);
+	});
 });

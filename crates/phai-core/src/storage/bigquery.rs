@@ -3163,7 +3163,7 @@ impl FinanceStore for BigQueryStore {
               description,
               merchant_name,
               purpose,
-              CAST(amount AS STRING),
+              CAST(ROUND(COALESCE(amount_cents, 0) / 100.0, 2) AS STRING),
               tx_type,
               category_id,
               category_source,
@@ -3391,16 +3391,43 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
-        // Accrual basis over all reportable accounts — delegates to the
-        // `v_cashflow` view (same rules as the SQLite backend). Monetary
-        // columns are exact-decimal strings; `opening`/`closing` are unset.
+        // Accrual basis over all reportable accounts. This mirrors v_cashflow
+        // and drops OFX rows when Pluggy produced the same transaction key.
         let sql = format!(
             "
+            WITH reportable AS (
+              SELECT
+                *,
+                COUNTIF(source = 'pluggy') OVER (
+                  PARTITION BY
+                    transaction_date,
+                    COALESCE(account_id, ''),
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INT64)),
+                    LOWER(TRIM(raw_description))
+                ) > 0 AS has_pluggy
+              FROM {tx}
+              WHERE COALESCE(category_id, '') NOT IN (
+                SELECT category_id FROM {internal}
+              )
+            )
             SELECT month_ref, income, expenses, expense_reduction, net
-            FROM {view}
+            FROM (
+              SELECT
+                FORMAT_DATE('%Y-%m', transaction_date) AS month_ref,
+                ROUND(SUM(IF(amount_cents > 0 AND COALESCE(category_id, '') != 'cashback',
+                  amount_cents, 0)) / 100.0, 2) AS income,
+                ROUND(SUM(IF(amount_cents < 0, ABS(amount_cents), 0)) / 100.0, 2) AS expenses,
+                ROUND(SUM(IF(amount_cents > 0 AND COALESCE(category_id, '') = 'cashback',
+                  amount_cents, 0)) / 100.0, 2) AS expense_reduction,
+                ROUND(SUM(amount_cents) / 100.0, 2) AS net
+              FROM reportable
+              WHERE NOT (source = 'ofx' AND has_pluggy)
+              GROUP BY 1
+            )
             ORDER BY month_ref ASC
             ",
-            view = self.qualified_table("v_cashflow")?,
+            tx = self.qualified_table("v_transactions_reportable")?,
+            internal = self.qualified_table("internal_categories")?,
         );
         let response = self.run_query(&sql).await?;
         let mut items = Vec::with_capacity(response.rows.len());

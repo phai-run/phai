@@ -2,10 +2,9 @@ import { queryDb } from "@livestore/livestore";
 import { useStore } from "@livestore/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { events, tables } from "../livestore/schema";
-
-const MAX_RETRIES = 10;
 import {
 	api,
+	type BridgeIdentity,
 	type ChartData,
 	type ForecastRecord,
 	type ForecastTemplateRecord,
@@ -13,7 +12,9 @@ import {
 	type TxRow,
 } from "./api";
 
+const MAX_RETRIES = 10;
 const pendingWrites$ = queryDb(tables.pendingWrites);
+const BRIDGE_IDENTITY_STORAGE_KEY = "phai.bridgeIdentity";
 
 export interface SyncStatus {
 	pending: number;
@@ -31,7 +32,49 @@ interface PendingRow {
 	attempts: number;
 }
 
+type StoreApi = ReturnType<typeof useStore>["store"];
+
 const bool = (v: unknown): number => (v ? 1 : 0);
+
+const readStoredBridgeIdentity = (): string | null => {
+	try {
+		return window.localStorage.getItem(BRIDGE_IDENTITY_STORAGE_KEY);
+	} catch {
+		return null;
+	}
+};
+
+const writeStoredBridgeIdentity = (identity: BridgeIdentity) => {
+	try {
+		window.localStorage.setItem(BRIDGE_IDENTITY_STORAGE_KEY, identity.identity);
+	} catch {
+		// Storage can be unavailable in hardened/private contexts. In that case
+		// we still gate flushing for this mount, but cannot persist the guard.
+	}
+};
+
+const shouldClearLocalWrites = (
+	previousIdentity: string | null,
+	nextIdentity: string,
+	queuedWriteCount: number,
+): boolean =>
+	(previousIdentity !== null && previousIdentity !== nextIdentity) ||
+	(previousIdentity === null && queuedWriteCount > 0);
+
+const clearStaleLocalWrites = (store: StoreApi, identity: BridgeIdentity) => {
+	const previous = readStoredBridgeIdentity();
+	const queuedWrites = store.query(pendingWrites$) as ReadonlyArray<PendingRow>;
+	if (!shouldClearLocalWrites(previous, identity.identity, queuedWrites.length)) {
+		return false;
+	}
+	store.commit(
+		events.bridgeIdentityChanged({
+			oldIdentity: previous ?? "unknown",
+			newIdentity: identity.identity,
+		}),
+	);
+	return true;
+};
 
 /**
  * Wires LiveStore to the Rust bridge:
@@ -50,6 +93,7 @@ export const useBridgeSync = (): SyncStatus => {
 	const [error, setError] = useState<string | null>(null);
 	const [pending, setPending] = useState(0);
 	const [seeded, setSeeded] = useState(false);
+	const [identityReady, setIdentityReady] = useState(false);
 	const flushing = useRef(false);
 	const backoffRef = useRef({
 		failures: 0,
@@ -60,12 +104,27 @@ export const useBridgeSync = (): SyncStatus => {
 	// 1. Seed reference data once.
 	useEffect(() => {
 		let cancelled = false;
-		Promise.all([api.categories(), api.accounts()])
-			.then(([cats, accs]) => {
-				if (cancelled) return;
+		setIdentityReady(false);
+		api.identity()
+			.then(async (identity) => {
+				if (cancelled) return null;
+				if (clearStaleLocalWrites(store, identity)) {
+					setPending(0);
+				}
+				writeStoredBridgeIdentity(identity);
+				const [cats, accs] = await Promise.all([
+					api.categories(),
+					api.accounts(),
+				]);
+				return { cats, accs };
+			})
+			.then((seed) => {
+				if (cancelled || !seed) return;
+				const { cats, accs } = seed;
 				store.commit(events.categoriesSeeded({ ids: cats.ids }));
 				store.commit(events.accountsSeeded({ rows: accs.rows }));
 				setSeeded(true);
+				setIdentityReady(true);
 			})
 			.catch((e: unknown) => setError(String(e)));
 		return () => {
@@ -75,6 +134,7 @@ export const useBridgeSync = (): SyncStatus => {
 
 	// 2. Drain the typed pending-write queue with exponential backoff.
 	useEffect(() => {
+		if (!identityReady) return;
 		const flush = async () => {
 			if (flushing.current) return;
 			const rows = store.query(pendingWrites$) as ReadonlyArray<PendingRow>;
@@ -115,9 +175,10 @@ export const useBridgeSync = (): SyncStatus => {
 			sub();
 			if (backoffRef.current.timer) clearTimeout(backoffRef.current.timer);
 		};
-	}, [store]);
+	}, [store, identityReady]);
 
 	const retry = useCallback(() => {
+		if (!identityReady) return;
 		setError(null);
 		backoffRef.current.failures = 0;
 		if (backoffRef.current.timer) clearTimeout(backoffRef.current.timer);
@@ -134,12 +195,10 @@ export const useBridgeSync = (): SyncStatus => {
 			}
 			scheduleFlushRef.current?.();
 		})();
-	}, [store]);
+	}, [store, identityReady]);
 
 	return { pending, error, seeded, retry };
 };
-
-type StoreApi = ReturnType<typeof useStore>["store"];
 
 /**
  * Routes each pending write to the right endpoint by `type`. Reviews flush as a

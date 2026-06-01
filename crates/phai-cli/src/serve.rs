@@ -24,10 +24,11 @@ use phai_core::models::{
     AccountRecord, AuditEvent, ForecastRecord, ForecastTemplateRecord, TransactionRecord,
 };
 use phai_core::storage::{open_store, FinanceStore};
-use phai_core::AppConfig;
+use phai_core::{AppConfig, BackendKind};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -62,6 +63,187 @@ use crate::{
     all_transactions_for_review, apply_human_review, load_config, review_human_rows,
     HumanReviewPatch, ReviewFilters, ReviewHumanKind,
 };
+
+const LEGACY_WEB_CATEGORY_ALIASES: &[(&str, &str)] = &[
+    ("airport-and-airlines", "lazer:viagem"),
+    ("airlines", "lazer:viagem"),
+    ("accomodation", "lazer:viagem"),
+    ("automotive", "transporte"),
+    ("bank", "financeiro"),
+    ("bank-fees", "financeiro:taxas"),
+    ("cashback", "receitas:cashback"),
+    ("digital-services", "compras:servicos-digitais"),
+    ("donations", "outros"),
+    ("electricity", "moradia:energia"),
+    ("electronics", "compras:eletronicos"),
+    ("gambling", "lazer:apostas"),
+    ("gaming", "lazer"),
+    ("gas", "moradia:gas"),
+    ("gas-stations", "transporte:combustivel"),
+    ("groceries", "alimentacao:mercado"),
+    ("supermarket", "alimentacao:mercado"),
+    ("eating-out", "alimentacao:restaurantes"),
+    ("restaurants", "alimentacao:restaurantes"),
+    ("food-and-drinks", "alimentacao:restaurantes"),
+    ("food-and-beverages", "alimentacao:restaurantes"),
+    ("food-delivery", "alimentacao:delivery"),
+    ("gyms-and-fitness-centers", "saude:atividade-fisica"),
+    ("houseware", "compras:casa"),
+    ("housing", "moradia"),
+    ("insurance", "financeiro:seguros"),
+    ("kids-and-toys", "lazer:criancas"),
+    ("clothing", "compras:vestuario"),
+    ("fashion", "compras:vestuario"),
+    ("apparel", "compras:vestuario"),
+    ("shopping", "compras"),
+    ("retail", "compras"),
+    ("e-commerce", "compras"),
+    ("online-shopping", "compras:e-commerce"),
+    ("office-supplies", "compras"),
+    ("parking", "transporte:estacionamento"),
+    ("sports-goods", "lazer:esportes"),
+    ("hospital-clinics-and-labs", "saude:consulta"),
+    ("optometry", "saude:saude-visual"),
+    ("pharmacy", "saude:farmacia"),
+    ("health", "saude"),
+    ("healthcare", "saude"),
+    ("school", "educacao"),
+    ("online-courses", "educacao:cursos"),
+    ("transport", "transporte"),
+    ("transportation", "transporte"),
+    ("ride-sharing", "transporte:aplicativo"),
+    ("taxi-and-ride-hailing", "transporte:aplicativo"),
+    ("public-transportation", "transporte:publico"),
+    ("tolls-and-in-vehicle-payment", "transporte:pedagio"),
+    ("vehicle-maintenance", "transporte:manutencao"),
+    ("education", "educacao"),
+    ("bookstore", "educacao"),
+    ("entertainment", "lazer"),
+    ("leisure", "lazer"),
+    ("sports-and-fitness", "saude:fitness"),
+    ("travel", "lazer:viagem"),
+    ("bills-and-utilities", "moradia:contas"),
+    ("utilities", "moradia:contas"),
+    ("telecommunications", "moradia:contas"),
+    ("rent", "moradia:aluguel"),
+    ("personal-care", "pessoal:cuidado-fisico"),
+    ("personal", "pessoal"),
+    ("subscriptions", "assinaturas"),
+    ("video-streaming", "assinaturas:streaming"),
+    ("same-person-transfer", "transfer-internal"),
+    ("transfers", "transfer-internal"),
+    ("transfer-pix", "transfer-internal"),
+    ("tax-on-financial-operations", "financeiro:iof"),
+    ("income", "renda"),
+    ("salary", "renda"),
+    ("pets", "lazer:pets"),
+];
+
+const WEB_CANONICAL_CATEGORY_FAMILIES: &[&str] = &[
+    "alimentacao",
+    "assinaturas",
+    "compras",
+    "educacao",
+    "financeiro",
+    "lazer",
+    "moradia",
+    "outros",
+    "pessoal",
+    "receitas",
+    "renda",
+    "saude",
+    "servicos",
+    "transferencias",
+    "transporte",
+];
+
+fn is_web_canonical_category(category_id: &str) -> bool {
+    if category_id == REVIEW_PENDING_CATEGORY {
+        return true;
+    }
+    let family = category_id
+        .split_once(':')
+        .map_or(category_id, |(family, _)| family);
+    WEB_CANONICAL_CATEGORY_FAMILIES.contains(&family)
+}
+
+fn canonical_web_category_id(category_id: &str) -> String {
+    let raw = category_id.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let normalized = raw.to_lowercase().replace([' ', '_'], "-");
+    if let Some(canonical) = LEGACY_WEB_CATEGORY_ALIASES
+        .iter()
+        .find_map(|(alias, canonical)| (*alias == normalized).then_some(*canonical))
+    {
+        return canonical.to_string();
+    }
+    if is_web_canonical_category(&normalized) {
+        return normalized;
+    }
+    "outros".to_string()
+}
+
+fn canonical_web_category(category_id: Option<&str>) -> Option<String> {
+    category_id
+        .map(canonical_web_category_id)
+        .filter(|id| !id.trim().is_empty())
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeIdentityResponse {
+    identity: String,
+    backend: String,
+}
+
+fn bridge_identity_response(config: &AppConfig) -> BridgeIdentityResponse {
+    let backend = config.effective_backend();
+    let (backend_label, material) = match backend {
+        BackendKind::Bigquery => (
+            "bigquery",
+            format!(
+                "bigquery:{}:{}",
+                config.project_id.as_deref().unwrap_or(""),
+                config.dataset_id.as_deref().unwrap_or("")
+            ),
+        ),
+        BackendKind::Local => (
+            "local",
+            format!(
+                "local:{}",
+                config
+                    .local_db_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            ),
+        ),
+    };
+    let digest = Sha256::digest(material.as_bytes());
+    BridgeIdentityResponse {
+        identity: format!("{backend_label}:{digest:x}"),
+        backend: backend_label.to_string(),
+    }
+}
+
+async fn list_web_category_ids(store: &dyn FinanceStore) -> Result<Vec<String>> {
+    let internal_categories = store.internal_categories().await?;
+    let ids = store.list_all_category_ids().await?;
+    let mut out = BTreeSet::new();
+    for id in ids {
+        if id == REVIEW_PENDING_CATEGORY || internal_categories.contains(&id) {
+            continue;
+        }
+        let canonical = canonical_web_category_id(&id);
+        if canonical.is_empty() || internal_categories.contains(&canonical) {
+            continue;
+        }
+        out.insert(canonical);
+    }
+    Ok(out.into_iter().collect())
+}
 
 // ── Store actor ──────────────────────────────────────────────────────────
 
@@ -179,10 +361,7 @@ async fn store_actor_loop(
                 let _ = resp.send(result);
             }
             StoreRequest::ListCategoryIds { resp } => {
-                let result = store
-                    .list_all_category_ids()
-                    .await
-                    .map(|ids| ids.into_iter().collect());
+                let result = list_web_category_ids(store.as_ref()).await;
                 let _ = resp.send(result);
             }
             StoreRequest::GetAccounts { resp } => {
@@ -301,6 +480,19 @@ async fn load_transactions_window(
         .effective_transactions_window(None, from, until)
         .await
         .context("effective_transactions_window")?;
+    let internal_categories = store
+        .internal_categories()
+        .await
+        .context("internal_categories")?;
+    rows.retain(|row| {
+        let raw_category = row.category_id.as_deref();
+        let canonical_category = canonical_web_category(raw_category);
+        !raw_category.is_some_and(|category| internal_categories.contains(category))
+            && !canonical_category
+                .as_deref()
+                .is_some_and(|category| internal_categories.contains(category))
+    });
+    dedupe_pluggy_shadowed_ofx_rows(&mut rows);
     if !params.include_reviewed {
         rows.retain(is_pending_review);
     }
@@ -315,6 +507,27 @@ async fn load_transactions_window(
         offset,
         has_more,
     })
+}
+
+fn dedupe_pluggy_shadowed_ofx_rows(rows: &mut Vec<TransactionRecord>) {
+    let pluggy_keys: BTreeSet<_> = rows
+        .iter()
+        .filter(|row| row.source.eq_ignore_ascii_case("pluggy"))
+        .map(reportable_dedupe_key)
+        .collect();
+    rows.retain(|row| {
+        !(row.source.eq_ignore_ascii_case("ofx")
+            && pluggy_keys.contains(&reportable_dedupe_key(row)))
+    });
+}
+
+fn reportable_dedupe_key(row: &TransactionRecord) -> (NaiveDate, Option<String>, Decimal, String) {
+    (
+        row.transaction_date,
+        row.account_id.clone(),
+        row.amount,
+        row.raw_description.trim().to_lowercase(),
+    )
 }
 
 /// A transaction is "reviewed" when it has a concrete category that is not the
@@ -655,10 +868,10 @@ struct TxRow {
 
 impl TxRow {
     fn from_record(row: &TransactionRecord) -> Self {
+        let category_id = canonical_web_category(row.category_id.as_deref());
         // `isSubscription` heuristic: any category under the `assinaturas:`
         // namespace is treated as a subscription charge.
-        let is_subscription = row
-            .category_id
+        let is_subscription = category_id
             .as_deref()
             .is_some_and(|cat| cat.starts_with(SUBSCRIPTION_CATEGORY_PREFIX));
         Self {
@@ -686,7 +899,7 @@ impl TxRow {
             description: row.description.clone(),
             merchant_name: row.merchant_name.clone(),
             purpose: row.purpose.clone(),
-            category_id: row.category_id.clone(),
+            category_id,
             month: row.transaction_date.format("%Y-%m").to_string(),
             payment_status: row.payment_status.clone(),
             reviewed: is_reviewed(row),
@@ -1339,6 +1552,7 @@ fn parse_opt_date(value: Option<&str>) -> Result<Option<NaiveDate>, String> {
 pub async fn run(port: u16) -> Result<()> {
     let (_, config) = load_config().await?;
     let config: AppConfig = config;
+    let bridge_identity = Arc::new(bridge_identity_response(&config));
     let actor_config = config.clone();
 
     // Shared sender: the store actor replaces the inner sender on each restart
@@ -1388,6 +1602,16 @@ pub async fn run(port: u16) -> Result<()> {
     // without an Origin header (curl, direct integration) are allowed.
     let api = Router::new()
         .route("/api", get(api_status))
+        .route(
+            "/api/identity",
+            get({
+                let bridge_identity = bridge_identity.clone();
+                move || {
+                    let bridge_identity = bridge_identity.clone();
+                    async move { Json((*bridge_identity).clone()) }
+                }
+            }),
+        )
         .route("/api/review-queue", get(get_review_queue))
         .route("/api/transactions", get(get_transactions))
         .route("/api/categories", get(get_categories))
@@ -1809,6 +2033,42 @@ mod tests {
         assert!(row.reviewed);
     }
 
+    #[test]
+    fn tx_row_normalizes_legacy_english_category_for_web() {
+        let mut record = sample_record();
+        record.category_id = Some("shopping".into());
+
+        let row = TxRow::from_record(&record);
+
+        assert_eq!(row.category_id.as_deref(), Some("compras"));
+    }
+
+    #[test]
+    fn web_category_list_normalizes_legacy_english_ids() {
+        assert_eq!(
+            canonical_web_category_id("Eating out"),
+            "alimentacao:restaurantes"
+        );
+        assert_eq!(
+            canonical_web_category_id("Groceries"),
+            "alimentacao:mercado"
+        );
+        assert_eq!(canonical_web_category_id("Shopping"), "compras");
+        assert_eq!(
+            canonical_web_category_id("airport-and-airlines"),
+            "lazer:viagem"
+        );
+        assert_eq!(
+            canonical_web_category_id("same-person-transfer"),
+            "transfer-internal"
+        );
+        assert_eq!(canonical_web_category_id("unknown-english"), "outros");
+        assert_eq!(
+            canonical_web_category_id("saude:farmacia"),
+            "saude:farmacia"
+        );
+    }
+
     // ── month window helpers ──────────────────────────────────────────────
 
     #[test]
@@ -2090,6 +2350,131 @@ mod tests {
         assert!(matching.iter().any(|r| r.transaction_id == "tx-1"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn transactions_window_excludes_internal_categories() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+
+        let mut external = sample_record();
+        external.transaction_id = "tx-external".into();
+        external.transaction_date = today;
+        external.category_id = Some("alimentacao:mercado".into());
+
+        let mut internal = sample_record();
+        internal.transaction_id = "tx-internal".into();
+        internal.transaction_date = today;
+        internal.category_id = Some("credit-card-payment".into());
+
+        store
+            .upsert_transactions(&[external, internal])
+            .await
+            .unwrap();
+
+        let result = load_transactions_window(
+            store.as_ref(),
+            TransactionsWindowParams {
+                months_back: 0,
+                months_ahead: 0,
+                include_reviewed: true,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: BTreeSet<_> = result
+            .rows
+            .iter()
+            .map(|row| row.transaction_id.as_str())
+            .collect();
+        assert!(ids.contains("tx-external"));
+        assert!(!ids.contains("tx-internal"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transactions_window_dedupes_ofx_shadowed_by_pluggy() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+
+        let mut pluggy = sample_record();
+        pluggy.transaction_id = "tx-pluggy".into();
+        pluggy.transaction_date = today;
+        pluggy.raw_description = "Compra Exemplo".into();
+        pluggy.amount = Decimal::new(-11603, 2);
+        pluggy.source = "pluggy".into();
+        pluggy.category_id = Some("alimentacao:mercado".into());
+
+        let mut ofx = pluggy.clone();
+        ofx.transaction_id = "tx-ofx-duplicate".into();
+        ofx.source = "ofx".into();
+
+        let mut ofx_unique = pluggy.clone();
+        ofx_unique.transaction_id = "tx-ofx-unique".into();
+        ofx_unique.raw_description = "Compra Unica".into();
+        ofx_unique.source = "ofx".into();
+
+        store
+            .upsert_transactions(&[pluggy, ofx, ofx_unique])
+            .await
+            .unwrap();
+
+        let result = load_transactions_window(
+            store.as_ref(),
+            TransactionsWindowParams {
+                months_back: 0,
+                months_ahead: 0,
+                include_reviewed: true,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: BTreeSet<_> = result
+            .rows
+            .iter()
+            .map(|row| row.transaction_id.as_str())
+            .collect();
+        assert!(ids.contains("tx-pluggy"));
+        assert!(ids.contains("tx-ofx-unique"));
+        assert!(!ids.contains("tx-ofx-duplicate"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_category_list_filters_review_sentinel_and_internal_aliases() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+
+        let mut legacy = sample_record();
+        legacy.transaction_id = "tx-legacy".into();
+        legacy.transaction_date = today;
+        legacy.category_id = Some("airport-and-airlines".into());
+
+        let mut review = sample_record();
+        review.transaction_id = "tx-review".into();
+        review.transaction_date = today;
+        review.category_id = Some(REVIEW_PENDING_CATEGORY.into());
+
+        let mut internal_alias = sample_record();
+        internal_alias.transaction_id = "tx-internal-alias".into();
+        internal_alias.transaction_date = today;
+        internal_alias.category_id = Some("same-person-transfer".into());
+
+        store
+            .upsert_transactions(&[legacy, review, internal_alias])
+            .await
+            .unwrap();
+
+        let ids = list_web_category_ids(store.as_ref()).await.unwrap();
+
+        assert!(ids.contains(&"lazer:viagem".to_string()));
+        assert!(!ids.contains(&REVIEW_PENDING_CATEGORY.to_string()));
+        assert!(!ids.contains(&"transfer-internal".to_string()));
+        assert!(!ids.contains(&"same-person-transfer".to_string()));
+    }
+
     // ── Behavioral: MoveForecast against a real SQLite store ───────────────
 
     fn installment_template(template_id: &str) -> ForecastTemplateRecord {
@@ -2126,7 +2511,7 @@ mod tests {
         ensure_forecast_idempotency(&mut forecast).unwrap();
         store.upsert_forecasts(&[forecast]).await.unwrap();
 
-        let new_due = NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
+        let new_due = first_of_month(shift_months(Utc::now().date_naive(), 1));
         let outcome = move_forecast(store.as_ref(), "f-manual", new_due)
             .await
             .unwrap();

@@ -107,6 +107,11 @@ export interface NewForecast {
 	account_id?: string;
 }
 
+export interface BridgeIdentity {
+	identity: string;
+	backend: string;
+}
+
 const trimParams = (
 	record: Record<string, string | null | undefined>,
 ): URLSearchParams => {
@@ -132,6 +137,9 @@ export interface TransactionsPage {
 }
 
 export const api = {
+	identity: (): Promise<BridgeIdentity> =>
+		fetch("/api/identity").then((r) => json<BridgeIdentity>(r)),
+
 	/** Fetch one page of the transaction window. Use offset to paginate. */
 	transactions: (params: {
 		monthsBack: number;

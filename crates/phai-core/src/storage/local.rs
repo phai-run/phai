@@ -1186,7 +1186,9 @@ impl FinanceStore for LocalStore {
             "
             SELECT
               transaction_id, account_id, transaction_date, raw_description, description,
-              merchant_name, purpose, CAST(amount AS TEXT), tx_type, category_id,
+              merchant_name, purpose,
+              printf('%.2f', COALESCE(amount_cents, 0) / 100.0),
+              tx_type, category_id,
               category_source, context, classifier_trace, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
@@ -1843,16 +1845,53 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
-        // Accrual basis over all reportable accounts — delegates to the
-        // `v_cashflow` view, which already encodes the report rules (split
-        // expansion + effective category via v_transactions_reportable, and
-        // the internal-category exclusion). The view's monetary columns are
-        // exact integer-cent strings (ADR-0003), parsed back into Decimal.
+        // Accrual basis over all reportable accounts. This mirrors v_cashflow
+        // and drops OFX rows when Pluggy produced the same transaction key.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
+            WITH reportable AS (
+              SELECT
+                *,
+                MAX(CASE WHEN source = 'pluggy' THEN 1 ELSE 0 END) OVER (
+                  PARTITION BY
+                    transaction_date,
+                    COALESCE(account_id, ''),
+                    COALESCE(amount_cents, CAST(ROUND(CAST(amount AS REAL) * 100) AS INTEGER)),
+                    LOWER(TRIM(raw_description))
+                ) AS has_pluggy
+              FROM v_transactions_reportable
+              WHERE COALESCE(category_id, '') NOT IN (SELECT category_id FROM internal_categories)
+            )
             SELECT month_ref, income, expenses, expense_reduction, net
-            FROM v_cashflow
+            FROM (
+              SELECT
+                strftime('%Y-%m', transaction_date) AS month_ref,
+                CAST(ROUND(SUM(
+                  CASE
+                    WHEN amount_cents > 0 AND COALESCE(category_id, '') != 'cashback'
+                      THEN amount_cents
+                    ELSE 0
+                  END
+                ) / 100.0, 2) AS TEXT) AS income,
+                CAST(ROUND(SUM(
+                  CASE
+                    WHEN amount_cents < 0 THEN ABS(amount_cents)
+                    ELSE 0
+                  END
+                ) / 100.0, 2) AS TEXT) AS expenses,
+                CAST(ROUND(SUM(
+                  CASE
+                    WHEN amount_cents > 0 AND COALESCE(category_id, '') = 'cashback'
+                      THEN amount_cents
+                    ELSE 0
+                  END
+                ) / 100.0, 2) AS TEXT) AS expense_reduction,
+                CAST(ROUND(SUM(amount_cents) / 100.0, 2) AS TEXT) AS net
+              FROM reportable
+              WHERE NOT (source = 'ofx' AND has_pluggy = 1)
+              GROUP BY 1
+            )
             ORDER BY month_ref ASC
             ",
         )?;
@@ -2712,5 +2751,82 @@ impl FinanceStore for LocalStore {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LocalStore;
+    use crate::config::AppConfig;
+    use crate::migrations::run_migrations;
+    use crate::models::TransactionRecord;
+    use crate::storage::FinanceStore;
+    use chrono::{NaiveDate, Utc};
+    use rust_decimal::Decimal;
+
+    fn test_config(path: std::path::PathBuf) -> AppConfig {
+        AppConfig {
+            local_db_path: Some(path),
+            actor_id: "test".to_string(),
+            ..AppConfig::default()
+        }
+    }
+
+    fn tx(id: &str, source: &str, description: &str, amount: Decimal) -> TransactionRecord {
+        let now = Utc::now();
+        TransactionRecord {
+            transaction_id: id.to_string(),
+            account_id: Some("acc-1".to_string()),
+            transaction_date: NaiveDate::from_ymd_opt(2026, 5, 10).unwrap(),
+            raw_description: description.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            amount,
+            amount_cents: None,
+            tx_type: "debit".to_string(),
+            category_id: Some("alimentacao:mercado".to_string()),
+            category_source: "rule".to_string(),
+            context: None,
+            classifier_trace: None,
+            payment_status: "posted".to_string(),
+            source: source.to_string(),
+            actor_id: "test".to_string(),
+            idempotency_key: format!("{source}:{id}"),
+            metadata_json: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+            enrichment_attempted_at: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cashflow_reportable_dedupes_ofx_shadowed_by_pluggy() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_transactions(&[
+                tx(
+                    "pluggy",
+                    "pluggy",
+                    "Compra Exemplo",
+                    Decimal::new(-11603, 2),
+                ),
+                tx("ofx-dupe", "ofx", "Compra Exemplo", Decimal::new(-11603, 2)),
+                tx("ofx-unique", "ofx", "Compra Unica", Decimal::new(-5000, 2)),
+            ])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        let may = rows
+            .iter()
+            .find(|row| row.month_ref == "2026-05")
+            .expect("may cashflow");
+
+        assert_eq!(may.expenses, Decimal::new(16603, 2));
     }
 }
