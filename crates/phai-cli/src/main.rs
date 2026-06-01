@@ -1820,6 +1820,28 @@ struct RuleInspectArgs {
 #[derive(Subcommand)]
 enum AccountCommand {
     Upsert(AccountUpsertArgs),
+    #[command(
+        about = "set a credit card's billing closing/due day (merges into metadata)",
+        long_about = "Sets `billing_closing_day` and `billing_due_day` on an existing \
+                      account's metadata without clobbering the rest (Pluggy creditData, \
+                      balance, etc.). These drive the cash-flow `cash_month` projection — a \
+                      card purchase lands in the month its bill is paid (ADR-0025). Required \
+                      for the bill-explosion view; Pluggy does not populate them reliably."
+    )]
+    SetBillingCycle(AccountBillingCycleArgs),
+}
+
+#[derive(Args)]
+struct AccountBillingCycleArgs {
+    /// Account id to update (e.g. the credit-card account).
+    #[arg(long)]
+    account_id: String,
+    /// Day of month the bill closes (1–28).
+    #[arg(long)]
+    closing_day: u32,
+    /// Day of month the bill is due/paid (1–28).
+    #[arg(long)]
+    due_day: u32,
 }
 
 #[derive(Args)]
@@ -2997,6 +3019,7 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Account { command }) => match command {
             AccountCommand::Upsert(args) => account_upsert(args).await,
+            AccountCommand::SetBillingCycle(args) => account_set_billing_cycle(args).await,
         },
         Some(Commands::Budget { command }) => match command {
             BudgetCommand::Upsert(args) => budget_upsert(args).await,
@@ -8280,6 +8303,51 @@ async fn account_upsert(args: AccountUpsertArgs) -> Result<()> {
         )])
         .await?;
     println!("Conta salva: {}", row.account_id);
+    Ok(())
+}
+
+async fn account_set_billing_cycle(args: AccountBillingCycleArgs) -> Result<()> {
+    if !(1..=28).contains(&args.closing_day) || !(1..=28).contains(&args.due_day) {
+        anyhow::bail!("closing-day e due-day devem estar entre 1 e 28");
+    }
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let mut accounts = store.get_accounts().await?;
+    let row = accounts
+        .iter_mut()
+        .find(|a| a.account_id == args.account_id)
+        .with_context(|| format!("conta '{}' não encontrada", args.account_id))?;
+
+    if !row.metadata_json.is_object() {
+        row.metadata_json = json!({});
+    }
+    if let Some(obj) = row.metadata_json.as_object_mut() {
+        obj.insert(
+            "billing_closing_day".into(),
+            json!(args.closing_day.to_string()),
+        );
+        obj.insert("billing_due_day".into(), json!(args.due_day.to_string()));
+    }
+    row.updated_at = Utc::now();
+    let row = row.clone();
+
+    store.upsert_accounts(std::slice::from_ref(&row)).await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "account",
+            &row.account_id,
+            "set_billing_cycle",
+            &config.actor_id,
+            &row.idempotency_key,
+            serde_json::to_value(&row)?,
+        )])
+        .await?;
+    println!(
+        "Ciclo de fatura salvo: {} (fecha dia {}, vence dia {})",
+        row.account_id, args.closing_day, args.due_day
+    );
     Ok(())
 }
 

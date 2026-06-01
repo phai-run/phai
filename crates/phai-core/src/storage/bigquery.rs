@@ -3674,8 +3674,7 @@ impl FinanceStore for BigQueryStore {
             FROM {tx}
             GROUP BY transaction_date, account_id, amount_cents, norm_desc
             HAVING COUNT(*) > 1
-            ORDER BY COUNT(*) DESC, ABS(CAST(ROUND(amount * 100) AS INT64)) DESC,
-              transaction_date DESC
+            ORDER BY COUNT(*) DESC, MIN(ABS(amount)) DESC, transaction_date DESC
             ",
             tx = self.qualified_table("transactions")?,
         );
