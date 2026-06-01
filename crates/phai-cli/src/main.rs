@@ -324,6 +324,17 @@ enum ReportCommand {
     )]
     Uncategorized(UncategorizedArgs),
     #[command(
+        about = "read-only audit of duplicate transactions inflating expense totals",
+        long_about = "Finds groups of transactions that share a dedup fingerprint \
+                      (same date, account, amount and normalised description) but have \
+                      different transaction ids — typically Pluggy re-assigning ids across \
+                      syncs — which double-count in cashflow and per-category reports. \
+                      This is READ-ONLY: it reports the groups so you can verify before any \
+                      cleanup; deleting the extras is a separate guided step (see ADR-0025). \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
+    Duplicates(DuplicatesArgs),
+    #[command(
         about = "transactions whose total matches the sum of multiple smaller items in the same \
                  window (potential splits)",
         long_about = "Detects transactions that look like they should be split into sub-items — \
@@ -605,6 +616,22 @@ struct UncategorizedArgs {
 }
 
 impl UncategorizedArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
+}
+
+#[derive(Args)]
+struct DuplicatesArgs {
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
+    #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
+    json: bool,
+}
+
+impl DuplicatesArgs {
     fn structured_output(&self) -> bool {
         self.raw || self.json
     }
@@ -2921,6 +2948,7 @@ async fn main() -> Result<()> {
             ReportCommand::CardClosedInsights(args) => report_card_closed_insights(args).await,
             ReportCommand::Installments(args) => report_installments(args).await,
             ReportCommand::Uncategorized(args) => report_uncategorized(args).await,
+            ReportCommand::Duplicates(args) => report_duplicates(args).await,
             ReportCommand::SplitCandidates(args) => report_split_candidates(args).await,
             ReportCommand::ItemPrices(args) => report_item_prices(args).await,
             ReportCommand::DataHealth(args) => report_data_health(args).await,
@@ -6387,6 +6415,52 @@ async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
         total_count,
         brl_abs(total_amount.abs())
     );
+
+    Ok(())
+}
+
+async fn report_duplicates(args: DuplicatesArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    let groups = store.audit_duplicate_transactions().await?;
+
+    if args.structured_output() {
+        println!("{}", serde_json::to_string_pretty(&groups)?);
+        return Ok(());
+    }
+
+    if groups.is_empty() {
+        println!("✅ Nenhuma transação duplicada encontrada.");
+        return Ok(());
+    }
+
+    // Inflation = the amount the extra copies add on top of one canonical row.
+    let extra_count: i64 = groups.iter().map(|g| g.count - 1).sum();
+    let inflated: rust_decimal::Decimal = groups
+        .iter()
+        .map(|g| g.amount.abs() * rust_decimal::Decimal::from(g.count - 1))
+        .sum();
+
+    println!("⚠️ *Transações duplicadas · {} grupos*", groups.len());
+    println!();
+    for g in &groups {
+        println!(
+            "{}× · {} · {} · {} [{}]",
+            g.count,
+            brl_abs(g.amount.abs()),
+            short_date_pt(g.transaction_date),
+            normalize_inline_text(&g.description),
+            g.sources.join(","),
+        );
+    }
+    println!();
+    println!(
+        "Total: {} cópias extras inflando {} (mantendo 1 por grupo).",
+        extra_count,
+        brl_abs(inflated)
+    );
+    println!("Auditoria somente-leitura — a limpeza é um passo separado (ADR-0025).");
 
     Ok(())
 }

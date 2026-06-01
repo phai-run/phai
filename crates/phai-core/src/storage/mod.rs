@@ -2,8 +2,9 @@ use crate::config::{AppConfig, BackendKind};
 use crate::models::{
     AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow, CardClosedTransactionRow,
     CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, CheckingBalance,
-    DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow,
-    RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    DailyPulseItem, DuplicateTransactionGroup, ForecastRecord, ForecastTemplateRecord,
+    ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord,
+    UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -244,6 +245,12 @@ pub trait FinanceStore {
     /// `accounts.metadata_json.billing_closing_day`. Cards without a
     /// closing-day field fall back to the next calendar month.
     async fn cards_open_now(&self) -> Result<Vec<CardSummaryRow>>;
+    /// Read-only audit: groups of transactions sharing a dedup fingerprint
+    /// (`transaction_date`, `account_id`, `amount_cents`, normalised
+    /// `raw_description`) with more than one row — likely duplicates inflating
+    /// expense aggregates (typically Pluggy `transaction_id` drift across
+    /// syncs). Ordered most-duplicated first. See `phai dedup --audit`.
+    async fn audit_duplicate_transactions(&self) -> Result<Vec<DuplicateTransactionGroup>>;
     async fn card_closed_transactions(
         &self,
         month_ref: Option<&str>,

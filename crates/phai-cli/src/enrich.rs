@@ -1721,6 +1721,11 @@ mod test_support {
         async fn cards_open_now(&self) -> Result<Vec<phai_core::models::CardSummaryRow>> {
             Ok(vec![])
         }
+        async fn audit_duplicate_transactions(
+            &self,
+        ) -> Result<Vec<phai_core::models::DuplicateTransactionGroup>> {
+            Ok(vec![])
+        }
         async fn latest_account_snapshots(&self) -> Result<Vec<AccountSnapshotRecord>> {
             Ok(vec![])
         }

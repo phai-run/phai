@@ -3,8 +3,9 @@ use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
-    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow,
-    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    CheckingBalance, DailyPulseItem, DuplicateTransactionGroup, ForecastRecord,
+    ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -2176,6 +2177,61 @@ impl FinanceStore for LocalStore {
         Ok(rows)
     }
 
+    async fn audit_duplicate_transactions(&self) -> Result<Vec<DuplicateTransactionGroup>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_date,
+              account_id,
+              amount_cents,
+              LOWER(TRIM(raw_description)) AS norm_desc,
+              COUNT(*) AS n,
+              GROUP_CONCAT(transaction_id) AS ids,
+              GROUP_CONCAT(DISTINCT source) AS sources
+            FROM transactions
+            GROUP BY transaction_date, COALESCE(account_id, ''), amount_cents, norm_desc
+            HAVING COUNT(*) > 1
+            ORDER BY n DESC, ABS(amount_cents) DESC, transaction_date DESC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let date_str = row.get::<_, String>(0)?;
+                let amount_cents = row.get::<_, i64>(2)?;
+                let ids_raw = row.get::<_, String>(5)?;
+                let sources_raw = row.get::<_, Option<String>>(6)?.unwrap_or_default();
+                let transaction_date =
+                    NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?;
+                let mut transaction_ids: Vec<String> =
+                    ids_raw.split(',').map(|s| s.trim().to_string()).collect();
+                transaction_ids.sort();
+                let mut sources: Vec<String> = sources_raw
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                sources.sort();
+                Ok(DuplicateTransactionGroup {
+                    transaction_date,
+                    account_id: row.get::<_, Option<String>>(1)?,
+                    amount: Decimal::new(amount_cents, 2),
+                    description: row.get(3)?,
+                    count: row.get(4)?,
+                    transaction_ids,
+                    sources,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn card_closed_transactions(
         &self,
         month_ref: Option<&str>,
@@ -2952,5 +3008,32 @@ mod tests {
             .find(|r| r.month_ref == "2026-05")
             .expect("may cashflow");
         assert_eq!(may.expenses, Decimal::new(8000, 2));
+    }
+
+    /// Two rows sharing a dedup fingerprint (same date/account/amount/desc) but
+    /// different transaction_ids — the Pluggy-id-drift shape — surface as one
+    /// duplicate group; a unique row does not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_duplicate_transactions_groups_by_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_transactions(&[
+                tx("dup-a", "pluggy", "Compra Exemplo", Decimal::new(-11603, 2)),
+                tx("dup-b", "pluggy", "Compra Exemplo", Decimal::new(-11603, 2)),
+                tx("solo", "pluggy", "Compra Unica", Decimal::new(-5000, 2)),
+            ])
+            .await
+            .unwrap();
+
+        let groups = store.audit_duplicate_transactions().await.unwrap();
+        assert_eq!(groups.len(), 1, "exactly one duplicate group");
+        let group = &groups[0];
+        assert_eq!(group.count, 2);
+        assert_eq!(group.transaction_ids, vec!["dup-a", "dup-b"]);
+        assert_eq!(group.amount, Decimal::new(-11603, 2));
     }
 }
