@@ -2,8 +2,9 @@
 type: ADR
 id: "0024"
 title: "Cashflow chart sources from `v_cashflow` (accrual) with a net-derived saldo line"
-status: accepted
+status: superseded
 date: 2026-05-30
+superseded_by: "0025"
 ---
 
 ## Context

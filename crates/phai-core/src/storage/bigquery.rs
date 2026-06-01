@@ -3391,8 +3391,10 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
-        // Accrual basis over all reportable accounts. This mirrors v_cashflow
-        // and drops OFX rows when Pluggy produced the same transaction key.
+        // Cash-flow basis over all reportable accounts. This mirrors v_cashflow
+        // (buckets by the canonical `cash_month` from v_transactions_cashbasis,
+        // so a card purchase lands in the month its bill is paid) and drops OFX
+        // rows when Pluggy produced the same transaction key. See ADR-0025.
         let sql = format!(
             "
             WITH reportable AS (
@@ -3413,7 +3415,7 @@ impl FinanceStore for BigQueryStore {
             SELECT month_ref, income, expenses, expense_reduction, net
             FROM (
               SELECT
-                FORMAT_DATE('%Y-%m', transaction_date) AS month_ref,
+                cash_month AS month_ref,
                 ROUND(SUM(IF(amount_cents > 0 AND COALESCE(category_id, '') != 'cashback',
                   amount_cents, 0)) / 100.0, 2) AS income,
                 ROUND(SUM(IF(amount_cents < 0, ABS(amount_cents), 0)) / 100.0, 2) AS expenses,
@@ -3426,7 +3428,7 @@ impl FinanceStore for BigQueryStore {
             )
             ORDER BY month_ref ASC
             ",
-            tx = self.qualified_table("v_transactions_reportable")?,
+            tx = self.qualified_table("v_transactions_cashbasis")?,
             internal = self.qualified_table("internal_categories")?,
         );
         let response = self.run_query(&sql).await?;

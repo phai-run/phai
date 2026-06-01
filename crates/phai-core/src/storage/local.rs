@@ -1845,8 +1845,10 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
-        // Accrual basis over all reportable accounts. This mirrors v_cashflow
-        // and drops OFX rows when Pluggy produced the same transaction key.
+        // Cash-flow basis over all reportable accounts. This mirrors v_cashflow
+        // (buckets by the canonical `cash_month` from v_transactions_cashbasis,
+        // so a card purchase lands in the month its bill is paid) and drops OFX
+        // rows when Pluggy produced the same transaction key. See ADR-0025.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
@@ -1860,13 +1862,13 @@ impl FinanceStore for LocalStore {
                     COALESCE(amount_cents, CAST(ROUND(CAST(amount AS REAL) * 100) AS INTEGER)),
                     LOWER(TRIM(raw_description))
                 ) AS has_pluggy
-              FROM v_transactions_reportable
+              FROM v_transactions_cashbasis
               WHERE COALESCE(category_id, '') NOT IN (SELECT category_id FROM internal_categories)
             )
             SELECT month_ref, income, expenses, expense_reduction, net
             FROM (
               SELECT
-                strftime('%Y-%m', transaction_date) AS month_ref,
+                cash_month AS month_ref,
                 CAST(ROUND(SUM(
                   CASE
                     WHEN amount_cents > 0 AND COALESCE(category_id, '') != 'cashback'
@@ -2759,7 +2761,7 @@ mod tests {
     use super::LocalStore;
     use crate::config::AppConfig;
     use crate::migrations::run_migrations;
-    use crate::models::TransactionRecord;
+    use crate::models::{AccountRecord, TransactionRecord};
     use crate::storage::FinanceStore;
     use chrono::{NaiveDate, Utc};
     use rust_decimal::Decimal;
@@ -2828,5 +2830,127 @@ mod tests {
             .expect("may cashflow");
 
         assert_eq!(may.expenses, Decimal::new(16603, 2));
+    }
+
+    fn card_account(account_id: &str, closing_day: &str, due_day: &str) -> AccountRecord {
+        let now = Utc::now();
+        AccountRecord {
+            account_id: account_id.to_string(),
+            owner: "test".to_string(),
+            account_type: "credit".to_string(),
+            bank: "test-bank".to_string(),
+            label: "Test Card".to_string(),
+            pluggy_account_id: None,
+            pluggy_item_id: None,
+            status: "active".to_string(),
+            actor_id: "test".to_string(),
+            idempotency_key: format!("acct:{account_id}"),
+            metadata_json: serde_json::json!({
+                "billing_closing_day": closing_day,
+                "billing_due_day": due_day,
+            }),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn card_tx(id: &str, account_id: &str, date: NaiveDate, amount: Decimal) -> TransactionRecord {
+        let now = Utc::now();
+        TransactionRecord {
+            transaction_id: id.to_string(),
+            account_id: Some(account_id.to_string()),
+            transaction_date: date,
+            raw_description: id.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            amount,
+            amount_cents: None,
+            tx_type: "debit".to_string(),
+            category_id: Some("alimentacao:mercado".to_string()),
+            category_source: "rule".to_string(),
+            context: None,
+            classifier_trace: None,
+            payment_status: "posted".to_string(),
+            source: "pluggy".to_string(),
+            actor_id: "test".to_string(),
+            idempotency_key: format!("pluggy:{id}"),
+            metadata_json: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+            enrichment_attempted_at: None,
+        }
+    }
+
+    /// A card purchase belongs to the month its bill is paid, not its posting
+    /// month. Closing day 3, due day 10: a 2026-04-28 swipe (day 28 > 3) closes
+    /// in the 2026-05 cycle, due 2026-05-10 → cash_month 2026-05. See ADR-0025.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cashflow_reportable_buckets_card_purchase_in_bill_due_month() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_accounts(&[card_account("cc-1", "3", "10")])
+            .await
+            .unwrap();
+        store
+            .upsert_transactions(&[card_tx(
+                "swipe-1",
+                "cc-1",
+                NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                Decimal::new(-15000, 2),
+            )])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        assert!(
+            rows.iter().all(|r| r.month_ref != "2026-04"),
+            "card purchase must not appear in its posting month (April)"
+        );
+        let may = rows
+            .iter()
+            .find(|r| r.month_ref == "2026-05")
+            .expect("may cashflow");
+        assert_eq!(may.expenses, Decimal::new(15000, 2));
+    }
+
+    /// When the due day precedes the closing day the bill is paid the following
+    /// month. Closing 25, due 5: a 2026-04-10 swipe (day 10 <= 25) closes in the
+    /// 2026-04 cycle but is due 2026-05-05 → cash_month 2026-05. See ADR-0025.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cashflow_reportable_rolls_due_before_closing_to_next_month() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_accounts(&[card_account("cc-2", "25", "5")])
+            .await
+            .unwrap();
+        store
+            .upsert_transactions(&[card_tx(
+                "swipe-2",
+                "cc-2",
+                NaiveDate::from_ymd_opt(2026, 4, 10).unwrap(),
+                Decimal::new(-8000, 2),
+            )])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        assert!(
+            rows.iter().all(|r| r.month_ref != "2026-04"),
+            "bill paid in May must not appear in April"
+        );
+        let may = rows
+            .iter()
+            .find(|r| r.month_ref == "2026-05")
+            .expect("may cashflow");
+        assert_eq!(may.expenses, Decimal::new(8000, 2));
     }
 }
