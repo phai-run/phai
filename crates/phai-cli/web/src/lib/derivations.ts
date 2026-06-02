@@ -28,6 +28,8 @@ export interface TxView {
 	categoryId: string | null;
 	month: string;
 	paymentStatus: string;
+	installmentMarker?: string | null;
+	accountLabel?: string;
 	reviewed: number; // 0/1
 	isInstallment: number; // 0/1
 	isSubscription: number; // 0/1

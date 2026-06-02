@@ -15,9 +15,16 @@ import { CardsPanel } from "./CardsPanel";
 import type { ChartMonthView, ForecastView } from "./types";
 
 // Seeding window: the 12 months of the current calendar year.
-const _now = new Date();
-const MONTHS_BACK = _now.getMonth(); // months before current → Jan
-const MONTHS_AHEAD = 11 - _now.getMonth(); // months after current → Dec
+export const planningYearWindow = (date: Date) => {
+	const monthIndex = date.getMonth();
+	return {
+		chartMonthsBack: monthIndex + 1, // chart expects a count including current
+		transactionMonthsBack: monthIndex, // transaction API expects an offset
+		monthsAhead: 11 - monthIndex,
+	};
+};
+
+const YEAR_WINDOW = planningYearWindow(new Date());
 
 const chart$ = queryDb(tables.chartMonths.orderBy("ordinal", "asc"));
 const forecasts$ = queryDb(tables.forecasts.orderBy("dueDate", "asc"));
@@ -62,9 +69,15 @@ export const Dashboard = () => {
 	const fOverlay = useQuery(forecastOverlay$);
 
 	// Seed: current year
-	const chartSeed = useChartSeed(MONTHS_BACK, MONTHS_AHEAD);
+	const chartSeed = useChartSeed(
+		YEAR_WINDOW.chartMonthsBack,
+		YEAR_WINDOW.monthsAhead,
+	);
 	const forecastSeed = useForecastsSeed(null);
-	useTransactionsSeed(MONTHS_BACK, MONTHS_AHEAD);
+	useTransactionsSeed(
+		YEAR_WINDOW.transactionMonthsBack,
+		YEAR_WINDOW.monthsAhead,
+	);
 
 	// Apply forecast re-dating overlay
 	const overlayById = useMemo(
@@ -186,7 +199,7 @@ export const Dashboard = () => {
 					padding: "0 clamp(24px,3vw,32px)",
 				}}
 			>
-				<CardsPanel />
+				<CardsPanel month={selected} />
 			</div>
 
 			{/* ── Month detail ── */}

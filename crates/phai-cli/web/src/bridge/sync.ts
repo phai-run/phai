@@ -350,6 +350,7 @@ const normalizeTransactions = (rows: TxRow[]) =>
 		categoryId: r.categoryId ?? null,
 		month: r.month ?? "",
 		paymentStatus: r.paymentStatus ?? "",
+		installmentMarker: r.installmentMarker ?? null,
 		reviewed: bool(r.reviewed),
 		isInstallment: bool(r.isInstallment),
 		isSubscription: bool(r.isSubscription),

@@ -14,6 +14,7 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
 use phai_core::migrations::run_migrations;
+use phai_core::models::ForecastRecord;
 use phai_core::storage::{open_store, FinanceStore};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -212,6 +213,9 @@ pub(crate) async fn build_chart_data(
             if lower <= last_day {
                 let forecasts = store.upcoming_forecasts(lower, last_day).await?;
                 for f in &forecasts {
+                    if !forecast_counts_in_chart_projection(f) {
+                        continue;
+                    }
                     if f.amount > Decimal::ZERO {
                         fi_rem += f.amount;
                     } else {
@@ -260,6 +264,17 @@ pub(crate) async fn build_chart_data(
         realized_count,
         scenario: None,
     })
+}
+
+fn forecast_counts_in_chart_projection(forecast: &ForecastRecord) -> bool {
+    if forecast.recurrence.as_deref() == Some("card-cycle") {
+        return false;
+    }
+    forecast
+        .metadata_json
+        .get("source")
+        .and_then(|v| v.as_str())
+        != Some("card-open-bill")
 }
 
 fn write_svg(path: &Path, body: &str) -> Result<()> {
@@ -1129,7 +1144,9 @@ fn sparkline_line(values: &[f64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use rust_decimal_macros::dec;
+    use serde_json::json;
 
     fn realized_only() -> ChartData {
         ChartData {
@@ -1162,6 +1179,45 @@ mod tests {
             realized_count: 2,
             scenario: None,
         }
+    }
+
+    fn sample_forecast(recurrence: Option<&str>, source: Option<&str>) -> ForecastRecord {
+        ForecastRecord {
+            forecast_id: "forecast-1".into(),
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 6, 15).unwrap()),
+            description: "Synthetic forecast".into(),
+            amount: dec!(-100),
+            category_id: None,
+            account_id: Some("account-1".into()),
+            status: "ativo".into(),
+            recurrence: recurrence.map(str::to_string),
+            actor_id: "test".into(),
+            idempotency_key: "forecast-1".into(),
+            metadata_json: source
+                .map(|s| json!({ "source": s }))
+                .unwrap_or_else(|| json!({})),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            template_id: None,
+            realized_transaction_id: None,
+            realized_at: None,
+        }
+    }
+
+    #[test]
+    fn chart_projection_ignores_open_card_bill_forecasts() {
+        assert!(!forecast_counts_in_chart_projection(&sample_forecast(
+            Some("card-cycle"),
+            None
+        )));
+        assert!(!forecast_counts_in_chart_projection(&sample_forecast(
+            None,
+            Some("card-open-bill")
+        )));
+        assert!(forecast_counts_in_chart_projection(&sample_forecast(
+            Some("monthly"),
+            Some("manual")
+        )));
     }
 
     fn realized_plus_future() -> ChartData {

@@ -30,6 +30,7 @@ const makeTx = (
 	categoryId: (overrides.categoryId as string | null) ?? null,
 	month: (overrides.month as string) ?? "2024-01",
 	paymentStatus: (overrides.paymentStatus as string) ?? "posted",
+	installmentMarker: (overrides.installmentMarker as string | null) ?? null,
 	reviewed: bool(overrides.reviewed ?? false),
 	isInstallment: bool(overrides.isInstallment ?? false),
 	isSubscription: bool(overrides.isSubscription ?? false),

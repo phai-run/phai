@@ -25,7 +25,7 @@ use phai_core::models::{
     TransactionRecord,
 };
 use phai_core::storage::{open_store, FinanceStore};
-use phai_core::{AppConfig, BackendKind};
+use phai_core::{parse_installment_description, AppConfig, BackendKind};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,8 +61,8 @@ const DEFAULT_TRANSACTIONS_LIMIT: usize = 5000;
 use crate::cashflow_chart::{build_chart_data, ChartData};
 use crate::forecast_cmd::materialise_template_forecasts;
 use crate::{
-    all_transactions_for_review, apply_human_review, load_config, review_human_rows,
-    HumanReviewPatch, ReviewFilters, ReviewHumanKind,
+    all_transactions_for_review, apply_human_review, load_config, parse_month_ref,
+    review_human_rows, HumanReviewPatch, ReviewFilters, ReviewHumanKind,
 };
 
 const LEGACY_WEB_CATEGORY_ALIASES: &[(&str, &str)] = &[
@@ -295,13 +295,14 @@ enum StoreRequest {
     /// Per-credit-card cycle state (open/paid), total and credit-limit usage,
     /// for the dashboard card panel (`GET /api/cards`).
     Cards {
+        month: Option<String>,
         resp: oneshot::Sender<Result<Vec<CardApiRow>>>,
     },
     ReviewQueue {
         params: ReviewQueueParams,
         resp: oneshot::Sender<Result<Vec<TransactionRecord>>>,
     },
-    /// Transactions whose posted month falls in the requested window, used by
+    /// Transactions whose cash month falls in the requested window, used by
     /// the planning workspace (`GET /api/transactions`).
     TransactionsWindow {
         params: TransactionsWindowParams,
@@ -374,8 +375,8 @@ async fn store_actor_loop(
                 let result = store.get_accounts().await;
                 let _ = resp.send(result);
             }
-            StoreRequest::Cards { resp } => {
-                let result = build_cards_api(store.as_ref()).await;
+            StoreRequest::Cards { month, resp } => {
+                let result = build_cards_api(store.as_ref(), month.as_deref()).await;
                 let _ = resp.send(result);
             }
             StoreRequest::ReviewQueue { params, resp } => {
@@ -469,13 +470,13 @@ struct TransactionsWindowParams {
 
 /// Result of a paginated transaction-window load.
 struct TransactionsWindowResult {
-    rows: Vec<TransactionRecord>,
+    rows: Vec<TxRow>,
     total: usize,
     offset: usize,
     has_more: bool,
 }
 
-/// Load transactions whose posted month is within
+/// Load transactions whose cash month is within
 /// `[now - months_back, now + months_ahead]`, optionally restricted to rows
 /// still pending review. Returns a page of up to `limit` rows starting at
 /// `offset`, plus the total matching count so the client can paginate.
@@ -484,10 +485,13 @@ async fn load_transactions_window(
     params: TransactionsWindowParams,
 ) -> Result<TransactionsWindowResult> {
     let today = Utc::now().date_naive();
-    let from = first_of_month(shift_months(today, -(params.months_back as i64)));
-    let until = last_of_month(shift_months(today, params.months_ahead as i64));
+    let cash_from = first_of_month(shift_months(today, -(params.months_back as i64)));
+    let cash_until = last_of_month(shift_months(today, params.months_ahead as i64));
+    let cash_from_ref = cash_from.format("%Y-%m").to_string();
+    let cash_until_ref = cash_until.format("%Y-%m").to_string();
+    let posted_from = first_of_month(shift_months(cash_from, -2));
     let mut rows = store
-        .effective_transactions_window(None, from, until)
+        .effective_transactions_window(None, posted_from, cash_until)
         .await
         .context("effective_transactions_window")?;
     let internal_categories = store
@@ -506,10 +510,23 @@ async fn load_transactions_window(
     if !params.include_reviewed {
         rows.retain(is_pending_review);
     }
-    let total = rows.len();
+    let accounts = store.get_accounts().await.context("get_accounts")?;
+    let lookup = cash_month_lookup(&accounts);
+    let tx_rows: Vec<TxRow> = tx_rows_with_cash_month(&rows, &lookup)
+        .into_iter()
+        .filter(|row| {
+            row.month.as_str() >= cash_from_ref.as_str()
+                && row.month.as_str() <= cash_until_ref.as_str()
+        })
+        .collect();
+    let total = tx_rows.len();
     let offset = params.offset.min(total);
     let end = (offset + params.limit).min(total);
-    let page: Vec<TransactionRecord> = rows.drain(offset..end).collect();
+    let page: Vec<TxRow> = tx_rows
+        .into_iter()
+        .skip(offset)
+        .take(end - offset)
+        .collect();
     let has_more = end < total;
     Ok(TransactionsWindowResult {
         rows: page,
@@ -871,6 +888,7 @@ struct TxRow {
     category_id: Option<String>,
     month: String,
     payment_status: String,
+    installment_marker: Option<String>,
     reviewed: bool,
     is_installment: bool,
     is_subscription: bool,
@@ -879,6 +897,13 @@ struct TxRow {
 impl TxRow {
     fn from_record(row: &TransactionRecord) -> Self {
         let category_id = canonical_web_category(row.category_id.as_deref());
+        let installment_marker = parse_installment_description(&row.raw_description)
+            .or_else(|| {
+                row.description
+                    .as_deref()
+                    .and_then(parse_installment_description)
+            })
+            .map(|m| format!("{}/{}", m.current, m.total));
         // `isSubscription` heuristic: any category under the `assinaturas:`
         // namespace is treated as a subscription charge.
         let is_subscription = category_id
@@ -912,8 +937,10 @@ impl TxRow {
             category_id,
             month: row.transaction_date.format("%Y-%m").to_string(),
             payment_status: row.payment_status.clone(),
+            installment_marker: installment_marker.clone(),
             reviewed: is_reviewed(row),
-            is_installment: row.payment_status == PAYMENT_STATUS_INSTALLMENT,
+            is_installment: row.payment_status == PAYMENT_STATUS_INSTALLMENT
+                || installment_marker.is_some(),
             is_subscription,
         }
     }
@@ -1034,14 +1061,24 @@ fn cycle_due_date(month_ref: &str, due_day: u32) -> Option<String> {
     )
 }
 
-/// Assemble the card panel: each active credit account with its open-bill cycle
-/// (from `cards_open_now`, ADR-0010) plus credit-limit usage from Pluggy
-/// metadata. Cards with no open balance are reported `state="em-dia"`.
-async fn build_cards_api(store: &dyn FinanceStore) -> Result<Vec<CardApiRow>> {
+/// Assemble the card panel: each active credit account with the selected card
+/// cycle when `month_ref` is provided, otherwise with the currently-open bill
+/// (from `cards_open_now`, ADR-0010). Cards with no selected-cycle charges are
+/// reported `state="em-dia"`.
+async fn build_cards_api(
+    store: &dyn FinanceStore,
+    month_ref: Option<&str>,
+) -> Result<Vec<CardApiRow>> {
+    let today = chrono::Local::now().date_naive();
     let accounts = store.get_accounts().await?;
-    let open = store.cards_open_now().await?;
-    let open_by: std::collections::HashMap<&str, &CardSummaryRow> =
-        open.iter().map(|r| (r.account_id.as_str(), r)).collect();
+    let summaries = match month_ref {
+        Some(month) => store.card_summary(Some(month)).await?,
+        None => store.cards_open_now().await?,
+    };
+    let summary_by_account: std::collections::HashMap<&str, &CardSummaryRow> = summaries
+        .iter()
+        .map(|r| (r.account_id.as_str(), r))
+        .collect();
 
     let mut rows = Vec::new();
     for a in accounts
@@ -1066,18 +1103,32 @@ async fn build_cards_api(store: &dyn FinanceStore) -> Result<Vec<CardApiRow>> {
         } else {
             a.label.clone()
         };
-        let row = match open_by.get(a.account_id.as_str()) {
-            Some(r) => CardApiRow {
-                account_id: a.account_id.clone(),
-                label,
-                state: "aberta",
-                cycle_month: Some(r.month_ref.clone()),
-                total: format!("{:.2}", r.total_charges),
-                open_amount: format!("{:.2}", r.open_amount),
-                due_date: due_day.and_then(|d| cycle_due_date(&r.month_ref, d)),
-                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
-                used_amount: used.map(|u| format!("{u:.2}")),
-            },
+        let row = match summary_by_account.get(a.account_id.as_str()) {
+            Some(r) => {
+                let due_date = due_day.and_then(|d| cycle_due_date(&r.month_ref, d));
+                let state = if due_date
+                    .as_deref()
+                    .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+                    .is_some_and(|d| d < today)
+                {
+                    "fechada"
+                } else if r.open_amount > Decimal::ZERO {
+                    "aberta"
+                } else {
+                    "fechada"
+                };
+                CardApiRow {
+                    account_id: a.account_id.clone(),
+                    label,
+                    state,
+                    cycle_month: Some(r.month_ref.clone()),
+                    total: format!("{:.2}", r.total_charges),
+                    open_amount: format!("{:.2}", r.open_amount),
+                    due_date,
+                    credit_limit: credit_limit.map(|c| format!("{c:.2}")),
+                    used_amount: used.map(|u| format!("{u:.2}")),
+                }
+            }
             None => CardApiRow {
                 account_id: a.account_id.clone(),
                 label,
@@ -1156,6 +1207,11 @@ struct ReviewQueueQuery {
 struct ChartQuery {
     months_back: Option<usize>,
     months_ahead: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+struct CardsQuery {
+    month: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1349,7 +1405,6 @@ async fn get_transactions(
         offset: q.offset.unwrap_or(0),
     };
     let tx = clone_actor_tx(&tx).await;
-    let accounts = fetch_accounts(&tx).await;
     let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::TransactionsWindow {
@@ -1362,16 +1417,13 @@ async fn get_transactions(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(result)) => {
-            let lookup = cash_month_lookup(&accounts);
-            Json(TransactionsResponse {
-                rows: tx_rows_with_cash_month(&result.rows, &lookup),
-                total: result.total,
-                offset: result.offset,
-                has_more: result.has_more,
-            })
-            .into_response()
-        }
+        Ok(Ok(result)) => Json(TransactionsResponse {
+            rows: result.rows,
+            total: result.total,
+            offset: result.offset,
+            has_more: result.has_more,
+        })
+        .into_response(),
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1394,11 +1446,19 @@ async fn get_categories(State(tx): Store) -> impl IntoResponse {
     }
 }
 
-async fn get_cards(State(tx): Store) -> impl IntoResponse {
+async fn get_cards(State(tx): Store, Query(q): Query<CardsQuery>) -> impl IntoResponse {
+    if let Some(month) = q.month.as_deref() {
+        if let Err(e) = parse_month_ref(month) {
+            return error_response(StatusCode::BAD_REQUEST, e.to_string());
+        }
+    }
     let (resp_tx, resp_rx) = oneshot::channel();
     let tx = clone_actor_tx(&tx).await;
     if tx
-        .send(StoreRequest::Cards { resp: resp_tx })
+        .send(StoreRequest::Cards {
+            month: q.month,
+            resp: resp_tx,
+        })
         .await
         .is_err()
     {
@@ -2225,9 +2285,11 @@ mod tests {
         assert_eq!(value["purpose"], "Trabalho");
         assert_eq!(value["categoryId"], "alimentacao:restaurante");
         assert_eq!(value["month"], "2026-03");
+        assert_eq!(value["installmentMarker"], serde_json::Value::Null);
         // snake_case keys must NOT leak.
         assert!(value.get("account_id").is_none());
         assert!(value.get("raw_description").is_none());
+        assert!(value.get("installment_marker").is_none());
     }
 
     // ── TxRow contract (camelCase + flag derivation) ──────────────────────
@@ -2242,6 +2304,7 @@ mod tests {
         assert_eq!(value["rawDescription"], "RAW MERCHANT 123");
         assert_eq!(value["month"], "2026-03");
         assert_eq!(value["paymentStatus"], "settled");
+        assert_eq!(value["installmentMarker"], serde_json::Value::Null);
         // sample_record has a concrete category → reviewed; not installment;
         // not under `assinaturas:` → not a subscription.
         assert_eq!(value["reviewed"], true);
@@ -2268,6 +2331,13 @@ mod tests {
         let mut installment = sample_record();
         installment.payment_status = PAYMENT_STATUS_INSTALLMENT.into();
         assert!(TxRow::from_record(&installment).is_installment);
+
+        let mut marked_installment = sample_record();
+        marked_installment.raw_description = "LOJA SINTETICA 2/5".into();
+        marked_installment.payment_status = "settled".into();
+        let row = TxRow::from_record(&marked_installment);
+        assert!(row.is_installment);
+        assert_eq!(row.installment_marker.as_deref(), Some("2/5"));
 
         let mut subscription = sample_record();
         subscription.category_id = Some("assinaturas:streaming".into());
@@ -2626,11 +2696,7 @@ mod tests {
         .await
         .unwrap();
 
-        let ids: BTreeSet<_> = result
-            .rows
-            .iter()
-            .map(|row| row.transaction_id.as_str())
-            .collect();
+        let ids: BTreeSet<_> = result.rows.iter().map(|row| row.id.as_str()).collect();
         assert!(ids.contains("tx-external"));
         assert!(!ids.contains("tx-internal"));
     }
@@ -2675,14 +2741,69 @@ mod tests {
         .await
         .unwrap();
 
-        let ids: BTreeSet<_> = result
-            .rows
-            .iter()
-            .map(|row| row.transaction_id.as_str())
-            .collect();
+        let ids: BTreeSet<_> = result.rows.iter().map(|row| row.id.as_str()).collect();
         assert!(ids.contains("tx-pluggy"));
         assert!(ids.contains("tx-ofx-unique"));
         assert!(!ids.contains("tx-ofx-duplicate"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transactions_window_includes_prior_posted_card_purchase_for_current_cash_month() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+        let current_month = first_of_month(today);
+        let previous_month = shift_months(current_month, -1);
+        let current_ref = current_month.format("%Y-%m").to_string();
+
+        let mut card = sample_account("cc-1", "Card", "me");
+        card.account_type = "credit".into();
+        card.metadata_json = serde_json::json!({
+            "billing_closing_day": "3",
+            "billing_due_day": "10",
+        });
+        store.upsert_accounts(&[card]).await.unwrap();
+
+        let mut card_purchase = sample_record();
+        card_purchase.transaction_id = "tx-card-prior-posted".into();
+        card_purchase.account_id = Some("cc-1".into());
+        card_purchase.transaction_date =
+            NaiveDate::from_ymd_opt(previous_month.year(), previous_month.month(), 28).unwrap();
+        card_purchase.category_id = Some("educacao:cursos".into());
+
+        let mut prior_checking = sample_record();
+        prior_checking.transaction_id = "tx-prior-checking".into();
+        prior_checking.transaction_date = card_purchase.transaction_date;
+        prior_checking.category_id = Some("alimentacao:mercado".into());
+
+        store
+            .upsert_transactions(&[card_purchase, prior_checking])
+            .await
+            .unwrap();
+
+        let result = load_transactions_window(
+            store.as_ref(),
+            TransactionsWindowParams {
+                months_back: 0,
+                months_ahead: 0,
+                include_reviewed: true,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: BTreeSet<_> = result.rows.iter().map(|row| row.id.as_str()).collect();
+        assert!(ids.contains("tx-card-prior-posted"));
+        assert!(!ids.contains("tx-prior-checking"));
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .find(|row| row.id == "tx-card-prior-posted")
+                .map(|row| row.month.as_str()),
+            Some(current_ref.as_str())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

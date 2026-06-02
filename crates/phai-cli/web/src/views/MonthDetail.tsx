@@ -43,6 +43,8 @@ interface TxView {
 	categoryId: string | null;
 	month: string;
 	paymentStatus: string;
+	installmentMarker?: string | null;
+	accountLabel?: string;
 	reviewed: number;
 	isInstallment: number;
 	isSubscription: number;
@@ -101,8 +103,14 @@ export const MonthDetail = ({
 
 	// Transactions for this month
 	const monthTxs = useMemo(
-		() => txRows.filter((t) => t.month === month),
-		[txRows, month],
+		() =>
+			txRows
+				.filter((t) => t.month === month)
+				.map((t) => ({
+					...t,
+					accountLabel: accountById.get(t.accountId)?.label || t.accountId,
+				})),
+		[txRows, month, accountById],
 	);
 
 	// ── Debounced text filter ───────────────────────────────────────────
@@ -1975,18 +1983,13 @@ const TransactionModal = ({
 	const { store } = useStore();
 
 	const applyBulk = useCallback(
-		(newCategory: string) => {
+		(patch: ReviewPatch) => {
 			for (const id of selectedSimilar) {
 				store.commit(
 					events.reviewSubmitted({
 						writeId: crypto.randomUUID(),
 						transactionId: id,
-						patch: {
-							description: null,
-							merchantName: null,
-							purpose: null,
-							categoryId: newCategory || null,
-						},
+						patch,
 						submittedAt: Date.now(),
 					}),
 				);
@@ -2014,13 +2017,24 @@ const TransactionModal = ({
 	}, []);
 
 	const handleSave = useCallback(() => {
-		onSubmit({
+		const patch = {
 			description: description.trim() || null,
 			merchantName: merchantName.trim() || null,
 			purpose: purpose.trim() || null,
 			categoryId: category.trim() || null,
-		});
+		};
+		onSubmit(patch);
 	}, [onSubmit, description, merchantName, purpose, category]);
+
+	const currentPatch = useMemo(
+		() => ({
+			description: description.trim() || null,
+			merchantName: merchantName.trim() || null,
+			purpose: purpose.trim() || null,
+			categoryId: category.trim() || null,
+		}),
+		[description, merchantName, purpose, category],
+	);
 
 	return (
 		<>
@@ -2235,6 +2249,7 @@ const TransactionModal = ({
 									onSelectAll={handleSelectAll}
 									onClearAll={handleClearAll}
 									onApplyBulk={applyBulk}
+									patch={currentPatch}
 								/>
 							</motion.div>
 						)}
@@ -2377,6 +2392,7 @@ const SimilarPanel = ({
 	onSelectAll,
 	onClearAll,
 	onApplyBulk,
+	patch,
 }: {
 	similarTxs: ReadonlyArray<TxView>;
 	overlayById: Map<
@@ -2392,13 +2408,18 @@ const SimilarPanel = ({
 	onToggle: (id: string) => void;
 	onSelectAll: () => void;
 	onClearAll: () => void;
-	onApplyBulk: (cat: string) => void;
+	onApplyBulk: (patch: ReviewPatch) => void;
+	patch: ReviewPatch;
 }) => {
-	const [bulkCat, setBulkCat] = useState("");
-
 	const handleApply = useCallback(() => {
-		onApplyBulk(bulkCat);
-	}, [onApplyBulk, bulkCat]);
+		onApplyBulk(patch);
+	}, [onApplyBulk, patch]);
+
+	const hasPatch =
+		patch.description != null ||
+		patch.merchantName != null ||
+		patch.purpose != null ||
+		patch.categoryId != null;
 
 	if (similarTxs.length === 0) {
 		return (
@@ -2429,26 +2450,18 @@ const SimilarPanel = ({
 				)}
 				{selected.size > 0 && (
 					<>
-						<input
-							list="phai-cats"
-							placeholder="nova categoria…"
-							value={bulkCat}
-							onChange={(e) => setBulkCat(e.target.value)}
-							className="mono"
-							style={{ ...inputStyle, color: "var(--cyan)", width: 160 }}
-						/>
 						<button
 							onClick={handleApply}
-							disabled={!bulkCat.trim()}
+							disabled={!hasPatch}
 							className="mono"
 							style={{
 								...pillStyle,
 								background: "var(--purple)",
 								color: "#fff",
-								opacity: !bulkCat.trim() ? 0.4 : 1,
+								opacity: !hasPatch ? 0.4 : 1,
 							}}
 						>
-							aplicar em {selected.size} →
+							aplicar campos em {selected.size} →
 						</button>
 					</>
 				)}

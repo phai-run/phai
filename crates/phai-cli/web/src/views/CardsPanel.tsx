@@ -10,14 +10,16 @@ import { formatMoneyNumber, numeric } from "../lib/format";
  * and track the bill. Cash-flow basis: the cycle total is what will leave the
  * cash in the month the bill is paid (ADR-0025). Data: GET /api/cards.
  */
-export const CardsPanel = () => {
+export const CardsPanel = ({ month }: { month: string | null }) => {
 	const [rows, setRows] = useState<CardRow[] | null>(null);
 	const [error, setError] = useState<string | null>(null);
 
 	useEffect(() => {
 		let alive = true;
+		setRows(null);
+		setError(null);
 		api
-			.cards()
+			.cards(month ?? undefined)
 			.then((r) => {
 				if (alive) setRows(r.rows);
 			})
@@ -27,7 +29,7 @@ export const CardsPanel = () => {
 		return () => {
 			alive = false;
 		};
-	}, []);
+	}, [month]);
 
 	if (error) return null; // non-critical panel; stay silent on failure
 	if (!rows) return null;
@@ -57,6 +59,7 @@ export const CardsPanel = () => {
 
 const CardTile = ({ card }: { card: CardRow }) => {
 	const open = card.state === "aberta";
+	const closed = card.state === "fechada";
 	const total = numeric(card.total);
 	const limit = card.creditLimit != null ? numeric(card.creditLimit) : null;
 	const used = card.usedAmount != null ? numeric(card.usedAmount) : null;
@@ -64,7 +67,11 @@ const CardTile = ({ card }: { card: CardRow }) => {
 		limit && limit > 0 && used != null
 			? Math.min(100, Math.round((used / limit) * 100))
 			: null;
-	const accent = open ? "var(--amber, #d97706)" : "var(--green, #16a34a)";
+	const accent = open
+		? "var(--amber, #d97706)"
+		: closed
+			? "var(--purple)"
+			: "var(--green, #16a34a)";
 
 	return (
 		<Card accent={accent}>
@@ -83,18 +90,20 @@ const CardTile = ({ card }: { card: CardRow }) => {
 					title={
 						open
 							? "Fatura em aberto — ainda vai sair do caixa"
-							: "Sem fatura em aberto"
+							: closed
+								? "Fatura fechada para o mês selecionado"
+								: "Sem fatura no mês selecionado"
 					}
 				>
-					{open ? "ABERTA" : "EM DIA"}
+					{open ? "ABERTA" : closed ? "FECHADA" : "EM DIA"}
 				</span>
 			</div>
 			<div style={{ fontSize: 22, fontWeight: 700, marginTop: 6 }}>
 				{formatMoneyNumber(total)}
 			</div>
 			<div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-				{open && card.cycleMonth ? `Ciclo ${card.cycleMonth}` : "—"}
-				{open && card.dueDate ? ` · vence ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}` : ""}
+				{card.cycleMonth ? `Ciclo ${card.cycleMonth}` : "—"}
+				{card.dueDate ? ` · vence ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}` : ""}
 			</div>
 			{usedPct != null && limit != null && (
 				<div style={{ marginTop: 10 }}>
