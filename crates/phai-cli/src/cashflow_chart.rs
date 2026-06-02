@@ -184,6 +184,23 @@ pub(crate) async fn build_chart_data(
         None => fallback_initial_balance,
     };
 
+    // Fetch every in-window upcoming forecast ONCE rather than per month. The
+    // per-month union of [max(today+1, month_start), month_end] is exactly
+    // [today+1, window_end] (past months elapsed, so contribute nothing), so a
+    // single query feeds them all — this was the chart's dominant latency
+    // (~one BigQuery round-trip per month). Bucketed in-memory in the loop.
+    let upcoming: Vec<ForecastRecord> = if with_forecast {
+        let lower = today.succ_opt().unwrap_or(today);
+        let window_end = last_day_of_month(*window.last().expect("non-empty window"))?;
+        if lower <= window_end {
+            store.upcoming_forecasts(lower, window_end).await?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     let realized_count = months_back; // by construction
     let mut data: Vec<MonthDatum> = Vec::with_capacity(total);
     // Two running balances: `running` advances only on realized net (the
@@ -227,10 +244,12 @@ pub(crate) async fn build_chart_data(
                 // envelope ("Moradia", "Alimentação") can be netted against
                 // spend already realized in that category; income is netted at
                 // the month total (salary dominates, no per-category budget).
-                let forecasts = store.upcoming_forecasts(lower, last_day).await?;
                 let mut fi_total = Decimal::ZERO;
                 let mut fo_by_cat: HashMap<String, Decimal> = HashMap::new();
-                for f in &forecasts {
+                for f in upcoming
+                    .iter()
+                    .filter(|f| f.due_date.is_some_and(|d| d >= lower && d <= last_day))
+                {
                     if !forecast_counts_in_chart_projection(f) {
                         continue;
                     }
