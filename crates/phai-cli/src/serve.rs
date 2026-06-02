@@ -502,7 +502,8 @@ async fn load_transactions_window(
                 .as_deref()
                 .is_some_and(|category| internal_categories.contains(category))
     });
-    dedupe_pluggy_shadowed_ofx_rows(&mut rows);
+    // ofx-shadowed-by-pluggy rows are already dropped by v_transactions_reportable
+    // (migration 038 / ADR-0026); no Rust-side dedup needed here.
     if !params.include_reviewed {
         rows.retain(is_pending_review);
     }
@@ -517,27 +518,6 @@ async fn load_transactions_window(
         offset,
         has_more,
     })
-}
-
-fn dedupe_pluggy_shadowed_ofx_rows(rows: &mut Vec<TransactionRecord>) {
-    let pluggy_keys: BTreeSet<_> = rows
-        .iter()
-        .filter(|row| row.source.eq_ignore_ascii_case("pluggy"))
-        .map(reportable_dedupe_key)
-        .collect();
-    rows.retain(|row| {
-        !(row.source.eq_ignore_ascii_case("ofx")
-            && pluggy_keys.contains(&reportable_dedupe_key(row)))
-    });
-}
-
-fn reportable_dedupe_key(row: &TransactionRecord) -> (NaiveDate, Option<String>, Decimal, String) {
-    (
-        row.transaction_date,
-        row.account_id.clone(),
-        row.amount,
-        row.raw_description.trim().to_lowercase(),
-    )
 }
 
 /// A transaction is "reviewed" when it has a concrete category that is not the
@@ -1066,31 +1046,28 @@ async fn build_cards_api(store: &dyn FinanceStore) -> Result<Vec<CardApiRow>> {
         } else {
             a.label.clone()
         };
-        let row = match open_by.get(a.account_id.as_str()) {
-            Some(r) => CardApiRow {
-                account_id: a.account_id.clone(),
-                label,
-                state: "aberta",
-                cycle_month: Some(r.month_ref.clone()),
-                total: format!("{:.2}", r.total_charges),
-                open_amount: format!("{:.2}", r.open_amount),
-                due_date: due_day.and_then(|d| cycle_due_date(&r.month_ref, d)),
-                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
-                used_amount: used.map(|u| format!("{u:.2}")),
-            },
-            None => CardApiRow {
-                account_id: a.account_id.clone(),
-                label,
-                state: "em-dia",
-                cycle_month: None,
-                total: "0.00".to_string(),
-                open_amount: "0.00".to_string(),
-                due_date: None,
-                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
-                used_amount: used.map(|u| format!("{u:.2}")),
-            },
-        };
-        rows.push(row);
+        let (state, cycle_month, total, open_amount, due_date) =
+            match open_by.get(a.account_id.as_str()) {
+                Some(r) => (
+                    "aberta",
+                    Some(r.month_ref.clone()),
+                    format!("{:.2}", r.total_charges),
+                    format!("{:.2}", r.open_amount),
+                    due_day.and_then(|d| cycle_due_date(&r.month_ref, d)),
+                ),
+                None => ("em-dia", None, "0.00".to_string(), "0.00".to_string(), None),
+            };
+        rows.push(CardApiRow {
+            account_id: a.account_id.clone(),
+            label,
+            state,
+            cycle_month,
+            total,
+            open_amount,
+            due_date,
+            credit_limit: credit_limit.map(|c| format!("{c:.2}")),
+            used_amount: used.map(|u| format!("{u:.2}")),
+        });
     }
     rows.sort_by(|a, b| a.label.cmp(&b.label));
     Ok(rows)

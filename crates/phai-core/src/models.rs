@@ -364,6 +364,21 @@ pub struct CardSummaryRow {
     pub transaction_count: i64,
 }
 
+/// Split a comma-joined SQL aggregate (`GROUP_CONCAT` / `STRING_AGG`) into a
+/// trimmed, sorted vec, dropping empty entries. Shared by both backends'
+/// `audit_duplicate_transactions` so the dedup-group output format is defined
+/// once.
+pub fn split_csv_sorted(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out
+}
+
 /// A set of transactions that share the same dedup fingerprint
 /// (`transaction_date`, `account_id`, `amount_cents`, normalised
 /// `raw_description`) and therefore likely duplicate one real movement —
