@@ -48,14 +48,14 @@ SELECT
   t.category_display
 FROM v_transactions_effective t
 LEFT JOIN (
-  SELECT account_id, amount, transaction_date, 1 AS matched
+  SELECT account_id, amount_cents, transaction_date, 1 AS matched
   FROM v_transactions_effective
   WHERE source = 'pluggy'
 ) legacy_match
   ON t.source = 'legacy'
   AND t.transaction_id LIKE 'manual_%'
   AND legacy_match.account_id = t.account_id
-  AND legacy_match.amount = t.amount
+  AND legacy_match.amount_cents = t.amount_cents
   AND legacy_match.transaction_date
         BETWEEN date(t.transaction_date, '-7 day') AND date(t.transaction_date, '+7 day')
 LEFT JOIN (

@@ -47,14 +47,14 @@ SELECT
   t.category_display
 FROM `{{project_id}}.{{dataset_id}}.v_transactions_effective` t
 LEFT JOIN (
-  SELECT account_id, amount, transaction_date, 1 AS matched
+  SELECT account_id, amount_cents, transaction_date, 1 AS matched
   FROM `{{project_id}}.{{dataset_id}}.v_transactions_effective`
   WHERE source = 'pluggy'
 ) legacy_match
   ON t.source = 'legacy'
   AND STARTS_WITH(t.transaction_id, 'manual_')
   AND legacy_match.account_id = t.account_id
-  AND legacy_match.amount = t.amount
+  AND legacy_match.amount_cents = t.amount_cents
   AND legacy_match.transaction_date
         BETWEEN DATE_SUB(t.transaction_date, INTERVAL 7 DAY)
         AND DATE_ADD(t.transaction_date, INTERVAL 7 DAY)

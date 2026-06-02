@@ -110,8 +110,11 @@ pub async fn gather_pulse_data(
 
     let current_month = month_ref(today);
 
-    // Cashflow over 4 months: current + previous 3.
-    let cashflow = store.cashflow(4).await?;
+    // Household cash-flow basis — the same canonical source as the chart: all
+    // reportable accounts, bucketed by cash_month with card bills exploded into
+    // the month they are paid (ADR-0025/0026), so the daily pulse headline
+    // agrees with the web chart instead of the old checking-only cash basis.
+    let cashflow = store.cashflow_reportable().await?;
     let mtd = cashflow
         .iter()
         .find(|r| r.month_ref == current_month)
@@ -125,11 +128,14 @@ pub async fn gather_pulse_data(
             opening_balance: None,
             closing_balance: None,
         });
-    let closed: Vec<&CashflowRow> = cashflow
+    // cashflow_reportable returns every month oldest-first; take the 3 months
+    // immediately before the current one for the baseline average.
+    let mut prior: Vec<&CashflowRow> = cashflow
         .iter()
-        .filter(|r| r.month_ref != current_month)
-        .take(3)
+        .filter(|r| r.month_ref.as_str() < current_month.as_str())
         .collect();
+    prior.sort_by(|a, b| b.month_ref.cmp(&a.month_ref));
+    let closed: Vec<&CashflowRow> = prior.into_iter().take(3).collect();
     let three = Decimal::from(3);
     let baseline_t3m = if closed.is_empty() {
         CashflowRow {
