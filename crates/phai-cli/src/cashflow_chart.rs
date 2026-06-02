@@ -210,6 +210,37 @@ pub(crate) async fn build_chart_data(
     let mut running = fallback_initial_balance;
     let mut running_proj = initial_balance;
 
+    // Prefetch the realized checking balance for every past/current month-end
+    // CONCURRENTLY (each is an independent snapshot lookup), instead of awaiting
+    // one BigQuery round-trip per month inside the loop — the chart's remaining
+    // latency after the forecast batch. Future months have no realized balance.
+    let realized_targets: Vec<Option<NaiveDate>> = window
+        .iter()
+        .enumerate()
+        .map(|(i, ms)| {
+            if i >= realized_count {
+                Ok(None)
+            } else if *ms == current_month {
+                Ok(Some(today))
+            } else {
+                last_day_of_month(*ms).map(Some)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let realized_balances: Vec<Option<Decimal>> =
+        futures::future::join_all(realized_targets.iter().map(|t| async move {
+            match t {
+                Some(target) => store
+                    .checking_balance_at(*target)
+                    .await
+                    .map(|o| o.map(|b| b.balance)),
+                None => Ok(None),
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+
     for (i, month_start) in window.iter().enumerate() {
         let month_ref = month_ref_for(*month_start);
         parse_month_ref(&month_ref)?;
@@ -284,17 +315,7 @@ pub(crate) async fn build_chart_data(
         let net_remaining =
             fc_in_remaining.unwrap_or(Decimal::ZERO) - fc_out_remaining.unwrap_or(Decimal::ZERO);
         running += net_realized;
-        let realized_anchor_date = if is_future {
-            None
-        } else if *month_start == current_month {
-            Some(today)
-        } else {
-            Some(last_day_of_month(*month_start)?)
-        };
-        let realized_balance = match realized_anchor_date {
-            Some(target) => store.checking_balance_at(target).await?.map(|b| b.balance),
-            None => None,
-        };
+        let realized_balance = realized_balances[i];
 
         let closing_balance = if is_future {
             None
