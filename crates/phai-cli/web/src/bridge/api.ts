@@ -44,6 +44,23 @@ export interface CardRow {
 	dueDate: string | null;
 	creditLimit: string | null;
 	usedAmount: string | null;
+	installmentDebt: string;
+	installmentMonthAmount: string;
+	installmentEndingAmount: string;
+	installmentCount: number;
+	installments: CardInstallmentRow[];
+}
+
+export interface CardInstallmentRow {
+	transactionId: string;
+	transactionDate: string;
+	description: string;
+	amount: string;
+	marker: string;
+	current: number;
+	total: number;
+	remaining: number;
+	endingThisMonth: boolean;
 }
 
 export interface ReviewPatch {

@@ -1034,11 +1034,36 @@ struct CardApiRow {
     /// Card credit limit and used amount from Pluggy metadata, for a usage bar.
     credit_limit: Option<String>,
     used_amount: Option<String>,
+    installment_debt: String,
+    installment_month_amount: String,
+    installment_ending_amount: String,
+    installment_count: usize,
+    installments: Vec<CardInstallmentApiRow>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CardInstallmentApiRow {
+    transaction_id: String,
+    transaction_date: String,
+    description: String,
+    amount: String,
+    marker: String,
+    current: u32,
+    total: u32,
+    remaining: u32,
+    ending_this_month: bool,
 }
 
 #[derive(Serialize)]
 struct CardsResponse {
     rows: Vec<CardApiRow>,
+}
+
+struct CardCreditMeta {
+    due_day: Option<u32>,
+    credit_limit: Option<f64>,
+    used_amount: Option<f64>,
 }
 
 /// Due date (YYYY-MM-DD) for a cycle `"YYYY-MM"` given the billing due day,
@@ -1079,72 +1104,239 @@ async fn build_cards_api(
         .iter()
         .map(|r| (r.account_id.as_str(), r))
         .collect();
+    let mut installments_by_account = match month_ref {
+        Some(month) => card_installments_by_account_for_cash_month(store, month, &accounts).await?,
+        None => std::collections::HashMap::new(),
+    };
 
     let mut rows = Vec::new();
     for a in accounts
         .iter()
         .filter(|a| a.account_type == "credit" && a.status.eq_ignore_ascii_case("active"))
     {
-        let due_day = account_billing_day(&a.metadata_json, "billing_due_day");
-        let credit_limit = a
-            .metadata_json
-            .pointer("/raw/creditData/creditLimit")
-            .and_then(serde_json::Value::as_f64);
-        let available = a
-            .metadata_json
-            .pointer("/raw/creditData/availableCreditLimit")
-            .and_then(serde_json::Value::as_f64);
-        let used = match (credit_limit, available) {
-            (Some(c), Some(av)) => Some(c - av),
-            _ => None,
-        };
-        let label = if a.label.is_empty() {
-            a.account_id.clone()
-        } else {
-            a.label.clone()
-        };
-        let row = match summary_by_account.get(a.account_id.as_str()) {
-            Some(r) => {
-                let due_date = due_day.and_then(|d| cycle_due_date(&r.month_ref, d));
-                let state = if due_date
-                    .as_deref()
-                    .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-                    .is_some_and(|d| d < today)
-                {
-                    "fechada"
-                } else if r.open_amount > Decimal::ZERO {
-                    "aberta"
-                } else {
-                    "fechada"
-                };
-                CardApiRow {
-                    account_id: a.account_id.clone(),
-                    label,
-                    state,
-                    cycle_month: Some(r.month_ref.clone()),
-                    total: format!("{:.2}", r.total_charges),
-                    open_amount: format!("{:.2}", r.open_amount),
-                    due_date,
-                    credit_limit: credit_limit.map(|c| format!("{c:.2}")),
-                    used_amount: used.map(|u| format!("{u:.2}")),
-                }
-            }
-            None => CardApiRow {
-                account_id: a.account_id.clone(),
-                label,
-                state: "em-dia",
-                cycle_month: None,
-                total: "0.00".to_string(),
-                open_amount: "0.00".to_string(),
-                due_date: None,
-                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
-                used_amount: used.map(|u| format!("{u:.2}")),
-            },
-        };
-        rows.push(row);
+        let installments = installments_by_account
+            .remove(&a.account_id)
+            .unwrap_or_default();
+        rows.push(card_api_row_for_account(
+            a,
+            summary_by_account.get(a.account_id.as_str()).copied(),
+            card_credit_meta(a),
+            installments,
+            today,
+        ));
     }
     rows.sort_by(|a, b| a.label.cmp(&b.label));
     Ok(rows)
+}
+
+fn card_credit_meta(account: &AccountRecord) -> CardCreditMeta {
+    let credit_limit = account
+        .metadata_json
+        .pointer("/raw/creditData/creditLimit")
+        .and_then(serde_json::Value::as_f64);
+    let available = account
+        .metadata_json
+        .pointer("/raw/creditData/availableCreditLimit")
+        .and_then(serde_json::Value::as_f64);
+    CardCreditMeta {
+        due_day: account_billing_day(&account.metadata_json, "billing_due_day"),
+        credit_limit,
+        used_amount: match (credit_limit, available) {
+            (Some(c), Some(av)) => Some(c - av),
+            _ => None,
+        },
+    }
+}
+
+fn card_label(account: &AccountRecord) -> String {
+    if account.label.is_empty() {
+        account.account_id.clone()
+    } else {
+        account.label.clone()
+    }
+}
+
+fn selected_card_state(
+    due_date: Option<&str>,
+    open_amount: Decimal,
+    today: NaiveDate,
+) -> &'static str {
+    if due_date
+        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .is_some_and(|d| d < today)
+    {
+        "fechada"
+    } else if open_amount > Decimal::ZERO {
+        "aberta"
+    } else {
+        "fechada"
+    }
+}
+
+fn card_api_row_for_account(
+    account: &AccountRecord,
+    summary: Option<&CardSummaryRow>,
+    meta: CardCreditMeta,
+    installments: Vec<CardInstallmentApiRow>,
+    today: NaiveDate,
+) -> CardApiRow {
+    let (installment_debt, installment_month_amount, installment_ending_amount) =
+        card_installment_totals(&installments);
+    match summary {
+        Some(row) => {
+            let due_date = meta.due_day.and_then(|d| cycle_due_date(&row.month_ref, d));
+            CardApiRow {
+                account_id: account.account_id.clone(),
+                label: card_label(account),
+                state: selected_card_state(due_date.as_deref(), row.open_amount, today),
+                cycle_month: Some(row.month_ref.clone()),
+                total: format!("{:.2}", row.total_charges),
+                open_amount: format!("{:.2}", row.open_amount),
+                due_date,
+                credit_limit: meta.credit_limit.map(|c| format!("{c:.2}")),
+                used_amount: meta.used_amount.map(|u| format!("{u:.2}")),
+                installment_debt: format!("{:.2}", installment_debt),
+                installment_month_amount: format!("{:.2}", installment_month_amount),
+                installment_ending_amount: format!("{:.2}", installment_ending_amount),
+                installment_count: installments.len(),
+                installments,
+            }
+        }
+        None => CardApiRow {
+            account_id: account.account_id.clone(),
+            label: card_label(account),
+            state: "em-dia",
+            cycle_month: None,
+            total: "0.00".to_string(),
+            open_amount: "0.00".to_string(),
+            due_date: None,
+            credit_limit: meta.credit_limit.map(|c| format!("{c:.2}")),
+            used_amount: meta.used_amount.map(|u| format!("{u:.2}")),
+            installment_debt: format!("{:.2}", installment_debt),
+            installment_month_amount: format!("{:.2}", installment_month_amount),
+            installment_ending_amount: format!("{:.2}", installment_ending_amount),
+            installment_count: installments.len(),
+            installments,
+        },
+    }
+}
+
+async fn card_installments_by_account_for_cash_month(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    accounts: &[AccountRecord],
+) -> Result<std::collections::HashMap<String, Vec<CardInstallmentApiRow>>> {
+    let month_start = parse_month_ref(month_ref)?;
+    let cash_until = last_of_month(month_start);
+    let posted_from = first_of_month(shift_months(month_start, -2));
+    let mut rows = store
+        .effective_transactions_window(None, posted_from, cash_until)
+        .await
+        .context("card effective_transactions_window")?;
+    let internal_categories = store
+        .internal_categories()
+        .await
+        .context("card internal_categories")?;
+    rows.retain(|row| {
+        let raw_category = row.category_id.as_deref();
+        let canonical_category = canonical_web_category(raw_category);
+        !raw_category.is_some_and(|category| internal_categories.contains(category))
+            && !canonical_category
+                .as_deref()
+                .is_some_and(|category| internal_categories.contains(category))
+    });
+    dedupe_pluggy_shadowed_ofx_rows(&mut rows);
+
+    let lookup = cash_month_lookup(accounts);
+    let mut by_account: std::collections::HashMap<String, Vec<CardInstallmentApiRow>> =
+        std::collections::HashMap::new();
+    for row in &rows {
+        let Some(account_id) = row.account_id.as_deref() else {
+            continue;
+        };
+        let Some((is_credit, closing, due)) = lookup.get(account_id) else {
+            continue;
+        };
+        if !*is_credit {
+            continue;
+        }
+        let cash_month =
+            phai_core::cashflow::cash_month_for(row.transaction_date, *is_credit, *closing, *due);
+        if cash_month != month_ref {
+            continue;
+        }
+        let Some(installment) = card_installment_api_row(row) else {
+            continue;
+        };
+        by_account
+            .entry(account_id.to_string())
+            .or_default()
+            .push(installment);
+    }
+    for rows in by_account.values_mut() {
+        rows.sort_by(|a, b| {
+            a.description
+                .cmp(&b.description)
+                .then_with(|| a.marker.cmp(&b.marker))
+                .then_with(|| a.transaction_id.cmp(&b.transaction_id))
+        });
+    }
+    Ok(by_account)
+}
+
+fn card_installment_api_row(row: &TransactionRecord) -> Option<CardInstallmentApiRow> {
+    let marker = parse_installment_description(&row.raw_description)
+        .or_else(|| {
+            row.description
+                .as_deref()
+                .and_then(parse_installment_description)
+        })
+        .or_else(|| {
+            row.merchant_name
+                .as_deref()
+                .and_then(parse_installment_description)
+        })
+        .or_else(|| {
+            row.metadata_json
+                .get("raw")
+                .and_then(|r| r.get("descriptionRaw"))
+                .and_then(|v| v.as_str())
+                .and_then(parse_installment_description)
+        })?;
+    let remaining = marker.total - marker.current + 1;
+    Some(CardInstallmentApiRow {
+        transaction_id: row.transaction_id.clone(),
+        transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
+        description: row
+            .description
+            .clone()
+            .or_else(|| row.merchant_name.clone())
+            .unwrap_or_else(|| row.raw_description.clone()),
+        amount: format!("{:.2}", row.amount.round_dp(2).abs()),
+        marker: format!("{}/{}", marker.current, marker.total),
+        current: marker.current,
+        total: marker.total,
+        remaining,
+        ending_this_month: marker.current == marker.total,
+    })
+}
+
+fn card_installment_totals(rows: &[CardInstallmentApiRow]) -> (Decimal, Decimal, Decimal) {
+    rows.iter().fold(
+        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
+        |(debt, month, ending), row| {
+            let amount = Decimal::from_str(&row.amount).unwrap_or(Decimal::ZERO);
+            (
+                debt + amount * Decimal::from(row.remaining),
+                month + amount,
+                if row.ending_this_month {
+                    ending + amount
+                } else {
+                    ending
+                },
+            )
+        },
+    )
 }
 
 #[derive(Serialize)]

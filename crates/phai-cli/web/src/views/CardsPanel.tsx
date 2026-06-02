@@ -58,9 +58,13 @@ export const CardsPanel = ({ month }: { month: string | null }) => {
 };
 
 const CardTile = ({ card }: { card: CardRow }) => {
+	const [expanded, setExpanded] = useState(false);
 	const open = card.state === "aberta";
 	const closed = card.state === "fechada";
 	const total = numeric(card.total);
+	const installmentDebt = numeric(card.installmentDebt);
+	const installmentMonthAmount = numeric(card.installmentMonthAmount);
+	const installmentEndingAmount = numeric(card.installmentEndingAmount);
 	const limit = card.creditLimit != null ? numeric(card.creditLimit) : null;
 	const used = card.usedAmount != null ? numeric(card.usedAmount) : null;
 	const usedPct =
@@ -105,6 +109,18 @@ const CardTile = ({ card }: { card: CardRow }) => {
 				{card.cycleMonth ? `Ciclo ${card.cycleMonth}` : "—"}
 				{card.dueDate ? ` · vence ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}` : ""}
 			</div>
+			<div
+				style={{
+					display: "grid",
+					gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+					gap: 8,
+					marginTop: 10,
+				}}
+			>
+				<CardMetric label="parcelado" value={installmentDebt} />
+				<CardMetric label="este mês" value={installmentMonthAmount} />
+				<CardMetric label="termina" value={installmentEndingAmount} />
+			</div>
 			{usedPct != null && limit != null && (
 				<div style={{ marginTop: 10 }}>
 					<div
@@ -128,6 +144,131 @@ const CardTile = ({ card }: { card: CardRow }) => {
 					</div>
 				</div>
 			)}
+			{card.installmentCount > 0 && (
+				<div style={{ marginTop: 10 }}>
+					<button
+						type="button"
+						className="mono"
+						onClick={() => setExpanded((v) => !v)}
+						style={{
+							width: "100%",
+							border: "1px solid var(--border)",
+							background: "transparent",
+							borderRadius: "var(--radius-sm)",
+							padding: "5px 8px",
+							cursor: "pointer",
+							color: "var(--muted)",
+							fontSize: 11,
+							textAlign: "left",
+						}}
+					>
+						{expanded ? "▾" : "▸"} {card.installmentCount} parcela
+						{card.installmentCount !== 1 ? "s" : ""}
+					</button>
+					{expanded && (
+						<div
+							style={{
+								marginTop: 6,
+								border: "1px solid var(--border)",
+								borderRadius: "var(--radius-sm)",
+								overflow: "hidden",
+							}}
+						>
+							{card.installments.map((row, idx) => (
+								<div
+									key={row.transactionId}
+									style={{
+										display: "grid",
+										gridTemplateColumns: "1fr auto",
+										gap: 8,
+										padding: "7px 8px",
+										borderTop:
+											idx > 0 ? "1px solid var(--border)" : "none",
+										background: row.endingThisMonth
+											? "rgba(245,158,11,0.10)"
+											: "transparent",
+									}}
+								>
+									<div style={{ minWidth: 0 }}>
+										<div
+											style={{
+												fontSize: 11,
+												whiteSpace: "nowrap",
+												overflow: "hidden",
+												textOverflow: "ellipsis",
+											}}
+										>
+											{row.description}
+										</div>
+										<div
+											className="mono"
+											style={{
+												fontSize: 10,
+												color: row.endingThisMonth
+													? "var(--amber)"
+													: "var(--muted)",
+												marginTop: 1,
+											}}
+										>
+											{row.marker}
+											{row.endingThisMonth ? " · termina este mês" : ""}
+										</div>
+									</div>
+									<span
+										className="mono"
+										style={{
+											fontSize: 11,
+											fontWeight: 600,
+											color: row.endingThisMonth
+												? "var(--amber)"
+												: "var(--rose)",
+											whiteSpace: "nowrap",
+										}}
+									>
+										{formatMoneyNumber(numeric(row.amount))}
+									</span>
+								</div>
+							))}
+						</div>
+					)}
+				</div>
+			)}
 		</Card>
 	);
 };
+
+const CardMetric = ({ label, value }: { label: string; value: number }) => (
+	<div
+		style={{
+			border: "1px solid var(--border)",
+			borderRadius: "var(--radius-sm)",
+			padding: "6px 7px",
+			minWidth: 0,
+		}}
+	>
+		<div
+			className="mono"
+			style={{
+				fontSize: 9,
+				color: "var(--muted)",
+				whiteSpace: "nowrap",
+				overflow: "hidden",
+				textOverflow: "ellipsis",
+			}}
+		>
+			{label}
+		</div>
+		<div
+			className="mono"
+			style={{
+				fontSize: 11,
+				fontWeight: 600,
+				color: value > 0 ? "var(--rose)" : "var(--muted)",
+				marginTop: 2,
+				whiteSpace: "nowrap",
+			}}
+		>
+			{formatMoneyNumber(value)}
+		</div>
+	</div>
+);
