@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.3.0](https://github.com/phai-run/phai/compare/v5.2.1...v5.3.0) (2026-06-02)
+
+
+### Features
+
+* **cashflow:** cash-flow basis with bill explosion + single deduped view chain ([#122](https://github.com/phai-run/phai/issues/122)) ([e9f3710](https://github.com/phai-run/phai/commit/e9f37109888b62599d3a5dd9ff6414fd321f6b51))
+
 ## [5.2.1](https://github.com/phai-run/phai/compare/v5.2.0...v5.2.1) (2026-05-31)
 
 
