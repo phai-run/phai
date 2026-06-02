@@ -94,6 +94,9 @@ enum Commands {
         command: SyncCommand,
     },
     Report {
+        /// Emit report data as CSV instead of the WhatsApp-friendly summary.
+        #[arg(long, global = true)]
+        csv: bool,
         #[command(subcommand)]
         command: ReportCommand,
     },
@@ -402,6 +405,125 @@ enum ReportCommand {
                       `report cards` ou o pulse. WhatsApp-friendly by default; pass --raw for JSON."
     )]
     Balances(BalancesArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportOutputFormat {
+    Human,
+    Json,
+    Csv,
+}
+
+impl ReportOutputFormat {
+    fn structured_output(self) -> bool {
+        !matches!(self, Self::Human)
+    }
+}
+
+fn report_output_format(csv: bool, json_output: bool) -> Result<ReportOutputFormat> {
+    if csv && json_output {
+        bail!("Use apenas uma saída estruturada: --raw/--json ou --csv");
+    }
+
+    if csv {
+        Ok(ReportOutputFormat::Csv)
+    } else if json_output {
+        Ok(ReportOutputFormat::Json)
+    } else {
+        Ok(ReportOutputFormat::Human)
+    }
+}
+
+fn print_report_output<T: Serialize>(format: ReportOutputFormat, value: &T) -> Result<()> {
+    match format {
+        ReportOutputFormat::Human => Ok(()),
+        ReportOutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(value)?);
+            Ok(())
+        }
+        ReportOutputFormat::Csv => {
+            let value = serde_json::to_value(value)?;
+            let stdout = io::stdout();
+            write_csv_from_value(&value, stdout.lock())
+        }
+    }
+}
+
+fn write_csv_from_value<W: io::Write>(value: &Value, mut writer: W) -> Result<()> {
+    let rows = match value {
+        Value::Array(rows) => rows.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut headers = BTreeSet::new();
+    for row in rows {
+        collect_csv_headers(row, &mut headers);
+    }
+    let headers = headers.into_iter().collect::<Vec<_>>();
+    write_csv_record(&headers, &mut writer)?;
+
+    for row in rows {
+        let cells = headers
+            .iter()
+            .map(|header| csv_cell_for_header(row, header))
+            .collect::<Result<Vec<_>>>()?;
+        write_csv_record(&cells, &mut writer)?;
+    }
+
+    Ok(())
+}
+
+fn collect_csv_headers(value: &Value, headers: &mut BTreeSet<String>) {
+    if let Value::Object(map) = value {
+        headers.extend(map.keys().cloned());
+    } else {
+        headers.insert("value".to_string());
+    }
+}
+
+fn csv_cell_for_header(row: &Value, header: &str) -> Result<String> {
+    match row {
+        Value::Object(map) => csv_cell_value(map.get(header).unwrap_or(&Value::Null)),
+        value if header == "value" => csv_cell_value(value),
+        _ => Ok(String::new()),
+    }
+}
+
+fn csv_cell_value(value: &Value) -> Result<String> {
+    match value {
+        Value::Null => Ok(String::new()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::String(value) => Ok(value.clone()),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string(value).context("Falha ao serializar célula CSV")
+        }
+    }
+}
+
+fn write_csv_record<W: io::Write>(cells: &[String], writer: &mut W) -> Result<()> {
+    for (idx, cell) in cells.iter().enumerate() {
+        if idx > 0 {
+            writer.write_all(b",")?;
+        }
+        write_csv_cell(cell, writer)?;
+    }
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn write_csv_cell<W: io::Write>(cell: &str, writer: &mut W) -> Result<()> {
+    if cell.contains([',', '"', '\n', '\r']) {
+        writer.write_all(b"\"")?;
+        writer.write_all(cell.replace('"', "\"\"").as_bytes())?;
+        writer.write_all(b"\"")?;
+    } else {
+        writer.write_all(cell.as_bytes())?;
+    }
+    Ok(())
 }
 
 #[derive(Args)]
@@ -2960,25 +3082,81 @@ async fn main() -> Result<()> {
         Some(Commands::Sync { command }) => match command {
             SyncCommand::Pluggy(args) => sync_pluggy_command(args).await,
         },
-        Some(Commands::Report { command }) => match command {
-            ReportCommand::DailyPulse(args) => report_daily_pulse(args).await,
-            ReportCommand::MonthlySpend(args) => report_monthly_spend(args).await,
-            ReportCommand::Cashflow(args) => report_cashflow(args).await,
-            ReportCommand::CashflowChart(args) => report_cashflow_chart(args).await,
-            ReportCommand::ForecastVsActual(args) => report_forecast_vs_actual(args).await,
-            ReportCommand::CardSummary(args) => report_card_summary(args).await,
-            ReportCommand::CardClosedInsights(args) => report_card_closed_insights(args).await,
-            ReportCommand::Installments(args) => report_installments(args).await,
-            ReportCommand::Uncategorized(args) => report_uncategorized(args).await,
-            ReportCommand::Duplicates(args) => report_duplicates(args).await,
-            ReportCommand::SplitCandidates(args) => report_split_candidates(args).await,
-            ReportCommand::ItemPrices(args) => report_item_prices(args).await,
-            ReportCommand::DataHealth(args) => report_data_health(args).await,
-            ReportCommand::Scenario(args) => report_scenario(args).await,
-            ReportCommand::OfxConsistency(args) => report_ofx_consistency(args).await,
-            ReportCommand::BudgetStatus(args) => report_budget_status(args).await,
-            ReportCommand::Cards(args) => report_cards(args).await,
-            ReportCommand::Balances(args) => report_balances(args).await,
+        Some(Commands::Report { csv, command }) => match command {
+            ReportCommand::DailyPulse(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_daily_pulse(args, format).await
+            }
+            ReportCommand::MonthlySpend(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_monthly_spend(args, format).await
+            }
+            ReportCommand::Cashflow(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_cashflow(args, format).await
+            }
+            ReportCommand::CashflowChart(args) => {
+                if csv {
+                    bail!("report cashflow-chart não suporta --csv; use --text ou o SVG de saída");
+                }
+                report_cashflow_chart(args).await
+            }
+            ReportCommand::ForecastVsActual(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_forecast_vs_actual(args, format).await
+            }
+            ReportCommand::CardSummary(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_card_summary(args, format).await
+            }
+            ReportCommand::CardClosedInsights(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_card_closed_insights(args, format).await
+            }
+            ReportCommand::Installments(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_installments(args, format).await
+            }
+            ReportCommand::Uncategorized(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_uncategorized(args, format).await
+            }
+            ReportCommand::Duplicates(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_duplicates(args, format).await
+            }
+            ReportCommand::SplitCandidates(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_split_candidates(args, format).await
+            }
+            ReportCommand::ItemPrices(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_item_prices(args, format).await
+            }
+            ReportCommand::DataHealth(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_data_health(args, format).await
+            }
+            ReportCommand::Scenario(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_scenario(args, format).await
+            }
+            ReportCommand::OfxConsistency(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_ofx_consistency(args, format).await
+            }
+            ReportCommand::BudgetStatus(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_budget_status(args, format).await
+            }
+            ReportCommand::Cards(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_cards(args, format).await
+            }
+            ReportCommand::Balances(args) => {
+                let format = report_output_format(csv, args.structured_output())?;
+                report_balances(args, format).await
+            }
         },
         Some(Commands::Tx { command }) => match command {
             TxCommand::UpsertManual(args) => tx_upsert_manual(args).await,
@@ -3634,19 +3812,19 @@ fn resolve_sync_from(
         .to_string())
 }
 
-async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
+async fn report_daily_pulse(args: DailyPulseArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
 
-    if args.structured_output() {
+    if format.structured_output() {
         // Backwards-compat: --raw still emits the flat list of items.
         let since = Utc::now()
             .date_naive()
             .checked_sub_signed(Duration::days(args.days.saturating_sub(1)))
             .context("Falha ao calcular janela do daily pulse")?;
         let items = store.daily_pulse(since).await?;
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        print_report_output(format, &items)?;
         return Ok(());
     }
 
@@ -3657,7 +3835,7 @@ async fn report_daily_pulse(args: DailyPulseArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_balances(args: BalancesArgs) -> Result<()> {
+async fn report_balances(_args: BalancesArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
@@ -3684,7 +3862,7 @@ async fn report_balances(args: BalancesArgs) -> Result<()> {
         })
         .collect();
 
-    if args.structured_output() {
+    if format.structured_output() {
         let payload: Vec<_> = rows
             .iter()
             .map(|(a, s)| {
@@ -3698,7 +3876,7 @@ async fn report_balances(args: BalancesArgs) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        print_report_output(format, &payload)?;
         return Ok(());
     }
 
@@ -3764,14 +3942,14 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-async fn report_monthly_spend(args: MonthlySpendArgs) -> Result<()> {
+async fn report_monthly_spend(args: MonthlySpendArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.monthly_spend(args.month.as_deref()).await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+    if format.structured_output() {
+        print_report_output(format, &rows)?;
         return Ok(());
     }
 
@@ -4756,7 +4934,7 @@ fn merge_card_bill_expense_groups(
     }
 }
 
-async fn report_cashflow(args: CashflowArgs) -> Result<()> {
+async fn report_cashflow(args: CashflowArgs, format: ReportOutputFormat) -> Result<()> {
     let store = migrated_finance_store().await?;
 
     // Default to the current month so a bare `finance report cashflow`
@@ -4764,7 +4942,7 @@ async fn report_cashflow(args: CashflowArgs) -> Result<()> {
     let today = chrono::Local::now().date_naive();
     let month_ref = cashflow_month_arg(&args, today)?;
     let effective_details = cashflow_effective_details(&args);
-    let progress = cashflow_should_show_progress(&args, effective_details);
+    let progress = cashflow_should_show_progress(format, &args, effective_details);
 
     let (row, accounts_considered, snapshot_anchor) =
         cashflow_basic_summary(store.as_ref(), &month_ref, today, progress).await?;
@@ -4773,6 +4951,7 @@ async fn report_cashflow(args: CashflowArgs) -> Result<()> {
         return report_cashflow_detailed(
             store.as_ref(),
             &args,
+            format,
             &month_ref,
             effective_details,
             progress,
@@ -4781,7 +4960,7 @@ async fn report_cashflow(args: CashflowArgs) -> Result<()> {
         .await;
     }
 
-    render_basic_cashflow(&args, &row, accounts_considered, snapshot_anchor)?;
+    render_basic_cashflow(format, &row, accounts_considered, snapshot_anchor)?;
     Ok(())
 }
 
@@ -4793,8 +4972,12 @@ fn cashflow_uses_month_report(args: &CashflowArgs, effective_details: bool) -> b
     effective_details || args.forecast
 }
 
-fn cashflow_should_show_progress(args: &CashflowArgs, effective_details: bool) -> bool {
-    !args.structured_output() && cashflow_uses_month_report(args, effective_details)
+fn cashflow_should_show_progress(
+    format: ReportOutputFormat,
+    args: &CashflowArgs,
+    effective_details: bool,
+) -> bool {
+    !format.structured_output() && cashflow_uses_month_report(args, effective_details)
 }
 
 async fn migrated_finance_store() -> Result<Box<dyn FinanceStore>> {
@@ -4811,13 +4994,13 @@ fn cashflow_month_arg(args: &CashflowArgs, today: NaiveDate) -> Result<String> {
 }
 
 fn render_basic_cashflow(
-    args: &CashflowArgs,
+    format: ReportOutputFormat,
     row: &CashflowRow,
     accounts_considered: usize,
     snapshot_anchor: Option<NaiveDate>,
 ) -> Result<()> {
-    if args.structured_output() {
-        print_cashflow_summary_json(row, accounts_considered, snapshot_anchor)
+    if format.structured_output() {
+        print_cashflow_summary_output(format, row, accounts_considered, snapshot_anchor)
     } else {
         print_cashflow_human(row, accounts_considered, snapshot_anchor);
         Ok(())
@@ -4846,6 +5029,7 @@ async fn cashflow_basic_summary(
 async fn report_cashflow_detailed(
     store: &dyn FinanceStore,
     args: &CashflowArgs,
+    format: ReportOutputFormat,
     month_ref: &str,
     effective_details: bool,
     progress: bool,
@@ -4856,8 +5040,8 @@ async fn report_cashflow_detailed(
         build_cashflow_month_report(store, month_ref, effective_details, args.forecast, row)
             .await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+    if format.structured_output() {
+        print_report_output(format, &report)?;
         return Ok(());
     }
 
@@ -4866,7 +5050,8 @@ async fn report_cashflow_detailed(
     Ok(())
 }
 
-fn print_cashflow_summary_json(
+fn print_cashflow_summary_output(
+    format: ReportOutputFormat,
     row: &CashflowRow,
     accounts_considered: usize,
     snapshot_anchor: Option<NaiveDate>,
@@ -4883,8 +5068,7 @@ fn print_cashflow_summary_json(
         "snapshot_anchor_date": snapshot_anchor,
         "snapshot_complete": row.opening_balance.is_some() && row.closing_balance.is_some(),
     });
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    Ok(())
+    print_report_output(format, &payload)
 }
 
 #[derive(Default)]
@@ -5415,14 +5599,17 @@ fn cashflow_accounts_label(accounts_considered: usize) -> String {
     }
 }
 
-async fn report_forecast_vs_actual(args: ForecastVsActualArgs) -> Result<()> {
+async fn report_forecast_vs_actual(
+    args: ForecastVsActualArgs,
+    format: ReportOutputFormat,
+) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.forecast_vs_actual(args.month.as_deref()).await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+    if format.structured_output() {
+        print_report_output(format, &rows)?;
         return Ok(());
     }
 
@@ -5564,14 +5751,14 @@ fn print_forecast_totals(rows: &[phai_core::models::ForecastVsActualRow]) {
     );
 }
 
-async fn report_card_summary(args: CardSummaryArgs) -> Result<()> {
+async fn report_card_summary(args: CardSummaryArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.card_summary(args.month.as_deref()).await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+    if format.structured_output() {
+        print_report_output(format, &rows)?;
         return Ok(());
     }
 
@@ -5642,7 +5829,10 @@ async fn report_card_summary(args: CardSummaryArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()> {
+async fn report_card_closed_insights(
+    args: CardClosedInsightsArgs,
+    format: ReportOutputFormat,
+) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
@@ -5859,8 +6049,8 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
         open_installments: open_installment_rows,
     };
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+    if format.structured_output() {
+        print_report_output(format, &output)?;
         return Ok(());
     }
 
@@ -6005,7 +6195,7 @@ async fn report_card_closed_insights(args: CardClosedInsightsArgs) -> Result<()>
     Ok(())
 }
 
-async fn report_installments(args: InstallmentsArgs) -> Result<()> {
+async fn report_installments(args: InstallmentsArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
@@ -6036,23 +6226,19 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
         .filter(|chain| chain.remaining > 0)
         .collect();
 
-    if args.structured_output() {
+    if format.structured_output() {
         if args.verbose {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &all_chains
-                        .iter()
-                        .filter(|c| c.remaining > 0)
-                        .collect::<Vec<_>>()
-                )?
-            );
+            let active = all_chains
+                .iter()
+                .filter(|c| c.remaining > 0)
+                .collect::<Vec<_>>();
+            print_report_output(format, &active)?;
         } else {
             let views: Vec<InstallmentChainView> = active_chains
                 .iter()
                 .map(|chain| InstallmentChainView::from_chain(chain))
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&views)?);
+            print_report_output(format, &views)?;
         }
         return Ok(());
     }
@@ -6125,7 +6311,10 @@ async fn report_installments(args: InstallmentsArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
+async fn report_ofx_consistency(
+    args: OfxConsistencyArgs,
+    format: ReportOutputFormat,
+) -> Result<()> {
     if args.date_tolerance_days < 0 {
         bail!("date_tolerance_days deve ser >= 0");
     }
@@ -6295,8 +6484,8 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
         extra_transactions,
     };
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+    if format.structured_output() {
+        print_report_output(format, &output)?;
         return Ok(());
     }
 
@@ -6373,14 +6562,14 @@ async fn report_ofx_consistency(args: OfxConsistencyArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
+async fn report_uncategorized(args: UncategorizedArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let rows = store.uncategorized(args.limit).await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+    if format.structured_output() {
+        print_report_output(format, &rows)?;
         return Ok(());
     }
 
@@ -6442,14 +6631,14 @@ async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_duplicates(args: DuplicatesArgs) -> Result<()> {
+async fn report_duplicates(_args: DuplicatesArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let groups = store.audit_duplicate_transactions().await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&groups)?);
+    if format.structured_output() {
+        print_report_output(format, &groups)?;
         return Ok(());
     }
 
@@ -6488,7 +6677,10 @@ async fn report_duplicates(args: DuplicatesArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_split_candidates(args: SplitCandidatesArgs) -> Result<()> {
+async fn report_split_candidates(
+    args: SplitCandidatesArgs,
+    format: ReportOutputFormat,
+) -> Result<()> {
     let (_, config) = load_config().await?;
     ensure_bigquery_split_backend(&config)?;
     let store = open_store(&config).await?;
@@ -6499,8 +6691,8 @@ async fn report_split_candidates(args: SplitCandidatesArgs) -> Result<()> {
         .context("Falha ao calcular janela de split candidates")?;
     let rows = store.split_candidates(since).await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+    if format.structured_output() {
+        print_report_output(format, &rows)?;
         return Ok(());
     }
 
@@ -6521,7 +6713,7 @@ async fn report_split_candidates(args: SplitCandidatesArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_item_prices(args: ItemPricesArgs) -> Result<()> {
+async fn report_item_prices(args: ItemPricesArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     ensure_bigquery_split_backend(&config)?;
     let store = open_store(&config).await?;
@@ -6534,8 +6726,8 @@ async fn report_item_prices(args: ItemPricesArgs) -> Result<()> {
         .context("since inválido; use YYYY-MM-DD")?;
     let rows = store.item_prices(&args.query, since).await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+    if format.structured_output() {
+        print_report_output(format, &rows)?;
         return Ok(());
     }
 
@@ -6563,7 +6755,7 @@ async fn report_item_prices(args: ItemPricesArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_data_health(args: DataHealthArgs) -> Result<()> {
+async fn report_data_health(args: DataHealthArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
@@ -6687,8 +6879,8 @@ async fn report_data_health(args: DataHealthArgs) -> Result<()> {
         flat_categories,
     };
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+    if format.structured_output() {
+        print_report_output(format, &output)?;
         return Ok(());
     }
 
@@ -6806,7 +6998,7 @@ async fn report_data_health(args: DataHealthArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_scenario(args: ScenarioArgs) -> Result<()> {
+async fn report_scenario(args: ScenarioArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
@@ -6897,8 +7089,8 @@ async fn report_scenario(args: ScenarioArgs) -> Result<()> {
         looks_ok_after_card_carry: projected_cash_after_card_carry >= Decimal::ZERO,
     };
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+    if format.structured_output() {
+        print_report_output(format, &output)?;
         return Ok(());
     }
 
@@ -8437,15 +8629,15 @@ async fn budget_list(args: BudgetListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn report_budget_status(args: BudgetStatusArgs) -> Result<()> {
+async fn report_budget_status(args: BudgetStatusArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     parse_month_ref(&args.month)?;
     let rows: Vec<BudgetStatusRow> = store.budget_status_for_month(&args.month).await?;
 
-    if args.structured_output() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+    if format.structured_output() {
+        print_report_output(format, &rows)?;
         return Ok(());
     }
 
@@ -8814,7 +9006,7 @@ fn build_cards_account_reports(
     (accounts_report, grand_total)
 }
 
-async fn report_cards(args: CardsArgs) -> Result<()> {
+async fn report_cards(args: CardsArgs, format: ReportOutputFormat) -> Result<()> {
     let (_, config) = load_config().await?;
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
@@ -9111,7 +9303,7 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
         grand_total,
     };
 
-    if args.structured_output() {
+    if format.structured_output() {
         // Raw output: include both summary and the full transaction list so
         // agents have everything they need.
         let payload = serde_json::json!({
@@ -9132,7 +9324,7 @@ async fn report_cards(args: CardsArgs) -> Result<()> {
                 })
             }).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        print_report_output(format, &payload)?;
         return Ok(());
     }
 
@@ -9385,10 +9577,12 @@ impl NaiveDateSat for NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_human_review, effective_review_human_limit, parse_closing_day, resolve_sync_from,
-        HumanReviewPatch,
+        apply_human_review, effective_review_human_limit, parse_closing_day, report_output_format,
+        resolve_sync_from, write_csv_from_value, Cli, Commands, HumanReviewPatch, ReportCommand,
+        ReportOutputFormat,
     };
     use chrono::NaiveDate;
+    use clap::Parser;
     use phai_core::models::TransactionRecord;
     use phai_core::storage::FinanceStore;
     use rust_decimal::Decimal;
@@ -9451,6 +9645,44 @@ mod tests {
                 "billing_due_day": 18
             })),
             Some(10)
+        );
+    }
+
+    #[test]
+    fn report_csv_flag_selects_csv_output() {
+        let cli = Cli::try_parse_from(["phai", "report", "monthly-spend", "--csv"]).unwrap();
+        let Some(Commands::Report {
+            csv,
+            command: ReportCommand::MonthlySpend(args),
+        }) = cli.command
+        else {
+            panic!("expected report monthly-spend command");
+        };
+        let format = report_output_format(csv, args.structured_output()).unwrap();
+        assert_eq!(format, ReportOutputFormat::Csv);
+        assert!(format.structured_output());
+    }
+
+    #[test]
+    fn csv_writer_escapes_commas_quotes_and_nulls() {
+        let rows = json!([
+            {
+                "description": "A, B",
+                "amount": "-10.00",
+            },
+            {
+                "description": "Quote \"x\"",
+                "amount": "2.50",
+                "category": null,
+            }
+        ]);
+        let mut out = Vec::new();
+        write_csv_from_value(&rows, &mut out).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert_eq!(
+            rendered,
+            "amount,category,description\n-10.00,,\"A, B\"\n2.50,,\"Quote \"\"x\"\"\"\n"
         );
     }
 
