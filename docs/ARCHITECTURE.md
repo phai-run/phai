@@ -198,6 +198,8 @@ transactions                       raw rows (Pluggy / OFX / legacy / manual)
 - **Internal categories** (`credit-card-payment`, `transfer-internal`, `same-person-transfer`) are the single exclusion list, applied in the views — so paying a card bill, or moving money between two *tracked* own accounts, never double-counts. Money arriving from an *untracked* account (e.g. a salary relay) is real income and is **not** excluded.
 - `FinanceStore::cashflow_reportable` is a thin `SELECT … FROM v_cashflow`. New reporting reads the chain; new rules go into `v_transactions_reportable` or the exclusion list — never into a Rust query or the web layer.
 
+To validate the chain against the bank, see the [data-consistency runbook](runbook-data-consistency.md).
+
 ### Self-update (atomic, SHA-256-verified)
 
 See [ADR-0007](adr/0007-atomic-self-update.md). On macOS, the running binary atomically renames the new binary over its own path, then `execv`s with a `FINANCE_OS_UPDATED=<version>` sentinel to prevent loops. The sentinel disables the auto-check in the child process.
