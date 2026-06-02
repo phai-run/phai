@@ -32,6 +32,19 @@ export interface AccountRow {
 	owner: string;
 }
 
+export interface CardRow {
+	accountId: string;
+	label: string;
+	/** "aberta" = open bill with a balance; "em-dia" = no open bill. */
+	state: "aberta" | "em-dia";
+	cycleMonth: string | null;
+	total: string;
+	openAmount: string;
+	dueDate: string | null;
+	creditLimit: string | null;
+	usedAmount: string | null;
+}
+
 export interface ReviewPatch {
 	description: string | null;
 	merchantName: string | null;
@@ -162,6 +175,8 @@ export const api = {
 		fetch("/api/categories").then((r) => json<{ ids: string[] }>(r)),
 	accounts: (): Promise<{ rows: AccountRow[] }> =>
 		fetch("/api/accounts").then((r) => json<{ rows: AccountRow[] }>(r)),
+	cards: (): Promise<{ rows: CardRow[] }> =>
+		fetch("/api/cards").then((r) => json<{ rows: CardRow[] }>(r)),
 
 	chart: (monthsBack: number, monthsAhead: number): Promise<ChartData> =>
 		fetch(

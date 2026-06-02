@@ -17,11 +17,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use phai_core::idempotency::ensure_forecast_idempotency;
 use phai_core::migrations::run_migrations;
 use phai_core::models::{
-    AccountRecord, AuditEvent, ForecastRecord, ForecastTemplateRecord, TransactionRecord,
+    AccountRecord, AuditEvent, CardSummaryRow, ForecastRecord, ForecastTemplateRecord,
+    TransactionRecord,
 };
 use phai_core::storage::{open_store, FinanceStore};
 use phai_core::{AppConfig, BackendKind};
@@ -291,6 +292,11 @@ enum StoreRequest {
     GetAccounts {
         resp: oneshot::Sender<Result<Vec<AccountRecord>>>,
     },
+    /// Per-credit-card cycle state (open/paid), total and credit-limit usage,
+    /// for the dashboard card panel (`GET /api/cards`).
+    Cards {
+        resp: oneshot::Sender<Result<Vec<CardApiRow>>>,
+    },
     ReviewQueue {
         params: ReviewQueueParams,
         resp: oneshot::Sender<Result<Vec<TransactionRecord>>>,
@@ -366,6 +372,10 @@ async fn store_actor_loop(
             }
             StoreRequest::GetAccounts { resp } => {
                 let result = store.get_accounts().await;
+                let _ = resp.send(result);
+            }
+            StoreRequest::Cards { resp } => {
+                let result = build_cards_api(store.as_ref()).await;
                 let _ = resp.send(result);
             }
             StoreRequest::ReviewQueue { params, resp } => {
@@ -979,6 +989,113 @@ async fn fetch_accounts(tx: &mpsc::Sender<StoreRequest>) -> Vec<AccountRecord> {
     resp_rx.await.ok().and_then(Result::ok).unwrap_or_default()
 }
 
+/// Per-credit-card cycle state for the dashboard card panel. `state` is
+/// `"aberta"` when the card has an open bill with a balance, else `"em-dia"`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CardApiRow {
+    account_id: String,
+    label: String,
+    state: &'static str,
+    cycle_month: Option<String>,
+    /// Total charged on the open cycle (R$, 2dp string).
+    total: String,
+    /// Amount still open/owed on the cycle.
+    open_amount: String,
+    /// Bill due date (YYYY-MM-DD) when `billing_due_day` is known.
+    due_date: Option<String>,
+    /// Card credit limit and used amount from Pluggy metadata, for a usage bar.
+    credit_limit: Option<String>,
+    used_amount: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CardsResponse {
+    rows: Vec<CardApiRow>,
+}
+
+/// Due date (YYYY-MM-DD) for a cycle `"YYYY-MM"` given the billing due day,
+/// clamped to the month length.
+fn cycle_due_date(month_ref: &str, due_day: u32) -> Option<String> {
+    let mut parts = month_ref.split('-');
+    let y: i32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let next_first = if m == 12 {
+        NaiveDate::from_ymd_opt(y + 1, 1, 1)?
+    } else {
+        NaiveDate::from_ymd_opt(y, m + 1, 1)?
+    };
+    let last_day = next_first.pred_opt()?.day();
+    let day = due_day.min(last_day);
+    Some(
+        NaiveDate::from_ymd_opt(y, m, day)?
+            .format("%Y-%m-%d")
+            .to_string(),
+    )
+}
+
+/// Assemble the card panel: each active credit account with its open-bill cycle
+/// (from `cards_open_now`, ADR-0010) plus credit-limit usage from Pluggy
+/// metadata. Cards with no open balance are reported `state="em-dia"`.
+async fn build_cards_api(store: &dyn FinanceStore) -> Result<Vec<CardApiRow>> {
+    let accounts = store.get_accounts().await?;
+    let open = store.cards_open_now().await?;
+    let open_by: std::collections::HashMap<&str, &CardSummaryRow> =
+        open.iter().map(|r| (r.account_id.as_str(), r)).collect();
+
+    let mut rows = Vec::new();
+    for a in accounts
+        .iter()
+        .filter(|a| a.account_type == "credit" && a.status.eq_ignore_ascii_case("active"))
+    {
+        let due_day = account_billing_day(&a.metadata_json, "billing_due_day");
+        let credit_limit = a
+            .metadata_json
+            .pointer("/raw/creditData/creditLimit")
+            .and_then(serde_json::Value::as_f64);
+        let available = a
+            .metadata_json
+            .pointer("/raw/creditData/availableCreditLimit")
+            .and_then(serde_json::Value::as_f64);
+        let used = match (credit_limit, available) {
+            (Some(c), Some(av)) => Some(c - av),
+            _ => None,
+        };
+        let label = if a.label.is_empty() {
+            a.account_id.clone()
+        } else {
+            a.label.clone()
+        };
+        let row = match open_by.get(a.account_id.as_str()) {
+            Some(r) => CardApiRow {
+                account_id: a.account_id.clone(),
+                label,
+                state: "aberta",
+                cycle_month: Some(r.month_ref.clone()),
+                total: format!("{:.2}", r.total_charges),
+                open_amount: format!("{:.2}", r.open_amount),
+                due_date: due_day.and_then(|d| cycle_due_date(&r.month_ref, d)),
+                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
+                used_amount: used.map(|u| format!("{u:.2}")),
+            },
+            None => CardApiRow {
+                account_id: a.account_id.clone(),
+                label,
+                state: "em-dia",
+                cycle_month: None,
+                total: "0.00".to_string(),
+                open_amount: "0.00".to_string(),
+                due_date: None,
+                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
+                used_amount: used.map(|u| format!("{u:.2}")),
+            },
+        };
+        rows.push(row);
+    }
+    rows.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(rows)
+}
+
 #[derive(Serialize)]
 struct TransactionsResponse {
     rows: Vec<TxRow>,
@@ -1272,6 +1389,23 @@ async fn get_categories(State(tx): Store) -> impl IntoResponse {
     }
     match resp_rx.await {
         Ok(Ok(ids)) => Json(CategoriesResponse { ids }).into_response(),
+        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn get_cards(State(tx): Store) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
+    if tx
+        .send(StoreRequest::Cards { resp: resp_tx })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(rows)) => Json(CardsResponse { rows }).into_response(),
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1694,6 +1828,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/transactions", get(get_transactions))
         .route("/api/categories", get(get_categories))
         .route("/api/accounts", get(get_accounts))
+        .route("/api/cards", get(get_cards))
         .route("/api/chart", get(get_chart))
         .route("/api/forecasts", get(get_forecasts))
         .route("/api/forecast-templates", get(get_forecast_templates))

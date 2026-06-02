@@ -11,6 +11,7 @@ import {
 import { ErrorNote, LoadingNote } from "../components/ui";
 import { PlanningChart } from "./PlanningChart";
 import { MonthDetail } from "./MonthDetail";
+import { CardsPanel } from "./CardsPanel";
 import type { ChartMonthView, ForecastView } from "./types";
 
 // Seeding window: the 12 months of the current calendar year.
@@ -176,6 +177,17 @@ export const Dashboard = () => {
 
 			{/* Sentinel: when this scrolls offscreen, chart → compact */}
 			<div ref={sentinelRef} style={{ height: 0 }} />
+
+			{/* ── Cards (open/settled, cycle total, limit usage) ── */}
+			<div
+				style={{
+					maxWidth: "var(--container)",
+					margin: "0 auto",
+					padding: "0 clamp(24px,3vw,32px)",
+				}}
+			>
+				<CardsPanel />
+			</div>
 
 			{/* ── Month detail ── */}
 			<div
