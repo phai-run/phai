@@ -324,6 +324,17 @@ enum ReportCommand {
     )]
     Uncategorized(UncategorizedArgs),
     #[command(
+        about = "read-only audit of duplicate transactions inflating expense totals",
+        long_about = "Finds groups of transactions that share a dedup fingerprint \
+                      (same date, account, amount and normalised description) but have \
+                      different transaction ids — typically Pluggy re-assigning ids across \
+                      syncs — which double-count in cashflow and per-category reports. \
+                      This is READ-ONLY: it reports the groups so you can verify before any \
+                      cleanup; deleting the extras is a separate guided step (see ADR-0025). \
+                      WhatsApp-friendly by default; pass --raw for JSON."
+    )]
+    Duplicates(DuplicatesArgs),
+    #[command(
         about = "transactions whose total matches the sum of multiple smaller items in the same \
                  window (potential splits)",
         long_about = "Detects transactions that look like they should be split into sub-items — \
@@ -605,6 +616,22 @@ struct UncategorizedArgs {
 }
 
 impl UncategorizedArgs {
+    fn structured_output(&self) -> bool {
+        self.raw || self.json
+    }
+}
+
+#[derive(Args)]
+struct DuplicatesArgs {
+    /// Emit machine-readable JSON instead of the WhatsApp-friendly summary.
+    #[arg(long)]
+    raw: bool,
+    /// Deprecated alias for `--raw`.
+    #[arg(long, hide = true)]
+    json: bool,
+}
+
+impl DuplicatesArgs {
     fn structured_output(&self) -> bool {
         self.raw || self.json
     }
@@ -1793,6 +1820,28 @@ struct RuleInspectArgs {
 #[derive(Subcommand)]
 enum AccountCommand {
     Upsert(AccountUpsertArgs),
+    #[command(
+        about = "set a credit card's billing closing/due day (merges into metadata)",
+        long_about = "Sets `billing_closing_day` and `billing_due_day` on an existing \
+                      account's metadata without clobbering the rest (Pluggy creditData, \
+                      balance, etc.). These drive the cash-flow `cash_month` projection — a \
+                      card purchase lands in the month its bill is paid (ADR-0025). Required \
+                      for the bill-explosion view; Pluggy does not populate them reliably."
+    )]
+    SetBillingCycle(AccountBillingCycleArgs),
+}
+
+#[derive(Args)]
+struct AccountBillingCycleArgs {
+    /// Account id to update (e.g. the credit-card account).
+    #[arg(long)]
+    account_id: String,
+    /// Day of month the bill closes (1–28).
+    #[arg(long)]
+    closing_day: u32,
+    /// Day of month the bill is due/paid (1–28).
+    #[arg(long)]
+    due_day: u32,
 }
 
 #[derive(Args)]
@@ -2921,6 +2970,7 @@ async fn main() -> Result<()> {
             ReportCommand::CardClosedInsights(args) => report_card_closed_insights(args).await,
             ReportCommand::Installments(args) => report_installments(args).await,
             ReportCommand::Uncategorized(args) => report_uncategorized(args).await,
+            ReportCommand::Duplicates(args) => report_duplicates(args).await,
             ReportCommand::SplitCandidates(args) => report_split_candidates(args).await,
             ReportCommand::ItemPrices(args) => report_item_prices(args).await,
             ReportCommand::DataHealth(args) => report_data_health(args).await,
@@ -2969,6 +3019,7 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Account { command }) => match command {
             AccountCommand::Upsert(args) => account_upsert(args).await,
+            AccountCommand::SetBillingCycle(args) => account_set_billing_cycle(args).await,
         },
         Some(Commands::Budget { command }) => match command {
             BudgetCommand::Upsert(args) => budget_upsert(args).await,
@@ -6391,6 +6442,52 @@ async fn report_uncategorized(args: UncategorizedArgs) -> Result<()> {
     Ok(())
 }
 
+async fn report_duplicates(args: DuplicatesArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+    let groups = store.audit_duplicate_transactions().await?;
+
+    if args.structured_output() {
+        println!("{}", serde_json::to_string_pretty(&groups)?);
+        return Ok(());
+    }
+
+    if groups.is_empty() {
+        println!("✅ Nenhuma transação duplicada encontrada.");
+        return Ok(());
+    }
+
+    // Inflation = the amount the extra copies add on top of one canonical row.
+    let extra_count: i64 = groups.iter().map(|g| g.count - 1).sum();
+    let inflated: rust_decimal::Decimal = groups
+        .iter()
+        .map(|g| g.amount.abs() * rust_decimal::Decimal::from(g.count - 1))
+        .sum();
+
+    println!("⚠️ *Transações duplicadas · {} grupos*", groups.len());
+    println!();
+    for g in &groups {
+        println!(
+            "{}× · {} · {} · {} [{}]",
+            g.count,
+            brl_abs(g.amount.abs()),
+            short_date_pt(g.transaction_date),
+            normalize_inline_text(&g.description),
+            g.sources.join(","),
+        );
+    }
+    println!();
+    println!(
+        "Total: {} cópias extras inflando {} (mantendo 1 por grupo).",
+        extra_count,
+        brl_abs(inflated)
+    );
+    println!("Auditoria somente-leitura — a limpeza é um passo separado (ADR-0025).");
+
+    Ok(())
+}
+
 async fn report_split_candidates(args: SplitCandidatesArgs) -> Result<()> {
     let (_, config) = load_config().await?;
     ensure_bigquery_split_backend(&config)?;
@@ -8206,6 +8303,51 @@ async fn account_upsert(args: AccountUpsertArgs) -> Result<()> {
         )])
         .await?;
     println!("Conta salva: {}", row.account_id);
+    Ok(())
+}
+
+async fn account_set_billing_cycle(args: AccountBillingCycleArgs) -> Result<()> {
+    if !(1..=28).contains(&args.closing_day) || !(1..=28).contains(&args.due_day) {
+        anyhow::bail!("closing-day e due-day devem estar entre 1 e 28");
+    }
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let mut accounts = store.get_accounts().await?;
+    let row = accounts
+        .iter_mut()
+        .find(|a| a.account_id == args.account_id)
+        .with_context(|| format!("conta '{}' não encontrada", args.account_id))?;
+
+    if !row.metadata_json.is_object() {
+        row.metadata_json = json!({});
+    }
+    if let Some(obj) = row.metadata_json.as_object_mut() {
+        obj.insert(
+            "billing_closing_day".into(),
+            json!(args.closing_day.to_string()),
+        );
+        obj.insert("billing_due_day".into(), json!(args.due_day.to_string()));
+    }
+    row.updated_at = Utc::now();
+    let row = row.clone();
+
+    store.upsert_accounts(std::slice::from_ref(&row)).await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "account",
+            &row.account_id,
+            "set_billing_cycle",
+            &config.actor_id,
+            &row.idempotency_key,
+            serde_json::to_value(&row)?,
+        )])
+        .await?;
+    println!(
+        "Ciclo de fatura salvo: {} (fecha dia {}, vence dia {})",
+        row.account_id, args.closing_day, args.due_day
+    );
     Ok(())
 }
 

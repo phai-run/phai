@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 35] = [
+const SQLITE_MIGRATIONS: [Migration; 38] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -145,9 +145,21 @@ const SQLITE_MIGRATIONS: [Migration; 35] = [
         "035_fix_card_summary_double_count",
         include_str!("../../../schema/sqlite/035_fix_card_summary_double_count.sql"),
     ),
+    (
+        "036_internal_same_person_transfer",
+        include_str!("../../../schema/sqlite/036_internal_same_person_transfer.sql"),
+    ),
+    (
+        "037_cashflow_basis",
+        include_str!("../../../schema/sqlite/037_cashflow_basis.sql"),
+    ),
+    (
+        "038_reportable_ofx_dedup",
+        include_str!("../../../schema/sqlite/038_reportable_ofx_dedup.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 35] = [
+const BIGQUERY_MIGRATIONS: [Migration; 38] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -288,6 +300,18 @@ const BIGQUERY_MIGRATIONS: [Migration; 35] = [
         "035_fix_card_summary_double_count",
         include_str!("../../../schema/bigquery/035_fix_card_summary_double_count.sql"),
     ),
+    (
+        "036_internal_same_person_transfer",
+        include_str!("../../../schema/bigquery/036_internal_same_person_transfer.sql"),
+    ),
+    (
+        "037_cashflow_basis",
+        include_str!("../../../schema/bigquery/037_cashflow_basis.sql"),
+    ),
+    (
+        "038_reportable_ofx_dedup",
+        include_str!("../../../schema/bigquery/038_reportable_ofx_dedup.sql"),
+    ),
 ];
 
 fn backend_migrations(backend: BackendKind) -> &'static [Migration] {
@@ -361,6 +385,36 @@ mod tests {
         assert!(BIGQUERY_MIGRATIONS
             .iter()
             .any(|(version, _)| *version == "018_category_budgets"));
+    }
+
+    #[test]
+    fn internal_same_person_transfer_migration_is_registered() {
+        assert!(SQLITE_MIGRATIONS
+            .iter()
+            .any(|(version, _)| *version == "036_internal_same_person_transfer"));
+        assert!(BIGQUERY_MIGRATIONS
+            .iter()
+            .any(|(version, _)| *version == "036_internal_same_person_transfer"));
+    }
+
+    #[test]
+    fn sqlite_internal_same_person_transfer_migration_inserts_category() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        let sql = SQLITE_MIGRATIONS
+            .iter()
+            .find(|(version, _)| *version == "036_internal_same_person_transfer")
+            .map(|(_, sql)| *sql)
+            .expect("036 migration");
+        conn.execute_batch(sql).expect("apply migration");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM internal_categories WHERE category_id = 'same-person-transfer'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("same-person-transfer row");
+        assert_eq!(count, 1);
     }
 
     #[test]

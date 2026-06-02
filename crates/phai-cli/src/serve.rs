@@ -17,17 +17,19 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use phai_core::idempotency::ensure_forecast_idempotency;
 use phai_core::migrations::run_migrations;
 use phai_core::models::{
-    AccountRecord, AuditEvent, ForecastRecord, ForecastTemplateRecord, TransactionRecord,
+    AccountRecord, AuditEvent, CardSummaryRow, ForecastRecord, ForecastTemplateRecord,
+    TransactionRecord,
 };
 use phai_core::storage::{open_store, FinanceStore};
-use phai_core::AppConfig;
+use phai_core::{AppConfig, BackendKind};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -62,6 +64,187 @@ use crate::{
     all_transactions_for_review, apply_human_review, load_config, review_human_rows,
     HumanReviewPatch, ReviewFilters, ReviewHumanKind,
 };
+
+const LEGACY_WEB_CATEGORY_ALIASES: &[(&str, &str)] = &[
+    ("airport-and-airlines", "lazer:viagem"),
+    ("airlines", "lazer:viagem"),
+    ("accomodation", "lazer:viagem"),
+    ("automotive", "transporte"),
+    ("bank", "financeiro"),
+    ("bank-fees", "financeiro:taxas"),
+    ("cashback", "receitas:cashback"),
+    ("digital-services", "compras:servicos-digitais"),
+    ("donations", "outros"),
+    ("electricity", "moradia:energia"),
+    ("electronics", "compras:eletronicos"),
+    ("gambling", "lazer:apostas"),
+    ("gaming", "lazer"),
+    ("gas", "moradia:gas"),
+    ("gas-stations", "transporte:combustivel"),
+    ("groceries", "alimentacao:mercado"),
+    ("supermarket", "alimentacao:mercado"),
+    ("eating-out", "alimentacao:restaurantes"),
+    ("restaurants", "alimentacao:restaurantes"),
+    ("food-and-drinks", "alimentacao:restaurantes"),
+    ("food-and-beverages", "alimentacao:restaurantes"),
+    ("food-delivery", "alimentacao:delivery"),
+    ("gyms-and-fitness-centers", "saude:atividade-fisica"),
+    ("houseware", "compras:casa"),
+    ("housing", "moradia"),
+    ("insurance", "financeiro:seguros"),
+    ("kids-and-toys", "lazer:criancas"),
+    ("clothing", "compras:vestuario"),
+    ("fashion", "compras:vestuario"),
+    ("apparel", "compras:vestuario"),
+    ("shopping", "compras"),
+    ("retail", "compras"),
+    ("e-commerce", "compras"),
+    ("online-shopping", "compras:e-commerce"),
+    ("office-supplies", "compras"),
+    ("parking", "transporte:estacionamento"),
+    ("sports-goods", "lazer:esportes"),
+    ("hospital-clinics-and-labs", "saude:consulta"),
+    ("optometry", "saude:saude-visual"),
+    ("pharmacy", "saude:farmacia"),
+    ("health", "saude"),
+    ("healthcare", "saude"),
+    ("school", "educacao"),
+    ("online-courses", "educacao:cursos"),
+    ("transport", "transporte"),
+    ("transportation", "transporte"),
+    ("ride-sharing", "transporte:aplicativo"),
+    ("taxi-and-ride-hailing", "transporte:aplicativo"),
+    ("public-transportation", "transporte:publico"),
+    ("tolls-and-in-vehicle-payment", "transporte:pedagio"),
+    ("vehicle-maintenance", "transporte:manutencao"),
+    ("education", "educacao"),
+    ("bookstore", "educacao"),
+    ("entertainment", "lazer"),
+    ("leisure", "lazer"),
+    ("sports-and-fitness", "saude:fitness"),
+    ("travel", "lazer:viagem"),
+    ("bills-and-utilities", "moradia:contas"),
+    ("utilities", "moradia:contas"),
+    ("telecommunications", "moradia:contas"),
+    ("rent", "moradia:aluguel"),
+    ("personal-care", "pessoal:cuidado-fisico"),
+    ("personal", "pessoal"),
+    ("subscriptions", "assinaturas"),
+    ("video-streaming", "assinaturas:streaming"),
+    ("same-person-transfer", "transfer-internal"),
+    ("transfers", "transfer-internal"),
+    ("transfer-pix", "transfer-internal"),
+    ("tax-on-financial-operations", "financeiro:iof"),
+    ("income", "renda"),
+    ("salary", "renda"),
+    ("pets", "lazer:pets"),
+];
+
+const WEB_CANONICAL_CATEGORY_FAMILIES: &[&str] = &[
+    "alimentacao",
+    "assinaturas",
+    "compras",
+    "educacao",
+    "financeiro",
+    "lazer",
+    "moradia",
+    "outros",
+    "pessoal",
+    "receitas",
+    "renda",
+    "saude",
+    "servicos",
+    "transferencias",
+    "transporte",
+];
+
+fn is_web_canonical_category(category_id: &str) -> bool {
+    if category_id == REVIEW_PENDING_CATEGORY {
+        return true;
+    }
+    let family = category_id
+        .split_once(':')
+        .map_or(category_id, |(family, _)| family);
+    WEB_CANONICAL_CATEGORY_FAMILIES.contains(&family)
+}
+
+fn canonical_web_category_id(category_id: &str) -> String {
+    let raw = category_id.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let normalized = raw.to_lowercase().replace([' ', '_'], "-");
+    if let Some(canonical) = LEGACY_WEB_CATEGORY_ALIASES
+        .iter()
+        .find_map(|(alias, canonical)| (*alias == normalized).then_some(*canonical))
+    {
+        return canonical.to_string();
+    }
+    if is_web_canonical_category(&normalized) {
+        return normalized;
+    }
+    "outros".to_string()
+}
+
+fn canonical_web_category(category_id: Option<&str>) -> Option<String> {
+    category_id
+        .map(canonical_web_category_id)
+        .filter(|id| !id.trim().is_empty())
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeIdentityResponse {
+    identity: String,
+    backend: String,
+}
+
+fn bridge_identity_response(config: &AppConfig) -> BridgeIdentityResponse {
+    let backend = config.effective_backend();
+    let (backend_label, material) = match backend {
+        BackendKind::Bigquery => (
+            "bigquery",
+            format!(
+                "bigquery:{}:{}",
+                config.project_id.as_deref().unwrap_or(""),
+                config.dataset_id.as_deref().unwrap_or("")
+            ),
+        ),
+        BackendKind::Local => (
+            "local",
+            format!(
+                "local:{}",
+                config
+                    .local_db_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            ),
+        ),
+    };
+    let digest = Sha256::digest(material.as_bytes());
+    BridgeIdentityResponse {
+        identity: format!("{backend_label}:{digest:x}"),
+        backend: backend_label.to_string(),
+    }
+}
+
+async fn list_web_category_ids(store: &dyn FinanceStore) -> Result<Vec<String>> {
+    let internal_categories = store.internal_categories().await?;
+    let ids = store.list_all_category_ids().await?;
+    let mut out = BTreeSet::new();
+    for id in ids {
+        if id == REVIEW_PENDING_CATEGORY || internal_categories.contains(&id) {
+            continue;
+        }
+        let canonical = canonical_web_category_id(&id);
+        if canonical.is_empty() || internal_categories.contains(&canonical) {
+            continue;
+        }
+        out.insert(canonical);
+    }
+    Ok(out.into_iter().collect())
+}
 
 // ── Store actor ──────────────────────────────────────────────────────────
 
@@ -108,6 +291,11 @@ enum StoreRequest {
     },
     GetAccounts {
         resp: oneshot::Sender<Result<Vec<AccountRecord>>>,
+    },
+    /// Per-credit-card cycle state (open/paid), total and credit-limit usage,
+    /// for the dashboard card panel (`GET /api/cards`).
+    Cards {
+        resp: oneshot::Sender<Result<Vec<CardApiRow>>>,
     },
     ReviewQueue {
         params: ReviewQueueParams,
@@ -179,14 +367,15 @@ async fn store_actor_loop(
                 let _ = resp.send(result);
             }
             StoreRequest::ListCategoryIds { resp } => {
-                let result = store
-                    .list_all_category_ids()
-                    .await
-                    .map(|ids| ids.into_iter().collect());
+                let result = list_web_category_ids(store.as_ref()).await;
                 let _ = resp.send(result);
             }
             StoreRequest::GetAccounts { resp } => {
                 let result = store.get_accounts().await;
+                let _ = resp.send(result);
+            }
+            StoreRequest::Cards { resp } => {
+                let result = build_cards_api(store.as_ref()).await;
                 let _ = resp.send(result);
             }
             StoreRequest::ReviewQueue { params, resp } => {
@@ -301,6 +490,19 @@ async fn load_transactions_window(
         .effective_transactions_window(None, from, until)
         .await
         .context("effective_transactions_window")?;
+    let internal_categories = store
+        .internal_categories()
+        .await
+        .context("internal_categories")?;
+    rows.retain(|row| {
+        let raw_category = row.category_id.as_deref();
+        let canonical_category = canonical_web_category(raw_category);
+        !raw_category.is_some_and(|category| internal_categories.contains(category))
+            && !canonical_category
+                .as_deref()
+                .is_some_and(|category| internal_categories.contains(category))
+    });
+    dedupe_pluggy_shadowed_ofx_rows(&mut rows);
     if !params.include_reviewed {
         rows.retain(is_pending_review);
     }
@@ -315,6 +517,27 @@ async fn load_transactions_window(
         offset,
         has_more,
     })
+}
+
+fn dedupe_pluggy_shadowed_ofx_rows(rows: &mut Vec<TransactionRecord>) {
+    let pluggy_keys: BTreeSet<_> = rows
+        .iter()
+        .filter(|row| row.source.eq_ignore_ascii_case("pluggy"))
+        .map(reportable_dedupe_key)
+        .collect();
+    rows.retain(|row| {
+        !(row.source.eq_ignore_ascii_case("ofx")
+            && pluggy_keys.contains(&reportable_dedupe_key(row)))
+    });
+}
+
+fn reportable_dedupe_key(row: &TransactionRecord) -> (NaiveDate, Option<String>, Decimal, String) {
+    (
+        row.transaction_date,
+        row.account_id.clone(),
+        row.amount,
+        row.raw_description.trim().to_lowercase(),
+    )
 }
 
 /// A transaction is "reviewed" when it has a concrete category that is not the
@@ -655,10 +878,10 @@ struct TxRow {
 
 impl TxRow {
     fn from_record(row: &TransactionRecord) -> Self {
+        let category_id = canonical_web_category(row.category_id.as_deref());
         // `isSubscription` heuristic: any category under the `assinaturas:`
         // namespace is treated as a subscription charge.
-        let is_subscription = row
-            .category_id
+        let is_subscription = category_id
             .as_deref()
             .is_some_and(|cat| cat.starts_with(SUBSCRIPTION_CATEGORY_PREFIX));
         Self {
@@ -686,7 +909,7 @@ impl TxRow {
             description: row.description.clone(),
             merchant_name: row.merchant_name.clone(),
             purpose: row.purpose.clone(),
-            category_id: row.category_id.clone(),
+            category_id,
             month: row.transaction_date.format("%Y-%m").to_string(),
             payment_status: row.payment_status.clone(),
             reviewed: is_reviewed(row),
@@ -694,6 +917,183 @@ impl TxRow {
             is_subscription,
         }
     }
+}
+
+/// Parse a `billing_closing_day` / `billing_due_day` value (stored as a string
+/// or a number) from account metadata.
+fn account_billing_day(meta: &Value, key: &str) -> Option<u32> {
+    match meta.get(key)? {
+        Value::String(s) => s.trim().parse::<u32>().ok(),
+        Value::Number(n) => n.as_u64().map(|d| d as u32),
+        _ => None,
+    }
+    .filter(|d| (1..=31).contains(d))
+}
+
+/// `account_id → (is_credit, closing_day, due_day)` for cash_month bucketing.
+fn cash_month_lookup(
+    accounts: &[AccountRecord],
+) -> std::collections::HashMap<String, (bool, Option<u32>, Option<u32>)> {
+    accounts
+        .iter()
+        .map(|a| {
+            (
+                a.account_id.clone(),
+                (
+                    a.account_type == "credit",
+                    account_billing_day(&a.metadata_json, "billing_closing_day"),
+                    account_billing_day(&a.metadata_json, "billing_due_day"),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// Build the web transaction rows, overriding `month` with the canonical
+/// `cash_month` so a card purchase appears under the month its bill is paid
+/// (the family cash-flow view — see ADR-0025). Falls back to the posting month
+/// when the account is unknown.
+fn tx_rows_with_cash_month(
+    rows: &[TransactionRecord],
+    lookup: &std::collections::HashMap<String, (bool, Option<u32>, Option<u32>)>,
+) -> Vec<TxRow> {
+    rows.iter()
+        .map(|row| {
+            let mut tr = TxRow::from_record(row);
+            if let Some((is_credit, closing, due)) =
+                row.account_id.as_deref().and_then(|id| lookup.get(id))
+            {
+                tr.month = phai_core::cashflow::cash_month_for(
+                    row.transaction_date,
+                    *is_credit,
+                    *closing,
+                    *due,
+                );
+            }
+            tr
+        })
+        .collect()
+}
+
+/// Fetch accounts via the store actor (best-effort: an empty list just means
+/// rows keep their posting month). Used to resolve `cash_month`.
+async fn fetch_accounts(tx: &mpsc::Sender<StoreRequest>) -> Vec<AccountRecord> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    if tx
+        .send(StoreRequest::GetAccounts { resp: resp_tx })
+        .await
+        .is_err()
+    {
+        return Vec::new();
+    }
+    resp_rx.await.ok().and_then(Result::ok).unwrap_or_default()
+}
+
+/// Per-credit-card cycle state for the dashboard card panel. `state` is
+/// `"aberta"` when the card has an open bill with a balance, else `"em-dia"`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CardApiRow {
+    account_id: String,
+    label: String,
+    state: &'static str,
+    cycle_month: Option<String>,
+    /// Total charged on the open cycle (R$, 2dp string).
+    total: String,
+    /// Amount still open/owed on the cycle.
+    open_amount: String,
+    /// Bill due date (YYYY-MM-DD) when `billing_due_day` is known.
+    due_date: Option<String>,
+    /// Card credit limit and used amount from Pluggy metadata, for a usage bar.
+    credit_limit: Option<String>,
+    used_amount: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CardsResponse {
+    rows: Vec<CardApiRow>,
+}
+
+/// Due date (YYYY-MM-DD) for a cycle `"YYYY-MM"` given the billing due day,
+/// clamped to the month length.
+fn cycle_due_date(month_ref: &str, due_day: u32) -> Option<String> {
+    let mut parts = month_ref.split('-');
+    let y: i32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let next_first = if m == 12 {
+        NaiveDate::from_ymd_opt(y + 1, 1, 1)?
+    } else {
+        NaiveDate::from_ymd_opt(y, m + 1, 1)?
+    };
+    let last_day = next_first.pred_opt()?.day();
+    let day = due_day.min(last_day);
+    Some(
+        NaiveDate::from_ymd_opt(y, m, day)?
+            .format("%Y-%m-%d")
+            .to_string(),
+    )
+}
+
+/// Assemble the card panel: each active credit account with its open-bill cycle
+/// (from `cards_open_now`, ADR-0010) plus credit-limit usage from Pluggy
+/// metadata. Cards with no open balance are reported `state="em-dia"`.
+async fn build_cards_api(store: &dyn FinanceStore) -> Result<Vec<CardApiRow>> {
+    let accounts = store.get_accounts().await?;
+    let open = store.cards_open_now().await?;
+    let open_by: std::collections::HashMap<&str, &CardSummaryRow> =
+        open.iter().map(|r| (r.account_id.as_str(), r)).collect();
+
+    let mut rows = Vec::new();
+    for a in accounts
+        .iter()
+        .filter(|a| a.account_type == "credit" && a.status.eq_ignore_ascii_case("active"))
+    {
+        let due_day = account_billing_day(&a.metadata_json, "billing_due_day");
+        let credit_limit = a
+            .metadata_json
+            .pointer("/raw/creditData/creditLimit")
+            .and_then(serde_json::Value::as_f64);
+        let available = a
+            .metadata_json
+            .pointer("/raw/creditData/availableCreditLimit")
+            .and_then(serde_json::Value::as_f64);
+        let used = match (credit_limit, available) {
+            (Some(c), Some(av)) => Some(c - av),
+            _ => None,
+        };
+        let label = if a.label.is_empty() {
+            a.account_id.clone()
+        } else {
+            a.label.clone()
+        };
+        let row = match open_by.get(a.account_id.as_str()) {
+            Some(r) => CardApiRow {
+                account_id: a.account_id.clone(),
+                label,
+                state: "aberta",
+                cycle_month: Some(r.month_ref.clone()),
+                total: format!("{:.2}", r.total_charges),
+                open_amount: format!("{:.2}", r.open_amount),
+                due_date: due_day.and_then(|d| cycle_due_date(&r.month_ref, d)),
+                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
+                used_amount: used.map(|u| format!("{u:.2}")),
+            },
+            None => CardApiRow {
+                account_id: a.account_id.clone(),
+                label,
+                state: "em-dia",
+                cycle_month: None,
+                total: "0.00".to_string(),
+                open_amount: "0.00".to_string(),
+                due_date: None,
+                credit_limit: credit_limit.map(|c| format!("{c:.2}")),
+                used_amount: used.map(|u| format!("{u:.2}")),
+            },
+        };
+        rows.push(row);
+    }
+    rows.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(rows)
 }
 
 #[derive(Serialize)]
@@ -911,8 +1311,9 @@ async fn get_review_queue(
         include_reviewed: q.include_reviewed,
         limit: q.limit.unwrap_or(DEFAULT_REVIEW_QUEUE_LIMIT),
     };
-    let (resp_tx, resp_rx) = oneshot::channel();
     let tx = clone_actor_tx(&tx).await;
+    let accounts = fetch_accounts(&tx).await;
+    let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::ReviewQueue {
             params,
@@ -924,10 +1325,13 @@ async fn get_review_queue(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(rows)) => Json(ReviewQueueResponse {
-            rows: rows.iter().map(TxRow::from_record).collect(),
-        })
-        .into_response(),
+        Ok(Ok(rows)) => {
+            let lookup = cash_month_lookup(&accounts);
+            Json(ReviewQueueResponse {
+                rows: tx_rows_with_cash_month(&rows, &lookup),
+            })
+            .into_response()
+        }
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -944,8 +1348,9 @@ async fn get_transactions(
         limit: q.limit.unwrap_or(DEFAULT_TRANSACTIONS_LIMIT),
         offset: q.offset.unwrap_or(0),
     };
-    let (resp_tx, resp_rx) = oneshot::channel();
     let tx = clone_actor_tx(&tx).await;
+    let accounts = fetch_accounts(&tx).await;
+    let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::TransactionsWindow {
             params,
@@ -957,13 +1362,16 @@ async fn get_transactions(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(result)) => Json(TransactionsResponse {
-            rows: result.rows.iter().map(TxRow::from_record).collect(),
-            total: result.total,
-            offset: result.offset,
-            has_more: result.has_more,
-        })
-        .into_response(),
+        Ok(Ok(result)) => {
+            let lookup = cash_month_lookup(&accounts);
+            Json(TransactionsResponse {
+                rows: tx_rows_with_cash_month(&result.rows, &lookup),
+                total: result.total,
+                offset: result.offset,
+                has_more: result.has_more,
+            })
+            .into_response()
+        }
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -981,6 +1389,23 @@ async fn get_categories(State(tx): Store) -> impl IntoResponse {
     }
     match resp_rx.await {
         Ok(Ok(ids)) => Json(CategoriesResponse { ids }).into_response(),
+        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn get_cards(State(tx): Store) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&tx).await;
+    if tx
+        .send(StoreRequest::Cards { resp: resp_tx })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(rows)) => Json(CardsResponse { rows }).into_response(),
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1339,6 +1764,7 @@ fn parse_opt_date(value: Option<&str>) -> Result<Option<NaiveDate>, String> {
 pub async fn run(port: u16) -> Result<()> {
     let (_, config) = load_config().await?;
     let config: AppConfig = config;
+    let bridge_identity = Arc::new(bridge_identity_response(&config));
     let actor_config = config.clone();
 
     // Shared sender: the store actor replaces the inner sender on each restart
@@ -1388,10 +1814,21 @@ pub async fn run(port: u16) -> Result<()> {
     // without an Origin header (curl, direct integration) are allowed.
     let api = Router::new()
         .route("/api", get(api_status))
+        .route(
+            "/api/identity",
+            get({
+                let bridge_identity = bridge_identity.clone();
+                move || {
+                    let bridge_identity = bridge_identity.clone();
+                    async move { Json((*bridge_identity).clone()) }
+                }
+            }),
+        )
         .route("/api/review-queue", get(get_review_queue))
         .route("/api/transactions", get(get_transactions))
         .route("/api/categories", get(get_categories))
         .route("/api/accounts", get(get_accounts))
+        .route("/api/cards", get(get_cards))
         .route("/api/chart", get(get_chart))
         .route("/api/forecasts", get(get_forecasts))
         .route("/api/forecast-templates", get(get_forecast_templates))
@@ -1705,6 +2142,36 @@ mod tests {
         }
     }
 
+    /// A card purchase served to the web is bucketed under its bill's payment
+    /// month (cash_month), not its posting month — the family cash-flow view.
+    #[test]
+    fn tx_rows_use_cash_month_for_card_purchases() {
+        let mut card = sample_account("cc-1", "Card", "me");
+        card.account_type = "credit".into();
+        card.metadata_json = serde_json::json!({
+            "billing_closing_day": "3",
+            "billing_due_day": "10",
+        });
+        let mut rec = sample_record();
+        rec.account_id = Some("cc-1".into());
+        // 2026-04-28 (day 28 > closing 3) closes in the May cycle, due May 10.
+        rec.transaction_date = NaiveDate::from_ymd_opt(2026, 4, 28).unwrap();
+
+        let lookup = cash_month_lookup(&[card]);
+        let rows = tx_rows_with_cash_month(&[rec], &lookup);
+        assert_eq!(rows[0].month, "2026-05");
+    }
+
+    /// A non-card purchase keeps its posting month.
+    #[test]
+    fn tx_rows_keep_posting_month_for_non_card() {
+        let checking = sample_account("acc-1", "Checking", "me");
+        let rec = sample_record(); // dated 2026-03-15 on acc-1
+        let lookup = cash_month_lookup(&[checking]);
+        let rows = tx_rows_with_cash_month(&[rec], &lookup);
+        assert_eq!(rows[0].month, "2026-03");
+    }
+
     fn sample_account(account_id: &str, label: &str, owner: &str) -> AccountRecord {
         AccountRecord {
             account_id: account_id.into(),
@@ -1807,6 +2274,42 @@ mod tests {
         let row = TxRow::from_record(&subscription);
         assert!(row.is_subscription);
         assert!(row.reviewed);
+    }
+
+    #[test]
+    fn tx_row_normalizes_legacy_english_category_for_web() {
+        let mut record = sample_record();
+        record.category_id = Some("shopping".into());
+
+        let row = TxRow::from_record(&record);
+
+        assert_eq!(row.category_id.as_deref(), Some("compras"));
+    }
+
+    #[test]
+    fn web_category_list_normalizes_legacy_english_ids() {
+        assert_eq!(
+            canonical_web_category_id("Eating out"),
+            "alimentacao:restaurantes"
+        );
+        assert_eq!(
+            canonical_web_category_id("Groceries"),
+            "alimentacao:mercado"
+        );
+        assert_eq!(canonical_web_category_id("Shopping"), "compras");
+        assert_eq!(
+            canonical_web_category_id("airport-and-airlines"),
+            "lazer:viagem"
+        );
+        assert_eq!(
+            canonical_web_category_id("same-person-transfer"),
+            "transfer-internal"
+        );
+        assert_eq!(canonical_web_category_id("unknown-english"), "outros");
+        assert_eq!(
+            canonical_web_category_id("saude:farmacia"),
+            "saude:farmacia"
+        );
     }
 
     // ── month window helpers ──────────────────────────────────────────────
@@ -2090,6 +2593,131 @@ mod tests {
         assert!(matching.iter().any(|r| r.transaction_id == "tx-1"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn transactions_window_excludes_internal_categories() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+
+        let mut external = sample_record();
+        external.transaction_id = "tx-external".into();
+        external.transaction_date = today;
+        external.category_id = Some("alimentacao:mercado".into());
+
+        let mut internal = sample_record();
+        internal.transaction_id = "tx-internal".into();
+        internal.transaction_date = today;
+        internal.category_id = Some("credit-card-payment".into());
+
+        store
+            .upsert_transactions(&[external, internal])
+            .await
+            .unwrap();
+
+        let result = load_transactions_window(
+            store.as_ref(),
+            TransactionsWindowParams {
+                months_back: 0,
+                months_ahead: 0,
+                include_reviewed: true,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: BTreeSet<_> = result
+            .rows
+            .iter()
+            .map(|row| row.transaction_id.as_str())
+            .collect();
+        assert!(ids.contains("tx-external"));
+        assert!(!ids.contains("tx-internal"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transactions_window_dedupes_ofx_shadowed_by_pluggy() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+
+        let mut pluggy = sample_record();
+        pluggy.transaction_id = "tx-pluggy".into();
+        pluggy.transaction_date = today;
+        pluggy.raw_description = "Compra Exemplo".into();
+        pluggy.amount = Decimal::new(-11603, 2);
+        pluggy.source = "pluggy".into();
+        pluggy.category_id = Some("alimentacao:mercado".into());
+
+        let mut ofx = pluggy.clone();
+        ofx.transaction_id = "tx-ofx-duplicate".into();
+        ofx.source = "ofx".into();
+
+        let mut ofx_unique = pluggy.clone();
+        ofx_unique.transaction_id = "tx-ofx-unique".into();
+        ofx_unique.raw_description = "Compra Unica".into();
+        ofx_unique.source = "ofx".into();
+
+        store
+            .upsert_transactions(&[pluggy, ofx, ofx_unique])
+            .await
+            .unwrap();
+
+        let result = load_transactions_window(
+            store.as_ref(),
+            TransactionsWindowParams {
+                months_back: 0,
+                months_ahead: 0,
+                include_reviewed: true,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: BTreeSet<_> = result
+            .rows
+            .iter()
+            .map(|row| row.transaction_id.as_str())
+            .collect();
+        assert!(ids.contains("tx-pluggy"));
+        assert!(ids.contains("tx-ofx-unique"));
+        assert!(!ids.contains("tx-ofx-duplicate"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_category_list_filters_review_sentinel_and_internal_aliases() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+
+        let mut legacy = sample_record();
+        legacy.transaction_id = "tx-legacy".into();
+        legacy.transaction_date = today;
+        legacy.category_id = Some("airport-and-airlines".into());
+
+        let mut review = sample_record();
+        review.transaction_id = "tx-review".into();
+        review.transaction_date = today;
+        review.category_id = Some(REVIEW_PENDING_CATEGORY.into());
+
+        let mut internal_alias = sample_record();
+        internal_alias.transaction_id = "tx-internal-alias".into();
+        internal_alias.transaction_date = today;
+        internal_alias.category_id = Some("same-person-transfer".into());
+
+        store
+            .upsert_transactions(&[legacy, review, internal_alias])
+            .await
+            .unwrap();
+
+        let ids = list_web_category_ids(store.as_ref()).await.unwrap();
+
+        assert!(ids.contains(&"lazer:viagem".to_string()));
+        assert!(!ids.contains(&REVIEW_PENDING_CATEGORY.to_string()));
+        assert!(!ids.contains(&"transfer-internal".to_string()));
+        assert!(!ids.contains(&"same-person-transfer".to_string()));
+    }
+
     // ── Behavioral: MoveForecast against a real SQLite store ───────────────
 
     fn installment_template(template_id: &str) -> ForecastTemplateRecord {
@@ -2126,7 +2754,7 @@ mod tests {
         ensure_forecast_idempotency(&mut forecast).unwrap();
         store.upsert_forecasts(&[forecast]).await.unwrap();
 
-        let new_due = NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
+        let new_due = first_of_month(shift_months(Utc::now().date_naive(), 1));
         let outcome = move_forecast(store.as_ref(), "f-manual", new_due)
             .await
             .unwrap();

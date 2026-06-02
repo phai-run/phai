@@ -283,6 +283,13 @@ export const events = {
 		name: "v1.ForecastTemplatesSeeded",
 		schema: Schema.Struct({ rows: Schema.Array(ForecastTemplateRow) }),
 	}),
+	bridgeIdentityChanged: Events.synced({
+		name: "v1.BridgeIdentityChanged",
+		schema: Schema.Struct({
+			oldIdentity: Schema.String,
+			newIdentity: Schema.String,
+		}),
+	}),
 
 	// ── User writes ─────────────────────────────────────────────────────────
 	reviewSubmitted: Events.synced({
@@ -351,6 +358,11 @@ const materializers = State.SQLite.materializers(events, {
 	"v1.ForecastTemplatesSeeded": ({ rows }) => [
 		tables.forecastTemplates.delete(),
 		...rows.map((r) => tables.forecastTemplates.insert(r)),
+	],
+	"v1.BridgeIdentityChanged": () => [
+		tables.pendingWrites.delete(),
+		tables.reviewOverlay.delete(),
+		tables.forecastOverlay.delete(),
 	],
 	"v1.ReviewSubmitted": ({ writeId, transactionId, patch, submittedAt }) => [
 		tables.pendingWrites.insert({

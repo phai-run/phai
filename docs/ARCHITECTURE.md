@@ -178,6 +178,28 @@ sequenceDiagram
 
 Reports read from views, not raw tables. Views encode the business logic (sign normalization for credit-card transactions, internal-transfer exclusion, effective categorization with overrides, and display labels that fall back from `description` to `merchant_name` to `raw_description`). See `schema/sqlite/033_transaction_anatomy.sql`.
 
+#### Canonical reporting view chain (single source of truth)
+
+All cash-flow/spend reporting — the CLI, the cashflow chart, and the web UI — reads **one** view chain. Dedup and classification live *inside* it; no report or query method re-derives them. This is the rule that stops the cash-flow numbers from regressing (see [ADR-0026](adr/0026-single-view-chain-canonical-source.md) and [ADR-0025](adr/0025-cashflow-basis-bill-explosion.md)):
+
+```
+transactions                       raw rows (Pluggy / OFX / legacy / manual)
+  └─ v_transactions_effective      splits expansion + display labels
+       └─ v_transactions_reportable  dedup: drops legacy-manual + ofx rows
+            │                          shadowed by a Pluggy row (anti-joins)
+            └─ v_transactions_cashbasis  + canonical cash_month: a card purchase
+                 │                         falls in the month its bill is PAID,
+                 │                         from billing_closing_day/billing_due_day
+                 ├─ v_cashflow            monthly income/expenses/net (cash basis)
+                 └─ v_monthly_spend       per-category monthly spend
+```
+
+- **Cash basis, not accrual.** A family sees the month its money actually moves: a credit-card bill paid in May explodes into its individual purchases under May (not a lump payment, not on the original purchase dates). Requires `billing_closing_day`/`billing_due_day` on each card (`phai account set-billing-cycle`); without them a card falls back to the calendar posting month.
+- **Internal categories** (`credit-card-payment`, `transfer-internal`, `same-person-transfer`) are the single exclusion list, applied in the views — so paying a card bill, or moving money between two *tracked* own accounts, never double-counts. Money arriving from an *untracked* account (e.g. a salary relay) is real income and is **not** excluded.
+- `FinanceStore::cashflow_reportable` is a thin `SELECT … FROM v_cashflow`. New reporting reads the chain; new rules go into `v_transactions_reportable` or the exclusion list — never into a Rust query or the web layer.
+
+To validate the chain against the bank, see the [data-consistency runbook](runbook-data-consistency.md).
+
 ### Self-update (atomic, SHA-256-verified)
 
 See [ADR-0007](adr/0007-atomic-self-update.md). On macOS, the running binary atomically renames the new binary over its own path, then `execv`s with a `FINANCE_OS_UPDATED=<version>` sentinel to prevent loops. The sentinel disables the auto-check in the child process.

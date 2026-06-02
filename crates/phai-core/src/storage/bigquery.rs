@@ -3,8 +3,9 @@ use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
-    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow,
-    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    CheckingBalance, DailyPulseItem, DuplicateTransactionGroup, ForecastRecord,
+    ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -3163,7 +3164,7 @@ impl FinanceStore for BigQueryStore {
               description,
               merchant_name,
               purpose,
-              CAST(amount AS STRING),
+              CAST(ROUND(COALESCE(amount_cents, 0) / 100.0, 2) AS STRING),
               tx_type,
               category_id,
               category_source,
@@ -3391,16 +3392,19 @@ impl FinanceStore for BigQueryStore {
     }
 
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
-        // Accrual basis over all reportable accounts — delegates to the
-        // `v_cashflow` view (same rules as the SQLite backend). Monetary
-        // columns are exact-decimal strings; `opening`/`closing` are unset.
+        // Cash-flow basis over all reportable accounts — reads the canonical
+        // `v_cashflow` view directly (single source of truth). The view buckets
+        // by `cash_month` (a card purchase lands in the month its bill is paid,
+        // ADR-0025) over `v_transactions_reportable`, which already drops
+        // ofx-shadowed-by-pluggy and legacy-manual duplicates (ADR-0026), so no
+        // dedup is re-implemented here.
         let sql = format!(
             "
             SELECT month_ref, income, expenses, expense_reduction, net
-            FROM {view}
+            FROM {cashflow}
             ORDER BY month_ref ASC
             ",
-            view = self.qualified_table("v_cashflow")?,
+            cashflow = self.qualified_table("v_cashflow")?,
         );
         let response = self.run_query(&sql).await?;
         let mut items = Vec::with_capacity(response.rows.len());
@@ -3625,6 +3629,54 @@ impl FinanceStore for BigQueryStore {
                 open_amount: required_decimal(&values, 3, "open_amount")?,
                 installments_future: required_decimal(&values, 4, "installments_future")?,
                 transaction_count: required_i64(&values, 5, "transaction_count")?,
+            });
+        }
+        Ok(items)
+    }
+
+    async fn audit_duplicate_transactions(&self) -> Result<Vec<DuplicateTransactionGroup>> {
+        let sql = format!(
+            "
+            SELECT
+              CAST(transaction_date AS STRING) AS transaction_date,
+              account_id,
+              CAST(CAST(ROUND(amount * 100) AS INT64) AS STRING) AS amount_cents,
+              LOWER(TRIM(raw_description)) AS norm_desc,
+              CAST(COUNT(*) AS STRING) AS n,
+              STRING_AGG(transaction_id, ',') AS ids,
+              STRING_AGG(DISTINCT source, ',') AS sources
+            FROM {tx}
+            GROUP BY transaction_date, account_id, amount_cents, norm_desc
+            HAVING COUNT(*) > 1
+            ORDER BY COUNT(*) DESC, MIN(ABS(amount)) DESC, transaction_date DESC
+            ",
+            tx = self.qualified_table("transactions")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            let amount_cents = required_i64(&values, 2, "amount_cents")?;
+            let mut transaction_ids: Vec<String> = required_string(&values, 5, "ids")?
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            transaction_ids.sort();
+            let mut sources: Vec<String> = optional_string(&values, 6)
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().to_string())
+                .collect();
+            sources.sort();
+            items.push(DuplicateTransactionGroup {
+                transaction_date: required_date(&values, 0, "transaction_date")?,
+                account_id: optional_string(&values, 1),
+                amount: Decimal::new(amount_cents, 2),
+                description: required_string(&values, 3, "norm_desc")?,
+                count: required_i64(&values, 4, "n")?,
+                transaction_ids,
+                sources,
             });
         }
         Ok(items)

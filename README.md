@@ -113,6 +113,7 @@ All reports produce a human-readable output by default and accept `--raw` for JS
 | `report installments` | Active parcela chains (X de Y), with projected end |
 | `report forecast-vs-actual` | Planned amounts vs what actually happened |
 | `report uncategorized` | Transactions still needing a category |
+| `report duplicates` | Read-only audit of duplicate transactions inflating expense totals (Pluggy id drift) |
 | `report data-health` | Consistency checks across the dataset |
 
 Add `--raw` to any of them for structured output.

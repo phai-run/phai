@@ -364,6 +364,29 @@ pub struct CardSummaryRow {
     pub transaction_count: i64,
 }
 
+/// A set of transactions that share the same dedup fingerprint
+/// (`transaction_date`, `account_id`, `amount_cents`, normalised
+/// `raw_description`) and therefore likely duplicate one real movement —
+/// typically Pluggy re-assigning a new `transaction_id` across syncs. Used by
+/// the `phai dedup --audit` report. See ADR-0025 and the runtime dedup in
+/// `dedup_pluggy_duplicates`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateTransactionGroup {
+    pub transaction_date: NaiveDate,
+    pub account_id: Option<String>,
+    pub amount: Decimal,
+    /// Normalised (lower-cased, whitespace-trimmed) raw description.
+    pub description: String,
+    /// Number of rows sharing the fingerprint (always ≥ 2).
+    pub count: i64,
+    /// All transaction ids in the group, sorted for deterministic output. A
+    /// cleanup keeps one canonical row (e.g. the earliest-created) and removes
+    /// the rest — that step is intentionally separate from this audit.
+    pub transaction_ids: Vec<String>,
+    /// Distinct `source` values present in the group (e.g. `pluggy`, `ofx`).
+    pub sources: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardClosedTransactionRow {
     pub month_ref: String,

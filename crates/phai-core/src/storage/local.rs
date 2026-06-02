@@ -3,8 +3,9 @@ use crate::config::AppConfig;
 use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
-    CheckingBalance, DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow,
-    MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
+    CheckingBalance, DailyPulseItem, DuplicateTransactionGroup, ForecastRecord,
+    ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -1186,7 +1187,9 @@ impl FinanceStore for LocalStore {
             "
             SELECT
               transaction_id, account_id, transaction_date, raw_description, description,
-              merchant_name, purpose, CAST(amount AS TEXT), tx_type, category_id,
+              merchant_name, purpose,
+              printf('%.2f', COALESCE(amount_cents, 0) / 100.0),
+              tx_type, category_id,
               category_source, context, classifier_trace, payment_status, source,
               actor_id, idempotency_key, metadata_json, created_at, updated_at,
               enrichment_attempted_at
@@ -1843,11 +1846,12 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
-        // Accrual basis over all reportable accounts — delegates to the
-        // `v_cashflow` view, which already encodes the report rules (split
-        // expansion + effective category via v_transactions_reportable, and
-        // the internal-category exclusion). The view's monetary columns are
-        // exact integer-cent strings (ADR-0003), parsed back into Decimal.
+        // Cash-flow basis over all reportable accounts — reads the canonical
+        // `v_cashflow` view directly (single source of truth). The view buckets
+        // by `cash_month` (a card purchase lands in the month its bill is paid,
+        // ADR-0025) over `v_transactions_reportable`, which already drops
+        // ofx-shadowed-by-pluggy and legacy-manual duplicates (ADR-0026), so no
+        // dedup is re-implemented here.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
@@ -2129,6 +2133,61 @@ impl FinanceStore for LocalStore {
                         )
                     })?,
                     transaction_count: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    async fn audit_duplicate_transactions(&self) -> Result<Vec<DuplicateTransactionGroup>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              transaction_date,
+              account_id,
+              amount_cents,
+              LOWER(TRIM(raw_description)) AS norm_desc,
+              COUNT(*) AS n,
+              GROUP_CONCAT(transaction_id) AS ids,
+              GROUP_CONCAT(DISTINCT source) AS sources
+            FROM transactions
+            GROUP BY transaction_date, COALESCE(account_id, ''), amount_cents, norm_desc
+            HAVING COUNT(*) > 1
+            ORDER BY n DESC, ABS(amount_cents) DESC, transaction_date DESC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let date_str = row.get::<_, String>(0)?;
+                let amount_cents = row.get::<_, i64>(2)?;
+                let ids_raw = row.get::<_, String>(5)?;
+                let sources_raw = row.get::<_, Option<String>>(6)?.unwrap_or_default();
+                let transaction_date =
+                    NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
+                        )
+                    })?;
+                let mut transaction_ids: Vec<String> =
+                    ids_raw.split(',').map(|s| s.trim().to_string()).collect();
+                transaction_ids.sort();
+                let mut sources: Vec<String> = sources_raw
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                sources.sort();
+                Ok(DuplicateTransactionGroup {
+                    transaction_date,
+                    account_id: row.get::<_, Option<String>>(1)?,
+                    amount: Decimal::new(amount_cents, 2),
+                    description: row.get(3)?,
+                    count: row.get(4)?,
+                    transaction_ids,
+                    sources,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2712,5 +2771,231 @@ impl FinanceStore for LocalStore {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LocalStore;
+    use crate::config::AppConfig;
+    use crate::migrations::run_migrations;
+    use crate::models::{AccountRecord, TransactionRecord};
+    use crate::storage::FinanceStore;
+    use chrono::{NaiveDate, Utc};
+    use rust_decimal::Decimal;
+
+    fn test_config(path: std::path::PathBuf) -> AppConfig {
+        AppConfig {
+            local_db_path: Some(path),
+            actor_id: "test".to_string(),
+            ..AppConfig::default()
+        }
+    }
+
+    fn tx(id: &str, source: &str, description: &str, amount: Decimal) -> TransactionRecord {
+        let now = Utc::now();
+        TransactionRecord {
+            transaction_id: id.to_string(),
+            account_id: Some("acc-1".to_string()),
+            transaction_date: NaiveDate::from_ymd_opt(2026, 5, 10).unwrap(),
+            raw_description: description.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            amount,
+            amount_cents: None,
+            tx_type: "debit".to_string(),
+            category_id: Some("alimentacao:mercado".to_string()),
+            category_source: "rule".to_string(),
+            context: None,
+            classifier_trace: None,
+            payment_status: "posted".to_string(),
+            source: source.to_string(),
+            actor_id: "test".to_string(),
+            idempotency_key: format!("{source}:{id}"),
+            metadata_json: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+            enrichment_attempted_at: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cashflow_reportable_dedupes_ofx_shadowed_by_pluggy() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_transactions(&[
+                tx(
+                    "pluggy",
+                    "pluggy",
+                    "Compra Exemplo",
+                    Decimal::new(-11603, 2),
+                ),
+                tx("ofx-dupe", "ofx", "Compra Exemplo", Decimal::new(-11603, 2)),
+                tx("ofx-unique", "ofx", "Compra Unica", Decimal::new(-5000, 2)),
+            ])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        let may = rows
+            .iter()
+            .find(|row| row.month_ref == "2026-05")
+            .expect("may cashflow");
+
+        assert_eq!(may.expenses, Decimal::new(16603, 2));
+    }
+
+    fn card_account(account_id: &str, closing_day: &str, due_day: &str) -> AccountRecord {
+        let now = Utc::now();
+        AccountRecord {
+            account_id: account_id.to_string(),
+            owner: "test".to_string(),
+            account_type: "credit".to_string(),
+            bank: "test-bank".to_string(),
+            label: "Test Card".to_string(),
+            pluggy_account_id: None,
+            pluggy_item_id: None,
+            status: "active".to_string(),
+            actor_id: "test".to_string(),
+            idempotency_key: format!("acct:{account_id}"),
+            metadata_json: serde_json::json!({
+                "billing_closing_day": closing_day,
+                "billing_due_day": due_day,
+            }),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn card_tx(id: &str, account_id: &str, date: NaiveDate, amount: Decimal) -> TransactionRecord {
+        let now = Utc::now();
+        TransactionRecord {
+            transaction_id: id.to_string(),
+            account_id: Some(account_id.to_string()),
+            transaction_date: date,
+            raw_description: id.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            amount,
+            amount_cents: None,
+            tx_type: "debit".to_string(),
+            category_id: Some("alimentacao:mercado".to_string()),
+            category_source: "rule".to_string(),
+            context: None,
+            classifier_trace: None,
+            payment_status: "posted".to_string(),
+            source: "pluggy".to_string(),
+            actor_id: "test".to_string(),
+            idempotency_key: format!("pluggy:{id}"),
+            metadata_json: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+            enrichment_attempted_at: None,
+        }
+    }
+
+    /// A card purchase belongs to the month its bill is paid, not its posting
+    /// month. Closing day 3, due day 10: a 2026-04-28 swipe (day 28 > 3) closes
+    /// in the 2026-05 cycle, due 2026-05-10 → cash_month 2026-05. See ADR-0025.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cashflow_reportable_buckets_card_purchase_in_bill_due_month() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_accounts(&[card_account("cc-1", "3", "10")])
+            .await
+            .unwrap();
+        store
+            .upsert_transactions(&[card_tx(
+                "swipe-1",
+                "cc-1",
+                NaiveDate::from_ymd_opt(2026, 4, 28).unwrap(),
+                Decimal::new(-15000, 2),
+            )])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        assert!(
+            rows.iter().all(|r| r.month_ref != "2026-04"),
+            "card purchase must not appear in its posting month (April)"
+        );
+        let may = rows
+            .iter()
+            .find(|r| r.month_ref == "2026-05")
+            .expect("may cashflow");
+        assert_eq!(may.expenses, Decimal::new(15000, 2));
+    }
+
+    /// When the due day precedes the closing day the bill is paid the following
+    /// month. Closing 25, due 5: a 2026-04-10 swipe (day 10 <= 25) closes in the
+    /// 2026-04 cycle but is due 2026-05-05 → cash_month 2026-05. See ADR-0025.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cashflow_reportable_rolls_due_before_closing_to_next_month() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_accounts(&[card_account("cc-2", "25", "5")])
+            .await
+            .unwrap();
+        store
+            .upsert_transactions(&[card_tx(
+                "swipe-2",
+                "cc-2",
+                NaiveDate::from_ymd_opt(2026, 4, 10).unwrap(),
+                Decimal::new(-8000, 2),
+            )])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        assert!(
+            rows.iter().all(|r| r.month_ref != "2026-04"),
+            "bill paid in May must not appear in April"
+        );
+        let may = rows
+            .iter()
+            .find(|r| r.month_ref == "2026-05")
+            .expect("may cashflow");
+        assert_eq!(may.expenses, Decimal::new(8000, 2));
+    }
+
+    /// Two rows sharing a dedup fingerprint (same date/account/amount/desc) but
+    /// different transaction_ids — the Pluggy-id-drift shape — surface as one
+    /// duplicate group; a unique row does not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_duplicate_transactions_groups_by_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        store
+            .upsert_transactions(&[
+                tx("dup-a", "pluggy", "Compra Exemplo", Decimal::new(-11603, 2)),
+                tx("dup-b", "pluggy", "Compra Exemplo", Decimal::new(-11603, 2)),
+                tx("solo", "pluggy", "Compra Unica", Decimal::new(-5000, 2)),
+            ])
+            .await
+            .unwrap();
+
+        let groups = store.audit_duplicate_transactions().await.unwrap();
+        assert_eq!(groups.len(), 1, "exactly one duplicate group");
+        let group = &groups[0];
+        assert_eq!(group.count, 2);
+        assert_eq!(group.transaction_ids, vec!["dup-a", "dup-b"]);
+        assert_eq!(group.amount, Decimal::new(-11603, 2));
     }
 }
