@@ -32,6 +32,8 @@ interface ChartModel {
 	expMaxBar: number;
 	minBal: number;
 	balSpan: number;
+	cashMin: number;
+	cashSpan: number;
 }
 
 export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
@@ -58,6 +60,17 @@ export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
 	const minBal = Math.min(0, ...balances);
 	const maxBal = Math.max(1, ...balances);
 	const balSpan = maxBal - minBal || 1;
+	const cashMax = Math.max(
+		1,
+		...balances,
+		...months.map((_, i) => realIns[i] + fcIns[i]),
+	);
+	const cashMin = Math.min(
+		0,
+		...balances,
+		...months.map((_, i) => -(realOuts[i] + fcOuts[i])),
+	);
+	const cashSpan = cashMax - cashMin || 1;
 	return {
 		realIns,
 		fcIns,
@@ -68,14 +81,15 @@ export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
 		expMaxBar,
 		minBal,
 		balSpan,
+		cashMin,
+		cashSpan,
 	};
 }
 
 // Convert bar magnitude → SVG height
 const bh = (v: number, maxBar: number) => (v / maxBar) * BAR_MAX;
-// Convert closing balance → SVG y-coord (full innerH range)
-const by = (v: number, minBal: number, balSpan: number) =>
-	PAD.top + (1 - (v - minBal) / balSpan) * innerH;
+const cashY = (v: number, min: number, span: number) =>
+	PAD.top + (1 - (v - min) / span) * innerH;
 
 // ── Public component ───────────────────────────────────────────────────────
 
@@ -287,12 +301,13 @@ const FullChart = ({
 			? model.balances
 			: model.balances.slice(0, firstFuture + 1);
 	const fcLine = firstFuture === -1 ? [] : model.balances.slice(firstFuture);
+	const zeroY = cashY(0, model.cashMin, model.cashSpan);
 
 	const linePath = (vals: number[], offset = 0) =>
 		vals
 			.map(
 				(b, k) =>
-					`${k === 0 ? "M" : "L"} ${midX(offset + k)} ${by(b, model.minBal, model.balSpan)}`,
+					`${k === 0 ? "M" : "L"} ${midX(offset + k)} ${cashY(b, model.cashMin, model.cashSpan)}`,
 			)
 			.join(" ");
 
@@ -389,19 +404,39 @@ const FullChart = ({
 					<line
 						x1={PAD.left}
 						x2={W - PAD.right}
-						y1={BASELINE}
-						y2={BASELINE}
+						y1={mode === "caixa" ? zeroY : BASELINE}
+						y2={mode === "caixa" ? zeroY : BASELINE}
 						stroke="var(--border)"
-						strokeWidth={0.5}
+						strokeWidth={mode === "caixa" ? 0.8 : 0.5}
 					/>
 
 					{/* ── Caixa mode: income + expense bars + balance line ── */}
 					{mode === "caixa" &&
 						months.map((m, i) => {
-							const rIn = bh(model.realIns[i], model.maxBar);
-							const fIn = bh(model.fcIns[i], model.maxBar);
-							const rOut = bh(model.realOuts[i], model.maxBar);
-							const fOut = bh(model.fcOuts[i], model.maxBar);
+							const rInTop = cashY(
+								model.realIns[i],
+								model.cashMin,
+								model.cashSpan,
+							);
+							const fInTop = cashY(
+								model.realIns[i] + model.fcIns[i],
+								model.cashMin,
+								model.cashSpan,
+							);
+							const rOutBottom = cashY(
+								-model.realOuts[i],
+								model.cashMin,
+								model.cashSpan,
+							);
+							const fOutBottom = cashY(
+								-(model.realOuts[i] + model.fcOuts[i]),
+								model.cashMin,
+								model.cashSpan,
+							);
+							const rIn = zeroY - rInTop;
+							const fIn = rInTop - fInTop;
+							const rOut = rOutBottom - zeroY;
+							const fOut = fOutBottom - rOutBottom;
 							const isSel = m.month === selectedMonth;
 							const isHov = hover === i && !isSel;
 							const ix = incX(i) - barW / 2;
@@ -431,7 +466,7 @@ const FullChart = ({
 									{rIn > 0.5 && (
 										<rect
 											x={ix}
-											y={BASELINE - rIn}
+											y={rInTop}
 											width={barW}
 											height={rIn}
 											rx={2}
@@ -442,7 +477,7 @@ const FullChart = ({
 									{fIn > 0.5 && (
 										<rect
 											x={ix}
-											y={BASELINE - rIn - fIn}
+											y={fInTop}
 											width={barW}
 											height={fIn}
 											rx={2}
@@ -454,7 +489,7 @@ const FullChart = ({
 									{rOut > 0.5 && (
 										<rect
 											x={ox}
-											y={BASELINE - rOut}
+											y={zeroY}
 											width={barW}
 											height={rOut}
 											rx={2}
@@ -465,7 +500,7 @@ const FullChart = ({
 									{fOut > 0.5 && (
 										<rect
 											x={ox}
-											y={BASELINE - rOut - fOut}
+											y={rOutBottom}
 											width={barW}
 											height={fOut}
 											rx={2}
@@ -720,7 +755,7 @@ const FullChart = ({
 								<circle
 									key={months[i].month}
 									cx={midX(i)}
-									cy={by(b, model.minBal, model.balSpan)}
+									cy={cashY(b, model.cashMin, model.cashSpan)}
 									r={2.5}
 									fill="var(--purple)"
 									opacity={months[i].isFuture ? 0.5 : 1}
