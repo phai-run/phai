@@ -11,7 +11,7 @@
  * math via toCents / sumAmounts from ./format.ts.
  */
 
-import { isNegative, sumAmounts } from "./format";
+import { isNegative, sumAmounts, toCents } from "./format";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -387,4 +387,63 @@ export const computeMonthSums = (
 		.filter((t) => !isNegative(t.amount))
 		.map((t) => t.amount);
 	return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
+};
+
+// ── Per-month category distribution (chart "Despesas" modes) ────────────────
+
+export interface CategoryMonthSeries {
+	/** Parent categories ranked by total spend desc; tail collapsed to "outros". */
+	categories: string[];
+	/** month ("YYYY-MM") → parent category → positive expense magnitude. */
+	byMonth: Map<string, Map<string, number>>;
+}
+
+const OUTROS = "outros";
+
+/**
+ * Break monthly expenses down by PARENT category for the stacked/line
+ * "Despesas" chart modes. Keeps the `topN` biggest parents; everything else
+ * rolls into an "outros" bucket so the legend stays readable. Category
+ * resolution is overlay-first (matches the transaction list).
+ */
+export const expensesByMonthCategory = (
+	transactions: ReadonlyArray<TxView>,
+	overlayMap: Map<string, ReviewOverlay>,
+	topN = 6,
+): CategoryMonthSeries => {
+	const totals = new Map<string, number>();
+	const raw = new Map<string, Map<string, number>>(); // month -> parent -> mag
+
+	for (const tx of transactions) {
+		if (!isNegative(tx.amount)) continue;
+		const parent = parseCategory(effectiveCategory(tx, overlayMap)).parent;
+		const mag = Math.abs(toCents(tx.amount)) / 100;
+		totals.set(parent, (totals.get(parent) ?? 0) + mag);
+		let m = raw.get(tx.month);
+		if (!m) {
+			m = new Map();
+			raw.set(tx.month, m);
+		}
+		m.set(parent, (m.get(parent) ?? 0) + mag);
+	}
+
+	const ranked = Array.from(totals.entries())
+		.sort((a, b) => b[1] - a[1])
+		.map(([cat]) => cat);
+	const top = new Set(ranked.slice(0, topN));
+	const hasOutros = ranked.length > topN;
+	const categories = ranked.slice(0, topN);
+	if (hasOutros) categories.push(OUTROS);
+
+	const byMonth = new Map<string, Map<string, number>>();
+	for (const [month, cats] of raw) {
+		const collapsed = new Map<string, number>();
+		for (const [cat, mag] of cats) {
+			const key = top.has(cat) ? cat : OUTROS;
+			collapsed.set(key, (collapsed.get(key) ?? 0) + mag);
+		}
+		byMonth.set(month, collapsed);
+	}
+
+	return { categories, byMonth };
 };

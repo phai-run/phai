@@ -1,6 +1,6 @@
 import { queryDb } from "@livestore/livestore";
 import { useStore, useQuery, useClientDocument } from "@livestore/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { events, tables } from "../livestore/schema";
 import {
 	useChartSeed,
@@ -8,6 +8,11 @@ import {
 	useTransactionsSeed,
 } from "../bridge/sync";
 
+import {
+	buildOverlayMap,
+	expensesByMonthCategory,
+	type TxView as TxViewD,
+} from "../lib/derivations";
 import { ErrorNote, LoadingNote } from "../components/ui";
 import { PlanningChart } from "./PlanningChart";
 import { MonthDetail } from "./MonthDetail";
@@ -29,6 +34,8 @@ const YEAR_WINDOW = planningYearWindow(new Date());
 const chart$ = queryDb(tables.chartMonths.orderBy("ordinal", "asc"));
 const forecasts$ = queryDb(tables.forecasts.orderBy("dueDate", "asc"));
 const forecastOverlay$ = queryDb(tables.forecastOverlay);
+const txAll$ = queryDb(tables.transactions);
+const reviewOverlay$ = queryDb(tables.reviewOverlay);
 
 const monthOf = (date: string | null): string | null =>
 	date ? date.slice(0, 7) : null;
@@ -67,6 +74,16 @@ export const Dashboard = () => {
 	const chartRows = useQuery(chart$) as ReadonlyArray<ChartMonthView>;
 	const forecastsRaw = useQuery(forecasts$);
 	const fOverlay = useQuery(forecastOverlay$);
+	const txRows = useQuery(txAll$) as ReadonlyArray<TxViewD>;
+	const rOverlay = useQuery(reviewOverlay$);
+
+	// Per-month expense distribution by parent category for the chart's
+	// "Despesas" modes (stacked bars / multi-line) — derived client-side from
+	// the already-seeded transactions (D3).
+	const categorySeries = useMemo(
+		() => expensesByMonthCategory(txRows, buildOverlayMap(rOverlay as never)),
+		[txRows, rOverlay],
+	);
 
 	// Seed: current year
 	const chartSeed = useChartSeed(
@@ -128,21 +145,29 @@ export const Dashboard = () => {
 		);
 	};
 
-	// Sticky / compact detection: IntersectionObserver on a sentinel div
-	// placed right after the full-height chart area. When sentinel leaves
-	// viewport (user scrolled past it), the chart goes compact.
-	const sentinelRef = useRef<HTMLDivElement>(null);
+	// Compact detection driven by scroll position with hysteresis. The old
+	// IntersectionObserver only fired once the whole tall chart had scrolled
+	// away — so it stayed full for a long scroll, then snapped (D1). Collapsing
+	// at a small scroll offset (and expanding a bit earlier) makes the
+	// transition early and smooth without flicker.
 	const [isCompact, setIsCompact] = useState(false);
 
 	useEffect(() => {
-		const sentinel = sentinelRef.current;
-		if (!sentinel) return;
-		const obs = new IntersectionObserver(
-			([entry]) => setIsCompact(!entry.isIntersecting),
-			{ threshold: 0 },
-		);
-		obs.observe(sentinel);
-		return () => obs.disconnect();
+		let raf = 0;
+		const onScroll = () => {
+			if (raf) return;
+			raf = requestAnimationFrame(() => {
+				raf = 0;
+				const y = window.scrollY;
+				setIsCompact((prev) => (prev ? y > 40 : y > 96));
+			});
+		};
+		window.addEventListener("scroll", onScroll, { passive: true });
+		onScroll();
+		return () => {
+			window.removeEventListener("scroll", onScroll);
+			if (raf) cancelAnimationFrame(raf);
+		};
 	}, []);
 
 	const error = chartSeed.error ?? forecastSeed.error;
@@ -179,6 +204,7 @@ export const Dashboard = () => {
 						<PlanningChart
 							months={months}
 							forecastsByMonth={forecastsByMonth}
+							categorySeries={categorySeries}
 							selectedMonth={selected}
 							onSelectMonth={(m) => setUi({ selectedMonth: m })}
 							onDropForecast={moveForecast}
@@ -187,9 +213,6 @@ export const Dashboard = () => {
 					)}
 				</div>
 			</div>
-
-			{/* Sentinel: when this scrolls offscreen, chart → compact */}
-			<div ref={sentinelRef} style={{ height: 0 }} />
 
 			{/* ── Cards (open/settled, cycle total, limit usage) ── */}
 			<div
