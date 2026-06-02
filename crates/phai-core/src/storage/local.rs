@@ -1846,55 +1846,17 @@ impl FinanceStore for LocalStore {
     }
 
     async fn cashflow_reportable(&self) -> Result<Vec<CashflowRow>> {
-        // Cash-flow basis over all reportable accounts. This mirrors v_cashflow
-        // (buckets by the canonical `cash_month` from v_transactions_cashbasis,
-        // so a card purchase lands in the month its bill is paid) and drops OFX
-        // rows when Pluggy produced the same transaction key. See ADR-0025.
+        // Cash-flow basis over all reportable accounts — reads the canonical
+        // `v_cashflow` view directly (single source of truth). The view buckets
+        // by `cash_month` (a card purchase lands in the month its bill is paid,
+        // ADR-0025) over `v_transactions_reportable`, which already drops
+        // ofx-shadowed-by-pluggy and legacy-manual duplicates (ADR-0026), so no
+        // dedup is re-implemented here.
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "
-            WITH reportable AS (
-              SELECT
-                *,
-                MAX(CASE WHEN source = 'pluggy' THEN 1 ELSE 0 END) OVER (
-                  PARTITION BY
-                    transaction_date,
-                    COALESCE(account_id, ''),
-                    COALESCE(amount_cents, CAST(ROUND(CAST(amount AS REAL) * 100) AS INTEGER)),
-                    LOWER(TRIM(raw_description))
-                ) AS has_pluggy
-              FROM v_transactions_cashbasis
-              WHERE COALESCE(category_id, '') NOT IN (SELECT category_id FROM internal_categories)
-            )
             SELECT month_ref, income, expenses, expense_reduction, net
-            FROM (
-              SELECT
-                cash_month AS month_ref,
-                CAST(ROUND(SUM(
-                  CASE
-                    WHEN amount_cents > 0 AND COALESCE(category_id, '') != 'cashback'
-                      THEN amount_cents
-                    ELSE 0
-                  END
-                ) / 100.0, 2) AS TEXT) AS income,
-                CAST(ROUND(SUM(
-                  CASE
-                    WHEN amount_cents < 0 THEN ABS(amount_cents)
-                    ELSE 0
-                  END
-                ) / 100.0, 2) AS TEXT) AS expenses,
-                CAST(ROUND(SUM(
-                  CASE
-                    WHEN amount_cents > 0 AND COALESCE(category_id, '') = 'cashback'
-                      THEN amount_cents
-                    ELSE 0
-                  END
-                ) / 100.0, 2) AS TEXT) AS expense_reduction,
-                CAST(ROUND(SUM(amount_cents) / 100.0, 2) AS TEXT) AS net
-              FROM reportable
-              WHERE NOT (source = 'ofx' AND has_pluggy = 1)
-              GROUP BY 1
-            )
+            FROM v_cashflow
             ORDER BY month_ref ASC
             ",
         )?;
