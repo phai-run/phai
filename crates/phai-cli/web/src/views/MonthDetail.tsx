@@ -1611,10 +1611,20 @@ const HierarchicalCategoryGroup = ({
 						style={{ overflow: "hidden" }}
 					>
 						<div style={{ display: "flex", flexDirection: "column" }}>
-							{parent.hasSubs
-								? /* Subcategory groups */
-									parent.subs.map((sub) => (
-										<SubGroup
+							{parent.hasSubs ? (
+								/* Subcategory tiles in a responsive grid; a tile expands
+								   in place (full row) to reveal its transactions (N6). */
+								<div
+									style={{
+										display: "grid",
+										gridTemplateColumns:
+											"repeat(auto-fill, minmax(220px, 1fr))",
+										gap: 8,
+										padding: 10,
+									}}
+								>
+									{parent.subs.map((sub) => (
+										<SubTile
 											key={sub.sub ?? "_flat_"}
 											sub={sub}
 											parentLabel={parent.parent}
@@ -1626,9 +1636,11 @@ const HierarchicalCategoryGroup = ({
 											onTxDragStart={onTxDragStart}
 											registerDropTarget={registerDropTarget}
 										/>
-									))
-								: /* Flat parent — render txs directly (no sub header) */
-									parent.subs[0]?.txs.map((tx) => {
+									))}
+								</div>
+							) : (
+								/* Flat parent — render txs directly (no sub header) */
+								parent.subs[0]?.txs.map((tx) => {
 										const o = overlayById.get(tx.id);
 										return (
 											<TxRow
@@ -1643,7 +1655,8 @@ const HierarchicalCategoryGroup = ({
 												onDragStart={onTxDragStart}
 											/>
 										);
-									})}
+									})
+								)}
 						</div>
 					</motion.div>
 				)}
@@ -1652,8 +1665,9 @@ const HierarchicalCategoryGroup = ({
 	);
 };
 
-/** Subcategory header + transactions within a parent. */
-const SubGroup = ({
+/** Subcategory tile: a compact card (label · total · count) that expands in
+ *  place — spanning the full grid row — to reveal its transactions (N6). */
+const SubTile = ({
 	sub,
 	parentLabel,
 	overlayById,
@@ -1685,6 +1699,7 @@ const SubGroup = ({
 		el: HTMLElement | null,
 	) => (() => void) | undefined;
 }) => {
+	const [expanded, setExpanded] = useState(false);
 	const isFlatSub = sub.sub === "—";
 	const subLabel = isFlatSub ? "sem subcategoria" : sub.sub;
 	const targetCategoryId =
@@ -1693,35 +1708,55 @@ const SubGroup = ({
 			: isFlatSub
 				? parentLabel
 				: `${parentLabel}:${sub.sub}`;
+	const hasInstallment = sub.txs.some((t) => t.isInstallment === 1);
 
-	// Register subcategory as drop target (compound: parent:sub)
-	const subHeaderRef = useRef<HTMLDivElement>(null);
+	// Register the tile as a drop target (compound category: parent:sub).
+	const tileRef = useRef<HTMLDivElement>(null);
 	useEffect(() => {
-		if (subHeaderRef.current) {
-			return registerDropTarget(targetCategoryId, subHeaderRef.current);
+		if (tileRef.current) {
+			return registerDropTarget(targetCategoryId, tileRef.current);
 		}
 		return undefined;
 	}, [registerDropTarget, targetCategoryId]);
 
 	return (
-		<div>
-			{/* Sub header */}
-			<div
-				ref={subHeaderRef}
+		<div
+			ref={tileRef}
+			style={{
+				border: "1px solid var(--border)",
+				borderRadius: "var(--radius-sm)",
+				background: "var(--surface)",
+				overflow: "hidden",
+				// An expanded tile takes the whole row so its transactions list
+				// gets full width regardless of where it sits in the grid.
+				gridColumn: expanded ? "1 / -1" : "auto",
+				alignSelf: "start",
+			}}
+		>
+			{/* Tile header (click to expand/collapse) */}
+			<button
+				type="button"
+				onClick={() => setExpanded((v) => !v)}
 				style={{
+					width: "100%",
 					display: "flex",
 					alignItems: "center",
-					gap: 10,
-					padding: "8px 14px 8px 28px",
-					background: "rgba(255,255,255,0.015)",
-					borderTop: "1px solid var(--border)",
+					gap: 8,
+					padding: "9px 11px",
+					background: "transparent",
+					border: "none",
+					cursor: "pointer",
+					textAlign: "left",
 				}}
 			>
+				<span style={{ color: "var(--muted2)", fontSize: 10, minWidth: 9 }}>
+					{expanded ? "▾" : "▸"}
+				</span>
 				<span
 					style={{
 						flex: 1,
 						fontSize: 12,
-						color: "var(--muted)",
+						color: "var(--white)",
 						overflow: "hidden",
 						textOverflow: "ellipsis",
 						whiteSpace: "nowrap",
@@ -1729,39 +1764,63 @@ const SubGroup = ({
 				>
 					{subLabel}
 				</span>
+				{hasInstallment && (
+					<span
+						className="mono"
+						style={{ fontSize: 9, color: "var(--amber)" }}
+						title="contém parcelas"
+					>
+						parc
+					</span>
+				)}
 				<span
 					className="mono"
 					style={{
 						fontSize: 11,
-						fontWeight: 500,
+						fontWeight: 600,
 						color: "var(--rose)",
 						whiteSpace: "nowrap",
 					}}
 				>
 					{formatMoney(String(sub.total))}
 				</span>
-				<span className="mono" style={{ fontSize: 10, color: "var(--muted2)" }}>
+				<span
+					className="mono"
+					style={{ fontSize: 10, color: "var(--muted2)", minWidth: 14, textAlign: "right" }}
+				>
 					{sub.count}
 				</span>
-			</div>
+			</button>
 
-			{/* Transactions */}
-			{sub.txs.map((tx) => {
-				const o = overlayById.get(tx.id);
-				return (
-					<TxRow
-						key={tx.id}
-						tx={tx}
-						overlay={o}
-						onEdit={onEdit}
-						isSelected={selectedIds.has(tx.id)}
-						isFocused={focusedTxId === tx.id}
-						onClick={onTxClick}
-						showDragHandle
-						onDragStart={onTxDragStart}
-					/>
-				);
-			})}
+			{/* Transactions (revealed on expand) */}
+			<AnimatePresence initial={false}>
+				{expanded && (
+					<motion.div
+						initial={{ height: 0, opacity: 0 }}
+						animate={{ height: "auto", opacity: 1 }}
+						exit={{ height: 0, opacity: 0 }}
+						transition={{ duration: 0.16, ease: "easeInOut" }}
+						style={{ overflow: "hidden" }}
+					>
+						{sub.txs.map((tx) => {
+							const o = overlayById.get(tx.id);
+							return (
+								<TxRow
+									key={tx.id}
+									tx={tx}
+									overlay={o}
+									onEdit={onEdit}
+									isSelected={selectedIds.has(tx.id)}
+									isFocused={focusedTxId === tx.id}
+									onClick={onTxClick}
+									showDragHandle
+									onDragStart={onTxDragStart}
+								/>
+							);
+						})}
+					</motion.div>
+				)}
+			</AnimatePresence>
 		</div>
 	);
 };

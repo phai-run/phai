@@ -491,3 +491,55 @@ describe("effectiveCategory", () => {
 		expect(effectiveCategory(tx, emptyOverlay)).toBeNull();
 	});
 });
+
+// ── filterTransactions flags (E1/E2 regression) ─────────────────────────────
+// The "Parcelas" and "Não revisadas" filters used to return nothing. Lock the
+// flag semantics deterministically so they keep returning the right subset.
+
+describe("filterTransactions installment/unreviewed flags", () => {
+	const mk = (id: string, o: Partial<TxView>): TxView => ({
+		id,
+		accountId: "acc-1",
+		postedAt: "2026-06-01",
+		amount: "-10.00",
+		rawDescription: "x",
+		description: null,
+		merchantName: null,
+		purpose: null,
+		categoryId: "compras",
+		month: "2026-06",
+		paymentStatus: "posted",
+		reviewed: 1,
+		isInstallment: 0,
+		isSubscription: 0,
+		...o,
+	});
+	const rows: TxView[] = [
+		mk("a", { isInstallment: 1, installmentMarker: "2/3" }),
+		mk("b", { isInstallment: 1, installmentMarker: "1/4" }),
+		mk("c", {}),
+		mk("d", { reviewed: 0 }),
+		mk("e", { reviewed: 0 }),
+	];
+	const base: TxFilters = {
+		accountFilter: null,
+		ownerFilter: null,
+		categoryFilter: null,
+		textFilter: null,
+		installmentsOnly: false,
+		subscriptionsOnly: false,
+		unreviewedOnly: false,
+	};
+	const ov = new Map<string, ReviewOverlay>();
+	const am = buildAccountMap([]);
+
+	it("installmentsOnly returns exactly the installment rows (not empty)", () => {
+		const r = filterTransactions(rows, { ...base, installmentsOnly: true }, ov, am);
+		expect(r.map((t) => t.id).sort()).toEqual(["a", "b"]);
+	});
+
+	it("unreviewedOnly returns exactly the unreviewed rows (not empty)", () => {
+		const r = filterTransactions(rows, { ...base, unreviewedOnly: true }, ov, am);
+		expect(r.map((t) => t.id).sort()).toEqual(["d", "e"]);
+	});
+});

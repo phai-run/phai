@@ -9530,6 +9530,55 @@ mod tests {
         assert_eq!(updated.category_source, "manual");
     }
 
+    /// Regression (web C5): a human-review edit from the web bridge must persist
+    /// the human description / merchant / purpose — not just the category — so
+    /// the edit survives a page reload (which re-seeds from the store). The web
+    /// `/api/events` flush lands here via `apply_human_review`.
+    #[tokio::test]
+    async fn human_review_persists_description_merchant_purpose() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let config = phai_core::AppConfig {
+            local_db_path: Some(db_path.clone()),
+            ..Default::default()
+        };
+        let store = phai_core::storage::local::LocalStore::new(config.clone()).unwrap();
+        phai_core::migrations::run_migrations(&store, &config)
+            .await
+            .unwrap();
+
+        let tx = sample_review_row("alimentacao:mercado");
+        store
+            .upsert_transactions(std::slice::from_ref(&tx))
+            .await
+            .unwrap();
+
+        apply_human_review(
+            &store,
+            &config,
+            &tx.transaction_id,
+            HumanReviewPatch {
+                description: Some("Zenilda Faxina".to_string()),
+                merchant_name: Some("Zenilda".to_string()),
+                purpose: Some("Faxina mensal".to_string()),
+                category_id: Some("moradia:servicos".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // What the web reseed (`/api/transactions`) would surface after reload.
+        let got = store
+            .transaction_by_id(&tx.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.description.as_deref(), Some("Zenilda Faxina"));
+        assert_eq!(got.merchant_name.as_deref(), Some("Zenilda"));
+        assert_eq!(got.purpose.as_deref(), Some("Faxina mensal"));
+        assert_eq!(got.category_id.as_deref(), Some("moradia:servicos"));
+    }
+
     // ── E2E: Consistency between Local (SQLite) and Remote (BigQuery) ──
     // Simulates the full TUI save pipeline with two SQLite DBs playing the
     // roles of local cache and remote BigQuery.
