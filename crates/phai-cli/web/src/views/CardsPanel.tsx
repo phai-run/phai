@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type CardRow } from "../bridge/api";
 import { Card } from "../components/ui";
-import { formatMoneyNumber, numeric } from "../lib/format";
+import { formatMoneyCompact, formatMoneyNumber, numeric } from "../lib/format";
 
 /**
  * Per-credit-card cycle panel: shows whether each card's bill is open (aberta)
@@ -105,9 +105,23 @@ const CardTile = ({ card }: { card: CardRow }) => {
 			<div style={{ fontSize: 22, fontWeight: 700, marginTop: 6 }}>
 				{formatMoneyNumber(total)}
 			</div>
-			<div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-				{card.cycleMonth ? `Ciclo ${card.cycleMonth}` : "—"}
-				{card.dueDate ? ` · vence ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}` : ""}
+			<div
+				className="mono"
+				style={{
+					fontSize: 11,
+					color: "var(--muted)",
+					marginTop: 2,
+					whiteSpace: "nowrap",
+					overflow: "hidden",
+					textOverflow: "ellipsis",
+				}}
+			>
+				{card.cycleMonth
+					? `ciclo ${card.cycleMonth.slice(5, 7)}/${card.cycleMonth.slice(2, 4)}`
+					: "—"}
+				{card.dueDate
+					? ` · vence ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}`
+					: ""}
 			</div>
 			<div
 				style={{
@@ -239,6 +253,7 @@ const CardTile = ({ card }: { card: CardRow }) => {
 
 const CardMetric = ({ label, value }: { label: string; value: number }) => (
 	<div
+		title={formatMoneyNumber(value)}
 		style={{
 			border: "1px solid var(--border)",
 			borderRadius: "var(--radius-sm)",
@@ -266,9 +281,11 @@ const CardMetric = ({ label, value }: { label: string; value: number }) => (
 				color: value > 0 ? "var(--rose)" : "var(--muted)",
 				marginTop: 2,
 				whiteSpace: "nowrap",
+				overflow: "hidden",
+				textOverflow: "ellipsis",
 			}}
 		>
-			{formatMoneyNumber(value)}
+			{formatMoneyCompact(value)}
 		</div>
 	</div>
 );
