@@ -717,6 +717,35 @@ const FullChart = ({
 							))}
 						</>
 					)}
+					{/* Manual-forecast marker: a discrete ring under months that carry an
+					    explicit manual forecast (kind === "manual"). Installments,
+					    subscriptions and recurrences never trigger it. */}
+					{mode === "caixa" &&
+						months.map((m, i) => {
+							const manual = (forecastsByMonth.get(m.month) ?? []).filter(
+								(f) => f.kind === "manual",
+							);
+							if (manual.length === 0) return null;
+							const tip = manual
+								.map(
+									(f) =>
+										`${f.description}: ${formatMoneyNumber(Math.abs(numeric(f.amount)))}`,
+								)
+								.join("\n");
+							return (
+								<circle
+									key={`mf-${m.month}`}
+									cx={midX(i)}
+									cy={BASELINE + 24}
+									r={2.5}
+									fill="none"
+									stroke="var(--purple)"
+									strokeWidth={1.2}
+								>
+									<title>{`Previsão manual\n${tip}`}</title>
+								</circle>
+							);
+						})}
 					{/* Balance dots left of expense bars in despesas-barras mode — removed */}
 				</svg>
 
