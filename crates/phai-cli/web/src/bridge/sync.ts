@@ -105,22 +105,18 @@ export const useBridgeSync = (): SyncStatus => {
 	useEffect(() => {
 		let cancelled = false;
 		setIdentityReady(false);
-		api.identity()
-			.then(async (identity) => {
-				if (cancelled) return null;
+		// Fetch identity + reference data concurrently (independent requests) and
+		// await them together, so first paint isn't gated on serial round-trips.
+		// Identity still drives the stale-write clear, which must run before the
+		// category/account commits (a bridge-identity change nukes all tables) —
+		// that ordering is preserved inside the handler.
+		Promise.all([api.identity(), api.categories(), api.accounts()])
+			.then(([identity, cats, accs]) => {
+				if (cancelled) return;
 				if (clearStaleLocalWrites(store, identity)) {
 					setPending(0);
 				}
 				writeStoredBridgeIdentity(identity);
-				const [cats, accs] = await Promise.all([
-					api.categories(),
-					api.accounts(),
-				]);
-				return { cats, accs };
-			})
-			.then((seed) => {
-				if (cancelled || !seed) return;
-				const { cats, accs } = seed;
 				store.commit(events.categoriesSeeded({ ids: cats.ids }));
 				store.commit(events.accountsSeeded({ rows: accs.rows }));
 				setSeeded(true);

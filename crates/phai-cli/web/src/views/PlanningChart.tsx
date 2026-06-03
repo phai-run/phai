@@ -1,21 +1,22 @@
 import { useMemo, useRef, useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import { formatMoneyNumber, numeric } from "../lib/format";
 import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView, ChartMode } from "./types";
 import type { CategoryMonthSeries } from "../lib/derivations";
 
-// Distinct palette for the per-category "Despesas" modes (stacked bars / lines).
-// Last entry ("outros") stays neutral grey.
+// Qualitative palette for the per-category "Despesas" stacked bars. Kept
+// distinct from the semantic income (cyan/green) and expense (rose) hues so a
+// category colour never reads as "income" or "balance". Last entry stays a
+// neutral grey for the rolled-up "outros" bucket.
 const CAT_COLORS = [
-	"#6d4aff",
-	"#0d9488",
-	"#e11d48",
-	"#d97706",
-	"#2563eb",
-	"#15803d",
-	"#9a9aae",
+	"#6d4aff", // purple
+	"#2563eb", // blue
+	"#d97706", // amber
+	"#0891b2", // teal
+	"#db2777", // pink
+	"#7c3aed", // violet
+	"#9a9aae", // neutral grey ("outros")
 ];
 const catColor = (index: number, total: number): string =>
 	index === total - 1 && total > CAT_COLORS.length
@@ -118,7 +119,6 @@ export const PlanningChart = ({
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
-	compact,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
@@ -126,7 +126,6 @@ export const PlanningChart = ({
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
-	compact: boolean;
 }) => {
 	const model = useMemo(() => buildModel(months), [months]);
 	const [mode, setMode] = useState<ChartMode>("caixa");
@@ -170,45 +169,16 @@ export const PlanningChart = ({
 		>
 			<ModeSelector mode={mode} onChange={setMode} />
 
-			<AnimatePresence mode="wait" initial={false}>
-				{compact ? (
-					<motion.div
-						key="compact"
-						initial={{ opacity: 0, y: -4 }}
-						animate={{ opacity: 1, y: 0 }}
-						exit={{ opacity: 0, y: -4 }}
-						transition={{ duration: 0.18 }}
-					>
-						<CompactChart
-							months={months}
-							model={model}
-							mode={mode}
-							selectedMonth={selectedMonth}
-							onSelectMonth={onSelectMonth}
-							onDropForecast={onDropForecast}
-						/>
-					</motion.div>
-				) : (
-					<motion.div
-						key="full"
-						initial={{ opacity: 0 }}
-						animate={{ opacity: 1 }}
-						exit={{ opacity: 0 }}
-						transition={{ duration: 0.18 }}
-					>
-						<FullChart
-							months={months}
-							model={model}
-							mode={mode}
-							forecastsByMonth={forecastsByMonth}
-							categorySeries={categorySeries}
-							selectedMonth={selectedMonth}
-							onSelectMonth={onSelectMonth}
-							onDropForecast={onDropForecast}
-						/>
-					</motion.div>
-				)}
-			</AnimatePresence>
+			<FullChart
+				months={months}
+				model={model}
+				mode={mode}
+				forecastsByMonth={forecastsByMonth}
+				categorySeries={categorySeries}
+				selectedMonth={selectedMonth}
+				onSelectMonth={onSelectMonth}
+				onDropForecast={onDropForecast}
+			/>
 		</div>
 	);
 };
@@ -240,14 +210,9 @@ const ModeSelector = ({
 			onClick={() => onChange("caixa")}
 		/>
 		<ModeChip
-			label="Despesas (barras)"
+			label="Despesas"
 			active={mode === "despesas-barras"}
 			onClick={() => onChange("despesas-barras")}
-		/>
-		<ModeChip
-			label="Despesas (linha)"
-			active={mode === "despesas-linha"}
-			onClick={() => onChange("despesas-linha")}
 		/>
 	</div>
 );
@@ -346,9 +311,6 @@ const FullChart = ({
 					`${k === 0 ? "M" : "L"} ${midX(offset + k)} ${cashY(b, model.cashMin, model.cashSpan)}`,
 			)
 			.join(" ");
-
-	// Expense bar scale (shared by both Despesas modes).
-	const expMax = mode === "caixa" ? model.maxBar : model.expMaxBar;
 
 	// Year totals
 	const yearIn = model.realIns.reduce((s, v, i) => s + v + model.fcIns[i], 0);
@@ -668,11 +630,18 @@ const FullChart = ({
 										}
 										let yCursor = BASELINE;
 										const nCats = categorySeries.categories.length;
+										const catTotal = Array.from(
+											catMags.values(),
+										).reduce((a, b) => a + b, 0);
 										return categorySeries.categories.map((cat, ci) => {
 											const mag = catMags.get(cat) ?? 0;
 											const h = bh(mag, model.expMaxBar);
 											if (h < 0.5) return null;
 											yCursor -= h;
+											const pct =
+												catTotal > 0
+													? Math.round((mag / catTotal) * 100)
+													: 0;
 											return (
 												<rect
 													key={cat}
@@ -683,7 +652,7 @@ const FullChart = ({
 													fill={catColor(ci, nCats)}
 													opacity={isSel || isHov ? 1 : 0.85}
 												>
-													<title>{`${cat}: ${formatMoneyNumber(mag)}`}</title>
+													<title>{`${cat}: ${formatMoneyNumber(mag)} (${pct}%)`}</title>
 												</rect>
 											);
 										});
@@ -717,76 +686,6 @@ const FullChart = ({
 							);
 						})}
 
-					{/* ── Despesas-linha mode: expense line/area chart ── */}
-					{mode === "despesas-linha" && (
-						<>
-							{/* Per-category expense lines (D3) */}
-							{categorySeries.categories.map((cat, ci) => {
-								const d = months
-									.map((m, i) => {
-										const mag =
-											categorySeries.byMonth.get(m.month)?.get(cat) ?? 0;
-										return `${i === 0 ? "M" : "L"} ${midX(i)} ${
-											BASELINE - bh(mag, expMax)
-										}`;
-									})
-									.join(" ");
-								return (
-									<path
-										key={cat}
-										d={d}
-										fill="none"
-										stroke={catColor(ci, categorySeries.categories.length)}
-										strokeWidth={1.8}
-										opacity={hover !== null ? 0.5 : 0.9}
-										style={{ transition: "opacity 120ms" }}
-									/>
-								);
-							})}
-
-							{/* Month labels */}
-							{months.map((m, i) => {
-								const isSel = m.month === selectedMonth;
-								return (
-									<g key={m.label}>
-										{(isSel || hover === i) && !isSel && (
-											<rect
-												x={PAD.left + slot * i}
-												y={PAD.top}
-												width={slot}
-												height={innerH + 2}
-												fill={
-													isSel ? "rgba(225,29,72,0.06)" : "rgba(0,0,0,0.025)"
-												}
-											/>
-										)}
-										<text
-											x={midX(i)}
-											y={BASELINE + 14}
-											textAnchor="middle"
-											fontSize={9.5}
-											fontFamily="var(--font-mono)"
-											fill={isSel ? "var(--rose)" : "var(--muted)"}
-											fontWeight={isSel ? "600" : "400"}
-										>
-											{m.label}
-										</text>
-										<text
-											x={midX(i)}
-											y={BASELINE + 30}
-											textAnchor="middle"
-											fontSize={8.5}
-											fontFamily="var(--font-mono)"
-											fill="var(--rose)"
-										>
-											{formatMoneyNumber(model.realOuts[i] + model.fcOuts[i])}
-										</text>
-									</g>
-								);
-							})}
-						</>
-					)}
-
 					{/* Balance / resultado line — caixa mode only */}
 					{mode === "caixa" && (
 						<>
@@ -818,6 +717,35 @@ const FullChart = ({
 							))}
 						</>
 					)}
+					{/* Manual-forecast marker: a discrete ring under months that carry an
+					    explicit manual forecast (kind === "manual"). Installments,
+					    subscriptions and recurrences never trigger it. */}
+					{mode === "caixa" &&
+						months.map((m, i) => {
+							const manual = (forecastsByMonth.get(m.month) ?? []).filter(
+								(f) => f.kind === "manual",
+							);
+							if (manual.length === 0) return null;
+							const tip = manual
+								.map(
+									(f) =>
+										`${f.description}: ${formatMoneyNumber(Math.abs(numeric(f.amount)))}`,
+								)
+								.join("\n");
+							return (
+								<circle
+									key={`mf-${m.month}`}
+									cx={midX(i)}
+									cy={BASELINE + 24}
+									r={2.5}
+									fill="none"
+									stroke="var(--purple)"
+									strokeWidth={1.2}
+								>
+									<title>{`Previsão manual\n${tip}`}</title>
+								</circle>
+							);
+						})}
 					{/* Balance dots left of expense bars in despesas-barras mode — removed */}
 				</svg>
 
@@ -866,7 +794,11 @@ const ChartLegend = ({
 	if (mode === "caixa") {
 		items.push({ color: "var(--cyan)", label: "entradas" });
 		items.push({ color: "var(--rose)", label: "saídas" });
-		if (hasFc) items.push({ color: "#99f6e4", label: "previsão" });
+		if (hasFc) {
+			items.push({ color: "#99f6e4", label: "entrada prevista" });
+			items.push({ color: "#fda4af", label: "saída prevista" });
+			items.push({ color: "var(--amber)", label: "parcela prevista" });
+		}
 		items.push({
 			color: "var(--purple)",
 			label: "saldo",
@@ -878,14 +810,6 @@ const ChartLegend = ({
 			items.push({
 				color: "#fda4af",
 				label: "previsto",
-			});
-	} else if (mode === "despesas-linha") {
-		items.push({ color: "var(--rose)", label: "realizado (área)" });
-		if (hasFc)
-			items.push({
-				color: "#fda4af",
-				label: "previsto",
-				dashed: true,
 			});
 	}
 
@@ -909,213 +833,6 @@ const ChartLegend = ({
 					dashed={it.dashed}
 				/>
 			))}
-		</div>
-	);
-};
-
-// ── Compact chart ──────────────────────────────────────────────────────────
-
-const CompactChart = ({
-	months,
-	model,
-	mode,
-	selectedMonth,
-	onSelectMonth,
-	onDropForecast,
-}: {
-	months: ReadonlyArray<ChartMonthView>;
-	model: ChartModel;
-	mode: ChartMode;
-	selectedMonth: string | null;
-	onSelectMonth: (month: string) => void;
-	onDropForecast: (forecastId: string, targetMonth: string) => void;
-}) => {
-	const BAR_MAX_C = 30;
-	const expMax = mode === "caixa" ? model.maxBar : model.expMaxBar;
-
-	// Selected-month summary so the collapsed chart stays useful instead of
-	// shrinking to unreadable bars (D2).
-	const selIdx = months.findIndex((m) => m.month === selectedMonth);
-	const sel = selIdx >= 0 ? months[selIdx] : null;
-	const selIn = selIdx >= 0 ? model.realIns[selIdx] + model.fcIns[selIdx] : 0;
-	const selOut =
-		selIdx >= 0 ? model.realOuts[selIdx] + model.fcOuts[selIdx] : 0;
-	const selBal = selIdx >= 0 ? model.balances[selIdx] : 0;
-
-	return (
-		<div style={{ position: "relative", height: 60 }}>
-			{/* Selected-month banner */}
-			{sel && (
-				<div
-					className="mono"
-					style={{
-						position: "absolute",
-						top: 0,
-						left: 8,
-						right: 8,
-						display: "flex",
-						alignItems: "baseline",
-						gap: 12,
-						fontSize: 10,
-						zIndex: 1,
-						pointerEvents: "none",
-					}}
-				>
-					<strong style={{ fontSize: 11 }}>{sel.label}</strong>
-					<span style={{ color: "var(--cyan)" }}>
-						↑ <CountMoney value={selIn} />
-					</span>
-					<span style={{ color: "var(--rose)" }}>
-						↓ <CountMoney value={selOut} />
-					</span>
-					<span style={{ color: selIn - selOut >= 0 ? "var(--green)" : "var(--rose)" }}>
-						= {selIn - selOut >= 0 ? "+" : ""}
-						<CountMoney value={selIn - selOut} />
-					</span>
-					<span style={{ marginLeft: "auto", color: "var(--muted)" }}>
-						saldo <CountMoney value={selBal} />
-					</span>
-				</div>
-			)}
-			{/* Visual layer */}
-			<div
-				style={{
-					position: "absolute",
-					inset: 0,
-					display: "flex",
-					alignItems: "flex-end",
-					paddingBottom: 14,
-					paddingTop: 16,
-				}}
-			>
-				{months.map((m, i) => {
-					const inH = Math.max(
-						2,
-						((model.realIns[i] + model.fcIns[i]) / model.maxBar) * BAR_MAX_C,
-					);
-					const outH = Math.max(
-						2,
-						((model.realOuts[i] + model.fcOuts[i]) / expMax) * BAR_MAX_C,
-					);
-					const rOutH = Math.max(1, (model.realOuts[i] / expMax) * BAR_MAX_C);
-					const fOutH = Math.max(1, (model.fcOuts[i] / expMax) * BAR_MAX_C);
-					const isSel = m.month === selectedMonth;
-
-					return (
-						<div
-							key={m.month}
-							style={{
-								flex: 1,
-								display: "flex",
-								flexDirection: "column",
-								alignItems: "center",
-								justifyContent: "flex-end",
-								height: "100%",
-								borderRadius: 4,
-								background: isSel
-									? mode === "caixa"
-										? "rgba(13,148,136,0.09)"
-										: "rgba(225,29,72,0.07)"
-									: "transparent",
-								position: "relative",
-							}}
-						>
-							{/* Mini bars */}
-							<div
-								style={{
-									display: "flex",
-									alignItems: "flex-end",
-									gap: 1,
-									marginBottom: 2,
-								}}
-							>
-								{mode === "caixa" && (
-									<>
-										<div
-											style={{
-												width: 4,
-												height: inH,
-												background: "var(--cyan)",
-												borderRadius: "1px 1px 0 0",
-												opacity: model.fcIns[i] > 0 ? 0.7 : 1,
-											}}
-										/>
-										<div
-											style={{
-												width: 4,
-												height: outH,
-												background: "var(--rose)",
-												borderRadius: "1px 1px 0 0",
-												opacity: model.fcOuts[i] > 0 ? 0.7 : 1,
-											}}
-										/>
-									</>
-								)}
-								{mode === "despesas-barras" && (
-									<>
-										<div
-											style={{
-												width: 6,
-												height: rOutH,
-												background: "var(--rose)",
-												borderRadius: "1px 1px 0 0",
-											}}
-										/>
-										{model.fcOuts[i] > 0 && (
-											<div
-												style={{
-													width: 6,
-													height: fOutH,
-													background: "#fda4af",
-													borderRadius: "1px 1px 0 0",
-												}}
-											/>
-										)}
-									</>
-								)}
-								{mode === "despesas-linha" && (
-									<div
-										style={{
-											width: 5,
-											height: outH,
-											background: "var(--rose)",
-											borderRadius: "1px 1px 0 0",
-											opacity: model.fcOuts[i] > 0 ? 0.5 : 0.85,
-										}}
-									/>
-								)}
-							</div>
-							{/* Month label */}
-							<span
-								className="mono"
-								style={{
-									position: "absolute",
-									bottom: 0,
-									fontSize: 8,
-									color: isSel
-										? mode === "caixa"
-											? "var(--cyan)"
-											: "var(--rose)"
-										: "var(--muted2)",
-									fontWeight: isSel ? 600 : 400,
-									lineHeight: 1,
-								}}
-							>
-								{m.label.slice(0, 3)}
-							</span>
-						</div>
-					);
-				})}
-			</div>
-
-			{/* Interaction overlay */}
-			<ColumnOverlay
-				months={months}
-				selectedMonth={selectedMonth}
-				onSelectMonth={onSelectMonth}
-				onHover={() => {}}
-				onDropForecast={onDropForecast}
-			/>
 		</div>
 	);
 };

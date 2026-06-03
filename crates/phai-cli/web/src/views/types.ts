@@ -11,7 +11,7 @@ export interface ChartMonthView {
 	isFuture: number; // 0/1 — SQLite has no bool
 }
 
-export type ChartMode = "caixa" | "despesas-barras" | "despesas-linha";
+export type ChartMode = "caixa" | "despesas-barras";
 
 /** A forecast as the view sees it: overlay-redated dueDate, derived month. */
 export interface ForecastView {

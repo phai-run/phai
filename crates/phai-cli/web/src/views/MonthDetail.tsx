@@ -8,7 +8,6 @@ import {
 	formatMoney,
 	formatMoneyNumber,
 	isNegative,
-	numeric,
 	sumAmounts,
 } from "../lib/format";
 import { useDnd } from "../lib/dnd";
@@ -131,6 +130,7 @@ export const MonthDetail = ({
 			if (ui.installmentsOnly && !tx.isInstallment) return false;
 			if (ui.subscriptionsOnly && !tx.isSubscription) return false;
 			if (ui.unreviewedOnly && tx.reviewed) return false;
+			if (ui.uncategorizedOnly && (effectiveCat(tx) ?? "") !== "") return false;
 			if (ui.accountFilter && tx.accountId !== ui.accountFilter) return false;
 			if (ui.ownerFilter) {
 				if ((accountById.get(tx.accountId)?.owner ?? "") !== ui.ownerFilter)
@@ -162,6 +162,12 @@ export const MonthDetail = ({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filtered, overlayById]);
 
+	// Denominator for each expense category's share of the month's spending.
+	const expenseTotal = useMemo(
+		() => groups.expenses.reduce((s, p) => s + Math.abs(p.total), 0),
+		[groups],
+	);
+
 	// Filter sums
 	const sums = useMemo(() => {
 		const out = filtered
@@ -172,29 +178,6 @@ export const MonthDetail = ({
 			.map((t) => t.amount);
 		return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
 	}, [filtered]);
-
-	// Month summary (all month transactions, no filter)
-	const monthSums = useMemo(() => {
-		const out = monthTxs
-			.filter((t) => isNegative(t.amount))
-			.map((t) => t.amount);
-		const inc = monthTxs
-			.filter((t) => !isNegative(t.amount))
-			.map((t) => t.amount);
-		return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
-	}, [monthTxs]);
-
-	const summarySums = useMemo(() => {
-		if (!chart) return monthSums;
-		return {
-			entradas:
-				Math.max(0, numeric(chart.inflows)) +
-				Math.max(0, numeric(chart.forecastInflowsRemaining)),
-			saidas:
-				Math.abs(numeric(chart.outflows)) +
-				Math.abs(numeric(chart.forecastOutflowsRemaining)),
-		};
-	}, [chart, monthSums]);
 
 	// Modal state — stable setter
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
@@ -472,6 +455,7 @@ export const MonthDetail = ({
 		ui.installmentsOnly ||
 		ui.subscriptionsOnly ||
 		ui.unreviewedOnly ||
+		ui.uncategorizedOnly ||
 		!!ui.accountFilter ||
 		!!ui.ownerFilter ||
 		!!ui.categoryFilter ||
@@ -486,21 +470,12 @@ export const MonthDetail = ({
 		sumAmounts(installments.map((t) => t.amount)),
 	);
 
-	const projectedClose = chart
-		? chart.isFuture
-			? Number(chart.projectedClosingBalance)
-			: Number(chart.closingBalance)
-		: null;
-
 	return (
 		<div style={{ paddingBottom: 80 }} onKeyDown={handleKeyDown}>
-			{/* ── Month summary strip ── */}
+			{/* ── Month header (the numeric synthesis lives in the sticky hero) ── */}
 			<MonthSummary
 				month={month}
 				isFuture={chart?.isFuture === 1}
-				entradas={summarySums.entradas}
-				saidas={summarySums.saidas}
-				projectedClose={projectedClose}
 				forecastCount={forecasts.length}
 				installmentCount={installments.length}
 				installmentSum={installmentSum}
@@ -570,6 +545,7 @@ export const MonthDetail = ({
 					<HierarchicalCategoryGroup
 						key={parent.parent}
 						parent={parent}
+						monthTotal={expenseTotal}
 						overlayById={overlayById}
 						onEdit={handleOpenModal}
 						selectedIds={selectedIds}
@@ -645,23 +621,16 @@ export const MonthDetail = ({
 const MonthSummary = ({
 	month,
 	isFuture,
-	entradas,
-	saidas,
-	projectedClose,
 	forecastCount,
 	installmentCount,
 	installmentSum,
 }: {
 	month: string;
 	isFuture: boolean;
-	entradas: number;
-	saidas: number;
-	projectedClose: number | null;
 	forecastCount: number;
 	installmentCount: number;
 	installmentSum: number;
 }) => {
-	const resultado = entradas - saidas;
 	const monthName = new Date(month + "-15").toLocaleString("pt-BR", {
 		month: "long",
 		year: "numeric",
@@ -709,36 +678,6 @@ const MonthSummary = ({
 				)}
 			</div>
 
-			<div
-				style={{
-					display: "grid",
-					gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-					gap: 8,
-				}}
-			>
-				<SumCard
-					label="entradas"
-					value={entradas}
-					color="var(--cyan)"
-					positive
-				/>
-				<SumCard label="saídas" value={-saidas} color="var(--rose)" />
-				<SumCard
-					label="resultado"
-					value={resultado}
-					color={resultado >= 0 ? "var(--green)" : "var(--rose)"}
-					positive={resultado >= 0}
-				/>
-				{projectedClose !== null && (
-					<SumCard
-						label="saldo proj."
-						value={projectedClose}
-						color="var(--purple)"
-						positive={projectedClose >= 0}
-					/>
-				)}
-			</div>
-
 			{installmentCount > 0 && (
 				<div
 					className="mono"
@@ -756,38 +695,6 @@ const MonthSummary = ({
 		</div>
 	);
 };
-
-const SumCard = ({
-	label,
-	value,
-	color,
-	positive,
-}: {
-	label: string;
-	value: number;
-	color: string;
-	positive?: boolean;
-}) => (
-	<div
-		style={{
-			padding: "8px 12px",
-			background: "var(--surface)",
-			borderRadius: "var(--radius-sm)",
-			border: "1px solid var(--border)",
-		}}
-	>
-		<div
-			className="mono"
-			style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}
-		>
-			{label}
-		</div>
-		<div className="mono" style={{ fontSize: 14, fontWeight: 600, color }}>
-			{positive && value > 0 ? "+" : ""}
-			{formatMoneyNumber(value)}
-		</div>
-	</div>
-);
 
 // ── Forecast section ───────────────────────────────────────────────────────
 
@@ -1228,6 +1135,19 @@ const ForecastSection = ({
 
 // ── Filter bar ─────────────────────────────────────────────────────────────
 
+const FilterDivider = () => (
+	<span
+		aria-hidden
+		style={{
+			width: 1,
+			alignSelf: "stretch",
+			minHeight: 20,
+			background: "var(--border)",
+			margin: "0 2px",
+		}}
+	/>
+);
+
 const FilterBar = ({
 	ui,
 	textInput,
@@ -1245,6 +1165,7 @@ const FilterBar = ({
 		installmentsOnly: boolean;
 		subscriptionsOnly: boolean;
 		unreviewedOnly: boolean;
+		uncategorizedOnly: boolean;
 	};
 	textInput: string;
 	setUi: (patch: Partial<typeof ui>) => void;
@@ -1291,6 +1212,11 @@ const FilterBar = ({
 		[setUi, ui.unreviewedOnly],
 	);
 
+	const toggleUncategorized = useCallback(
+		() => setUi({ uncategorizedOnly: !ui.uncategorizedOnly }),
+		[setUi, ui.uncategorizedOnly],
+	);
+
 	const clearFilters = useCallback(
 		() =>
 			setUi({
@@ -1301,6 +1227,7 @@ const FilterBar = ({
 				installmentsOnly: false,
 				subscriptionsOnly: false,
 				unreviewedOnly: false,
+				uncategorizedOnly: false,
 			}),
 		[setUi],
 	);
@@ -1340,7 +1267,9 @@ const FilterBar = ({
 				/>
 			</div>
 
-			{/* Category filter */}
+			<FilterDivider />
+
+			{/* Structural filters */}
 			<input
 				list="phai-cats"
 				placeholder="categoria…"
@@ -1387,7 +1316,9 @@ const FilterBar = ({
 				</select>
 			)}
 
-			{/* Toggle pills */}
+			<FilterDivider />
+
+			{/* Quick action chips */}
 			<ToggleBtn
 				active={ui.installmentsOnly}
 				color="var(--amber)"
@@ -1401,6 +1332,13 @@ const FilterBar = ({
 				onClick={toggleSubscriptions}
 			>
 				assinaturas
+			</ToggleBtn>
+			<ToggleBtn
+				active={ui.uncategorizedOnly}
+				color="var(--rose)"
+				onClick={toggleUncategorized}
+			>
+				sem categoria
 			</ToggleBtn>
 			<ToggleBtn
 				active={ui.unreviewedOnly}
@@ -1485,6 +1423,7 @@ const FilterSummary = ({
 
 const HierarchicalCategoryGroup = ({
 	parent,
+	monthTotal,
 	overlayById,
 	onEdit,
 	selectedIds,
@@ -1494,6 +1433,7 @@ const HierarchicalCategoryGroup = ({
 	registerDropTarget,
 }: {
 	parent: HierarchicalParentGroup;
+	monthTotal: number;
 	overlayById: Map<
 		string,
 		{
@@ -1513,7 +1453,7 @@ const HierarchicalCategoryGroup = ({
 		el: HTMLElement | null,
 	) => (() => void) | undefined;
 }) => {
-	const [expanded, setExpanded] = useState(true);
+	const [expanded, setExpanded] = useState(false);
 	const installmentTxs = parent.subs.flatMap((s) =>
 		s.txs.filter((t) => t.isInstallment === 1),
 	);
@@ -1595,6 +1535,19 @@ const HierarchicalCategoryGroup = ({
 				>
 					{formatMoney(String(parent.total))}
 				</span>
+				{monthTotal > 0 && (
+					<span
+						className="mono"
+						style={{
+							fontSize: 10,
+							color: "var(--muted)",
+							minWidth: 30,
+							textAlign: "right",
+						}}
+					>
+						{Math.round((Math.abs(parent.total) / monthTotal) * 100)}%
+					</span>
+				)}
 				<span className="mono" style={{ fontSize: 10, color: "var(--muted2)" }}>
 					{parent.count}
 				</span>
@@ -1862,7 +1815,7 @@ const CategoryGroup = ({
 		el: HTMLElement | null,
 	) => (() => void) | undefined;
 }) => {
-	const [expanded, setExpanded] = useState(true);
+	const [expanded, setExpanded] = useState(false);
 	const total = sumAmounts(txs.map((t) => t.amount));
 	const installmentTxs = useMemo(
 		() => txs.filter((t) => t.isInstallment === 1),
@@ -2363,7 +2316,6 @@ const EditForm = ({
 				placeholder="categoria"
 				className="mono"
 				style={{ ...inputStyle, color: "var(--cyan)", flex: 1 }}
-				autoFocus
 			/>
 		</FieldRow>
 		<FieldRow label="descrição">
