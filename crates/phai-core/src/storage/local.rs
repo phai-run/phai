@@ -2171,23 +2171,14 @@ impl FinanceStore for LocalStore {
                             Box::new(io::Error::new(io::ErrorKind::InvalidData, err.to_string())),
                         )
                     })?;
-                let mut transaction_ids: Vec<String> =
-                    ids_raw.split(',').map(|s| s.trim().to_string()).collect();
-                transaction_ids.sort();
-                let mut sources: Vec<String> = sources_raw
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.trim().to_string())
-                    .collect();
-                sources.sort();
                 Ok(DuplicateTransactionGroup {
+                    transaction_ids: crate::models::split_csv_sorted(&ids_raw),
+                    sources: crate::models::split_csv_sorted(&sources_raw),
                     transaction_date,
                     account_id: row.get::<_, Option<String>>(1)?,
                     amount: Decimal::new(amount_cents, 2),
                     description: row.get(3)?,
                     count: row.get(4)?,
-                    transaction_ids,
-                    sources,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2997,5 +2988,62 @@ mod tests {
         assert_eq!(group.count, 2);
         assert_eq!(group.transaction_ids, vec!["dup-a", "dup-b"]);
         assert_eq!(group.amount, Decimal::new(-11603, 2));
+    }
+
+    /// Parity guard: the Rust `cash_month_for` must equal the `cash_month`
+    /// column of `v_transactions_cashbasis` (the SQL view) for the same inputs.
+    /// They are two hand-maintained copies of one boundary-sensitive rule
+    /// (ADR-0025/0026); this test turns silent drift into a red test. Dates
+    /// straddle the closing day and the year boundary.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cash_month_for_matches_sql_view_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+        store
+            .upsert_accounts(&[card_account("cc-p", "3", "10")])
+            .await
+            .unwrap();
+        let dates = [
+            (2026, 4, 2),
+            (2026, 4, 3),
+            (2026, 4, 28),
+            (2026, 5, 2),
+            (2026, 12, 28),
+            (2027, 1, 2),
+        ];
+        let txs: Vec<_> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, &(y, m, d))| {
+                card_tx(
+                    &format!("p{i}"),
+                    "cc-p",
+                    NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+                    Decimal::new(-1000, 2),
+                )
+            })
+            .collect();
+        store.upsert_transactions(&txs).await.unwrap();
+
+        let conn = store.connection().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT transaction_date, cash_month FROM v_transactions_cashbasis \
+                 WHERE account_id = 'cc-p'",
+            )
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), dates.len());
+        for (date_str, view_cash_month) in rows {
+            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").unwrap();
+            let rust_cash_month = crate::cashflow::cash_month_for(date, true, Some(3), Some(10));
+            assert_eq!(rust_cash_month, view_cash_month, "drift on {date_str}");
+        }
     }
 }

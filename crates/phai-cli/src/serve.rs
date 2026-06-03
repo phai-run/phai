@@ -506,7 +506,8 @@ async fn load_transactions_window(
                 .as_deref()
                 .is_some_and(|category| internal_categories.contains(category))
     });
-    dedupe_pluggy_shadowed_ofx_rows(&mut rows);
+    // ofx-shadowed-by-pluggy rows are already dropped by v_transactions_reportable
+    // (migration 038 / ADR-0026); no Rust-side dedup needed here.
     if !params.include_reviewed {
         rows.retain(is_pending_review);
     }
@@ -534,27 +535,6 @@ async fn load_transactions_window(
         offset,
         has_more,
     })
-}
-
-fn dedupe_pluggy_shadowed_ofx_rows(rows: &mut Vec<TransactionRecord>) {
-    let pluggy_keys: BTreeSet<_> = rows
-        .iter()
-        .filter(|row| row.source.eq_ignore_ascii_case("pluggy"))
-        .map(reportable_dedupe_key)
-        .collect();
-    rows.retain(|row| {
-        !(row.source.eq_ignore_ascii_case("ofx")
-            && pluggy_keys.contains(&reportable_dedupe_key(row)))
-    });
-}
-
-fn reportable_dedupe_key(row: &TransactionRecord) -> (NaiveDate, Option<String>, Decimal, String) {
-    (
-        row.transaction_date,
-        row.account_id.clone(),
-        row.amount,
-        row.raw_description.trim().to_lowercase(),
-    )
 }
 
 /// A transaction is "reviewed" when it has a concrete category that is not the
@@ -1245,7 +1225,8 @@ async fn card_installments_by_account_for_cash_month(
                 .as_deref()
                 .is_some_and(|category| internal_categories.contains(category))
     });
-    dedupe_pluggy_shadowed_ofx_rows(&mut rows);
+    // ofx-shadowed-by-pluggy rows are already dropped by v_transactions_reportable
+    // (migration 038 / ADR-0026); no Rust-side dedup needed here.
 
     let lookup = cash_month_lookup(accounts);
     let mut by_account: std::collections::HashMap<String, Vec<CardInstallmentApiRow>> =
