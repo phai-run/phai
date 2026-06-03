@@ -1722,6 +1722,7 @@ const SubTile = ({
 	return (
 		<div
 			ref={tileRef}
+			className="lift"
 			style={{
 				border: "1px solid var(--border)",
 				borderRadius: "var(--radius-sm)",

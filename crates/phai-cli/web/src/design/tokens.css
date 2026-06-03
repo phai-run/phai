@@ -163,3 +163,20 @@ code,
 		transform: rotate(360deg);
 	}
 }
+
+/* Subtle hover lift for interactive cards/tiles (N8 delight). */
+.lift {
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.lift:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(21, 19, 31, 0.08);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lift,
+  .lift:hover {
+    transition: none;
+    transform: none;
+    box-shadow: none;
+  }
+}

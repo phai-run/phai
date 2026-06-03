@@ -1,4 +1,6 @@
 import { useEffect, type CSSProperties, type ReactNode } from "react";
+import { formatMoneyNumber } from "../lib/format";
+import { useCountUp } from "../design/motion";
 
 /**
  * Shared, brand-aligned primitives (DESIGN.md): cards with 1px borders and no
@@ -193,6 +195,49 @@ export const Skeleton = ({
 		className="skeleton"
 		style={{ height, ...(width != null ? { width } : {}), minWidth: 0 }}
 	/>
+);
+
+/** Money figure that "rolls" from its previous value when it changes (N8).
+ *  Honours prefers-reduced-motion (jumps straight to the value). */
+export const CountMoney = ({
+	value,
+	style,
+}: {
+	value: number;
+	style?: CSSProperties;
+}) => {
+	const v = useCountUp(value);
+	return (
+		<span className="mono" style={style}>
+			{formatMoneyNumber(v)}
+		</span>
+	);
+};
+
+/** Animated placeholder for the cash chart while the first seed loads (N7). */
+export const ChartSkeleton = () => (
+	<div
+		style={{
+			display: "flex",
+			alignItems: "flex-end",
+			gap: 8,
+			height: 150,
+			padding: "12px 0 28px",
+		}}
+		aria-label="carregando caixa"
+	>
+		{Array.from({ length: 12 }).map((_, i) => (
+			<div
+				key={i}
+				className="skeleton"
+				style={{
+					flex: 1,
+					height: `${35 + ((i * 41) % 55)}%`,
+					borderRadius: 4,
+				}}
+			/>
+		))}
+	</div>
 );
 
 export const Toast = ({

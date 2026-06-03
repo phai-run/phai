@@ -13,7 +13,7 @@ import {
 	expensesByMonthCategory,
 	type TxView as TxViewD,
 } from "../lib/derivations";
-import { ErrorNote, LoadingNote } from "../components/ui";
+import { ChartSkeleton, ErrorNote } from "../components/ui";
 import { PlanningChart } from "./PlanningChart";
 import { MonthDetail } from "./MonthDetail";
 import { CardsPanel } from "./CardsPanel";
@@ -199,7 +199,7 @@ export const Dashboard = () => {
 				>
 					{error && !loading && <ErrorNote error={error} />}
 					{loading ? (
-						<LoadingNote message="carregando caixa…" />
+						<ChartSkeleton />
 					) : months.length === 0 ? null : (
 						<PlanningChart
 							months={months}

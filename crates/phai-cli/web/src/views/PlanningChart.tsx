@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { formatMoneyNumber, numeric } from "../lib/format";
+import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView, ChartMode } from "./types";
 import type { CategoryMonthSeries } from "../lib/derivations";
@@ -376,11 +377,11 @@ const FullChart = ({
 				</span>
 				{!isExpensesMode && (
 					<span style={{ color: "var(--cyan)" }}>
-						entradas {formatMoneyNumber(yearIn)}
+						entradas <CountMoney value={yearIn} />
 					</span>
 				)}
 				<span style={{ color: "var(--rose)" }}>
-					saídas {formatMoneyNumber(-yearOut)}
+					saídas <CountMoney value={-yearOut} />
 				</span>
 				<span
 					style={{
@@ -388,7 +389,7 @@ const FullChart = ({
 					}}
 				>
 					resultado {yearIn - yearOut >= 0 ? "+" : ""}
-					{formatMoneyNumber(yearIn - yearOut)}
+					<CountMoney value={yearIn - yearOut} />
 				</span>
 			</div>
 
@@ -962,17 +963,17 @@ const CompactChart = ({
 				>
 					<strong style={{ fontSize: 11 }}>{sel.label}</strong>
 					<span style={{ color: "var(--cyan)" }}>
-						↑ {formatMoneyNumber(selIn)}
+						↑ <CountMoney value={selIn} />
 					</span>
 					<span style={{ color: "var(--rose)" }}>
-						↓ {formatMoneyNumber(selOut)}
+						↓ <CountMoney value={selOut} />
 					</span>
 					<span style={{ color: selIn - selOut >= 0 ? "var(--green)" : "var(--rose)" }}>
 						= {selIn - selOut >= 0 ? "+" : ""}
-						{formatMoneyNumber(selIn - selOut)}
+						<CountMoney value={selIn - selOut} />
 					</span>
 					<span style={{ marginLeft: "auto", color: "var(--muted)" }}>
-						saldo {formatMoneyNumber(selBal)}
+						saldo <CountMoney value={selBal} />
 					</span>
 				</div>
 			)}
