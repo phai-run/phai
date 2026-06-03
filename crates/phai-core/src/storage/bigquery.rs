@@ -3657,26 +3657,18 @@ impl FinanceStore for BigQueryStore {
         for row in response.rows {
             let values = row_values(&row);
             let amount_cents = required_i64(&values, 2, "amount_cents")?;
-            let mut transaction_ids: Vec<String> = required_string(&values, 5, "ids")?
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-            transaction_ids.sort();
-            let mut sources: Vec<String> = optional_string(&values, 6)
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.trim().to_string())
-                .collect();
-            sources.sort();
             items.push(DuplicateTransactionGroup {
                 transaction_date: required_date(&values, 0, "transaction_date")?,
                 account_id: optional_string(&values, 1),
                 amount: Decimal::new(amount_cents, 2),
                 description: required_string(&values, 3, "norm_desc")?,
                 count: required_i64(&values, 4, "n")?,
-                transaction_ids,
-                sources,
+                transaction_ids: crate::models::split_csv_sorted(&required_string(
+                    &values, 5, "ids",
+                )?),
+                sources: crate::models::split_csv_sorted(
+                    &optional_string(&values, 6).unwrap_or_default(),
+                ),
             });
         }
         Ok(items)
