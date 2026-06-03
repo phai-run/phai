@@ -162,6 +162,12 @@ export const MonthDetail = ({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filtered, overlayById]);
 
+	// Denominator for each expense category's share of the month's spending.
+	const expenseTotal = useMemo(
+		() => groups.expenses.reduce((s, p) => s + Math.abs(p.total), 0),
+		[groups],
+	);
+
 	// Filter sums
 	const sums = useMemo(() => {
 		const out = filtered
@@ -539,6 +545,7 @@ export const MonthDetail = ({
 					<HierarchicalCategoryGroup
 						key={parent.parent}
 						parent={parent}
+						monthTotal={expenseTotal}
 						overlayById={overlayById}
 						onEdit={handleOpenModal}
 						selectedIds={selectedIds}
@@ -1416,6 +1423,7 @@ const FilterSummary = ({
 
 const HierarchicalCategoryGroup = ({
 	parent,
+	monthTotal,
 	overlayById,
 	onEdit,
 	selectedIds,
@@ -1425,6 +1433,7 @@ const HierarchicalCategoryGroup = ({
 	registerDropTarget,
 }: {
 	parent: HierarchicalParentGroup;
+	monthTotal: number;
 	overlayById: Map<
 		string,
 		{
@@ -1444,7 +1453,7 @@ const HierarchicalCategoryGroup = ({
 		el: HTMLElement | null,
 	) => (() => void) | undefined;
 }) => {
-	const [expanded, setExpanded] = useState(true);
+	const [expanded, setExpanded] = useState(false);
 	const installmentTxs = parent.subs.flatMap((s) =>
 		s.txs.filter((t) => t.isInstallment === 1),
 	);
@@ -1526,6 +1535,19 @@ const HierarchicalCategoryGroup = ({
 				>
 					{formatMoney(String(parent.total))}
 				</span>
+				{monthTotal > 0 && (
+					<span
+						className="mono"
+						style={{
+							fontSize: 10,
+							color: "var(--muted)",
+							minWidth: 30,
+							textAlign: "right",
+						}}
+					>
+						{Math.round((Math.abs(parent.total) / monthTotal) * 100)}%
+					</span>
+				)}
 				<span className="mono" style={{ fontSize: 10, color: "var(--muted2)" }}>
 					{parent.count}
 				</span>
@@ -1793,7 +1815,7 @@ const CategoryGroup = ({
 		el: HTMLElement | null,
 	) => (() => void) | undefined;
 }) => {
-	const [expanded, setExpanded] = useState(true);
+	const [expanded, setExpanded] = useState(false);
 	const total = sumAmounts(txs.map((t) => t.amount));
 	const installmentTxs = useMemo(
 		() => txs.filter((t) => t.isInstallment === 1),
