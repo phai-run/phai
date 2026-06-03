@@ -13,10 +13,11 @@ import {
 	expensesByMonthCategory,
 	type TxView as TxViewD,
 } from "../lib/derivations";
-import { ChartSkeleton, ErrorNote } from "../components/ui";
+import { ChartSkeleton, ErrorNote, Skeleton } from "../components/ui";
 import { PlanningChart } from "./PlanningChart";
 import { MonthDetail } from "./MonthDetail";
 import { CardsPanel } from "./CardsPanel";
+import { CashDecisionPanel, type CashWhen } from "./cash/CashDecisionPanel";
 import type { ChartMonthView, ForecastView } from "./types";
 
 // Seeding window: the 12 months of the current calendar year.
@@ -128,6 +129,21 @@ export const Dashboard = () => {
 	const currentMonth = currentMonthKey();
 	const selected = ui.selectedMonth ?? currentMonth;
 
+	// The cash-decision hero shows the selected month (falling back to the
+	// current month). `when` drives the headline label/value: realized closing
+	// balance for past/current, projected for future.
+	const heroRow =
+		months.find((m) => m.month === selected) ??
+		months.find((m) => m.month === currentMonth) ??
+		null;
+	const heroWhen: CashWhen = heroRow
+		? heroRow.isFuture
+			? "future"
+			: heroRow.month === currentMonth
+				? "current"
+				: "past"
+		: "current";
+
 	// Drag-drop: move forecast to another month
 	const moveForecast = (forecastId: string, targetMonth: string) => {
 		const f = forecasts.find((x) => x.forecastId === forecastId);
@@ -175,7 +191,7 @@ export const Dashboard = () => {
 
 	return (
 		<div>
-			{/* ── Sticky chart header ── */}
+			{/* ── Sticky cash-decision hero ── */}
 			<div
 				style={{
 					position: "sticky",
@@ -192,26 +208,44 @@ export const Dashboard = () => {
 						maxWidth: "var(--container)",
 						margin: "0 auto",
 						padding: isCompact
-							? "6px clamp(24px,3vw,32px)"
-							: "16px clamp(24px,3vw,32px) 0",
+							? "8px clamp(24px,3vw,32px)"
+							: "16px clamp(24px,3vw,32px) 12px",
 						transition: "padding 200ms",
 					}}
 				>
 					{error && !loading && <ErrorNote error={error} />}
 					{loading ? (
-						<ChartSkeleton />
-					) : months.length === 0 ? null : (
-						<PlanningChart
-							months={months}
-							forecastsByMonth={forecastsByMonth}
-							categorySeries={categorySeries}
-							selectedMonth={selected}
-							onSelectMonth={(m) => setUi({ selectedMonth: m })}
-							onDropForecast={moveForecast}
+						<Skeleton height={isCompact ? 20 : 96} />
+					) : heroRow ? (
+						<CashDecisionPanel
+							row={heroRow}
+							when={heroWhen}
 							compact={isCompact}
 						/>
-					)}
+					) : null}
 				</div>
+			</div>
+
+			{/* ── Cash chart (subordinate to the hero; scrolls normally) ── */}
+			<div
+				style={{
+					maxWidth: "var(--container)",
+					margin: "0 auto",
+					padding: "12px clamp(24px,3vw,32px) 0",
+				}}
+			>
+				{loading ? (
+					<ChartSkeleton />
+				) : months.length === 0 ? null : (
+					<PlanningChart
+						months={months}
+						forecastsByMonth={forecastsByMonth}
+						categorySeries={categorySeries}
+						selectedMonth={selected}
+						onSelectMonth={(m) => setUi({ selectedMonth: m })}
+						onDropForecast={moveForecast}
+					/>
+				)}
 			</div>
 
 			{/* ── Cards (open/settled, cycle total, limit usage) ── */}

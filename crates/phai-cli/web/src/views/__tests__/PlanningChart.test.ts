@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildModel } from "../PlanningChart";
-import type { ChartMonthView } from "../types";
+import type { ChartMonthView, ChartMode } from "../types";
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -266,9 +266,7 @@ describe("expenses mode data consistency", () => {
 // ── Mode selector state machine ────────────────────────────────────────────
 
 describe("ChartMode state transitions", () => {
-	type Mode = "caixa" | "despesas-barras" | "despesas-linha";
-
-	const ALL_MODES: Mode[] = ["caixa", "despesas-barras", "despesas-linha"];
+	const ALL_MODES: ChartMode[] = ["caixa", "despesas-barras"];
 
 	it("all modes are valid and transitionable", () => {
 		for (const from of ALL_MODES) {
@@ -281,13 +279,12 @@ describe("ChartMode state transitions", () => {
 	});
 
 	it("mode labels match expected values", () => {
-		const labels: Record<Mode, string> = {
+		const labels: Record<ChartMode, string> = {
 			caixa: "Caixa",
-			"despesas-barras": "Despesas (barras)",
-			"despesas-linha": "Despesas (linha)",
+			"despesas-barras": "Despesas",
 		};
 
-		expect(Object.keys(labels)).toHaveLength(3);
+		expect(Object.keys(labels)).toHaveLength(2);
 		for (const m of ALL_MODES) {
 			expect(typeof labels[m]).toBe("string");
 			expect(labels[m].length).toBeGreaterThan(0);
@@ -295,15 +292,14 @@ describe("ChartMode state transitions", () => {
 	});
 
 	it("default mode is caixa", () => {
-		const defaultMode: Mode = "caixa";
+		const defaultMode: ChartMode = "caixa";
 		expect(defaultMode).toBe("caixa");
 	});
 
 	it("expenses modes start with 'despesas' prefix", () => {
-		const isExpensesMode = (m: Mode) => m.startsWith("despesas");
+		const isExpensesMode = (m: ChartMode) => m.startsWith("despesas");
 		expect(isExpensesMode("caixa")).toBe(false);
 		expect(isExpensesMode("despesas-barras")).toBe(true);
-		expect(isExpensesMode("despesas-linha")).toBe(true);
 	});
 });
 
