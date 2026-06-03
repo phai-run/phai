@@ -45,8 +45,11 @@ export const CardsPanel = ({ month }: { month: string | null }) => {
 			<div
 				style={{
 					display: "grid",
-					gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
-					gap: 12,
+					// Only a couple of cards — give them real width (not 240px
+					// slivers) and left-align so values never truncate.
+					gridTemplateColumns: "repeat(auto-fill, minmax(340px, 460px))",
+					justifyContent: "start",
+					gap: 16,
 				}}
 			>
 				{cards.map((c) => (
@@ -111,9 +114,6 @@ const CardTile = ({ card }: { card: CardRow }) => {
 					fontSize: 11,
 					color: "var(--muted)",
 					marginTop: 2,
-					whiteSpace: "nowrap",
-					overflow: "hidden",
-					textOverflow: "ellipsis",
 				}}
 			>
 				{card.cycleMonth
