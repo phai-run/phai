@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.5.0](https://github.com/phai-run/phai/compare/v5.4.1...v5.5.0) (2026-06-03)
+
+
+### Features
+
+* **web:** dashboard UX/UI redesign — decision hero, chart, cards, filters, category overview ([#129](https://github.com/phai-run/phai/issues/129)) ([74e2b82](https://github.com/phai-run/phai/commit/74e2b8209673d472d6a8fbd222891fe83026f4a5))
+
 ## [5.4.1](https://github.com/phai-run/phai/compare/v5.4.0...v5.4.1) (2026-06-03)
 
 
