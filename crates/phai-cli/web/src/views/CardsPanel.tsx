@@ -12,7 +12,13 @@ import { CardDetailPanel } from "./cards/CardDetailPanel";
  * is paid (ADR-0025). Clicking a tile opens a full-width detail panel *below*
  * the grid (parcelas breakdown). Data: GET /api/cards.
  */
-export const CardsPanel = ({ month }: { month: string | null }) => {
+export const CardsPanel = ({
+	month,
+	onViewCardTx,
+}: {
+	month: string | null;
+	onViewCardTx?: (accountId: string) => void;
+}) => {
 	const [rows, setRows] = useState<CardRow[] | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -71,7 +77,11 @@ export const CardsPanel = ({ month }: { month: string | null }) => {
 				))}
 			</div>
 			{expanded && (
-				<CardDetailPanel card={expanded} onClose={() => setExpandedId(null)} />
+				<CardDetailPanel
+					card={expanded}
+					onClose={() => setExpandedId(null)}
+					onViewTransactions={onViewCardTx}
+				/>
 			)}
 		</section>
 	);

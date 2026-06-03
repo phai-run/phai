@@ -23,9 +23,11 @@ const ddmm = (d: string | null): string =>
 export const CardDetailPanel = ({
 	card,
 	onClose,
+	onViewTransactions,
 }: {
 	card: CardRow;
 	onClose: () => void;
+	onViewTransactions?: (accountId: string) => void;
 }) => {
 	const accent = cardAccent(card.state);
 	const stateLabel =
@@ -130,6 +132,26 @@ export const CardDetailPanel = ({
 					</div>
 				))}
 			</div>
+
+			{onViewTransactions && (
+				<button
+					type="button"
+					onClick={() => onViewTransactions(card.accountId)}
+					className="mono"
+					style={{
+						marginTop: 14,
+						background: "transparent",
+						border: `1px solid ${accent}`,
+						color: accent,
+						borderRadius: "var(--radius-full)",
+						padding: "6px 14px",
+						cursor: "pointer",
+						fontSize: 12,
+					}}
+				>
+					ver transações do cartão →
+				</button>
+			)}
 
 			{/* Installments */}
 			{card.installments.length > 0 && (

@@ -256,7 +256,12 @@ export const Dashboard = () => {
 					padding: "0 clamp(24px,3vw,32px)",
 				}}
 			>
-				<CardsPanel month={selected} />
+				<CardsPanel
+					month={selected}
+					onViewCardTx={(accountId) =>
+						setUi({ accountFilter: accountId })
+					}
+				/>
 			</div>
 
 			{/* ── Month detail ── */}
