@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.4.0](https://github.com/phai-run/phai/compare/v5.3.0...v5.4.0) (2026-06-03)
+
+
+### Features
+
+* **report:** CSV export ([941436a](https://github.com/phai-run/phai/commit/941436a91e61d931e29fe02977442389a8fd4f14))
+
 ## [5.3.0](https://github.com/phai-run/phai/compare/v5.2.1...v5.3.0) (2026-06-02)
 
 
