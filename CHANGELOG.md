@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.4.1](https://github.com/phai-run/phai/compare/v5.4.0...v5.4.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* **web:** trustworthy + fast + delightful serve dashboard (data, cards, tx, chart, perf) ([#127](https://github.com/phai-run/phai/issues/127)) ([3c7700d](https://github.com/phai-run/phai/commit/3c7700dad9414007fe337b201b0821b688e54f9e))
+
 ## [5.4.0](https://github.com/phai-run/phai/compare/v5.3.0...v5.4.0) (2026-06-03)
 
 
