@@ -168,6 +168,7 @@ export const tables = {
 			installmentsOnly: Schema.Boolean,
 			subscriptionsOnly: Schema.Boolean,
 			unreviewedOnly: Schema.Boolean,
+			uncategorizedOnly: Schema.Boolean,
 			forecastStatusFilter: Schema.NullOr(Schema.String),
 		}),
 		default: {
@@ -181,6 +182,7 @@ export const tables = {
 				installmentsOnly: false,
 				subscriptionsOnly: false,
 				unreviewedOnly: false,
+				uncategorizedOnly: false,
 				forecastStatusFilter: null,
 			},
 		},

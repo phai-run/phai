@@ -130,6 +130,7 @@ export const MonthDetail = ({
 			if (ui.installmentsOnly && !tx.isInstallment) return false;
 			if (ui.subscriptionsOnly && !tx.isSubscription) return false;
 			if (ui.unreviewedOnly && tx.reviewed) return false;
+			if (ui.uncategorizedOnly && (effectiveCat(tx) ?? "") !== "") return false;
 			if (ui.accountFilter && tx.accountId !== ui.accountFilter) return false;
 			if (ui.ownerFilter) {
 				if ((accountById.get(tx.accountId)?.owner ?? "") !== ui.ownerFilter)
@@ -448,6 +449,7 @@ export const MonthDetail = ({
 		ui.installmentsOnly ||
 		ui.subscriptionsOnly ||
 		ui.unreviewedOnly ||
+		ui.uncategorizedOnly ||
 		!!ui.accountFilter ||
 		!!ui.ownerFilter ||
 		!!ui.categoryFilter ||
@@ -1126,6 +1128,19 @@ const ForecastSection = ({
 
 // ── Filter bar ─────────────────────────────────────────────────────────────
 
+const FilterDivider = () => (
+	<span
+		aria-hidden
+		style={{
+			width: 1,
+			alignSelf: "stretch",
+			minHeight: 20,
+			background: "var(--border)",
+			margin: "0 2px",
+		}}
+	/>
+);
+
 const FilterBar = ({
 	ui,
 	textInput,
@@ -1143,6 +1158,7 @@ const FilterBar = ({
 		installmentsOnly: boolean;
 		subscriptionsOnly: boolean;
 		unreviewedOnly: boolean;
+		uncategorizedOnly: boolean;
 	};
 	textInput: string;
 	setUi: (patch: Partial<typeof ui>) => void;
@@ -1189,6 +1205,11 @@ const FilterBar = ({
 		[setUi, ui.unreviewedOnly],
 	);
 
+	const toggleUncategorized = useCallback(
+		() => setUi({ uncategorizedOnly: !ui.uncategorizedOnly }),
+		[setUi, ui.uncategorizedOnly],
+	);
+
 	const clearFilters = useCallback(
 		() =>
 			setUi({
@@ -1199,6 +1220,7 @@ const FilterBar = ({
 				installmentsOnly: false,
 				subscriptionsOnly: false,
 				unreviewedOnly: false,
+				uncategorizedOnly: false,
 			}),
 		[setUi],
 	);
@@ -1238,7 +1260,9 @@ const FilterBar = ({
 				/>
 			</div>
 
-			{/* Category filter */}
+			<FilterDivider />
+
+			{/* Structural filters */}
 			<input
 				list="phai-cats"
 				placeholder="categoria…"
@@ -1285,7 +1309,9 @@ const FilterBar = ({
 				</select>
 			)}
 
-			{/* Toggle pills */}
+			<FilterDivider />
+
+			{/* Quick action chips */}
 			<ToggleBtn
 				active={ui.installmentsOnly}
 				color="var(--amber)"
@@ -1299,6 +1325,13 @@ const FilterBar = ({
 				onClick={toggleSubscriptions}
 			>
 				assinaturas
+			</ToggleBtn>
+			<ToggleBtn
+				active={ui.uncategorizedOnly}
+				color="var(--rose)"
+				onClick={toggleUncategorized}
+			>
+				sem categoria
 			</ToggleBtn>
 			<ToggleBtn
 				active={ui.unreviewedOnly}
