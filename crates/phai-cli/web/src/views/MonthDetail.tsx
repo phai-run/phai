@@ -2294,7 +2294,6 @@ const EditForm = ({
 				placeholder="categoria"
 				className="mono"
 				style={{ ...inputStyle, color: "var(--cyan)", flex: 1 }}
-				autoFocus
 			/>
 		</FieldRow>
 		<FieldRow label="descrição">
