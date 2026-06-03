@@ -21,6 +21,7 @@ export interface TxRow {
 	categoryId: string | null;
 	month: string;
 	paymentStatus: string;
+	installmentMarker: string | null;
 	reviewed: boolean;
 	isInstallment: boolean;
 	isSubscription: boolean;
@@ -35,14 +36,31 @@ export interface AccountRow {
 export interface CardRow {
 	accountId: string;
 	label: string;
-	/** "aberta" = open bill with a balance; "em-dia" = no open bill. */
-	state: "aberta" | "em-dia";
+	/** "aberta" = bill with open balance; "fechada" = selected closed cycle. */
+	state: "aberta" | "fechada" | "em-dia";
 	cycleMonth: string | null;
 	total: string;
 	openAmount: string;
 	dueDate: string | null;
 	creditLimit: string | null;
 	usedAmount: string | null;
+	installmentDebt: string;
+	installmentMonthAmount: string;
+	installmentEndingAmount: string;
+	installmentCount: number;
+	installments: CardInstallmentRow[];
+}
+
+export interface CardInstallmentRow {
+	transactionId: string;
+	transactionDate: string;
+	description: string;
+	amount: string;
+	marker: string;
+	current: number;
+	total: number;
+	remaining: number;
+	endingThisMonth: boolean;
 }
 
 export interface ReviewPatch {
@@ -175,8 +193,10 @@ export const api = {
 		fetch("/api/categories").then((r) => json<{ ids: string[] }>(r)),
 	accounts: (): Promise<{ rows: AccountRow[] }> =>
 		fetch("/api/accounts").then((r) => json<{ rows: AccountRow[] }>(r)),
-	cards: (): Promise<{ rows: CardRow[] }> =>
-		fetch("/api/cards").then((r) => json<{ rows: CardRow[] }>(r)),
+	cards: (month?: string): Promise<{ rows: CardRow[] }> =>
+		fetch(`/api/cards${month ? `?month=${encodeURIComponent(month)}` : ""}`).then(
+			(r) => json<{ rows: CardRow[] }>(r),
+		),
 
 	chart: (monthsBack: number, monthsAhead: number): Promise<ChartData> =>
 		fetch(

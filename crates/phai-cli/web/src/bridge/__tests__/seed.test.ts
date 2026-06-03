@@ -30,6 +30,7 @@ const makeTx = (
 	categoryId: (overrides.categoryId as string | null) ?? null,
 	month: (overrides.month as string) ?? "2024-01",
 	paymentStatus: (overrides.paymentStatus as string) ?? "posted",
+	installmentMarker: (overrides.installmentMarker as string | null) ?? null,
 	reviewed: bool(overrides.reviewed ?? false),
 	isInstallment: bool(overrides.isInstallment ?? false),
 	isSubscription: bool(overrides.isSubscription ?? false),
@@ -174,5 +175,59 @@ describe("Incremental transaction seeding", () => {
 		expect(store.query(tables.pendingWrites.select()).length).toBe(0);
 		expect(store.query(tables.reviewOverlay.select()).length).toBe(0);
 		expect(store.query(tables.forecastOverlay.select()).length).toBe(0);
+	});
+});
+
+describe("Review write persistence (web C5)", () => {
+	let store: Awaited<ReturnType<typeof createStorePromise>>;
+
+	beforeAll(async () => {
+		store = await createStorePromise({
+			schema,
+			storeId: "c5-test",
+			adapter: makeInMemoryAdapter(),
+			debug: { instanceId: "c5-test" },
+		});
+	});
+
+	afterAll(() => {
+		store?.sqliteDbWrapper?.close?.();
+	});
+
+	it("queues the FULL human patch for flush and clears on ack", () => {
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "w1",
+				transactionId: "tx-9",
+				patch: {
+					description: "Zenilda Faxina",
+					merchantName: "Zenilda",
+					purpose: "Faxina mensal",
+					categoryId: "moradia:servicos",
+				},
+				submittedAt: 1,
+			}),
+		);
+
+		const pending = store.query(tables.pendingWrites.select());
+		expect(pending.length).toBe(1);
+		expect(pending[0].type).toBe("review");
+		expect(pending[0].transactionId).toBe("tx-9");
+		// drainQueue() POSTs payload verbatim as the /api/events patch — the
+		// human description/merchant/purpose must ride along, not just category
+		// (regression: edits silently dropped, only category persisted).
+		expect(pending[0].payload.description).toBe("Zenilda Faxina");
+		expect(pending[0].payload.merchantName).toBe("Zenilda");
+		expect(pending[0].payload.purpose).toBe("Faxina mensal");
+		expect(pending[0].payload.categoryId).toBe("moradia:servicos");
+
+		// Optimistic overlay surfaces the edit immediately.
+		const overlay = store.query(tables.reviewOverlay.select());
+		expect(overlay.length).toBe(1);
+		expect(overlay[0].description).toBe("Zenilda Faxina");
+
+		// On bridge ack the queued write is removed (flush succeeded).
+		store.commit(events.writeAcked({ writeId: "w1" }));
+		expect(store.query(tables.pendingWrites.select()).length).toBe(0);
 	});
 });

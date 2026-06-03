@@ -25,7 +25,7 @@ use phai_core::models::{
     TransactionRecord,
 };
 use phai_core::storage::{open_store, FinanceStore};
-use phai_core::{AppConfig, BackendKind};
+use phai_core::{parse_installment_description, AppConfig, BackendKind};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,8 +61,8 @@ const DEFAULT_TRANSACTIONS_LIMIT: usize = 5000;
 use crate::cashflow_chart::{build_chart_data, ChartData};
 use crate::forecast_cmd::materialise_template_forecasts;
 use crate::{
-    all_transactions_for_review, apply_human_review, load_config, review_human_rows,
-    HumanReviewPatch, ReviewFilters, ReviewHumanKind,
+    all_transactions_for_review, apply_human_review, load_config, parse_month_ref,
+    review_human_rows, HumanReviewPatch, ReviewFilters, ReviewHumanKind,
 };
 
 const LEGACY_WEB_CATEGORY_ALIASES: &[(&str, &str)] = &[
@@ -295,13 +295,14 @@ enum StoreRequest {
     /// Per-credit-card cycle state (open/paid), total and credit-limit usage,
     /// for the dashboard card panel (`GET /api/cards`).
     Cards {
+        month: Option<String>,
         resp: oneshot::Sender<Result<Vec<CardApiRow>>>,
     },
     ReviewQueue {
         params: ReviewQueueParams,
         resp: oneshot::Sender<Result<Vec<TransactionRecord>>>,
     },
-    /// Transactions whose posted month falls in the requested window, used by
+    /// Transactions whose cash month falls in the requested window, used by
     /// the planning workspace (`GET /api/transactions`).
     TransactionsWindow {
         params: TransactionsWindowParams,
@@ -374,8 +375,8 @@ async fn store_actor_loop(
                 let result = store.get_accounts().await;
                 let _ = resp.send(result);
             }
-            StoreRequest::Cards { resp } => {
-                let result = build_cards_api(store.as_ref()).await;
+            StoreRequest::Cards { month, resp } => {
+                let result = build_cards_api(store.as_ref(), month.as_deref()).await;
                 let _ = resp.send(result);
             }
             StoreRequest::ReviewQueue { params, resp } => {
@@ -469,13 +470,13 @@ struct TransactionsWindowParams {
 
 /// Result of a paginated transaction-window load.
 struct TransactionsWindowResult {
-    rows: Vec<TransactionRecord>,
+    rows: Vec<TxRow>,
     total: usize,
     offset: usize,
     has_more: bool,
 }
 
-/// Load transactions whose posted month is within
+/// Load transactions whose cash month is within
 /// `[now - months_back, now + months_ahead]`, optionally restricted to rows
 /// still pending review. Returns a page of up to `limit` rows starting at
 /// `offset`, plus the total matching count so the client can paginate.
@@ -484,10 +485,13 @@ async fn load_transactions_window(
     params: TransactionsWindowParams,
 ) -> Result<TransactionsWindowResult> {
     let today = Utc::now().date_naive();
-    let from = first_of_month(shift_months(today, -(params.months_back as i64)));
-    let until = last_of_month(shift_months(today, params.months_ahead as i64));
+    let cash_from = first_of_month(shift_months(today, -(params.months_back as i64)));
+    let cash_until = last_of_month(shift_months(today, params.months_ahead as i64));
+    let cash_from_ref = cash_from.format("%Y-%m").to_string();
+    let cash_until_ref = cash_until.format("%Y-%m").to_string();
+    let posted_from = first_of_month(shift_months(cash_from, -2));
     let mut rows = store
-        .effective_transactions_window(None, from, until)
+        .effective_transactions_window(None, posted_from, cash_until)
         .await
         .context("effective_transactions_window")?;
     let internal_categories = store
@@ -507,10 +511,23 @@ async fn load_transactions_window(
     if !params.include_reviewed {
         rows.retain(is_pending_review);
     }
-    let total = rows.len();
+    let accounts = store.get_accounts().await.context("get_accounts")?;
+    let lookup = cash_month_lookup(&accounts);
+    let tx_rows: Vec<TxRow> = tx_rows_with_cash_month(&rows, &lookup)
+        .into_iter()
+        .filter(|row| {
+            row.month.as_str() >= cash_from_ref.as_str()
+                && row.month.as_str() <= cash_until_ref.as_str()
+        })
+        .collect();
+    let total = tx_rows.len();
     let offset = params.offset.min(total);
     let end = (offset + params.limit).min(total);
-    let page: Vec<TransactionRecord> = rows.drain(offset..end).collect();
+    let page: Vec<TxRow> = tx_rows
+        .into_iter()
+        .skip(offset)
+        .take(end - offset)
+        .collect();
     let has_more = end < total;
     Ok(TransactionsWindowResult {
         rows: page,
@@ -851,6 +868,7 @@ struct TxRow {
     category_id: Option<String>,
     month: String,
     payment_status: String,
+    installment_marker: Option<String>,
     reviewed: bool,
     is_installment: bool,
     is_subscription: bool,
@@ -859,6 +877,13 @@ struct TxRow {
 impl TxRow {
     fn from_record(row: &TransactionRecord) -> Self {
         let category_id = canonical_web_category(row.category_id.as_deref());
+        let installment_marker = parse_installment_description(&row.raw_description)
+            .or_else(|| {
+                row.description
+                    .as_deref()
+                    .and_then(parse_installment_description)
+            })
+            .map(|m| format!("{}/{}", m.current, m.total));
         // `isSubscription` heuristic: any category under the `assinaturas:`
         // namespace is treated as a subscription charge.
         let is_subscription = category_id
@@ -892,8 +917,10 @@ impl TxRow {
             category_id,
             month: row.transaction_date.format("%Y-%m").to_string(),
             payment_status: row.payment_status.clone(),
+            installment_marker: installment_marker.clone(),
             reviewed: is_reviewed(row),
-            is_installment: row.payment_status == PAYMENT_STATUS_INSTALLMENT,
+            is_installment: row.payment_status == PAYMENT_STATUS_INSTALLMENT
+                || installment_marker.is_some(),
             is_subscription,
         }
     }
@@ -987,11 +1014,36 @@ struct CardApiRow {
     /// Card credit limit and used amount from Pluggy metadata, for a usage bar.
     credit_limit: Option<String>,
     used_amount: Option<String>,
+    installment_debt: String,
+    installment_month_amount: String,
+    installment_ending_amount: String,
+    installment_count: usize,
+    installments: Vec<CardInstallmentApiRow>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CardInstallmentApiRow {
+    transaction_id: String,
+    transaction_date: String,
+    description: String,
+    amount: String,
+    marker: String,
+    current: u32,
+    total: u32,
+    remaining: u32,
+    ending_this_month: bool,
 }
 
 #[derive(Serialize)]
 struct CardsResponse {
     rows: Vec<CardApiRow>,
+}
+
+struct CardCreditMeta {
+    due_day: Option<u32>,
+    credit_limit: Option<f64>,
+    used_amount: Option<f64>,
 }
 
 /// Due date (YYYY-MM-DD) for a cycle `"YYYY-MM"` given the billing due day,
@@ -1014,63 +1066,258 @@ fn cycle_due_date(month_ref: &str, due_day: u32) -> Option<String> {
     )
 }
 
-/// Assemble the card panel: each active credit account with its open-bill cycle
-/// (from `cards_open_now`, ADR-0010) plus credit-limit usage from Pluggy
-/// metadata. Cards with no open balance are reported `state="em-dia"`.
-async fn build_cards_api(store: &dyn FinanceStore) -> Result<Vec<CardApiRow>> {
+/// Assemble the card panel: each active credit account with the selected card
+/// cycle when `month_ref` is provided, otherwise with the currently-open bill
+/// (from `cards_open_now`, ADR-0010). Cards with no selected-cycle charges are
+/// reported `state="em-dia"`.
+async fn build_cards_api(
+    store: &dyn FinanceStore,
+    month_ref: Option<&str>,
+) -> Result<Vec<CardApiRow>> {
+    let today = chrono::Local::now().date_naive();
     let accounts = store.get_accounts().await?;
-    let open = store.cards_open_now().await?;
-    let open_by: std::collections::HashMap<&str, &CardSummaryRow> =
-        open.iter().map(|r| (r.account_id.as_str(), r)).collect();
+    let summaries = match month_ref {
+        Some(month) => store.card_summary(Some(month)).await?,
+        None => store.cards_open_now().await?,
+    };
+    let summary_by_account: std::collections::HashMap<&str, &CardSummaryRow> = summaries
+        .iter()
+        .map(|r| (r.account_id.as_str(), r))
+        .collect();
+    let mut installments_by_account = match month_ref {
+        Some(month) => card_installments_by_account_for_cash_month(store, month, &accounts).await?,
+        None => std::collections::HashMap::new(),
+    };
 
     let mut rows = Vec::new();
     for a in accounts
         .iter()
         .filter(|a| a.account_type == "credit" && a.status.eq_ignore_ascii_case("active"))
     {
-        let due_day = account_billing_day(&a.metadata_json, "billing_due_day");
-        let credit_limit = a
-            .metadata_json
-            .pointer("/raw/creditData/creditLimit")
-            .and_then(serde_json::Value::as_f64);
-        let available = a
-            .metadata_json
-            .pointer("/raw/creditData/availableCreditLimit")
-            .and_then(serde_json::Value::as_f64);
-        let used = match (credit_limit, available) {
-            (Some(c), Some(av)) => Some(c - av),
-            _ => None,
-        };
-        let label = if a.label.is_empty() {
-            a.account_id.clone()
-        } else {
-            a.label.clone()
-        };
-        let (state, cycle_month, total, open_amount, due_date) =
-            match open_by.get(a.account_id.as_str()) {
-                Some(r) => (
-                    "aberta",
-                    Some(r.month_ref.clone()),
-                    format!("{:.2}", r.total_charges),
-                    format!("{:.2}", r.open_amount),
-                    due_day.and_then(|d| cycle_due_date(&r.month_ref, d)),
-                ),
-                None => ("em-dia", None, "0.00".to_string(), "0.00".to_string(), None),
-            };
-        rows.push(CardApiRow {
-            account_id: a.account_id.clone(),
-            label,
-            state,
-            cycle_month,
-            total,
-            open_amount,
-            due_date,
-            credit_limit: credit_limit.map(|c| format!("{c:.2}")),
-            used_amount: used.map(|u| format!("{u:.2}")),
-        });
+        let installments = installments_by_account
+            .remove(&a.account_id)
+            .unwrap_or_default();
+        rows.push(card_api_row_for_account(
+            a,
+            summary_by_account.get(a.account_id.as_str()).copied(),
+            card_credit_meta(a),
+            installments,
+            today,
+        ));
     }
     rows.sort_by(|a, b| a.label.cmp(&b.label));
     Ok(rows)
+}
+
+fn card_credit_meta(account: &AccountRecord) -> CardCreditMeta {
+    let credit_limit = account
+        .metadata_json
+        .pointer("/raw/creditData/creditLimit")
+        .and_then(serde_json::Value::as_f64);
+    let available = account
+        .metadata_json
+        .pointer("/raw/creditData/availableCreditLimit")
+        .and_then(serde_json::Value::as_f64);
+    CardCreditMeta {
+        due_day: account_billing_day(&account.metadata_json, "billing_due_day"),
+        credit_limit,
+        used_amount: match (credit_limit, available) {
+            (Some(c), Some(av)) => Some(c - av),
+            _ => None,
+        },
+    }
+}
+
+fn card_label(account: &AccountRecord) -> String {
+    if account.label.is_empty() {
+        account.account_id.clone()
+    } else {
+        account.label.clone()
+    }
+}
+
+fn selected_card_state(
+    due_date: Option<&str>,
+    open_amount: Decimal,
+    today: NaiveDate,
+) -> &'static str {
+    if due_date
+        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .is_some_and(|d| d < today)
+    {
+        "fechada"
+    } else if open_amount > Decimal::ZERO {
+        "aberta"
+    } else {
+        "fechada"
+    }
+}
+
+fn card_api_row_for_account(
+    account: &AccountRecord,
+    summary: Option<&CardSummaryRow>,
+    meta: CardCreditMeta,
+    installments: Vec<CardInstallmentApiRow>,
+    today: NaiveDate,
+) -> CardApiRow {
+    let (installment_debt, installment_month_amount, installment_ending_amount) =
+        card_installment_totals(&installments);
+    match summary {
+        Some(row) => {
+            let due_date = meta.due_day.and_then(|d| cycle_due_date(&row.month_ref, d));
+            CardApiRow {
+                account_id: account.account_id.clone(),
+                label: card_label(account),
+                state: selected_card_state(due_date.as_deref(), row.open_amount, today),
+                cycle_month: Some(row.month_ref.clone()),
+                total: format!("{:.2}", row.total_charges),
+                open_amount: format!("{:.2}", row.open_amount),
+                due_date,
+                credit_limit: meta.credit_limit.map(|c| format!("{c:.2}")),
+                used_amount: meta.used_amount.map(|u| format!("{u:.2}")),
+                installment_debt: format!("{:.2}", installment_debt),
+                installment_month_amount: format!("{:.2}", installment_month_amount),
+                installment_ending_amount: format!("{:.2}", installment_ending_amount),
+                installment_count: installments.len(),
+                installments,
+            }
+        }
+        None => CardApiRow {
+            account_id: account.account_id.clone(),
+            label: card_label(account),
+            state: "em-dia",
+            cycle_month: None,
+            total: "0.00".to_string(),
+            open_amount: "0.00".to_string(),
+            due_date: None,
+            credit_limit: meta.credit_limit.map(|c| format!("{c:.2}")),
+            used_amount: meta.used_amount.map(|u| format!("{u:.2}")),
+            installment_debt: format!("{:.2}", installment_debt),
+            installment_month_amount: format!("{:.2}", installment_month_amount),
+            installment_ending_amount: format!("{:.2}", installment_ending_amount),
+            installment_count: installments.len(),
+            installments,
+        },
+    }
+}
+
+async fn card_installments_by_account_for_cash_month(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+    accounts: &[AccountRecord],
+) -> Result<std::collections::HashMap<String, Vec<CardInstallmentApiRow>>> {
+    let month_start = parse_month_ref(month_ref)?;
+    let cash_until = last_of_month(month_start);
+    let posted_from = first_of_month(shift_months(month_start, -2));
+    let mut rows = store
+        .effective_transactions_window(None, posted_from, cash_until)
+        .await
+        .context("card effective_transactions_window")?;
+    let internal_categories = store
+        .internal_categories()
+        .await
+        .context("card internal_categories")?;
+    rows.retain(|row| {
+        let raw_category = row.category_id.as_deref();
+        let canonical_category = canonical_web_category(raw_category);
+        !raw_category.is_some_and(|category| internal_categories.contains(category))
+            && !canonical_category
+                .as_deref()
+                .is_some_and(|category| internal_categories.contains(category))
+    });
+    // ofx-shadowed-by-pluggy rows are already dropped by v_transactions_reportable
+    // (migration 038 / ADR-0026); no Rust-side dedup needed here.
+
+    let lookup = cash_month_lookup(accounts);
+    let mut by_account: std::collections::HashMap<String, Vec<CardInstallmentApiRow>> =
+        std::collections::HashMap::new();
+    for row in &rows {
+        let Some(account_id) = row.account_id.as_deref() else {
+            continue;
+        };
+        let Some((is_credit, closing, due)) = lookup.get(account_id) else {
+            continue;
+        };
+        if !*is_credit {
+            continue;
+        }
+        let cash_month =
+            phai_core::cashflow::cash_month_for(row.transaction_date, *is_credit, *closing, *due);
+        if cash_month != month_ref {
+            continue;
+        }
+        let Some(installment) = card_installment_api_row(row) else {
+            continue;
+        };
+        by_account
+            .entry(account_id.to_string())
+            .or_default()
+            .push(installment);
+    }
+    for rows in by_account.values_mut() {
+        rows.sort_by(|a, b| {
+            a.description
+                .cmp(&b.description)
+                .then_with(|| a.marker.cmp(&b.marker))
+                .then_with(|| a.transaction_id.cmp(&b.transaction_id))
+        });
+    }
+    Ok(by_account)
+}
+
+fn card_installment_api_row(row: &TransactionRecord) -> Option<CardInstallmentApiRow> {
+    let marker = parse_installment_description(&row.raw_description)
+        .or_else(|| {
+            row.description
+                .as_deref()
+                .and_then(parse_installment_description)
+        })
+        .or_else(|| {
+            row.merchant_name
+                .as_deref()
+                .and_then(parse_installment_description)
+        })
+        .or_else(|| {
+            row.metadata_json
+                .get("raw")
+                .and_then(|r| r.get("descriptionRaw"))
+                .and_then(|v| v.as_str())
+                .and_then(parse_installment_description)
+        })?;
+    let remaining = marker.total - marker.current + 1;
+    Some(CardInstallmentApiRow {
+        transaction_id: row.transaction_id.clone(),
+        transaction_date: row.transaction_date.format("%Y-%m-%d").to_string(),
+        description: row
+            .description
+            .clone()
+            .or_else(|| row.merchant_name.clone())
+            .unwrap_or_else(|| row.raw_description.clone()),
+        amount: format!("{:.2}", row.amount.round_dp(2).abs()),
+        marker: format!("{}/{}", marker.current, marker.total),
+        current: marker.current,
+        total: marker.total,
+        remaining,
+        ending_this_month: marker.current == marker.total,
+    })
+}
+
+fn card_installment_totals(rows: &[CardInstallmentApiRow]) -> (Decimal, Decimal, Decimal) {
+    rows.iter().fold(
+        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
+        |(debt, month, ending), row| {
+            let amount = Decimal::from_str(&row.amount).unwrap_or(Decimal::ZERO);
+            (
+                debt + amount * Decimal::from(row.remaining),
+                month + amount,
+                if row.ending_this_month {
+                    ending + amount
+                } else {
+                    ending
+                },
+            )
+        },
+    )
 }
 
 #[derive(Serialize)]
@@ -1133,6 +1380,11 @@ struct ReviewQueueQuery {
 struct ChartQuery {
     months_back: Option<usize>,
     months_ahead: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+struct CardsQuery {
+    month: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1326,7 +1578,6 @@ async fn get_transactions(
         offset: q.offset.unwrap_or(0),
     };
     let tx = clone_actor_tx(&tx).await;
-    let accounts = fetch_accounts(&tx).await;
     let (resp_tx, resp_rx) = oneshot::channel();
     if tx
         .send(StoreRequest::TransactionsWindow {
@@ -1339,16 +1590,13 @@ async fn get_transactions(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(result)) => {
-            let lookup = cash_month_lookup(&accounts);
-            Json(TransactionsResponse {
-                rows: tx_rows_with_cash_month(&result.rows, &lookup),
-                total: result.total,
-                offset: result.offset,
-                has_more: result.has_more,
-            })
-            .into_response()
-        }
+        Ok(Ok(result)) => Json(TransactionsResponse {
+            rows: result.rows,
+            total: result.total,
+            offset: result.offset,
+            has_more: result.has_more,
+        })
+        .into_response(),
         Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Err(_) => actor_silent(),
     }
@@ -1371,11 +1619,19 @@ async fn get_categories(State(tx): Store) -> impl IntoResponse {
     }
 }
 
-async fn get_cards(State(tx): Store) -> impl IntoResponse {
+async fn get_cards(State(tx): Store, Query(q): Query<CardsQuery>) -> impl IntoResponse {
+    if let Some(month) = q.month.as_deref() {
+        if let Err(e) = parse_month_ref(month) {
+            return error_response(StatusCode::BAD_REQUEST, e.to_string());
+        }
+    }
     let (resp_tx, resp_rx) = oneshot::channel();
     let tx = clone_actor_tx(&tx).await;
     if tx
-        .send(StoreRequest::Cards { resp: resp_tx })
+        .send(StoreRequest::Cards {
+            month: q.month,
+            resp: resp_tx,
+        })
         .await
         .is_err()
     {
@@ -2202,9 +2458,11 @@ mod tests {
         assert_eq!(value["purpose"], "Trabalho");
         assert_eq!(value["categoryId"], "alimentacao:restaurante");
         assert_eq!(value["month"], "2026-03");
+        assert_eq!(value["installmentMarker"], serde_json::Value::Null);
         // snake_case keys must NOT leak.
         assert!(value.get("account_id").is_none());
         assert!(value.get("raw_description").is_none());
+        assert!(value.get("installment_marker").is_none());
     }
 
     // ── TxRow contract (camelCase + flag derivation) ──────────────────────
@@ -2219,6 +2477,7 @@ mod tests {
         assert_eq!(value["rawDescription"], "RAW MERCHANT 123");
         assert_eq!(value["month"], "2026-03");
         assert_eq!(value["paymentStatus"], "settled");
+        assert_eq!(value["installmentMarker"], serde_json::Value::Null);
         // sample_record has a concrete category → reviewed; not installment;
         // not under `assinaturas:` → not a subscription.
         assert_eq!(value["reviewed"], true);
@@ -2245,6 +2504,13 @@ mod tests {
         let mut installment = sample_record();
         installment.payment_status = PAYMENT_STATUS_INSTALLMENT.into();
         assert!(TxRow::from_record(&installment).is_installment);
+
+        let mut marked_installment = sample_record();
+        marked_installment.raw_description = "LOJA SINTETICA 2/5".into();
+        marked_installment.payment_status = "settled".into();
+        let row = TxRow::from_record(&marked_installment);
+        assert!(row.is_installment);
+        assert_eq!(row.installment_marker.as_deref(), Some("2/5"));
 
         let mut subscription = sample_record();
         subscription.category_id = Some("assinaturas:streaming".into());
@@ -2603,11 +2869,7 @@ mod tests {
         .await
         .unwrap();
 
-        let ids: BTreeSet<_> = result
-            .rows
-            .iter()
-            .map(|row| row.transaction_id.as_str())
-            .collect();
+        let ids: BTreeSet<_> = result.rows.iter().map(|row| row.id.as_str()).collect();
         assert!(ids.contains("tx-external"));
         assert!(!ids.contains("tx-internal"));
     }
@@ -2652,14 +2914,69 @@ mod tests {
         .await
         .unwrap();
 
-        let ids: BTreeSet<_> = result
-            .rows
-            .iter()
-            .map(|row| row.transaction_id.as_str())
-            .collect();
+        let ids: BTreeSet<_> = result.rows.iter().map(|row| row.id.as_str()).collect();
         assert!(ids.contains("tx-pluggy"));
         assert!(ids.contains("tx-ofx-unique"));
         assert!(!ids.contains("tx-ofx-duplicate"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transactions_window_includes_prior_posted_card_purchase_for_current_cash_month() {
+        let (_dir, _config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+        let current_month = first_of_month(today);
+        let previous_month = shift_months(current_month, -1);
+        let current_ref = current_month.format("%Y-%m").to_string();
+
+        let mut card = sample_account("cc-1", "Card", "me");
+        card.account_type = "credit".into();
+        card.metadata_json = serde_json::json!({
+            "billing_closing_day": "3",
+            "billing_due_day": "10",
+        });
+        store.upsert_accounts(&[card]).await.unwrap();
+
+        let mut card_purchase = sample_record();
+        card_purchase.transaction_id = "tx-card-prior-posted".into();
+        card_purchase.account_id = Some("cc-1".into());
+        card_purchase.transaction_date =
+            NaiveDate::from_ymd_opt(previous_month.year(), previous_month.month(), 28).unwrap();
+        card_purchase.category_id = Some("educacao:cursos".into());
+
+        let mut prior_checking = sample_record();
+        prior_checking.transaction_id = "tx-prior-checking".into();
+        prior_checking.transaction_date = card_purchase.transaction_date;
+        prior_checking.category_id = Some("alimentacao:mercado".into());
+
+        store
+            .upsert_transactions(&[card_purchase, prior_checking])
+            .await
+            .unwrap();
+
+        let result = load_transactions_window(
+            store.as_ref(),
+            TransactionsWindowParams {
+                months_back: 0,
+                months_ahead: 0,
+                include_reviewed: true,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: BTreeSet<_> = result.rows.iter().map(|row| row.id.as_str()).collect();
+        assert!(ids.contains("tx-card-prior-posted"));
+        assert!(!ids.contains("tx-prior-checking"));
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .find(|row| row.id == "tx-card-prior-posted")
+                .map(|row| row.month.as_str()),
+            Some(current_ref.as_str())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

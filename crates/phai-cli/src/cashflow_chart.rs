@@ -1,5 +1,5 @@
 //! `finance report cashflow-chart` — renders an SVG (and optional ASCII
-//! sparkline) of cash-basis cashflow on checking accounts.
+//! sparkline) of household cashflow and real checking-account balance.
 //!
 //! Layout: stacked bars per month — solid bottom = realized entradas/saídas,
 //! hatched top = forecast remaining (what's still expected to come in or go
@@ -14,6 +14,7 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
 use phai_core::migrations::run_migrations;
+use phai_core::models::ForecastRecord;
 use phai_core::storage::{open_store, FinanceStore};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -138,11 +139,12 @@ pub(crate) async fn report_cashflow_chart(args: CashflowChartArgs) -> Result<()>
 /// projected closing balances (dashed saldo line).
 ///
 /// Realized bars come from [`FinanceStore::cashflow_reportable`] (the
-/// `v_cashflow` accrual basis: every reportable transaction, card swipes
-/// included, internal categories excluded) so the chart agrees with the
-/// per-category reports. The saldo line is derived from the accumulated
-/// monthly `net` — anchored on the net of all months *before* the window —
-/// rather than from checking-account snapshots (ADR-0024).
+/// `v_cashflow` household basis: every reportable transaction, card swipes
+/// bucketed into their cash month, internal categories excluded) so the chart
+/// agrees with the month-detail reports. The saldo line uses real
+/// checking-account snapshots via [`FinanceStore::checking_balance_at`] for
+/// past/current months when available, with the previous accumulated-net
+/// behaviour as a fallback for stores without complete snapshot coverage.
 pub(crate) async fn build_chart_data(
     store: &dyn FinanceStore,
     months_back: usize,
@@ -164,14 +166,40 @@ pub(crate) async fn build_chart_data(
     let flows = store.cashflow_reportable().await?;
     let by_month: HashMap<&str, _> = flows.iter().map(|r| (r.month_ref.as_str(), r)).collect();
 
-    // Derive the saldo anchor from the net of everything *before* the window
-    // so the line reflects prior history instead of always starting at zero.
+    // Fallback saldo anchor from the net of everything *before* the window.
+    // Used only when snapshot coverage is incomplete.
     let first_ref = month_ref_for(window[0]);
-    let initial_balance: Decimal = flows
+    let fallback_initial_balance: Decimal = flows
         .iter()
         .filter(|r| r.month_ref < first_ref)
         .map(|r| r.net)
         .sum();
+    let initial_anchor_date = window[0].pred_opt();
+    let initial_balance = match initial_anchor_date {
+        Some(anchor) => store
+            .checking_balance_at(anchor)
+            .await?
+            .map(|b| b.balance)
+            .unwrap_or(fallback_initial_balance),
+        None => fallback_initial_balance,
+    };
+
+    // Fetch every in-window upcoming forecast ONCE rather than per month. The
+    // per-month union of [max(today+1, month_start), month_end] is exactly
+    // [today+1, window_end] (past months elapsed, so contribute nothing), so a
+    // single query feeds them all — this was the chart's dominant latency
+    // (~one BigQuery round-trip per month). Bucketed in-memory in the loop.
+    let upcoming: Vec<ForecastRecord> = if with_forecast {
+        let lower = today.succ_opt().unwrap_or(today);
+        let window_end = last_day_of_month(*window.last().expect("non-empty window"))?;
+        if lower <= window_end {
+            store.upcoming_forecasts(lower, window_end).await?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
     let realized_count = months_back; // by construction
     let mut data: Vec<MonthDatum> = Vec::with_capacity(total);
@@ -179,8 +207,39 @@ pub(crate) async fn build_chart_data(
     // solid saldo line); `running_proj` also absorbs the forecast remainder
     // (the dashed projection). They coincide through the past and diverge
     // from the current month onward when forecasts exist.
-    let mut running = initial_balance;
+    let mut running = fallback_initial_balance;
     let mut running_proj = initial_balance;
+
+    // Prefetch the realized checking balance for every past/current month-end
+    // CONCURRENTLY (each is an independent snapshot lookup), instead of awaiting
+    // one BigQuery round-trip per month inside the loop — the chart's remaining
+    // latency after the forecast batch. Future months have no realized balance.
+    let realized_targets: Vec<Option<NaiveDate>> = window
+        .iter()
+        .enumerate()
+        .map(|(i, ms)| {
+            if i >= realized_count {
+                Ok(None)
+            } else if *ms == current_month {
+                Ok(Some(today))
+            } else {
+                last_day_of_month(*ms).map(Some)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let realized_balances: Vec<Option<Decimal>> =
+        futures::future::join_all(realized_targets.iter().map(|t| async move {
+            match t {
+                Some(target) => store
+                    .checking_balance_at(*target)
+                    .await
+                    .map(|o| o.map(|b| b.balance)),
+                None => Ok(None),
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
 
     for (i, month_start) in window.iter().enumerate() {
         let month_ref = month_ref_for(*month_start);
@@ -208,34 +267,72 @@ pub(crate) async fn build_chart_data(
             // materialized (e.g. mid-month salary already received) while
             // still surfacing the end-of-month installment that hasn't.
             let lower = today.succ_opt().unwrap_or(today).max(*month_start);
-            let (mut fi_rem, mut fo_rem) = (Decimal::ZERO, Decimal::ZERO);
-            if lower <= last_day {
-                let forecasts = store.upcoming_forecasts(lower, last_day).await?;
-                for f in &forecasts {
+            if lower > last_day {
+                // Wholly-past month: every due date already elapsed.
+                (Some(Decimal::ZERO), Some(Decimal::ZERO))
+            } else {
+                // Group remaining outflows by parent category so a budget
+                // envelope ("Moradia", "Alimentação") can be netted against
+                // spend already realized in that category; income is netted at
+                // the month total (salary dominates, no per-category budget).
+                let mut fi_total = Decimal::ZERO;
+                let mut fo_by_cat: HashMap<String, Decimal> = HashMap::new();
+                for f in upcoming
+                    .iter()
+                    .filter(|f| f.due_date.is_some_and(|d| d >= lower && d <= last_day))
+                {
+                    if !forecast_counts_in_chart_projection(f) {
+                        continue;
+                    }
                     if f.amount > Decimal::ZERO {
-                        fi_rem += f.amount;
+                        fi_total += f.amount;
                     } else {
-                        fo_rem += f.amount.abs();
+                        *fo_by_cat
+                            .entry(parent_category(f.category_id.as_deref()))
+                            .or_default() += f.amount.abs();
                     }
                 }
+                if is_future {
+                    // No realized rows yet — the full forecast projects through.
+                    (Some(fi_total), Some(fo_by_cat.values().copied().sum()))
+                } else {
+                    // Current month: net the remaining budget against realized
+                    // so realized spend isn't double-counted (ADR-0025).
+                    let realized_by_cat = realized_outflow_by_parent(store, &month_ref).await?;
+                    let fo_rem = envelope_remaining(&fo_by_cat, &realized_by_cat);
+                    let fi_rem = (fi_total - inflows).max(Decimal::ZERO);
+                    (Some(fi_rem), Some(fo_rem))
+                }
             }
-            (Some(fi_rem), Some(fo_rem))
         } else {
             (None, None)
         };
 
-        // Advance the derived balances. Realized saldo moves only on realized
-        // net; projected saldo also absorbs the forecast remainder.
+        // Advance the derived fallback balance. The displayed realized saldo
+        // prefers real checking snapshots; when they are unavailable, it falls
+        // back to the accumulated flow-derived balance so card-only/demo stores
+        // still render a continuous line.
         let net_remaining =
             fc_in_remaining.unwrap_or(Decimal::ZERO) - fc_out_remaining.unwrap_or(Decimal::ZERO);
         running += net_realized;
-        running_proj += net_realized + net_remaining;
+        let realized_balance = realized_balances[i];
 
-        // Realized closing exists for past/current months (derived, never a
-        // snapshot); future months have no realized closing.
-        let closing_balance = if is_future { None } else { Some(running) };
+        let closing_balance = if is_future {
+            None
+        } else {
+            Some(realized_balance.unwrap_or(running))
+        };
         let projected = if with_forecast {
-            Some(running_proj)
+            if is_future {
+                running_proj += net_remaining;
+                Some(running_proj)
+            } else {
+                running_proj = closing_balance.unwrap_or(running);
+                if *month_start == current_month {
+                    running_proj += net_remaining;
+                }
+                Some(running_proj)
+            }
         } else {
             closing_balance
         };
@@ -260,6 +357,64 @@ pub(crate) async fn build_chart_data(
         realized_count,
         scenario: None,
     })
+}
+
+fn forecast_counts_in_chart_projection(forecast: &ForecastRecord) -> bool {
+    if forecast.recurrence.as_deref() == Some("card-cycle") {
+        return false;
+    }
+    forecast
+        .metadata_json
+        .get("source")
+        .and_then(|v| v.as_str())
+        != Some("card-open-bill")
+}
+
+/// Roll a (sub)category id up to its parent: `"moradia:servicos"` → `"moradia"`.
+/// Empty/`None` maps to the `"sem-categoria"` bucket `v_monthly_spend` uses, so
+/// uncategorised forecasts and realized rows net against each other.
+fn parent_category(category_id: Option<&str>) -> String {
+    match category_id {
+        None | Some("") => "sem-categoria".to_string(),
+        Some(c) => c.split(':').next().unwrap_or(c).to_string(),
+    }
+}
+
+/// Realized outflow magnitude for `month_ref`, grouped by parent category. Reads
+/// the cash-basis `v_monthly_spend` via [`FinanceStore::monthly_spend`] (card
+/// swipes already bucketed into their bill's cash month, internal categories
+/// excluded), so it lines up with the chart's realized bar.
+async fn realized_outflow_by_parent(
+    store: &dyn FinanceStore,
+    month_ref: &str,
+) -> Result<HashMap<String, Decimal>> {
+    let rows = store.monthly_spend(Some(month_ref)).await?;
+    let mut out: HashMap<String, Decimal> = HashMap::new();
+    for r in rows {
+        *out.entry(parent_category(Some(&r.category_id)))
+            .or_default() += r.expenses;
+    }
+    Ok(out)
+}
+
+/// Envelope netting for the current month. A monthly budget forecast for a
+/// category (e.g. "Alimentação" = R$7.500) only contributes the portion NOT yet
+/// realized in that category, so realized spend and its budget envelope don't
+/// double-count — the bar shows `max(realized, budget)` per category instead of
+/// `realized + budget`. Over-spent categories contribute zero remaining (their
+/// realized magnitude is already in the solid bar). Both maps are
+/// parent-category → positive magnitude.
+fn envelope_remaining(
+    forecast_by_cat: &HashMap<String, Decimal>,
+    realized_by_cat: &HashMap<String, Decimal>,
+) -> Decimal {
+    forecast_by_cat
+        .iter()
+        .map(|(cat, fc)| {
+            let realized = realized_by_cat.get(cat).copied().unwrap_or(Decimal::ZERO);
+            (*fc - realized).max(Decimal::ZERO)
+        })
+        .sum()
 }
 
 fn write_svg(path: &Path, body: &str) -> Result<()> {
@@ -1129,7 +1284,38 @@ fn sparkline_line(values: &[f64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use rust_decimal_macros::dec;
+    use serde_json::json;
+
+    #[test]
+    fn parent_category_rolls_up_subcategories() {
+        assert_eq!(parent_category(Some("moradia:servicos")), "moradia");
+        assert_eq!(parent_category(Some("moradia")), "moradia");
+        assert_eq!(parent_category(None), "sem-categoria");
+        assert_eq!(parent_category(Some("")), "sem-categoria");
+    }
+
+    #[test]
+    fn envelope_remaining_nets_realized_against_budget() {
+        // Moradia barely spent → almost the whole budget still remains.
+        // Alimentação over-spent → nothing remains (realized is in the bar).
+        let fc = HashMap::from([
+            ("moradia".to_string(), dec!(9300)),
+            ("alimentacao".to_string(), dec!(7500)),
+        ]);
+        let realized = HashMap::from([
+            ("moradia".to_string(), dec!(100)),
+            ("alimentacao".to_string(), dec!(8000)),
+        ]);
+        assert_eq!(envelope_remaining(&fc, &realized), dec!(9200));
+    }
+
+    #[test]
+    fn envelope_remaining_passes_full_budget_when_nothing_realized() {
+        let fc = HashMap::from([("educacao".to_string(), dec!(4900))]);
+        assert_eq!(envelope_remaining(&fc, &HashMap::new()), dec!(4900));
+    }
 
     fn realized_only() -> ChartData {
         ChartData {
@@ -1162,6 +1348,45 @@ mod tests {
             realized_count: 2,
             scenario: None,
         }
+    }
+
+    fn sample_forecast(recurrence: Option<&str>, source: Option<&str>) -> ForecastRecord {
+        ForecastRecord {
+            forecast_id: "forecast-1".into(),
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 6, 15).unwrap()),
+            description: "Synthetic forecast".into(),
+            amount: dec!(-100),
+            category_id: None,
+            account_id: Some("account-1".into()),
+            status: "ativo".into(),
+            recurrence: recurrence.map(str::to_string),
+            actor_id: "test".into(),
+            idempotency_key: "forecast-1".into(),
+            metadata_json: source
+                .map(|s| json!({ "source": s }))
+                .unwrap_or_else(|| json!({})),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            template_id: None,
+            realized_transaction_id: None,
+            realized_at: None,
+        }
+    }
+
+    #[test]
+    fn chart_projection_ignores_open_card_bill_forecasts() {
+        assert!(!forecast_counts_in_chart_projection(&sample_forecast(
+            Some("card-cycle"),
+            None
+        )));
+        assert!(!forecast_counts_in_chart_projection(&sample_forecast(
+            None,
+            Some("card-open-bill")
+        )));
+        assert!(forecast_counts_in_chart_projection(&sample_forecast(
+            Some("monthly"),
+            Some("manual")
+        )));
     }
 
     fn realized_plus_future() -> ChartData {

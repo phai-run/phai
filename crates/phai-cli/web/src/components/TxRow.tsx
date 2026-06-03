@@ -15,6 +15,8 @@ export interface TxView {
 	categoryId: string | null;
 	month: string;
 	paymentStatus: string;
+	installmentMarker?: string | null;
+	accountLabel?: string;
 	reviewed: number;
 	isInstallment: number;
 	isSubscription: number;
@@ -78,6 +80,7 @@ export const TxRow = memo(
 			tx.merchantName ??
 			tx.rawDescription;
 		const cat = overlay?.categoryId ?? tx.categoryId;
+		const accountLabel = tx.accountLabel || tx.accountId;
 
 		const handleClick = useCallback(
 			(e: React.MouseEvent) => {
@@ -181,19 +184,30 @@ export const TxRow = memo(
 					>
 						<span>{display}</span>
 						{tx.isInstallment === 1 && (
-							<TagBadge label="parcela" color="var(--amber)" />
+							<TagBadge
+								label={tx.installmentMarker ? `parcela ${tx.installmentMarker}` : "parcela"}
+								color="var(--amber)"
+							/>
 						)}
 						{tx.isSubscription === 1 && (
 							<TagBadge label="assinatura" color="var(--cyan)" />
 						)}
 						{tx.reviewed === 1 && <TagBadge label="✓" color="var(--green)" />}
 					</div>
-					{cat && (
+					{(cat || accountLabel) && (
 						<div
 							className="mono"
-							style={{ fontSize: 10, color: "var(--cyan)", marginTop: 1 }}
+							style={{
+								fontSize: 10,
+								color: "var(--muted)",
+								marginTop: 1,
+								display: "flex",
+								gap: 8,
+								flexWrap: "wrap",
+							}}
 						>
-							{cat}
+							{cat && <span style={{ color: "var(--cyan)" }}>{cat}</span>}
+							{accountLabel && <span>{accountLabel}</span>}
 						</div>
 					)}
 				</div>

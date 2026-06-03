@@ -48,6 +48,7 @@ export const tables = {
 			categoryId: State.SQLite.text({ nullable: true }),
 			month: State.SQLite.text({ default: "" }), // YYYY-MM
 			paymentStatus: State.SQLite.text({ default: "" }),
+			installmentMarker: State.SQLite.text({ nullable: true }),
 			reviewed: State.SQLite.integer({ default: 0 }),
 			isInstallment: State.SQLite.integer({ default: 0 }),
 			isSubscription: State.SQLite.integer({ default: 0 }),
@@ -198,6 +199,7 @@ const TxRow = Schema.Struct({
 	categoryId: Schema.NullOr(Schema.String),
 	month: Schema.String,
 	paymentStatus: Schema.String,
+	installmentMarker: Schema.NullOr(Schema.String),
 	reviewed: Schema.Number,
 	isInstallment: Schema.Number,
 	isSubscription: Schema.Number,
@@ -360,6 +362,12 @@ const materializers = State.SQLite.materializers(events, {
 		...rows.map((r) => tables.forecastTemplates.insert(r)),
 	],
 	"v1.BridgeIdentityChanged": () => [
+		tables.transactions.delete(),
+		tables.categories.delete(),
+		tables.accounts.delete(),
+		tables.chartMonths.delete(),
+		tables.forecasts.delete(),
+		tables.forecastTemplates.delete(),
 		tables.pendingWrites.delete(),
 		tables.reviewOverlay.delete(),
 		tables.forecastOverlay.delete(),

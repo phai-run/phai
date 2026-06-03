@@ -11,6 +11,7 @@ import {
 	buildOverlayMap,
 	computeMonthSums,
 	effectiveCategory,
+	expensesByMonthCategory,
 	filterTransactions,
 	groupByCategory,
 	groupHierarchical,
@@ -489,5 +490,102 @@ describe("effectiveCategory", () => {
 			isSubscription: 0,
 		};
 		expect(effectiveCategory(tx, emptyOverlay)).toBeNull();
+	});
+});
+
+// ── filterTransactions flags (E1/E2 regression) ─────────────────────────────
+// The "Parcelas" and "Não revisadas" filters used to return nothing. Lock the
+// flag semantics deterministically so they keep returning the right subset.
+
+describe("filterTransactions installment/unreviewed flags", () => {
+	const mk = (id: string, o: Partial<TxView>): TxView => ({
+		id,
+		accountId: "acc-1",
+		postedAt: "2026-06-01",
+		amount: "-10.00",
+		rawDescription: "x",
+		description: null,
+		merchantName: null,
+		purpose: null,
+		categoryId: "compras",
+		month: "2026-06",
+		paymentStatus: "posted",
+		reviewed: 1,
+		isInstallment: 0,
+		isSubscription: 0,
+		...o,
+	});
+	const rows: TxView[] = [
+		mk("a", { isInstallment: 1, installmentMarker: "2/3" }),
+		mk("b", { isInstallment: 1, installmentMarker: "1/4" }),
+		mk("c", {}),
+		mk("d", { reviewed: 0 }),
+		mk("e", { reviewed: 0 }),
+	];
+	const base: TxFilters = {
+		accountFilter: null,
+		ownerFilter: null,
+		categoryFilter: null,
+		textFilter: null,
+		installmentsOnly: false,
+		subscriptionsOnly: false,
+		unreviewedOnly: false,
+	};
+	const ov = new Map<string, ReviewOverlay>();
+	const am = buildAccountMap([]);
+
+	it("installmentsOnly returns exactly the installment rows (not empty)", () => {
+		const r = filterTransactions(rows, { ...base, installmentsOnly: true }, ov, am);
+		expect(r.map((t) => t.id).sort()).toEqual(["a", "b"]);
+	});
+
+	it("unreviewedOnly returns exactly the unreviewed rows (not empty)", () => {
+		const r = filterTransactions(rows, { ...base, unreviewedOnly: true }, ov, am);
+		expect(r.map((t) => t.id).sort()).toEqual(["d", "e"]);
+	});
+});
+
+// ── expensesByMonthCategory (chart Despesas modes) ──────────────────────────
+
+describe("expensesByMonthCategory", () => {
+	const mk = (id: string, month: string, cat: string | null, amt: string): TxView => ({
+		id,
+		accountId: "a",
+		postedAt: `${month}-05`,
+		amount: amt,
+		rawDescription: "x",
+		description: null,
+		merchantName: null,
+		purpose: null,
+		categoryId: cat,
+		month,
+		paymentStatus: "posted",
+		reviewed: 1,
+		isInstallment: 0,
+		isSubscription: 0,
+	});
+	const ov = new Map<string, ReviewOverlay>();
+
+	it("ranks parents by total and buckets per month; rolls tail into outros", () => {
+		const txs = [
+			mk("1", "2026-05", "moradia:aluguel", "-3000.00"),
+			mk("2", "2026-05", "alimentacao:mercado", "-1000.00"),
+			mk("3", "2026-06", "moradia:luz", "-500.00"),
+			mk("4", "2026-06", "transporte:app", "-200.00"),
+			mk("5", "2026-06", "lazer:cinema", "-100.00"),
+			mk("6", "2026-05", "x", "200.00"), // income ignored
+		];
+		const r = expensesByMonthCategory(txs, ov, 2); // keep top 2 parents
+
+		expect(r.categories.slice(0, 2)).toEqual(["moradia", "alimentacao"]);
+		expect(r.categories).toContain("outros");
+		// May: moradia 3000, alimentacao 1000
+		expect(r.byMonth.get("2026-05")?.get("moradia")).toBe(3000);
+		expect(r.byMonth.get("2026-05")?.get("alimentacao")).toBe(1000);
+		// June: moradia 500 (top); transporte+lazer collapse to outros = 300
+		expect(r.byMonth.get("2026-06")?.get("moradia")).toBe(500);
+		expect(r.byMonth.get("2026-06")?.get("outros")).toBe(300);
+		// Income never appears.
+		expect(r.categories).not.toContain("—");
 	});
 });

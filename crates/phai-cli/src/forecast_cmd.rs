@@ -32,6 +32,9 @@ pub struct InstallmentsRefreshReport {
     pub chains_active: usize,
     pub templates_upserted: usize,
     pub forecasts_upserted: usize,
+    /// Duplicate templates collapsed to `descartado` before re-materialising
+    /// (their orphan forecasts deactivated). Self-heal — see ADR-0022.
+    pub templates_deduped: usize,
 }
 
 pub(crate) async fn run_refresh_installments(args: ForecastRefreshInstallmentsArgs) -> Result<()> {
@@ -47,6 +50,7 @@ pub(crate) async fn run_refresh_installments(args: ForecastRefreshInstallmentsAr
             "chains_active": report.chains_active,
             "templates_upserted": report.templates_upserted,
             "forecasts_upserted": report.forecasts_upserted,
+            "templates_deduped": report.templates_deduped,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
@@ -55,6 +59,9 @@ pub(crate) async fn run_refresh_installments(args: ForecastRefreshInstallmentsAr
         println!("  Cadeias ativas:      {}", report.chains_active);
         println!("  Templates atualizados: {}", report.templates_upserted);
         println!("  Forecasts gravados:    {}", report.forecasts_upserted);
+        if report.templates_deduped > 0 {
+            println!("  Duplicados colapsados: {}", report.templates_deduped);
+        }
     }
     Ok(())
 }
@@ -88,6 +95,14 @@ pub async fn refresh_installments(
         chains_seen: chains.len(),
         ..Default::default()
     };
+
+    // Self-heal first: collapse any duplicate templates (same identity, drifted
+    // id) and deactivate their orphan forecasts so this pass can't leave stale
+    // duplicates active. The standalone `refresh-installments` command (and any
+    // cron wired to it) previously skipped this — only `refresh_all` collapsed —
+    // so forked installment forecasts accumulated and inflated future months
+    // (ADR-0022). Idempotent: a no-op once the store is clean.
+    report.templates_deduped = collapse_duplicate_templates(store, &config.actor_id).await?;
 
     // Map every known identity to its canonical template_id so re-derivation
     // reuses the existing row instead of forking a duplicate (ADR-0022).

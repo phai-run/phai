@@ -48,6 +48,16 @@ export const formatMoney = (amount: string | null | undefined): string =>
 /** Format an already-parsed number as pt-BR R$. Display only. */
 export const formatMoneyNumber = (n: number): string => brl.format(n)
 
+const brlCompact = new Intl.NumberFormat('pt-BR', {
+  style: 'currency',
+  currency: 'BRL',
+  notation: 'compact',
+  maximumFractionDigits: 1,
+})
+
+/** Compact pt-BR R$ for tight UI (e.g. "R$ 8,2 mil"). Display only. */
+export const formatMoneyCompact = (n: number): string => brlCompact.format(n)
+
 /** True when the amount is negative (an expense / saída). */
 export const isNegative = (amount: string | null | undefined): boolean => {
   if (amount == null) return false

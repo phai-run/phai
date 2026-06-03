@@ -300,26 +300,71 @@ export interface SeedState {
 	reload: () => void;
 }
 
+// Stale-while-revalidate freshness window. The seeded datasets (transactions,
+// chart, forecasts) live in the OPFS-persisted LiveStore cache and are rendered
+// instantly on load; re-fetching them from the bridge is slow (BigQuery). Within
+// this window we skip the re-fetch entirely so reloads/remounts are instant.
+// A manual reload() or an expired window forces a refresh. Stored in
+// localStorage (NOT LiveStore) so it never triggers an OPFS schema migration.
+const SEED_FRESH_MS = 5 * 60 * 1000;
+
+const seedTs = (key: string): number => {
+	try {
+		return Number(localStorage.getItem(`phai:lastSync:${key}`)) || 0;
+	} catch {
+		return 0;
+	}
+};
+const markSeed = (key: string): void => {
+	try {
+		localStorage.setItem(`phai:lastSync:${key}`, String(Date.now()));
+	} catch {
+		/* private mode / quota — fall back to always-fetch */
+	}
+};
+const clearSeed = (key: string): void => {
+	try {
+		localStorage.removeItem(`phai:lastSync:${key}`);
+	} catch {
+		/* ignore */
+	}
+};
+
 /**
  * Generic "fetch from bridge → commit a seed event" hook. Re-runs whenever
- * `deps` change (e.g. window controls) and exposes a manual `reload`.
+ * `deps` change (e.g. window controls) and exposes a manual `reload`. When a
+ * `cacheKey` is given, the fetch is skipped while the last sync for that key is
+ * still fresh (stale-while-revalidate): the cached data is already on screen.
  */
 const useSeed = (
 	fetcher: () => Promise<void>,
 	deps: ReadonlyArray<unknown>,
+	cacheKey?: string,
+	maxAgeMs: number = SEED_FRESH_MS,
 ): SeedState => {
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [nonce, setNonce] = useState(0);
-	const reload = useCallback(() => setNonce((n) => n + 1), []);
+	const reload = useCallback(() => {
+		if (cacheKey) clearSeed(cacheKey);
+		setNonce((n) => n + 1);
+	}, [cacheKey]);
 
 	useEffect(() => {
+		// Fresh cache → skip the slow re-fetch; LiveStore already shows it.
+		if (cacheKey && Date.now() - seedTs(cacheKey) < maxAgeMs) {
+			setLoading(false);
+			return;
+		}
 		let cancelled = false;
 		setLoading(true);
 		setError(null);
 		fetcher()
 			.then(() => {
-				if (!cancelled) setError(null);
+				if (!cancelled) {
+					setError(null);
+					if (cacheKey) markSeed(cacheKey);
+				}
 			})
 			.catch((e: unknown) => {
 				if (!cancelled) setError(String(e));
@@ -350,6 +395,7 @@ const normalizeTransactions = (rows: TxRow[]) =>
 		categoryId: r.categoryId ?? null,
 		month: r.month ?? "",
 		paymentStatus: r.paymentStatus ?? "",
+		installmentMarker: r.installmentMarker ?? null,
 		reviewed: bool(r.reviewed),
 		isInstallment: bool(r.isInstallment),
 		isSubscription: bool(r.isSubscription),
@@ -390,7 +436,7 @@ export const useTransactionsSeed = (
 			if (!page.hasMore) break;
 		}
 	}, [store, monthsBack, monthsAhead]);
-	return useSeed(fetcher, [fetcher]);
+	return useSeed(fetcher, [fetcher], `tx:${monthsBack}:${monthsAhead}`);
 };
 
 const normalizeChart = (data: ChartData) =>
@@ -418,7 +464,7 @@ export const useChartSeed = (
 		const data = await api.chart(monthsBack, monthsAhead);
 		store.commit(events.chartSeeded({ months: normalizeChart(data) }));
 	}, [store, monthsBack, monthsAhead]);
-	return useSeed(fetcher, [fetcher]);
+	return useSeed(fetcher, [fetcher], `chart:${monthsBack}:${monthsAhead}`);
 };
 
 const normalizeForecasts = (forecasts: ForecastRecord[]) =>
@@ -460,5 +506,5 @@ export const useForecastsSeed = (status: string | null): SeedState => {
 			events.forecastTemplatesSeeded({ rows: normalizeTemplates(templates) }),
 		);
 	}, [store, status]);
-	return useSeed(fetcher, [fetcher]);
+	return useSeed(fetcher, [fetcher], `forecasts:${status ?? "all"}`);
 };

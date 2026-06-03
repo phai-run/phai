@@ -1,8 +1,26 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { formatMoneyNumber, numeric } from "../lib/format";
+import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView, ChartMode } from "./types";
+import type { CategoryMonthSeries } from "../lib/derivations";
+
+// Distinct palette for the per-category "Despesas" modes (stacked bars / lines).
+// Last entry ("outros") stays neutral grey.
+const CAT_COLORS = [
+	"#6d4aff",
+	"#0d9488",
+	"#e11d48",
+	"#d97706",
+	"#2563eb",
+	"#15803d",
+	"#9a9aae",
+];
+const catColor = (index: number, total: number): string =>
+	index === total - 1 && total > CAT_COLORS.length
+		? "#9a9aae"
+		: CAT_COLORS[index % CAT_COLORS.length];
 
 // ── SVG dimensions for the full chart ─────────────────────────────────────
 const W = 960;
@@ -32,6 +50,8 @@ interface ChartModel {
 	expMaxBar: number;
 	minBal: number;
 	balSpan: number;
+	cashMin: number;
+	cashSpan: number;
 }
 
 export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
@@ -58,6 +78,17 @@ export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
 	const minBal = Math.min(0, ...balances);
 	const maxBal = Math.max(1, ...balances);
 	const balSpan = maxBal - minBal || 1;
+	const cashMax = Math.max(
+		1,
+		...balances,
+		...months.map((_, i) => realIns[i] + fcIns[i]),
+	);
+	const cashMin = Math.min(
+		0,
+		...balances,
+		...months.map((_, i) => -(realOuts[i] + fcOuts[i])),
+	);
+	const cashSpan = cashMax - cashMin || 1;
 	return {
 		realIns,
 		fcIns,
@@ -68,20 +99,22 @@ export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
 		expMaxBar,
 		minBal,
 		balSpan,
+		cashMin,
+		cashSpan,
 	};
 }
 
 // Convert bar magnitude → SVG height
 const bh = (v: number, maxBar: number) => (v / maxBar) * BAR_MAX;
-// Convert closing balance → SVG y-coord (full innerH range)
-const by = (v: number, minBal: number, balSpan: number) =>
-	PAD.top + (1 - (v - minBal) / balSpan) * innerH;
+const cashY = (v: number, min: number, span: number) =>
+	PAD.top + (1 - (v - min) / span) * innerH;
 
 // ── Public component ───────────────────────────────────────────────────────
 
 export const PlanningChart = ({
 	months,
 	forecastsByMonth,
+	categorySeries,
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
@@ -89,6 +122,7 @@ export const PlanningChart = ({
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
+	categorySeries: CategoryMonthSeries;
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
@@ -167,6 +201,7 @@ export const PlanningChart = ({
 							model={model}
 							mode={mode}
 							forecastsByMonth={forecastsByMonth}
+							categorySeries={categorySeries}
 							selectedMonth={selectedMonth}
 							onSelectMonth={onSelectMonth}
 							onDropForecast={onDropForecast}
@@ -257,6 +292,7 @@ const FullChart = ({
 	model,
 	mode,
 	forecastsByMonth,
+	categorySeries,
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
@@ -265,6 +301,7 @@ const FullChart = ({
 	model: ChartModel;
 	mode: ChartMode;
 	forecastsByMonth: Map<string, ForecastView[]>;
+	categorySeries: CategoryMonthSeries;
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
@@ -287,35 +324,31 @@ const FullChart = ({
 			? model.balances
 			: model.balances.slice(0, firstFuture + 1);
 	const fcLine = firstFuture === -1 ? [] : model.balances.slice(firstFuture);
+	const zeroY = cashY(0, model.cashMin, model.cashSpan);
+
+	// Magnitude of already-committed credit-card installments per month
+	// (forecast kind === "installment"), to colour that slice of the forecast
+	// expense bar distinctly from the soft budget envelope (N2).
+	const committedMag = months.map((m) =>
+		(forecastsByMonth.get(m.month) ?? []).reduce(
+			(s, f) =>
+				f.kind === "installment" && numeric(f.amount) < 0
+					? s + Math.abs(numeric(f.amount))
+					: s,
+			0,
+		),
+	);
 
 	const linePath = (vals: number[], offset = 0) =>
 		vals
 			.map(
 				(b, k) =>
-					`${k === 0 ? "M" : "L"} ${midX(offset + k)} ${by(b, model.minBal, model.balSpan)}`,
+					`${k === 0 ? "M" : "L"} ${midX(offset + k)} ${cashY(b, model.cashMin, model.cashSpan)}`,
 			)
 			.join(" ");
 
-	// ── Expense line/area helpers ───────────────────────────────────────
+	// Expense bar scale (shared by both Despesas modes).
 	const expMax = mode === "caixa" ? model.maxBar : model.expMaxBar;
-
-	const expLinePath = (vals: number[], offset = 0) =>
-		vals
-			.map(
-				(v, k) =>
-					`${k === 0 ? "M" : "L"} ${midX(offset + k)} ${BASELINE - bh(v, expMax)}`,
-			)
-			.join(" ");
-
-	const expAreaPath = (vals: number[], offset = 0) => {
-		if (vals.length === 0) return "";
-		const top = vals
-			.map((v, k) => `L ${midX(offset + k)} ${BASELINE - bh(v, expMax)}`)
-			.join(" ");
-		const lastX = midX(offset + vals.length - 1);
-		const firstX = midX(offset);
-		return `M ${firstX} ${BASELINE} ${top} L ${lastX} ${BASELINE} Z`;
-	};
 
 	// Year totals
 	const yearIn = model.realIns.reduce((s, v, i) => s + v + model.fcIns[i], 0);
@@ -344,11 +377,11 @@ const FullChart = ({
 				</span>
 				{!isExpensesMode && (
 					<span style={{ color: "var(--cyan)" }}>
-						entradas {formatMoneyNumber(yearIn)}
+						entradas <CountMoney value={yearIn} />
 					</span>
 				)}
 				<span style={{ color: "var(--rose)" }}>
-					saídas {formatMoneyNumber(-yearOut)}
+					saídas <CountMoney value={-yearOut} />
 				</span>
 				<span
 					style={{
@@ -356,9 +389,41 @@ const FullChart = ({
 					}}
 				>
 					resultado {yearIn - yearOut >= 0 ? "+" : ""}
-					{formatMoneyNumber(yearIn - yearOut)}
+					<CountMoney value={yearIn - yearOut} />
 				</span>
 			</div>
+
+			{/* Category legend for the Despesas modes (D3) */}
+			{isExpensesMode && categorySeries.categories.length > 0 && (
+				<div
+					className="mono"
+					style={{
+						display: "flex",
+						gap: 12,
+						flexWrap: "wrap",
+						fontSize: 10,
+						color: "var(--muted)",
+						paddingBottom: 8,
+					}}
+				>
+					{categorySeries.categories.map((cat, ci) => (
+						<span
+							key={cat}
+							style={{ display: "flex", alignItems: "center", gap: 4 }}
+						>
+							<span
+								style={{
+									width: 8,
+									height: 8,
+									borderRadius: 2,
+									background: catColor(ci, categorySeries.categories.length),
+								}}
+							/>
+							{cat}
+						</span>
+					))}
+				</div>
+			)}
 
 			<div style={{ position: "relative" }}>
 				<svg
@@ -389,19 +454,39 @@ const FullChart = ({
 					<line
 						x1={PAD.left}
 						x2={W - PAD.right}
-						y1={BASELINE}
-						y2={BASELINE}
+						y1={mode === "caixa" ? zeroY : BASELINE}
+						y2={mode === "caixa" ? zeroY : BASELINE}
 						stroke="var(--border)"
-						strokeWidth={0.5}
+						strokeWidth={mode === "caixa" ? 0.8 : 0.5}
 					/>
 
 					{/* ── Caixa mode: income + expense bars + balance line ── */}
 					{mode === "caixa" &&
 						months.map((m, i) => {
-							const rIn = bh(model.realIns[i], model.maxBar);
-							const fIn = bh(model.fcIns[i], model.maxBar);
-							const rOut = bh(model.realOuts[i], model.maxBar);
-							const fOut = bh(model.fcOuts[i], model.maxBar);
+							const rInTop = cashY(
+								model.realIns[i],
+								model.cashMin,
+								model.cashSpan,
+							);
+							const fInTop = cashY(
+								model.realIns[i] + model.fcIns[i],
+								model.cashMin,
+								model.cashSpan,
+							);
+							const rOutBottom = cashY(
+								-model.realOuts[i],
+								model.cashMin,
+								model.cashSpan,
+							);
+							const fOutBottom = cashY(
+								-(model.realOuts[i] + model.fcOuts[i]),
+								model.cashMin,
+								model.cashSpan,
+							);
+							const rIn = zeroY - rInTop;
+							const fIn = rInTop - fInTop;
+							const rOut = rOutBottom - zeroY;
+							const fOut = fOutBottom - rOutBottom;
 							const isSel = m.month === selectedMonth;
 							const isHov = hover === i && !isSel;
 							const ix = incX(i) - barW / 2;
@@ -431,22 +516,25 @@ const FullChart = ({
 									{rIn > 0.5 && (
 										<rect
 											x={ix}
-											y={BASELINE - rIn}
+											y={rInTop}
 											width={barW}
 											height={rIn}
 											rx={2}
 											fill="var(--cyan)"
 										/>
 									)}
-									{/* Income bar — forecast (lighter cyan) */}
+									{/* Income bar — forecast (lighter cyan); fades on hover
+									    so the realized picture reads clean (N4). */}
 									{fIn > 0.5 && (
 										<rect
 											x={ix}
-											y={BASELINE - rIn - fIn}
+											y={fInTop}
 											width={barW}
 											height={fIn}
 											rx={2}
 											fill="#99f6e4"
+											opacity={hover !== null ? 0.15 : 1}
+											style={{ transition: "opacity 120ms" }}
 										/>
 									)}
 
@@ -454,24 +542,58 @@ const FullChart = ({
 									{rOut > 0.5 && (
 										<rect
 											x={ox}
-											y={BASELINE - rOut}
+											y={zeroY}
 											width={barW}
 											height={rOut}
 											rx={2}
 											fill="var(--rose)"
 										/>
 									)}
-									{/* Expense bar — forecast (lighter rose) */}
-									{fOut > 0.5 && (
-										<rect
-											x={ox}
-											y={BASELINE - rOut - fOut}
-											width={barW}
-											height={fOut}
-											rx={2}
-											fill="url(#fc-exp-bar)"
-										/>
-									)}
+									{/* Expense bar — forecast. The already-committed credit-card
+									    installment portion gets its own colour (N2); the soft
+									    remainder is the budget envelope. Both fade on hover (N4). */}
+									{fOut > 0.5 &&
+										(() => {
+											const committed =
+												model.fcOuts[i] > 0
+													? Math.min(
+															fOut,
+															fOut * (committedMag[i] / model.fcOuts[i]),
+														)
+													: 0;
+											const soft = fOut - committed;
+											const op = hover !== null ? 0.15 : 1;
+											return (
+												<>
+													{soft > 0.5 && (
+														<rect
+															x={ox}
+															y={rOutBottom}
+															width={barW}
+															height={soft}
+															rx={2}
+															fill="url(#fc-exp-bar)"
+															opacity={op}
+															style={{ transition: "opacity 120ms" }}
+														/>
+													)}
+													{committed > 0.5 && (
+														<rect
+															x={ox}
+															y={rOutBottom + soft}
+															width={barW}
+															height={committed}
+															rx={2}
+															fill="var(--amber)"
+															opacity={op}
+															style={{ transition: "opacity 120ms" }}
+														>
+															<title>parcelas comprometidas</title>
+														</rect>
+													)}
+												</>
+											);
+										})()}
 
 									{/* Month label */}
 									<text
@@ -525,28 +647,47 @@ const FullChart = ({
 										/>
 									)}
 
-									{/* Realized expense bar — solid rose */}
-									{rOut > 0.5 && (
-										<rect
-											x={bx}
-											y={BASELINE - rOut}
-											width={expBarW}
-											height={rOut}
-											rx={3}
-											fill="var(--rose)"
-										/>
-									)}
-									{/* Forecast expense bar — lighter solid */}
-									{fOut > 0.5 && (
-										<rect
-											x={bx}
-											y={BASELINE - rOut - fOut}
-											width={expBarW}
-											height={fOut}
-											rx={3}
-											fill="url(#fc-exp-bar)"
-										/>
-									)}
+									{/* Stacked expense segments by parent category (D3). Realized
+									    distribution per month; future months (no realized txs)
+									    fall back to the plain total bar. */}
+									{(() => {
+										const catMags = categorySeries.byMonth.get(m.month);
+										if (!catMags || catMags.size === 0) {
+											// No category data → plain total bar (e.g. future).
+											const tot = rOut + fOut;
+											return tot > 0.5 ? (
+												<rect
+													x={bx}
+													y={BASELINE - tot}
+													width={expBarW}
+													height={tot}
+													rx={3}
+													fill="url(#fc-exp-bar)"
+												/>
+											) : null;
+										}
+										let yCursor = BASELINE;
+										const nCats = categorySeries.categories.length;
+										return categorySeries.categories.map((cat, ci) => {
+											const mag = catMags.get(cat) ?? 0;
+											const h = bh(mag, model.expMaxBar);
+											if (h < 0.5) return null;
+											yCursor -= h;
+											return (
+												<rect
+													key={cat}
+													x={bx}
+													y={yCursor}
+													width={expBarW}
+													height={h}
+													fill={catColor(ci, nCats)}
+													opacity={isSel || isHov ? 1 : 0.85}
+												>
+													<title>{`${cat}: ${formatMoneyNumber(mag)}`}</title>
+												</rect>
+											);
+										});
+									})()}
 
 									{/* Month label */}
 									<text
@@ -579,80 +720,29 @@ const FullChart = ({
 					{/* ── Despesas-linha mode: expense line/area chart ── */}
 					{mode === "despesas-linha" && (
 						<>
-							{/* Realized area (past months only) */}
-							{firstFuture === -1 || firstFuture > 0 ? (
-								<path
-									d={
-										firstFuture === -1
-											? expAreaPath(model.realOuts)
-											: expAreaPath(model.realOuts.slice(0, firstFuture))
-									}
-									fill="#e11d48"
-									fillOpacity={0.12}
-								/>
-							) : null}
-							{/* Realized line */}
-							{firstFuture === -1 || firstFuture > 0 ? (
-								<path
-									d={
-										firstFuture === -1
-											? expLinePath(model.realOuts)
-											: expLinePath(model.realOuts.slice(0, firstFuture))
-									}
-									fill="none"
-									stroke="var(--rose)"
-									strokeWidth={2}
-								/>
-							) : null}
-
-							{/* Forecast area (future months) */}
-							{firstFuture !== -1 && firstFuture < n && (
-								<path
-									d={expAreaPath(model.fcOuts.slice(firstFuture), firstFuture)}
-									fill="url(#fc-exp-area)"
-								/>
-							)}
-							{/* Forecast line */}
-							{firstFuture !== -1 && firstFuture < n && (
-								<path
-									d={expLinePath(model.fcOuts.slice(firstFuture), firstFuture)}
-									fill="none"
-									stroke="#fda4af"
-									strokeWidth={2}
-									strokeDasharray="5 3"
-								/>
-							)}
-
-							{/* Data point circles: realized */}
-							{model.realOuts.map(
-								(v, i) =>
-									!months[i].isFuture &&
-									v > 0 && (
-										<circle
-											key={months[i].month}
-											cx={midX(i)}
-											cy={BASELINE - bh(v, expMax)}
-											r={3}
-											fill="var(--rose)"
-										/>
-									),
-							)}
-							{/* Data point circles: forecast */}
-							{model.fcOuts.map(
-								(v, i) =>
-									months[i].isFuture &&
-									v > 0 && (
-										<circle
-											key={`fc-${months[i].month}`}
-											cx={midX(i)}
-											cy={BASELINE - bh(v, expMax)}
-											r={2.5}
-											fill="#fda4af"
-											stroke="#fff"
-											strokeWidth={1}
-										/>
-									),
-							)}
+							{/* Per-category expense lines (D3) */}
+							{categorySeries.categories.map((cat, ci) => {
+								const d = months
+									.map((m, i) => {
+										const mag =
+											categorySeries.byMonth.get(m.month)?.get(cat) ?? 0;
+										return `${i === 0 ? "M" : "L"} ${midX(i)} ${
+											BASELINE - bh(mag, expMax)
+										}`;
+									})
+									.join(" ");
+								return (
+									<path
+										key={cat}
+										d={d}
+										fill="none"
+										stroke={catColor(ci, categorySeries.categories.length)}
+										strokeWidth={1.8}
+										opacity={hover !== null ? 0.5 : 0.9}
+										style={{ transition: "opacity 120ms" }}
+									/>
+								);
+							})}
 
 							{/* Month labels */}
 							{months.map((m, i) => {
@@ -720,7 +810,7 @@ const FullChart = ({
 								<circle
 									key={months[i].month}
 									cx={midX(i)}
-									cy={by(b, model.minBal, model.balSpan)}
+									cy={cashY(b, model.cashMin, model.cashSpan)}
 									r={2.5}
 									fill="var(--purple)"
 									opacity={months[i].isFuture ? 0.5 : 1}
@@ -843,8 +933,50 @@ const CompactChart = ({
 	const BAR_MAX_C = 30;
 	const expMax = mode === "caixa" ? model.maxBar : model.expMaxBar;
 
+	// Selected-month summary so the collapsed chart stays useful instead of
+	// shrinking to unreadable bars (D2).
+	const selIdx = months.findIndex((m) => m.month === selectedMonth);
+	const sel = selIdx >= 0 ? months[selIdx] : null;
+	const selIn = selIdx >= 0 ? model.realIns[selIdx] + model.fcIns[selIdx] : 0;
+	const selOut =
+		selIdx >= 0 ? model.realOuts[selIdx] + model.fcOuts[selIdx] : 0;
+	const selBal = selIdx >= 0 ? model.balances[selIdx] : 0;
+
 	return (
-		<div style={{ position: "relative", height: 56 }}>
+		<div style={{ position: "relative", height: 60 }}>
+			{/* Selected-month banner */}
+			{sel && (
+				<div
+					className="mono"
+					style={{
+						position: "absolute",
+						top: 0,
+						left: 8,
+						right: 8,
+						display: "flex",
+						alignItems: "baseline",
+						gap: 12,
+						fontSize: 10,
+						zIndex: 1,
+						pointerEvents: "none",
+					}}
+				>
+					<strong style={{ fontSize: 11 }}>{sel.label}</strong>
+					<span style={{ color: "var(--cyan)" }}>
+						↑ <CountMoney value={selIn} />
+					</span>
+					<span style={{ color: "var(--rose)" }}>
+						↓ <CountMoney value={selOut} />
+					</span>
+					<span style={{ color: selIn - selOut >= 0 ? "var(--green)" : "var(--rose)" }}>
+						= {selIn - selOut >= 0 ? "+" : ""}
+						<CountMoney value={selIn - selOut} />
+					</span>
+					<span style={{ marginLeft: "auto", color: "var(--muted)" }}>
+						saldo <CountMoney value={selBal} />
+					</span>
+				</div>
+			)}
 			{/* Visual layer */}
 			<div
 				style={{
@@ -852,7 +984,8 @@ const CompactChart = ({
 					inset: 0,
 					display: "flex",
 					alignItems: "flex-end",
-					paddingBottom: 16,
+					paddingBottom: 14,
+					paddingTop: 16,
 				}}
 			>
 				{months.map((m, i) => {
