@@ -8,7 +8,6 @@ import {
 	formatMoney,
 	formatMoneyNumber,
 	isNegative,
-	numeric,
 	sumAmounts,
 } from "../lib/format";
 import { useDnd } from "../lib/dnd";
@@ -172,29 +171,6 @@ export const MonthDetail = ({
 			.map((t) => t.amount);
 		return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
 	}, [filtered]);
-
-	// Month summary (all month transactions, no filter)
-	const monthSums = useMemo(() => {
-		const out = monthTxs
-			.filter((t) => isNegative(t.amount))
-			.map((t) => t.amount);
-		const inc = monthTxs
-			.filter((t) => !isNegative(t.amount))
-			.map((t) => t.amount);
-		return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
-	}, [monthTxs]);
-
-	const summarySums = useMemo(() => {
-		if (!chart) return monthSums;
-		return {
-			entradas:
-				Math.max(0, numeric(chart.inflows)) +
-				Math.max(0, numeric(chart.forecastInflowsRemaining)),
-			saidas:
-				Math.abs(numeric(chart.outflows)) +
-				Math.abs(numeric(chart.forecastOutflowsRemaining)),
-		};
-	}, [chart, monthSums]);
 
 	// Modal state — stable setter
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
@@ -486,21 +462,12 @@ export const MonthDetail = ({
 		sumAmounts(installments.map((t) => t.amount)),
 	);
 
-	const projectedClose = chart
-		? chart.isFuture
-			? Number(chart.projectedClosingBalance)
-			: Number(chart.closingBalance)
-		: null;
-
 	return (
 		<div style={{ paddingBottom: 80 }} onKeyDown={handleKeyDown}>
-			{/* ── Month summary strip ── */}
+			{/* ── Month header (the numeric synthesis lives in the sticky hero) ── */}
 			<MonthSummary
 				month={month}
 				isFuture={chart?.isFuture === 1}
-				entradas={summarySums.entradas}
-				saidas={summarySums.saidas}
-				projectedClose={projectedClose}
 				forecastCount={forecasts.length}
 				installmentCount={installments.length}
 				installmentSum={installmentSum}
@@ -645,23 +612,16 @@ export const MonthDetail = ({
 const MonthSummary = ({
 	month,
 	isFuture,
-	entradas,
-	saidas,
-	projectedClose,
 	forecastCount,
 	installmentCount,
 	installmentSum,
 }: {
 	month: string;
 	isFuture: boolean;
-	entradas: number;
-	saidas: number;
-	projectedClose: number | null;
 	forecastCount: number;
 	installmentCount: number;
 	installmentSum: number;
 }) => {
-	const resultado = entradas - saidas;
 	const monthName = new Date(month + "-15").toLocaleString("pt-BR", {
 		month: "long",
 		year: "numeric",
@@ -709,36 +669,6 @@ const MonthSummary = ({
 				)}
 			</div>
 
-			<div
-				style={{
-					display: "grid",
-					gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-					gap: 8,
-				}}
-			>
-				<SumCard
-					label="entradas"
-					value={entradas}
-					color="var(--cyan)"
-					positive
-				/>
-				<SumCard label="saídas" value={-saidas} color="var(--rose)" />
-				<SumCard
-					label="resultado"
-					value={resultado}
-					color={resultado >= 0 ? "var(--green)" : "var(--rose)"}
-					positive={resultado >= 0}
-				/>
-				{projectedClose !== null && (
-					<SumCard
-						label="saldo proj."
-						value={projectedClose}
-						color="var(--purple)"
-						positive={projectedClose >= 0}
-					/>
-				)}
-			</div>
-
 			{installmentCount > 0 && (
 				<div
 					className="mono"
@@ -756,38 +686,6 @@ const MonthSummary = ({
 		</div>
 	);
 };
-
-const SumCard = ({
-	label,
-	value,
-	color,
-	positive,
-}: {
-	label: string;
-	value: number;
-	color: string;
-	positive?: boolean;
-}) => (
-	<div
-		style={{
-			padding: "8px 12px",
-			background: "var(--surface)",
-			borderRadius: "var(--radius-sm)",
-			border: "1px solid var(--border)",
-		}}
-	>
-		<div
-			className="mono"
-			style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}
-		>
-			{label}
-		</div>
-		<div className="mono" style={{ fontSize: 14, fontWeight: 600, color }}>
-			{positive && value > 0 ? "+" : ""}
-			{formatMoneyNumber(value)}
-		</div>
-	</div>
-);
 
 // ── Forecast section ───────────────────────────────────────────────────────
 
