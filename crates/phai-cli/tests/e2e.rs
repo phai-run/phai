@@ -374,6 +374,23 @@ fn milestone_zero_local_sync_and_report() {
     .success()
     .stdout(predicate::str::contains("Supermercado Angeloni"))
     .stdout(predicate::str::contains("Pagamento recebido"));
+
+    envs(
+        cargo_bin()
+            .arg("report")
+            .arg("monthly-spend")
+            .arg("--month")
+            .arg("2026-03")
+            .arg("--csv"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::starts_with(
+        "account_id,category_id,expense_count,expenses,month_ref\n",
+    ))
+    .stdout(predicate::str::contains("2026-03"));
 }
 
 #[test]

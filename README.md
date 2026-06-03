@@ -99,7 +99,7 @@ See [BigQuery setup](#bigquery-setup) below for the multi-device backend.
 
 ## Reports
 
-All reports produce a human-readable output by default and accept `--raw` for JSON (consumed by AI agents, scripts, dashboards). The legacy `--json` flag continues to work.
+Reports produce a human-readable output by default. Add `--raw` for JSON (consumed by AI agents, scripts, dashboards) or `--csv` for spreadsheet-friendly CSV on stdout. The legacy `--json` flag continues to work as a hidden alias for `--raw`.
 
 | Command | What it shows |
 |---|---|
@@ -116,7 +116,7 @@ All reports produce a human-readable output by default and accept `--raw` for JS
 | `report duplicates` | Read-only audit of duplicate transactions inflating expense totals (Pluggy id drift) |
 | `report data-health` | Consistency checks across the dataset |
 
-Add `--raw` to any of them for structured output.
+Add `--raw` or `--csv` to data reports for structured output, e.g. `phai report monthly-spend --month 2026-03 --csv > monthly-spend.csv`. `cashflow-chart` is an SVG/text renderer and does not support CSV.
 
 ## Command surface
 

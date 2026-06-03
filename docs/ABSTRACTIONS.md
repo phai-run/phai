@@ -150,7 +150,7 @@ Adding a new report:
 1. Identify which view(s) it reads from. If none fit, add a new view migration in **both** backends.
 2. Add a method to `FinanceStore` returning a `Vec<…Row>` shape.
 3. Implement in `local.rs` and `bigquery.rs`.
-4. Add a `human_format::…` formatter. The CLI dispatches `--raw` to JSON via `serde_json`.
+4. Add a `human_format::…` formatter. The CLI dispatches `--raw` to JSON and `--csv` to CSV from the same serializable report payload.
 5. Add an E2E test in `crates/phai-cli/tests/` using SQLite.
 
 ## Rules Engine
