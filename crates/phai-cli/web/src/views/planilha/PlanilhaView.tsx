@@ -7,8 +7,13 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { AnimatePresence } from "framer-motion";
 import { events, tables } from "../../livestore/schema";
 import { CategoryPicker } from "../../components/CategoryPicker";
+import {
+	TransactionModal,
+	type ReviewPatch,
+} from "../../components/TransactionModal";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 import {
 	buildAccountMap,
@@ -64,6 +69,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 		targetIds: string[];
 	} | null>(null);
 	const [recentCats, setRecentCats] = useState<string[]>([]);
+	const [modalTx, setModalTx] = useState<TxView | null>(null);
 	const tableRef = useRef<HTMLDivElement>(null);
 
 	const rows = useMemo(() => {
@@ -169,19 +175,47 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 				});
 				lastClickedIdx.current = idx;
 			} else {
-				setSelectedIds((prev) =>
-					prev.size === 1 && prev.has(tx.id) ? new Set() : new Set([tx.id]),
-				);
+				// Plain click opens the same edit modal the categorias view uses;
+				// selection stays on the checkbox / modifier clicks.
 				lastClickedIdx.current = idx;
+				setModalTx(tx);
 			}
 			setFocusedIdx(idx);
 		},
 		[rows],
 	);
 
+	const submitModal = useCallback(
+		(transactionId: string, patch: ReviewPatch) => {
+			store.commit(
+				events.reviewSubmitted({
+					writeId: crypto.randomUUID(),
+					transactionId,
+					patch,
+					submittedAt: Date.now(),
+				}),
+			);
+			setModalTx(null);
+		},
+		[store],
+	);
+
+	// Same "similar" notion as the categorias view: shares the effective
+	// category or the merchant. Restricted to the seeded window (all months).
+	const similarTxs = useMemo(() => {
+		if (!modalTx) return [] as TxView[];
+		const cat = effectiveCategory(modalTx, overlayMap);
+		return txRows.filter(
+			(t) =>
+				t.id !== modalTx.id &&
+				(effectiveCategory(t, overlayMap) === cat ||
+					(t.merchantName && t.merchantName === modalTx.merchantName)),
+		);
+	}, [modalTx, txRows, overlayMap]);
+
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
-			if (picker) return; // the picker owns the keyboard while open
+			if (picker || modalTx) return; // the popover/modal owns the keyboard
 			switch (e.key) {
 				case "ArrowDown":
 				case "ArrowUp": {
@@ -208,7 +242,14 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					});
 					break;
 				}
-				case "Enter":
+				case "Enter": {
+					// Mirrors the plain click: open the full edit modal.
+					const tx = rows[focusedIdx];
+					if (!tx) break;
+					e.preventDefault();
+					setModalTx(tx);
+					break;
+				}
 				case "k": {
 					const tx = rows[focusedIdx];
 					if (!tx) break;
@@ -224,7 +265,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					break;
 			}
 		},
-		[picker, rows, focusedIdx, openPickerFor],
+		[picker, modalTx, rows, focusedIdx, openPickerFor],
 	);
 
 	const toggleSort = (key: SheetSortKey) =>
@@ -383,7 +424,8 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					resultado {formatMoneyNumber(totals.net)}
 				</span>
 				<span style={{ marginLeft: "auto", opacity: 0.7 }}>
-					↑↓ navegar · espaço selecionar · Enter categorizar · shift+clique intervalo
+					↑↓ navegar · espaço selecionar · Enter/clique editar · k categorizar ·
+					shift+clique intervalo
 				</span>
 			</div>
 
@@ -460,6 +502,20 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					onClose={() => setPicker(null)}
 				/>
 			)}
+
+			<AnimatePresence>
+				{modalTx && (
+					<TransactionModal
+						tx={modalTx}
+						overlay={overlayMap.get(modalTx.id)}
+						similarTxs={similarTxs}
+						overlayById={overlayMap}
+						categories={categoryIds}
+						onSubmit={(patch) => submitModal(modalTx.id, patch)}
+						onClose={() => setModalTx(null)}
+					/>
+				)}
+			</AnimatePresence>
 		</section>
 	);
 };
