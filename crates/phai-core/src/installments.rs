@@ -227,7 +227,7 @@ pub fn group_into_chains(transactions: &[TransactionRecord]) -> Vec<InstallmentC
         groups.entry(key).or_default().push(tx.clone());
     }
 
-    let mut chains: Vec<InstallmentChain> = groups
+    let chains: Vec<InstallmentChain> = groups
         .into_iter()
         .filter_map(
             |((account_id, base_description, total), mut installments)| {
@@ -275,15 +275,141 @@ pub fn group_into_chains(transactions: &[TransactionRecord]) -> Vec<InstallmentC
         )
         .collect();
 
-    // Sort: released_next_month descending, then projected_end ascending, then base_description
+    let mut chains = merge_renamed_chains(chains);
+    sort_chains(&mut chains);
+    chains
+}
+
+/// Sort: released_next_month descending, then projected_end ascending, then base_description.
+fn sort_chains(chains: &mut [InstallmentChain]) {
     chains.sort_by(|a, b| {
         b.released_next_month
             .cmp(&a.released_next_month)
             .then_with(|| a.projected_end.cmp(&b.projected_end))
             .then_with(|| a.base_description.cmp(&b.base_description))
     });
+}
 
-    chains
+/// Canonical plan identity behind a chain's naming. Card processors flip one
+/// plan's description between the POS capture (`"Pdv*Beagle"`, `"Pg *Loja"`)
+/// and the statement line (`"Beagle - Parcela"`), so the same identity must
+/// survive both: lowercase, drop a trailing `"- parcela"` qualifier and drop
+/// everything up to the first `*` (POS acquirer prefix). Never empty — when a
+/// strip would consume the whole name, the pre-strip form is kept.
+fn normalize_plan_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let lower = lower.trim();
+    let no_suffix = lower
+        .strip_suffix("parcela")
+        .map(|rest| rest.trim_end().trim_end_matches('-').trim_end())
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(lower);
+    no_suffix
+        .split_once('*')
+        .map(|(_, after)| after.trim())
+        .filter(|after| !after.is_empty())
+        .unwrap_or(no_suffix)
+        .to_string()
+}
+
+/// Timeline anchor: the (virtual) month index of "parcela zero". Parcela `k`
+/// of a plan lands `k` months after it, so every sighting of one plan yields
+/// the same anchor even when each naming saw different parcelas — while a
+/// second plan at the same merchant started in another month differs.
+fn chain_anchor(chain: &InstallmentChain) -> Option<i32> {
+    let last = chain.installments.last()?;
+    let current = parse_installment_description(&last.raw_description)
+        .map(|m| m.current)
+        .unwrap_or(chain.current);
+    Some(last.transaction_date.year() * 12 + last.transaction_date.month() as i32 - current as i32)
+}
+
+/// Merges chains that are the same real installment plan observed under
+/// different namings (see [`normalize_plan_name`]). Without this, each naming
+/// forks its own chain and every remaining parcela is projected once per fork.
+/// Identity = account + normalized name + declared total + per-parcela amount
+/// + timeline anchor; the freshest sighting donates the canonical naming.
+fn merge_renamed_chains(chains: Vec<InstallmentChain>) -> Vec<InstallmentChain> {
+    type MergeKey = (String, String, u32, Decimal, i32);
+    let mut merged: Vec<InstallmentChain> = Vec::new();
+    let mut groups: BTreeMap<MergeKey, Vec<InstallmentChain>> = BTreeMap::new();
+
+    for chain in chains {
+        let key =
+            chain
+                .installments
+                .last()
+                .zip(chain_anchor(&chain))
+                .map(|(last, anchor)| -> MergeKey {
+                    (
+                        chain.account_id.clone(),
+                        normalize_plan_name(&chain.base_description),
+                        chain.total,
+                        last.amount.abs().round_dp(2),
+                        anchor,
+                    )
+                });
+        match key {
+            Some(key) => groups.entry(key).or_default().push(chain),
+            // No installment evidence → nothing to merge on.
+            None => merged.push(chain),
+        }
+    }
+
+    for (_, mut group) in groups {
+        if group.len() == 1 {
+            merged.append(&mut group);
+            continue;
+        }
+        // Freshest evidence first: its naming matches what the processor
+        // emits today, so reconciliation keeps matching new parcelas.
+        group.sort_by(|a, b| {
+            let last_date =
+                |c: &InstallmentChain| c.installments.last().map(|t| t.transaction_date);
+            last_date(b)
+                .cmp(&last_date(a))
+                .then(b.current.cmp(&a.current))
+                .then_with(|| a.base_description.cmp(&b.base_description))
+        });
+
+        let total = group[0].total;
+        let account_id = group[0].account_id.clone();
+        let base_description = group[0].base_description.clone();
+        let current = group.iter().map(|c| c.current).max().unwrap_or(0);
+        let first_date = group.iter().map(|c| c.first_date).min();
+        let mut installments: Vec<TransactionRecord> = group
+            .drain(..)
+            .flat_map(|c| c.installments.into_iter())
+            .collect();
+        installments.sort_by_key(|t| t.transaction_date);
+
+        let (Some(first_date), Some(projected_end)) = (
+            first_date,
+            first_date.and_then(|d| add_months(d, total.saturating_sub(1))),
+        ) else {
+            continue; // unreachable: every grouped chain carries installments
+        };
+        let remaining = total.saturating_sub(current);
+        let total_amount = installments
+            .iter()
+            .map(|tx| tx.amount)
+            .fold(Decimal::ZERO, |acc, v| acc + v);
+
+        merged.push(InstallmentChain {
+            account_id,
+            base_description,
+            total,
+            current,
+            installments,
+            first_date,
+            projected_end,
+            remaining,
+            released_next_month: remaining == 1,
+            total_amount,
+        });
+    }
+
+    merged
 }
 
 fn add_months(date: NaiveDate, months: u32) -> Option<NaiveDate> {
@@ -541,6 +667,138 @@ mod tests {
         let chain = &chains[0];
         assert_eq!(chain.remaining, 0);
         assert!(!chain.released_next_month);
+    }
+
+    // ── renamed-chain merging tests ────────────────────────────────────────
+
+    fn make_tx_amount(
+        id: &str,
+        account_id: &str,
+        date: &str,
+        description: &str,
+        amount: &str,
+    ) -> TransactionRecord {
+        let mut tx = make_tx(id, account_id, date, description);
+        tx.amount = Decimal::from_str(amount).unwrap();
+        tx
+    }
+
+    #[test]
+    fn group_merges_same_plan_seen_under_pos_and_statement_naming() {
+        // Same real plan: the POS capture names it "Pdv*Beagle", the statement
+        // line "Beagle - Parcela". Each naming saw different parcelas.
+        let txs = vec![
+            make_tx_amount(
+                "s3",
+                "card",
+                "2026-04-09",
+                "Beagle - Parcela 3/5",
+                "-102.86",
+            ),
+            make_tx_amount("p4", "card", "2026-05-03", "Pdv*Beagle 4/5", "-102.86"),
+        ];
+        let chains = group_into_chains(&txs);
+        assert_eq!(chains.len(), 1, "renamed sightings must merge: {chains:#?}");
+        let chain = &chains[0];
+        // Canonical naming follows the freshest evidence.
+        assert_eq!(chain.base_description, "Pdv*Beagle");
+        assert_eq!(chain.current, 4);
+        assert_eq!(chain.remaining, 1);
+        assert_eq!(chain.installments.len(), 2);
+        // first_date = earliest evidence across both namings.
+        assert_eq!(
+            chain.first_date,
+            NaiveDate::from_ymd_opt(2026, 4, 9).unwrap()
+        );
+    }
+
+    #[test]
+    fn group_merge_unions_duplicate_parcela_sightings() {
+        // The statement re-posts an already-seen parcela under the other
+        // naming (real Pluggy behavior); the union must not double-count
+        // progress nor fork the chain.
+        let txs = vec![
+            make_tx_amount("a4", "card", "2026-04-10", "Globo Globoplay 4/12", "-44.90"),
+            make_tx_amount(
+                "b4",
+                "card",
+                "2026-04-28",
+                "Globo Globoplay - Parcela 4/12",
+                "-44.90",
+            ),
+            make_tx_amount(
+                "b5",
+                "card",
+                "2026-05-10",
+                "Globo Globoplay - Parcela 5/12",
+                "-44.90",
+            ),
+        ];
+        let chains = group_into_chains(&txs);
+        assert_eq!(chains.len(), 1, "{chains:#?}");
+        assert_eq!(chains[0].current, 5);
+        assert_eq!(chains[0].base_description, "Globo Globoplay - Parcela");
+    }
+
+    #[test]
+    fn group_keeps_distinct_plans_with_different_anchors() {
+        // Same store, same price, same total — but the second plan started two
+        // months later: different timeline anchor, so they are different plans.
+        let txs = vec![
+            make_tx_amount("m2", "card", "2026-03-10", "Pdv*Beagle 2/5", "-102.86"),
+            make_tx_amount(
+                "n0",
+                "card",
+                "2026-05-12",
+                "Beagle - Parcela 2/5",
+                "-102.86",
+            ),
+        ];
+        let chains = group_into_chains(&txs);
+        assert_eq!(chains.len(), 2, "{chains:#?}");
+    }
+
+    #[test]
+    fn group_keeps_unrelated_merchants_apart_despite_equal_price_and_timing() {
+        // Coincidental same amount/total/anchor at two different stores must
+        // never merge — names share no normalized identity.
+        let txs = vec![
+            make_tx_amount("u1", "card", "2026-05-03", "Loja Azul 2/4", "-150.00"),
+            make_tx_amount(
+                "u2",
+                "card",
+                "2026-05-07",
+                "Bazar Verde - Parcela 2/4",
+                "-150.00",
+            ),
+        ];
+        let chains = group_into_chains(&txs);
+        assert_eq!(chains.len(), 2, "{chains:#?}");
+    }
+
+    #[test]
+    fn group_keeps_same_plan_shape_with_different_amounts_apart() {
+        let txs = vec![
+            make_tx_amount("v1", "card", "2026-05-03", "Pdv*Beagle 2/4", "-150.00"),
+            make_tx_amount("v2", "card", "2026-05-07", "Beagle - Parcela 2/4", "-90.00"),
+        ];
+        let chains = group_into_chains(&txs);
+        assert_eq!(chains.len(), 2, "{chains:#?}");
+    }
+
+    #[test]
+    fn normalize_plan_name_strips_pos_prefix_and_parcela_suffix() {
+        assert_eq!(normalize_plan_name("Pdv*Beagle"), "beagle");
+        assert_eq!(normalize_plan_name("Beagle - Parcela"), "beagle");
+        assert_eq!(
+            normalize_plan_name("Globo Globoplay - Parcela"),
+            "globo globoplay"
+        );
+        assert_eq!(normalize_plan_name("Globo Globoplay"), "globo globoplay");
+        assert_eq!(normalize_plan_name("Mercadolivre*Mercadol"), "mercadol");
+        // Strip never leaves an empty identity.
+        assert_eq!(normalize_plan_name("Parcela"), "parcela");
+        assert_eq!(normalize_plan_name("Pdv*"), "pdv*");
     }
 
     #[test]
