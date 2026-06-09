@@ -18,7 +18,15 @@ import { PlanningChart } from "./PlanningChart";
 import { MonthDetail } from "./MonthDetail";
 import { CardsPanel } from "./CardsPanel";
 import { CashDecisionPanel, type CashWhen } from "./cash/CashDecisionPanel";
+import { PlanilhaView } from "./planilha/PlanilhaView";
+import { WarPlanPanel } from "./plano/WarPlanPanel";
 import type { ChartMonthView, ForecastView } from "./types";
+
+const DETAIL_MODES = [
+	{ id: "categorias", label: "categorias" },
+	{ id: "planilha", label: "planilha" },
+	{ id: "plano", label: "plano de guerra" },
+] as const;
 
 // Seeding window: the 12 months of the current calendar year.
 export const planningYearWindow = (date: Date) => {
@@ -264,7 +272,7 @@ export const Dashboard = () => {
 				/>
 			</div>
 
-			{/* ── Month detail ── */}
+			{/* ── Month detail (categorias | planilha | plano de guerra) ── */}
 			<div
 				style={{
 					maxWidth: "var(--container)",
@@ -272,6 +280,45 @@ export const Dashboard = () => {
 					padding: "0 clamp(24px,3vw,32px)",
 				}}
 			>
+				<div
+					role="tablist"
+					aria-label="modo de visualização do mês"
+					style={{
+						display: "inline-flex",
+						gap: 2,
+						border: "1px solid var(--border)",
+						borderRadius: "var(--radius-full)",
+						padding: 3,
+						margin: "16px 0 4px",
+						background: "var(--card)",
+					}}
+				>
+					{DETAIL_MODES.map((m) => {
+						const active = (ui.detailMode || "categorias") === m.id;
+						return (
+							<button
+								key={m.id}
+								role="tab"
+								aria-selected={active}
+								onClick={() => setUi({ detailMode: m.id })}
+								className="mono"
+								style={{
+									border: "none",
+									borderRadius: "var(--radius-full)",
+									padding: "6px 14px",
+									fontSize: 12,
+									cursor: "pointer",
+									background: active ? "var(--purple)" : "transparent",
+									color: active ? "#fff" : "var(--muted)",
+									transition: "background 150ms, color 150ms",
+								}}
+							>
+								{m.label}
+							</button>
+						);
+					})}
+				</div>
+
 				{months.length === 0 && !loading ? (
 					<div
 						className="mono"
@@ -300,6 +347,14 @@ export const Dashboard = () => {
 							↻ tentar novamente
 						</button>
 					</div>
+				) : (ui.detailMode || "categorias") === "planilha" ? (
+					<PlanilhaView month={selected} />
+				) : (ui.detailMode || "categorias") === "plano" ? (
+					<WarPlanPanel
+						month={selected}
+						forecasts={forecastsByMonth.get(selected) ?? []}
+						isPast={heroWhen === "past"}
+					/>
 				) : (
 					<MonthDetail
 						month={selected}

@@ -389,6 +389,218 @@ export const computeMonthSums = (
 	return { saidas: Math.abs(sumAmounts(out)), entradas: sumAmounts(inc) };
 };
 
+// ── Planilha (flat sheet) sorting ───────────────────────────────────────────
+
+export type SheetSortKey =
+	| "date"
+	| "description"
+	| "account"
+	| "category"
+	| "amount";
+
+export interface SheetSort {
+	key: SheetSortKey;
+	/** 1 = ascending, -1 = descending. */
+	dir: 1 | -1;
+}
+
+/** Visible label of a transaction (human description wins over raw). */
+export const sheetLabel = (tx: TxView): string =>
+	tx.description || tx.merchantName || tx.rawDescription;
+
+/**
+ * Sort a transaction list for the sheet view. Stable for equal keys (falls
+ * back to postedAt desc, then id, so re-renders never shuffle rows).
+ */
+export const sortForSheet = (
+	transactions: ReadonlyArray<TxView>,
+	sort: SheetSort,
+	overlayMap: Map<string, ReviewOverlay>,
+	accountMap: Map<string, AccountInfo>,
+): TxView[] => {
+	const keyOf = (tx: TxView): string | number => {
+		switch (sort.key) {
+			case "date":
+				return tx.postedAt;
+			case "description":
+				return sheetLabel(tx).toLowerCase();
+			case "account":
+				return (accountMap.get(tx.accountId)?.label ?? tx.accountId).toLowerCase();
+			case "category":
+				return (effectiveCategory(tx, overlayMap) ?? "").toLowerCase();
+			case "amount":
+				return toCents(tx.amount);
+		}
+	};
+	return [...transactions].sort((a, b) => {
+		const ka = keyOf(a);
+		const kb = keyOf(b);
+		const cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+		if (cmp !== 0) return cmp * sort.dir;
+		const dateCmp = a.postedAt < b.postedAt ? 1 : a.postedAt > b.postedAt ? -1 : 0;
+		return dateCmp !== 0 ? dateCmp : a.id < b.id ? -1 : 1;
+	});
+};
+
+// ── Plano de guerra (budget envelopes vs realized + simulation) ─────────────
+
+/** The forecast fields the war plan needs (subset of the view shape). */
+export interface PlanForecast {
+	amount: string;
+	categoryId: string | null;
+	kind: string;
+	status: string;
+	month: string | null;
+}
+
+export interface WarPlanRow {
+	parent: string;
+	/** Realized expense magnitude in the selected month. */
+	realizado: number;
+	/** Monthly budget envelope for the parent (null when none is defined). */
+	orcamento: number | null;
+	/** Average realized magnitude over the 3 calendar months before `month`. */
+	media3m: number;
+	/**
+	 * What the month is on track to cost: `max(realizado, orçamento)` for an
+	 * open month (mirrors the chart's envelope model), plain `realizado` once
+	 * the month is closed.
+	 */
+	projecao: number;
+}
+
+export interface WarPlan {
+	rows: WarPlanRow[];
+	/** Installment-kind forecast magnitude committed in the month (no category). */
+	parcelasComprometidas: number;
+	totalRealizado: number;
+	totalOrcamento: number;
+	totalProjecao: number;
+}
+
+const ACTIVE_FORECAST_STATUSES = new Set(["ativo", "active"]);
+
+/** Previous `n` calendar months of a "YYYY-MM" key, most recent first. */
+export const previousMonths = (month: string, n: number): string[] => {
+	const [y, m] = month.split("-").map(Number);
+	if (!y || !m) return [];
+	const out: string[] = [];
+	let year = y;
+	let mon = m;
+	for (let i = 0; i < n; i++) {
+		mon -= 1;
+		if (mon === 0) {
+			mon = 12;
+			year -= 1;
+		}
+		out.push(`${year}-${String(mon).padStart(2, "0")}`);
+	}
+	return out;
+};
+
+/**
+ * Build the war-plan table for a month: per parent category, the realized
+ * spend, the budget envelope (an active parent-level expense forecast in that
+ * month — how finance envelopes are modelled), the 3-month average and the
+ * projection. Card-bill forecasts (no category) and installment forecasts are
+ * excluded from the per-category rows; installments surface as a single
+ * committed magnitude so the table never double-counts a real expense.
+ */
+export const buildWarPlan = (
+	transactions: ReadonlyArray<TxView>,
+	month: string,
+	monthForecasts: ReadonlyArray<PlanForecast>,
+	overlayMap: Map<string, ReviewOverlay>,
+	mode: "open" | "past" = "open",
+): WarPlan => {
+	const realizadoBy = new Map<string, number>();
+	const historyBy = new Map<string, number>();
+	const history = new Set(previousMonths(month, 3));
+
+	for (const tx of transactions) {
+		if (!isNegative(tx.amount)) continue;
+		const inMonth = tx.month === month;
+		const inHistory = history.has(tx.month);
+		if (!inMonth && !inHistory) continue;
+		const parent = parseCategory(effectiveCategory(tx, overlayMap)).parent;
+		const mag = Math.abs(toCents(tx.amount)) / 100;
+		if (inMonth) realizadoBy.set(parent, (realizadoBy.get(parent) ?? 0) + mag);
+		else historyBy.set(parent, (historyBy.get(parent) ?? 0) + mag);
+	}
+
+	const orcamentoBy = new Map<string, number>();
+	let parcelasComprometidas = 0;
+	for (const f of monthForecasts) {
+		if (f.month !== month) continue;
+		if (!ACTIVE_FORECAST_STATUSES.has(f.status)) continue;
+		const mag = Math.abs(toCents(f.amount)) / 100;
+		if (!isNegative(f.amount)) continue;
+		if (f.kind === "installment") {
+			parcelasComprometidas += mag;
+			continue;
+		}
+		const cat = f.categoryId ?? "";
+		// Parent-level category = a budget envelope; anything else (card bills
+		// with no category, sub-category planned items) is not a budget.
+		if (cat !== "" && !cat.includes(":")) {
+			orcamentoBy.set(cat, (orcamentoBy.get(cat) ?? 0) + mag);
+		}
+	}
+
+	const parents = new Set<string>([
+		...realizadoBy.keys(),
+		...orcamentoBy.keys(),
+	]);
+	const rows: WarPlanRow[] = [];
+	for (const parent of parents) {
+		const realizado = realizadoBy.get(parent) ?? 0;
+		const orcamento = orcamentoBy.get(parent) ?? null;
+		const media3m = (historyBy.get(parent) ?? 0) / 3;
+		const projecao =
+			mode === "past" ? realizado : Math.max(realizado, orcamento ?? 0);
+		rows.push({ parent, realizado, orcamento, media3m, projecao });
+	}
+	rows.sort((a, b) => b.projecao - a.projecao);
+
+	return {
+		rows,
+		parcelasComprometidas,
+		totalRealizado: rows.reduce((s, r) => s + r.realizado, 0),
+		totalOrcamento: rows.reduce((s, r) => s + (r.orcamento ?? 0), 0),
+		totalProjecao: rows.reduce((s, r) => s + r.projecao, 0),
+	};
+};
+
+export interface WarPlanSimulation {
+	/** Projected month total with the simulated budgets applied. */
+	projecaoSimulada: number;
+	/** How much the month improves vs. the baseline projection. */
+	economiaMes: number;
+}
+
+/**
+ * Apply simulated budget targets (parent → new monthly budget) to a war plan.
+ * Realized spend is a floor — money already out the door can't be simulated
+ * away — so each row contributes `max(realizado, target ?? baseline)`.
+ */
+export const simulateWarPlan = (
+	plan: WarPlan,
+	targets: ReadonlyMap<string, number>,
+): WarPlanSimulation => {
+	let sim = 0;
+	for (const row of plan.rows) {
+		const target = targets.get(row.parent);
+		sim +=
+			target == null
+				? row.projecao
+				: Math.max(row.realizado, Math.max(0, target));
+	}
+	return {
+		projecaoSimulada: sim,
+		economiaMes: plan.totalProjecao - sim,
+	};
+};
+
 // ── Per-month category distribution (chart "Despesas" modes) ────────────────
 
 export interface CategoryMonthSeries {

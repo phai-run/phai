@@ -1,0 +1,693 @@
+import { queryDb } from "@livestore/livestore";
+import { useQuery, useStore, useClientDocument } from "@livestore/react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
+import { events, tables } from "../../livestore/schema";
+import { CategoryPicker } from "../../components/CategoryPicker";
+import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
+import {
+	buildAccountMap,
+	buildOverlayMap,
+	effectiveCategory,
+	filterTransactions,
+	sheetLabel,
+	sortForSheet,
+	transactionsForMonth,
+	type SheetSort,
+	type SheetSortKey,
+	type TxView,
+} from "../../lib/derivations";
+
+const txAll$ = queryDb(tables.transactions.orderBy("postedAt", "desc"));
+const overlay$ = queryDb(tables.reviewOverlay);
+const categories$ = queryDb(tables.categories.orderBy("id", "asc"));
+const accounts$ = queryDb(tables.accounts.orderBy("label", "asc"));
+
+const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string }> = [
+	{ key: "date", label: "data", width: "64px" },
+	{ key: "description", label: "descrição" },
+	{ key: "account", label: "conta", width: "120px" },
+	{ key: "category", label: "categoria", width: "220px" },
+	{ key: "amount", label: "valor", width: "110px" },
+];
+
+/**
+ * Planilha — the spreadsheet view of a month. Every transaction is one flat
+ * row: sortable columns, inline category editing (click the chip or press
+ * Enter), shift/cmd multi-select with a bulk-apply bar, and live totals for
+ * the current filter. Edits go through the same `reviewSubmitted` event the
+ * grouped view uses (optimistic overlay + background flush to the bridge).
+ */
+export const PlanilhaView = ({ month }: { month: string }) => {
+	const { store } = useStore();
+	const [ui, setUi] = useClientDocument(tables.ui);
+	const txRows = useQuery(txAll$) as ReadonlyArray<TxView>;
+	const overlay = useQuery(overlay$);
+	const categories = useQuery(categories$);
+	const accounts = useQuery(accounts$);
+
+	const overlayMap = useMemo(() => buildOverlayMap(overlay), [overlay]);
+	const accountMap = useMemo(() => buildAccountMap(accounts), [accounts]);
+	const categoryIds = useMemo(() => categories.map((c) => c.id), [categories]);
+
+	const [sort, setSort] = useState<SheetSort>({ key: "date", dir: -1 });
+	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+	const [focusedIdx, setFocusedIdx] = useState(-1);
+	const lastClickedIdx = useRef(-1);
+	const [picker, setPicker] = useState<{
+		anchorRect: DOMRect;
+		targetIds: string[];
+	} | null>(null);
+	const [recentCats, setRecentCats] = useState<string[]>([]);
+	const tableRef = useRef<HTMLDivElement>(null);
+
+	const rows = useMemo(() => {
+		const monthTxs = transactionsForMonth(txRows, month);
+		const filtered = filterTransactions(
+			monthTxs,
+			{
+				accountFilter: ui.accountFilter,
+				ownerFilter: ui.ownerFilter,
+				categoryFilter: ui.categoryFilter,
+				textFilter: ui.textFilter,
+				installmentsOnly: ui.installmentsOnly,
+				subscriptionsOnly: ui.subscriptionsOnly,
+				unreviewedOnly: ui.unreviewedOnly,
+			},
+			overlayMap,
+			accountMap,
+		).filter(
+			(tx) =>
+				!ui.uncategorizedOnly || (effectiveCategory(tx, overlayMap) ?? "") === "",
+		);
+		return sortForSheet(filtered, sort, overlayMap, accountMap);
+	}, [txRows, month, ui, overlayMap, accountMap, sort]);
+
+	// Reset selection when the month or the visible set changes size.
+	const rowCount = rows.length;
+	useEffect(() => {
+		setSelectedIds(new Set());
+		setFocusedIdx(-1);
+		lastClickedIdx.current = -1;
+	}, [month, rowCount]);
+
+	const totals = useMemo(() => {
+		let inCents = 0;
+		let outCents = 0;
+		for (const tx of rows) {
+			const c = toCents(tx.amount);
+			if (c < 0) outCents += -c;
+			else inCents += c;
+		}
+		return {
+			entradas: inCents / 100,
+			saidas: outCents / 100,
+			net: (inCents - outCents) / 100,
+		};
+	}, [rows]);
+
+	const selectionTotal = useMemo(() => {
+		let cents = 0;
+		for (const tx of rows) if (selectedIds.has(tx.id)) cents += toCents(tx.amount);
+		return cents / 100;
+	}, [rows, selectedIds]);
+
+	const applyCategory = useCallback(
+		(categoryId: string, targetIds: string[]) => {
+			for (const transactionId of targetIds) {
+				store.commit(
+					events.reviewSubmitted({
+						writeId: crypto.randomUUID(),
+						transactionId,
+						patch: {
+							description: null,
+							merchantName: null,
+							purpose: null,
+							categoryId,
+						},
+						submittedAt: Date.now(),
+					}),
+				);
+			}
+			setRecentCats((prev) =>
+				[categoryId, ...prev.filter((c) => c !== categoryId)].slice(0, 8),
+			);
+			setPicker(null);
+			setSelectedIds(new Set());
+		},
+		[store],
+	);
+
+	const openPickerFor = useCallback(
+		(tx: TxView, anchor: HTMLElement) => {
+			const ids =
+				selectedIds.size > 1 && selectedIds.has(tx.id)
+					? Array.from(selectedIds)
+					: [tx.id];
+			setPicker({ anchorRect: anchor.getBoundingClientRect(), targetIds: ids });
+		},
+		[selectedIds],
+	);
+
+	const handleRowClick = useCallback(
+		(tx: TxView, idx: number, e: React.MouseEvent) => {
+			if (e.shiftKey && lastClickedIdx.current >= 0) {
+				const start = Math.min(lastClickedIdx.current, idx);
+				const end = Math.max(lastClickedIdx.current, idx);
+				setSelectedIds(new Set(rows.slice(start, end + 1).map((t) => t.id)));
+			} else if (e.ctrlKey || e.metaKey) {
+				setSelectedIds((prev) => {
+					const next = new Set(prev);
+					if (next.has(tx.id)) next.delete(tx.id);
+					else next.add(tx.id);
+					return next;
+				});
+				lastClickedIdx.current = idx;
+			} else {
+				setSelectedIds((prev) =>
+					prev.size === 1 && prev.has(tx.id) ? new Set() : new Set([tx.id]),
+				);
+				lastClickedIdx.current = idx;
+			}
+			setFocusedIdx(idx);
+		},
+		[rows],
+	);
+
+	const handleKeyDown = useCallback(
+		(e: React.KeyboardEvent) => {
+			if (picker) return; // the picker owns the keyboard while open
+			switch (e.key) {
+				case "ArrowDown":
+				case "ArrowUp": {
+					e.preventDefault();
+					const delta = e.key === "ArrowDown" ? 1 : -1;
+					setFocusedIdx((i) => {
+						const next = Math.min(Math.max(i + delta, 0), rows.length - 1);
+						tableRef.current
+							?.querySelector(`[data-row-idx="${next}"]`)
+							?.scrollIntoView({ block: "nearest" });
+						return next;
+					});
+					break;
+				}
+				case " ": {
+					e.preventDefault();
+					const tx = rows[focusedIdx];
+					if (!tx) break;
+					setSelectedIds((prev) => {
+						const next = new Set(prev);
+						if (next.has(tx.id)) next.delete(tx.id);
+						else next.add(tx.id);
+						return next;
+					});
+					break;
+				}
+				case "Enter":
+				case "k": {
+					const tx = rows[focusedIdx];
+					if (!tx) break;
+					e.preventDefault();
+					const el = tableRef.current?.querySelector(
+						`[data-row-idx="${focusedIdx}"] [data-cat-chip]`,
+					);
+					if (el) openPickerFor(tx, el as HTMLElement);
+					break;
+				}
+				case "Escape":
+					setSelectedIds(new Set());
+					break;
+			}
+		},
+		[picker, rows, focusedIdx, openPickerFor],
+	);
+
+	const toggleSort = (key: SheetSortKey) =>
+		setSort((s) =>
+			s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: key === "date" || key === "amount" ? -1 : 1 },
+		);
+
+	const allVisibleSelected = rowCount > 0 && selectedIds.size === rowCount;
+
+	return (
+		<section aria-label={`Planilha de ${month}`}>
+			<SheetFilterBar
+				ui={ui}
+				setUi={setUi}
+				accounts={accounts}
+				count={rowCount}
+			/>
+
+			<div
+				ref={tableRef}
+				role="grid"
+				aria-rowcount={rowCount}
+				tabIndex={0}
+				onKeyDown={handleKeyDown}
+				style={{
+					border: "1px solid var(--border)",
+					borderRadius: "var(--radius-md)",
+					overflow: "auto",
+					maxHeight: "70vh",
+					outline: "none",
+					background: "var(--card)",
+				}}
+			>
+				<table
+					style={{
+						width: "100%",
+						borderCollapse: "collapse",
+						fontSize: 13,
+					}}
+				>
+					<thead>
+						<tr
+							className="mono"
+							style={{
+								position: "sticky",
+								top: 0,
+								zIndex: 2,
+								background: "var(--card)",
+								boxShadow: "0 1px 0 var(--border)",
+							}}
+						>
+							<th style={{ ...thStyle, width: 34 }}>
+								<input
+									type="checkbox"
+									aria-label="selecionar tudo"
+									checked={allVisibleSelected}
+									onChange={() =>
+										setSelectedIds(
+											allVisibleSelected
+												? new Set()
+												: new Set(rows.map((t) => t.id)),
+										)
+									}
+								/>
+							</th>
+							{COLUMNS.map((col) => (
+								<th
+									key={col.key}
+									style={{ ...thStyle, width: col.width }}
+									aria-sort={
+										sort.key === col.key
+											? sort.dir === 1
+												? "ascending"
+												: "descending"
+											: undefined
+									}
+								>
+									<button
+										onClick={() => toggleSort(col.key)}
+										className="mono"
+										style={{
+											background: "transparent",
+											border: "none",
+											cursor: "pointer",
+											color:
+												sort.key === col.key ? "var(--purple)" : "var(--muted)",
+											fontSize: 11,
+											textTransform: "uppercase",
+											letterSpacing: "0.06em",
+											padding: 0,
+											textAlign: col.key === "amount" ? "right" : "left",
+											width: "100%",
+										}}
+									>
+										{col.label}
+										{sort.key === col.key ? (sort.dir === 1 ? " ↑" : " ↓") : ""}
+									</button>
+								</th>
+							))}
+							<th style={{ ...thStyle, width: 70 }}>parcela</th>
+						</tr>
+					</thead>
+					<tbody>
+						{rows.map((tx, idx) => (
+							<SheetRow
+								key={tx.id}
+								tx={tx}
+								idx={idx}
+								selected={selectedIds.has(tx.id)}
+								focused={focusedIdx === idx}
+								category={effectiveCategory(tx, overlayMap)}
+								accountLabel={
+									accountMap.get(tx.accountId)?.label ?? tx.accountId
+								}
+								onClick={handleRowClick}
+								onCategoryClick={openPickerFor}
+							/>
+						))}
+					</tbody>
+				</table>
+				{rowCount === 0 && (
+					<div
+						className="mono"
+						style={{
+							padding: 24,
+							textAlign: "center",
+							color: "var(--muted)",
+							fontSize: 13,
+						}}
+					>
+						Nenhuma transação para os filtros atuais.
+					</div>
+				)}
+			</div>
+
+			{/* Totals footer — the "sheet status bar". */}
+			<div
+				className="mono"
+				style={{
+					display: "flex",
+					gap: 20,
+					padding: "10px 4px",
+					fontSize: 12,
+					color: "var(--muted)",
+					flexWrap: "wrap",
+				}}
+			>
+				<span>{rowCount} transações</span>
+				<span style={{ color: "var(--green)" }}>
+					entradas {formatMoneyNumber(totals.entradas)}
+				</span>
+				<span style={{ color: "var(--rose)" }}>
+					saídas {formatMoneyNumber(totals.saidas)}
+				</span>
+				<span style={{ color: totals.net >= 0 ? "var(--green)" : "var(--rose)" }}>
+					resultado {formatMoneyNumber(totals.net)}
+				</span>
+				<span style={{ marginLeft: "auto", opacity: 0.7 }}>
+					↑↓ navegar · espaço selecionar · Enter categorizar · shift+clique intervalo
+				</span>
+			</div>
+
+			{/* Bulk-apply bar */}
+			{selectedIds.size > 0 && (
+				<div
+					role="toolbar"
+					aria-label="ações em lote"
+					style={{
+						position: "sticky",
+						bottom: 12,
+						display: "flex",
+						alignItems: "center",
+						gap: 12,
+						background: "var(--ink, #15131f)",
+						color: "#fff",
+						borderRadius: "var(--radius-full)",
+						padding: "10px 18px",
+						boxShadow: "0 8px 24px rgba(21,19,31,0.25)",
+						width: "fit-content",
+						margin: "0 auto",
+						zIndex: 10,
+					}}
+				>
+					<span className="mono" style={{ fontSize: 12 }}>
+						{selectedIds.size} selecionada{selectedIds.size > 1 ? "s" : ""} ·{" "}
+						{formatMoneyNumber(selectionTotal)}
+					</span>
+					<button
+						onClick={(e) =>
+							setPicker({
+								anchorRect: (e.target as HTMLElement).getBoundingClientRect(),
+								targetIds: Array.from(selectedIds),
+							})
+						}
+						className="mono"
+						style={{
+							background: "var(--purple)",
+							color: "#fff",
+							border: "none",
+							borderRadius: "var(--radius-full)",
+							padding: "6px 14px",
+							cursor: "pointer",
+							fontSize: 12,
+						}}
+					>
+						categorizar
+					</button>
+					<button
+						onClick={() => setSelectedIds(new Set())}
+						className="mono"
+						style={{
+							background: "transparent",
+							color: "#fff",
+							border: "1px solid rgba(255,255,255,0.35)",
+							borderRadius: "var(--radius-full)",
+							padding: "6px 14px",
+							cursor: "pointer",
+							fontSize: 12,
+						}}
+					>
+						limpar
+					</button>
+				</div>
+			)}
+
+			{picker && (
+				<CategoryPicker
+					categories={categoryIds}
+					recentCategories={recentCats}
+					anchorRect={picker.anchorRect}
+					selectedCount={picker.targetIds.length}
+					onSelect={(cat) => applyCategory(cat, picker.targetIds)}
+					onClose={() => setPicker(null)}
+				/>
+			)}
+		</section>
+	);
+};
+
+const thStyle: React.CSSProperties = {
+	padding: "8px 10px",
+	textAlign: "left",
+	fontWeight: 500,
+};
+
+const SheetRow = ({
+	tx,
+	idx,
+	selected,
+	focused,
+	category,
+	accountLabel,
+	onClick,
+	onCategoryClick,
+}: {
+	tx: TxView;
+	idx: number;
+	selected: boolean;
+	focused: boolean;
+	category: string | null;
+	accountLabel: string;
+	onClick: (tx: TxView, idx: number, e: React.MouseEvent) => void;
+	onCategoryClick: (tx: TxView, anchor: HTMLElement) => void;
+}) => {
+	const negative = isNegative(tx.amount);
+	return (
+		<tr
+			data-row-idx={idx}
+			aria-selected={selected}
+			onClick={(e) => onClick(tx, idx, e)}
+			style={{
+				cursor: "default",
+				background: selected
+					? "var(--purple-50, rgba(124,93,250,0.08))"
+					: undefined,
+				boxShadow: focused ? "inset 2px 0 0 var(--purple)" : undefined,
+				borderBottom: "1px solid var(--border)",
+				userSelect: "none",
+			}}
+		>
+			<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
+				<input
+					type="checkbox"
+					aria-label={`selecionar ${sheetLabel(tx)}`}
+					checked={selected}
+					onChange={(e) =>
+						onClick(tx, idx, {
+							...e,
+							ctrlKey: true,
+							metaKey: true,
+							shiftKey: false,
+						} as unknown as React.MouseEvent)
+					}
+				/>
+			</td>
+			<td className="mono" style={{ ...tdStyle, color: "var(--muted)" }}>
+				{tx.postedAt.slice(8, 10)}/{tx.postedAt.slice(5, 7)}
+			</td>
+			<td style={{ ...tdStyle, maxWidth: 380 }} title={tx.rawDescription}>
+				<div
+					style={{
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
+					}}
+				>
+					{sheetLabel(tx)}
+				</div>
+				{tx.purpose && (
+					<div
+						className="mono"
+						style={{ fontSize: 10, color: "var(--muted)" }}
+					>
+						{tx.purpose}
+					</div>
+				)}
+			</td>
+			<td className="mono" style={{ ...tdStyle, fontSize: 11, color: "var(--muted)" }}>
+				{accountLabel}
+			</td>
+			<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
+				<button
+					data-cat-chip
+					onClick={(e) => onCategoryClick(tx, e.currentTarget)}
+					className="mono"
+					title="alterar categoria (Enter)"
+					style={{
+						background: category ? "var(--chip, #f1eefc)" : "transparent",
+						color: category ? "var(--purple)" : "var(--amber)",
+						border: category
+							? "1px solid transparent"
+							: "1px dashed var(--amber)",
+						borderRadius: "var(--radius-full)",
+						padding: "3px 10px",
+						cursor: "pointer",
+						fontSize: 11,
+						maxWidth: 200,
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
+					}}
+				>
+					{category ?? "sem categoria"}
+				</button>
+			</td>
+			<td
+				className="mono"
+				style={{
+					...tdStyle,
+					textAlign: "right",
+					color: negative ? "var(--text)" : "var(--green)",
+					fontVariantNumeric: "tabular-nums",
+				}}
+			>
+				{formatMoneyNumber(toCents(tx.amount) / 100)}
+			</td>
+			<td className="mono" style={{ ...tdStyle, fontSize: 11, color: "var(--muted)" }}>
+				{tx.installmentMarker ?? ""}
+			</td>
+		</tr>
+	);
+};
+
+const tdStyle: React.CSSProperties = {
+	padding: "6px 10px",
+	verticalAlign: "top",
+};
+
+interface SheetFilterState {
+	textFilter: string | null;
+	accountFilter: string | null;
+	uncategorizedOnly: boolean;
+	unreviewedOnly: boolean;
+	installmentsOnly: boolean;
+}
+
+/** Compact filter strip shared with the grouped view via the ui document. */
+const SheetFilterBar = ({
+	ui,
+	setUi,
+	accounts,
+	count,
+}: {
+	ui: SheetFilterState;
+	setUi: (patch: Partial<SheetFilterState>) => void;
+	accounts: ReadonlyArray<{ id: string; label: string }>;
+	count: number;
+}) => {
+	const chip = (active: boolean): React.CSSProperties => ({
+		background: active ? "var(--purple)" : "transparent",
+		color: active ? "#fff" : "var(--muted)",
+		border: `1px solid ${active ? "var(--purple)" : "var(--border)"}`,
+		borderRadius: "var(--radius-full)",
+		padding: "4px 12px",
+		cursor: "pointer",
+		fontSize: 12,
+	});
+	return (
+		<div
+			style={{
+				display: "flex",
+				gap: 8,
+				alignItems: "center",
+				flexWrap: "wrap",
+				padding: "12px 0",
+			}}
+		>
+			<input
+				type="search"
+				placeholder={`buscar em ${count} transações…`}
+				value={ui.textFilter ?? ""}
+				onChange={(e) => setUi({ textFilter: e.target.value || null })}
+				className="mono"
+				style={{
+					border: "1px solid var(--border)",
+					borderRadius: "var(--radius-full)",
+					padding: "6px 14px",
+					fontSize: 12,
+					minWidth: 220,
+					background: "var(--card)",
+				}}
+			/>
+			<select
+				aria-label="filtrar por conta"
+				value={ui.accountFilter ?? ""}
+				onChange={(e) => setUi({ accountFilter: e.target.value || null })}
+				className="mono"
+				style={{
+					border: "1px solid var(--border)",
+					borderRadius: "var(--radius-full)",
+					padding: "6px 10px",
+					fontSize: 12,
+					background: "var(--card)",
+				}}
+			>
+				<option value="">todas as contas</option>
+				{accounts.map((a) => (
+					<option key={a.id} value={a.id}>
+						{a.label}
+					</option>
+				))}
+			</select>
+			<button
+				className="mono"
+				style={chip(ui.uncategorizedOnly)}
+				onClick={() => setUi({ uncategorizedOnly: !ui.uncategorizedOnly })}
+			>
+				sem categoria
+			</button>
+			<button
+				className="mono"
+				style={chip(ui.unreviewedOnly)}
+				onClick={() => setUi({ unreviewedOnly: !ui.unreviewedOnly })}
+			>
+				não revisadas
+			</button>
+			<button
+				className="mono"
+				style={chip(ui.installmentsOnly)}
+				onClick={() => setUi({ installmentsOnly: !ui.installmentsOnly })}
+			>
+				parcelas
+			</button>
+		</div>
+	);
+};

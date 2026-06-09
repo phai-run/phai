@@ -160,6 +160,9 @@ export const tables = {
 		schema: Schema.Struct({
 			// Dashboard: the selected month drives the detail panel below the chart.
 			selectedMonth: Schema.NullOr(Schema.String),
+			// Month-detail presentation: "categorias" (grouped), "planilha"
+			// (flat sheet with inline editing) or "plano" (war-plan budgets).
+			detailMode: Schema.String,
 			// Month-detail filters (all applied client-side over the seeded window).
 			ownerFilter: Schema.NullOr(Schema.String),
 			accountFilter: Schema.NullOr(Schema.String),
@@ -175,6 +178,7 @@ export const tables = {
 			id: SessionIdSymbol,
 			value: {
 				selectedMonth: currentMonth,
+				detailMode: "categorias",
 				ownerFilter: null,
 				accountFilter: null,
 				categoryFilter: null,
