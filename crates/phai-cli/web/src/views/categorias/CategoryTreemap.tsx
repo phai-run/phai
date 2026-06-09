@@ -1,0 +1,526 @@
+import { useEffect, useMemo, useState } from "react";
+import { squarify } from "../../lib/treemap";
+import {
+	effectiveCategory,
+	parseCategory,
+	sheetLabel,
+	type ReviewOverlay,
+	type TxView,
+} from "../../lib/derivations";
+import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
+
+/**
+ * Categorias as a drillable treemap. Level 1 tiles the month's expense
+ * magnitude by parent category; clicking a tile drills into a sub-treemap of
+ * its subcategories; clicking a subcategory lists the individual transactions
+ * (amount-sorted rows — click one to open the shared edit modal via
+ * `onEditTx`). A breadcrumb walks back up; Escape goes one level up.
+ *
+ * Pure presentation: the caller owns filtering (the filter bar applies before
+ * `txs` arrives) and editing (modal + write path).
+ */
+
+type Drill =
+	| { level: 1 }
+	| { level: 2; parent: string }
+	| { level: 3; parent: string; sub: string };
+
+const TILE_COLORS = [
+	"#6d4aff",
+	"#0d9488",
+	"#e11d48",
+	"#b45309",
+	"#0369a1",
+	"#7c3aed",
+	"#15803d",
+	"#be185d",
+	"#4d7c0f",
+	"#b91c1c",
+	"#0e7490",
+	"#a21caf",
+];
+
+const colorFor = (index: number) => TILE_COLORS[index % TILE_COLORS.length]!;
+
+interface Bucket {
+	key: string;
+	total: number;
+	count: number;
+	txs: TxView[];
+}
+
+const bucketBy = (
+	txs: ReadonlyArray<TxView>,
+	keyOf: (tx: TxView) => string,
+): Bucket[] => {
+	const map = new Map<string, Bucket>();
+	for (const tx of txs) {
+		const key = keyOf(tx);
+		let b = map.get(key);
+		if (!b) {
+			b = { key, total: 0, count: 0, txs: [] };
+			map.set(key, b);
+		}
+		b.total += Math.abs(toCents(tx.amount)) / 100;
+		b.count += 1;
+		b.txs.push(tx);
+	}
+	return Array.from(map.values()).sort((a, b) => b.total - a.total);
+};
+
+export const CategoryTreemap = ({
+	txs,
+	overlayMap,
+	onEditTx,
+}: {
+	/** The month's transactions, already filtered by the caller. */
+	txs: ReadonlyArray<TxView>;
+	overlayMap: Map<string, ReviewOverlay>;
+	onEditTx: (tx: TxView) => void;
+}) => {
+	const [drill, setDrill] = useState<Drill>({ level: 1 });
+
+	const expenses = useMemo(
+		() => txs.filter((t) => isNegative(t.amount)),
+		[txs],
+	);
+	const income = useMemo(() => txs.filter((t) => !isNegative(t.amount)), [txs]);
+	const cat = (tx: TxView) => effectiveCategory(tx, overlayMap);
+
+	const parents = useMemo(
+		() => bucketBy(expenses, (tx) => parseCategory(cat(tx)).parent),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[expenses, overlayMap],
+	);
+	const parentIndex = useMemo(
+		() => new Map(parents.map((p, i) => [p.key, i])),
+		[parents],
+	);
+
+	// Drill targets can disappear when filters / edits change the data.
+	useEffect(() => {
+		if (drill.level !== 1 && !parentIndex.has(drill.parent)) {
+			setDrill({ level: 1 });
+		}
+	}, [drill, parentIndex]);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== "Escape") return;
+			setDrill((d) =>
+				d.level === 3
+					? { level: 2, parent: d.parent }
+					: d.level === 2
+						? { level: 1 }
+						: d,
+			);
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, []);
+
+	const subs = useMemo(() => {
+		if (drill.level === 1) return [];
+		const parent = drill.parent;
+		const inParent = expenses.filter(
+			(tx) => parseCategory(cat(tx)).parent === parent,
+		);
+		return bucketBy(inParent, (tx) => parseCategory(cat(tx)).sub ?? "—");
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [drill, expenses, overlayMap]);
+
+	const monthTotal = parents.reduce((s, p) => s + p.total, 0);
+	const incomeTotal = income.reduce(
+		(s, t) => s + Math.abs(toCents(t.amount)) / 100,
+		0,
+	);
+
+	const crumb = (label: string, target: Drill, active: boolean) => (
+		<button
+			key={label}
+			onClick={() => setDrill(target)}
+			className="mono"
+			disabled={active}
+			style={{
+				background: "transparent",
+				border: "none",
+				padding: 0,
+				fontSize: 12,
+				cursor: active ? "default" : "pointer",
+				color: active ? "var(--text)" : "var(--purple)",
+				fontWeight: active ? 600 : 400,
+			}}
+		>
+			{label}
+		</button>
+	);
+
+	return (
+		<section aria-label="categorias do mês (treemap)">
+			{/* Breadcrumb */}
+			<div
+				style={{
+					display: "flex",
+					alignItems: "baseline",
+					gap: 8,
+					padding: "10px 0",
+					flexWrap: "wrap",
+				}}
+			>
+				{crumb(
+					`despesas ${formatMoneyNumber(monthTotal)}`,
+					{ level: 1 },
+					drill.level === 1,
+				)}
+				{(drill.level === 2 || drill.level === 3) && (
+					<>
+						<span style={{ color: "var(--muted)" }}>›</span>
+						{crumb(
+							drill.parent,
+							{ level: 2, parent: drill.parent },
+							drill.level === 2,
+						)}
+					</>
+				)}
+				{drill.level === 3 && (
+					<>
+						<span style={{ color: "var(--muted)" }}>›</span>
+						{crumb(drill.sub, drill, true)}
+					</>
+				)}
+				<span
+					className="mono"
+					style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)" }}
+				>
+					{drill.level === 1
+						? "clique numa categoria para abrir"
+						: "Esc volta um nível"}
+				</span>
+			</div>
+
+			{drill.level === 1 && (
+				<TreemapBoard
+					buckets={parents}
+					total={monthTotal}
+					colorOf={(key) => colorFor(parentIndex.get(key) ?? 0)}
+					onOpen={(key) => setDrill({ level: 2, parent: key })}
+				/>
+			)}
+
+			{drill.level === 2 && (
+				<TreemapBoard
+					buckets={subs}
+					total={subs.reduce((s, b) => s + b.total, 0)}
+					colorOf={() => colorFor(parentIndex.get(drill.parent) ?? 0)}
+					shade
+					onOpen={(key) =>
+						setDrill({ level: 3, parent: drill.parent, sub: key })
+					}
+				/>
+			)}
+
+			{drill.level === 3 && (
+				<TxList
+					txs={
+						subs.find((b) => b.key === drill.sub)?.txs ??
+						([] as ReadonlyArray<TxView>)
+					}
+					onEditTx={onEditTx}
+				/>
+			)}
+
+			{/* Income strip — the treemap is expenses-only by design. */}
+			{drill.level === 1 && income.length > 0 && (
+				<div
+					className="mono"
+					style={{
+						display: "flex",
+						gap: 12,
+						padding: "10px 2px",
+						fontSize: 12,
+						color: "var(--muted)",
+					}}
+				>
+					<span style={{ color: "var(--green)" }}>
+						entradas {formatMoneyNumber(incomeTotal)}
+					</span>
+					<span>
+						{income.length} transação{income.length > 1 ? "ões" : ""} — edite
+						pela planilha ou clique abaixo
+					</span>
+				</div>
+			)}
+			{drill.level === 1 &&
+				income.slice(0, 6).map((tx) => (
+					<button
+						key={tx.id}
+						onClick={() => onEditTx(tx)}
+						className="mono"
+						style={{
+							display: "flex",
+							gap: 10,
+							width: "100%",
+							textAlign: "left",
+							background: "transparent",
+							border: "none",
+							borderBottom: "1px solid var(--border)",
+							padding: "6px 2px",
+							fontSize: 12,
+							cursor: "pointer",
+							alignItems: "baseline",
+						}}
+					>
+						<span style={{ color: "var(--muted)" }}>
+							{tx.postedAt.slice(8, 10)}/{tx.postedAt.slice(5, 7)}
+						</span>
+						<span
+							style={{
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap",
+								flex: 1,
+							}}
+						>
+							{sheetLabel(tx)}
+						</span>
+						<span style={{ color: "var(--green)" }}>
+							{formatMoneyNumber(toCents(tx.amount) / 100)}
+						</span>
+					</button>
+				))}
+		</section>
+	);
+};
+
+/** One treemap level rendered as absolutely-positioned tiles (percent space). */
+const TreemapBoard = ({
+	buckets,
+	total,
+	colorOf,
+	onOpen,
+	shade,
+}: {
+	buckets: ReadonlyArray<Bucket>;
+	total: number;
+	colorOf: (key: string) => string;
+	onOpen: (key: string) => void;
+	/** Level 2: same hue family, opacity scaled by share. */
+	shade?: boolean;
+}) => {
+	const rects = useMemo(
+		() =>
+			squarify(
+				buckets.map((b) => ({ id: b.key, value: b.total })),
+				0,
+				0,
+				100,
+				100,
+			),
+		[buckets],
+	);
+	const byId = useMemo(() => new Map(buckets.map((b) => [b.key, b])), [buckets]);
+
+	if (buckets.length === 0) {
+		return (
+			<div
+				className="mono"
+				style={{
+					padding: 32,
+					textAlign: "center",
+					color: "var(--muted)",
+					fontSize: 13,
+					border: "1px dashed var(--border)",
+					borderRadius: "var(--radius-md)",
+				}}
+			>
+				Sem despesas para os filtros atuais.
+			</div>
+		);
+	}
+
+	return (
+		<div
+			style={{
+				position: "relative",
+				width: "100%",
+				aspectRatio: "16 / 7.5",
+				minHeight: 280,
+				borderRadius: "var(--radius-md)",
+				overflow: "hidden",
+			}}
+		>
+			{rects.map((r) => {
+				const b = byId.get(r.id)!;
+				const pct = total > 0 ? Math.round((b.total / total) * 100) : 0;
+				const big = r.w * r.h >= 6; // enough room for two text lines
+				return (
+					<button
+						key={r.id}
+						onClick={() => onOpen(r.id)}
+						title={`${r.id} · ${formatMoneyNumber(b.total)} (${pct}%) · ${b.count} tx`}
+						style={{
+							position: "absolute",
+							left: `${r.x}%`,
+							top: `${r.y}%`,
+							width: `${r.w}%`,
+							height: `${r.h}%`,
+							background: colorOf(r.id),
+							opacity: shade ? 0.45 + 0.55 * (b.total / (buckets[0]?.total || 1)) : 0.92,
+							border: "2px solid var(--bg)",
+							borderRadius: 6,
+							cursor: "pointer",
+							display: "flex",
+							flexDirection: "column",
+							alignItems: "flex-start",
+							justifyContent: "flex-start",
+							padding: big ? "8px 10px" : "2px 6px",
+							overflow: "hidden",
+							color: "#fff",
+							transition: "filter 120ms",
+						}}
+						onMouseEnter={(e) => {
+							(e.currentTarget as HTMLElement).style.filter = "brightness(1.12)";
+						}}
+						onMouseLeave={(e) => {
+							(e.currentTarget as HTMLElement).style.filter = "";
+						}}
+					>
+						<span
+							style={{
+								fontSize: big ? 13 : 10,
+								fontWeight: 600,
+								maxWidth: "100%",
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap",
+								textShadow: "0 1px 2px rgba(0,0,0,0.25)",
+							}}
+						>
+							{r.id}
+						</span>
+						{big && (
+							<span
+								className="mono"
+								style={{
+									fontSize: 11,
+									opacity: 0.95,
+									textShadow: "0 1px 2px rgba(0,0,0,0.25)",
+								}}
+							>
+								{formatMoneyNumber(b.total)} · {pct}%
+							</span>
+						)}
+					</button>
+				);
+			})}
+		</div>
+	);
+};
+
+/** Level 3 — the subcategory's transactions, amount-sorted, modal on click. */
+const TxList = ({
+	txs,
+	onEditTx,
+}: {
+	txs: ReadonlyArray<TxView>;
+	onEditTx: (tx: TxView) => void;
+}) => {
+	const sorted = useMemo(
+		() =>
+			[...txs].sort(
+				(a, b) => Math.abs(toCents(b.amount)) - Math.abs(toCents(a.amount)),
+			),
+		[txs],
+	);
+	const total = sorted.reduce((s, t) => s + Math.abs(toCents(t.amount)) / 100, 0);
+	const max = Math.abs(toCents(sorted[0]?.amount ?? "0")) / 100 || 1;
+
+	return (
+		<div
+			style={{
+				border: "1px solid var(--border)",
+				borderRadius: "var(--radius-md)",
+				background: "var(--card)",
+				overflow: "hidden",
+			}}
+		>
+			{sorted.map((tx) => {
+				const mag = Math.abs(toCents(tx.amount)) / 100;
+				return (
+					<button
+						key={tx.id}
+						onClick={() => onEditTx(tx)}
+						title="editar transação"
+						style={{
+							position: "relative",
+							display: "flex",
+							gap: 12,
+							alignItems: "baseline",
+							width: "100%",
+							textAlign: "left",
+							background: "transparent",
+							border: "none",
+							borderBottom: "1px solid var(--border)",
+							padding: "9px 14px",
+							cursor: "pointer",
+							fontSize: 13,
+						}}
+					>
+						{/* Magnitude bar behind the row — instant visual ranking. */}
+						<span
+							aria-hidden
+							style={{
+								position: "absolute",
+								left: 0,
+								top: 0,
+								bottom: 0,
+								width: `${(mag / max) * 100}%`,
+								background: "rgba(109,74,255,0.07)",
+							}}
+						/>
+						<span className="mono" style={{ color: "var(--muted)", fontSize: 11 }}>
+							{tx.postedAt.slice(8, 10)}/{tx.postedAt.slice(5, 7)}
+						</span>
+						<span
+							style={{
+								flex: 1,
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap",
+							}}
+						>
+							{sheetLabel(tx)}
+							{tx.installmentMarker ? (
+								<span
+									className="mono"
+									style={{ color: "var(--muted)", fontSize: 10, marginLeft: 8 }}
+								>
+									parcela {tx.installmentMarker}
+								</span>
+							) : null}
+						</span>
+						<span
+							className="mono"
+							style={{ fontWeight: 600, whiteSpace: "nowrap" }}
+						>
+							{formatMoneyNumber(mag)}
+						</span>
+					</button>
+				);
+			})}
+			<div
+				className="mono"
+				style={{
+					display: "flex",
+					justifyContent: "space-between",
+					padding: "9px 14px",
+					fontSize: 12,
+					color: "var(--muted)",
+				}}
+			>
+				<span>{sorted.length} transações · clique para editar</span>
+				<span style={{ fontWeight: 600 }}>{formatMoneyNumber(total)}</span>
+			</div>
+		</div>
+	);
+};
