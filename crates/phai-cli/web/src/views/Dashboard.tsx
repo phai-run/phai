@@ -23,9 +23,9 @@ import { WarPlanPanel } from "./plano/WarPlanPanel";
 import type { ChartMonthView, ForecastView } from "./types";
 
 const DETAIL_MODES = [
-	{ id: "categorias", label: "categorias" },
 	{ id: "planilha", label: "planilha" },
-	{ id: "plano", label: "plano de guerra" },
+	{ id: "categorias", label: "categorias" },
+	{ id: "plano", label: "planejamento" },
 ] as const;
 
 // Seeding window: the 12 months of the current calendar year.
@@ -169,11 +169,11 @@ export const Dashboard = () => {
 		);
 	};
 
-	// Compact detection driven by scroll position with hysteresis. The old
-	// IntersectionObserver only fired once the whole tall chart had scrolled
-	// away — so it stayed full for a long scroll, then snapped (D1). Collapsing
-	// at a small scroll offset (and expanding a bit earlier) makes the
-	// transition early and smooth without flicker.
+	// Compact strip visibility. The strip is position:fixed, so toggling it
+	// never changes document flow — the old sticky variant swapped the tall
+	// hero for a thin one in place, and that height jump moved the page under
+	// the cursor, re-crossed the threshold and oscillated ("flicker on
+	// scroll"). With a fixed overlay the thresholds only drive a fade-in.
 	const [isCompact, setIsCompact] = useState(false);
 
 	useEffect(() => {
@@ -183,7 +183,7 @@ export const Dashboard = () => {
 			raf = requestAnimationFrame(() => {
 				raf = 0;
 				const y = window.scrollY;
-				setIsCompact((prev) => (prev ? y > 40 : y > 96));
+				setIsCompact((prev) => (prev ? y > 110 : y > 170));
 			});
 		};
 		window.addEventListener("scroll", onScroll, { passive: true });
@@ -199,40 +199,53 @@ export const Dashboard = () => {
 
 	return (
 		<div>
-			{/* ── Sticky cash-decision hero ── */}
+			{/* ── Cash-decision hero (normal flow — scrolls away naturally) ── */}
 			<div
 				style={{
-					position: "sticky",
-					top: 0,
-					zIndex: 20,
-					background: "var(--bg)",
-					borderBottom: isCompact ? "1px solid var(--border)" : "none",
-					boxShadow: isCompact ? "0 2px 12px rgba(21,19,31,0.06)" : "none",
-					transition: "box-shadow 200ms, border-color 200ms",
+					maxWidth: "var(--container)",
+					margin: "0 auto",
+					padding: "16px clamp(24px,3vw,32px) 12px",
 				}}
 			>
+				{error && !loading && <ErrorNote error={error} />}
+				{loading ? (
+					<Skeleton height={96} />
+				) : heroRow ? (
+					<CashDecisionPanel row={heroRow} when={heroWhen} compact={false} />
+				) : null}
+			</div>
+
+			{/* ── Fixed compact strip: fades in once the hero scrolls out.
+			       position:fixed = zero layout shift, so no scroll feedback loop. ── */}
+			{heroRow && (
 				<div
+					aria-hidden={!isCompact}
 					style={{
-						maxWidth: "var(--container)",
-						margin: "0 auto",
-						padding: isCompact
-							? "8px clamp(24px,3vw,32px)"
-							: "16px clamp(24px,3vw,32px) 12px",
-						transition: "padding 200ms",
+						position: "fixed",
+						top: 0,
+						left: 0,
+						right: 0,
+						zIndex: 30,
+						background: "var(--bg)",
+						borderBottom: "1px solid var(--border)",
+						boxShadow: "0 2px 12px rgba(21,19,31,0.08)",
+						transform: isCompact ? "translateY(0)" : "translateY(-110%)",
+						opacity: isCompact ? 1 : 0,
+						transition: "transform 180ms ease, opacity 180ms ease",
+						pointerEvents: isCompact ? "auto" : "none",
 					}}
 				>
-					{error && !loading && <ErrorNote error={error} />}
-					{loading ? (
-						<Skeleton height={isCompact ? 20 : 96} />
-					) : heroRow ? (
-						<CashDecisionPanel
-							row={heroRow}
-							when={heroWhen}
-							compact={isCompact}
-						/>
-					) : null}
+					<div
+						style={{
+							maxWidth: "var(--container)",
+							margin: "0 auto",
+							padding: "8px clamp(24px,3vw,32px)",
+						}}
+					>
+						<CashDecisionPanel row={heroRow} when={heroWhen} compact />
+					</div>
 				</div>
-			</div>
+			)}
 
 			{/* ── Cash chart (subordinate to the hero; scrolls normally) ── */}
 			<div
@@ -294,7 +307,7 @@ export const Dashboard = () => {
 					}}
 				>
 					{DETAIL_MODES.map((m) => {
-						const active = (ui.detailMode || "categorias") === m.id;
+						const active = (ui.detailMode || "planilha") === m.id;
 						return (
 							<button
 								key={m.id}
@@ -347,9 +360,9 @@ export const Dashboard = () => {
 							↻ tentar novamente
 						</button>
 					</div>
-				) : (ui.detailMode || "categorias") === "planilha" ? (
+				) : (ui.detailMode || "planilha") === "planilha" ? (
 					<PlanilhaView month={selected} />
-				) : (ui.detailMode || "categorias") === "plano" ? (
+				) : (ui.detailMode || "planilha") === "plano" ? (
 					<WarPlanPanel
 						month={selected}
 						forecasts={forecastsByMonth.get(selected) ?? []}

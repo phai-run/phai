@@ -312,14 +312,63 @@ const FullChart = ({
 			)
 			.join(" ");
 
+	const isExpensesMode = mode.startsWith("despesas");
+
+	// Native hover tooltips per column half. The interaction overlay sits on
+	// top of the SVG (it owns click/drag), so per-rect <title>s never fire —
+	// the values live on the overlay halves instead: left half = the income
+	// bar, right half = the expense bar.
+	const hoverTitles = useMemo(() => {
+		const money = (v: number) => formatMoneyNumber(v);
+		return months.map((m, i) => {
+			if (isExpensesMode) {
+				const catMags = categorySeries.byMonth.get(m.month);
+				const total = model.realOuts[i] + model.fcOuts[i];
+				const lines = catMags
+					? Array.from(catMags.entries())
+							.sort((a, b) => b[1] - a[1])
+							.map(
+								([cat, mag]) =>
+									`${cat}: ${money(mag)} (${total > 0 ? Math.round((mag / total) * 100) : 0}%)`,
+							)
+					: [];
+				const txt = [`despesas ${m.label} · ${money(total)}`, ...lines].join("\n");
+				return { left: txt, right: txt };
+			}
+			const balance = model.balances[i];
+			const saldoLine = `saldo ${m.isFuture ? "projetado " : ""}${money(balance)}`;
+			const left = [
+				`entradas ${m.label}`,
+				`realizado ${money(model.realIns[i])}`,
+				...(model.fcIns[i] > 0 ? [`previsto +${money(model.fcIns[i])}`] : []),
+				`total ${money(model.realIns[i] + model.fcIns[i])}`,
+				saldoLine,
+			].join("\n");
+			const right = [
+				`saídas ${m.label}`,
+				`realizado ${money(model.realOuts[i])}`,
+				...(model.fcOuts[i] > 0
+					? [
+							`previsto +${money(model.fcOuts[i])}${
+								committedMag[i] > 0
+									? ` (parcelas ${money(Math.min(committedMag[i], model.fcOuts[i]))})`
+									: ""
+							}`,
+						]
+					: []),
+				`total ${money(model.realOuts[i] + model.fcOuts[i])}`,
+				saldoLine,
+			].join("\n");
+			return { left, right };
+		});
+	}, [months, model, committedMag, categorySeries, isExpensesMode]);
+
 	// Year totals
 	const yearIn = model.realIns.reduce((s, v, i) => s + v + model.fcIns[i], 0);
 	const yearOut = model.realOuts.reduce(
 		(s, v, i) => s + v + model.fcOuts[i],
 		0,
 	);
-
-	const isExpensesMode = mode.startsWith("despesas");
 
 	return (
 		<div>
@@ -485,8 +534,7 @@ const FullChart = ({
 											fill="var(--cyan)"
 										/>
 									)}
-									{/* Income bar — forecast (lighter cyan); fades on hover
-									    so the realized picture reads clean (N4). */}
+									{/* Income bar — forecast (lighter cyan) */}
 									{fIn > 0.5 && (
 										<rect
 											x={ix}
@@ -495,8 +543,6 @@ const FullChart = ({
 											height={fIn}
 											rx={2}
 											fill="#99f6e4"
-											opacity={hover !== null ? 0.15 : 1}
-											style={{ transition: "opacity 120ms" }}
 										/>
 									)}
 
@@ -513,7 +559,7 @@ const FullChart = ({
 									)}
 									{/* Expense bar — forecast. The already-committed credit-card
 									    installment portion gets its own colour (N2); the soft
-									    remainder is the budget envelope. Both fade on hover (N4). */}
+									    remainder is the budget envelope. */}
 									{fOut > 0.5 &&
 										(() => {
 											const committed =
@@ -524,7 +570,6 @@ const FullChart = ({
 														)
 													: 0;
 											const soft = fOut - committed;
-											const op = hover !== null ? 0.15 : 1;
 											return (
 												<>
 													{soft > 0.5 && (
@@ -535,8 +580,6 @@ const FullChart = ({
 															height={soft}
 															rx={2}
 															fill="url(#fc-exp-bar)"
-															opacity={op}
-															style={{ transition: "opacity 120ms" }}
 														/>
 													)}
 													{committed > 0.5 && (
@@ -547,11 +590,7 @@ const FullChart = ({
 															height={committed}
 															rx={2}
 															fill="var(--amber)"
-															opacity={op}
-															style={{ transition: "opacity 120ms" }}
-														>
-															<title>parcelas comprometidas</title>
-														</rect>
+														/>
 													)}
 												</>
 											);
@@ -717,55 +756,17 @@ const FullChart = ({
 							))}
 						</>
 					)}
-					{/* Manual-forecast marker: a discrete ring under months that carry an
-					    explicit manual forecast (kind === "manual"). Installments,
-					    subscriptions and recurrences never trigger it. */}
-					{mode === "caixa" &&
-						months.map((m, i) => {
-							const manual = (forecastsByMonth.get(m.month) ?? []).filter(
-								(f) => f.kind === "manual",
-							);
-							if (manual.length === 0) return null;
-							const tip = manual
-								.map(
-									(f) =>
-										`${f.description}: ${formatMoneyNumber(Math.abs(numeric(f.amount)))}`,
-								)
-								.join("\n");
-							return (
-								<circle
-									key={`mf-${m.month}`}
-									cx={midX(i)}
-									cy={BASELINE + 24}
-									r={2.5}
-									fill="none"
-									stroke="var(--purple)"
-									strokeWidth={1.2}
-								>
-									<title>{`Previsão manual\n${tip}`}</title>
-								</circle>
-							);
-						})}
-					{/* Balance dots left of expense bars in despesas-barras mode — removed */}
 				</svg>
 
-				{/* Interaction overlay */}
+				{/* Interaction overlay (click/drag/hover; carries the value tooltips) */}
 				<ColumnOverlay
 					months={months}
+					titles={hoverTitles}
 					selectedMonth={selectedMonth}
 					onSelectMonth={onSelectMonth}
 					onHover={setHover}
 					onDropForecast={onDropForecast}
 				/>
-
-				{/* Hover popover */}
-				{hover != null && (
-					<BarPopover
-						month={months[hover]}
-						forecasts={forecastsByMonth.get(months[hover].month) ?? []}
-						leftPct={((hover + 0.5) / n) * 100}
-					/>
-				)}
 			</div>
 
 			{/* Legend */}
@@ -841,12 +842,14 @@ const ChartLegend = ({
 
 const ColumnOverlay = ({
 	months,
+	titles,
 	selectedMonth,
 	onSelectMonth,
 	onHover,
 	onDropForecast,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
+	titles: ReadonlyArray<{ left: string; right: string }>;
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onHover: (i: number | null) => void;
@@ -865,6 +868,8 @@ const ColumnOverlay = ({
 				key={m.month}
 				month={m.month}
 				index={i}
+				titleLeft={titles[i]?.left ?? ""}
+				titleRight={titles[i]?.right ?? ""}
 				selected={m.month === selectedMonth}
 				onSelect={() => onSelectMonth(m.month)}
 				onHover={onHover}
@@ -877,12 +882,16 @@ const ColumnOverlay = ({
 const MonthColumn = ({
 	month,
 	index,
+	titleLeft,
+	titleRight,
 	onSelect,
 	onHover,
 	onDropForecast,
 }: {
 	month: string;
 	index: number;
+	titleLeft: string;
+	titleRight: string;
 	selected: boolean;
 	onSelect: () => void;
 	onHover: (i: number | null) => void;
@@ -922,154 +931,15 @@ const MonthColumn = ({
 				outlineOffset: -2,
 				background: isDropTarget ? "rgba(109,74,255,0.10)" : "transparent",
 				transition: "outline-color 100ms",
+				display: "grid",
+				gridTemplateColumns: "1fr 1fr",
 			}}
 			aria-label={`selecionar ${month}`}
-		/>
-	);
-};
-
-// ── Hover popover ──────────────────────────────────────────────────────────
-
-const BarPopover = ({
-	month,
-	forecasts,
-	leftPct,
-}: {
-	month: ChartMonthView;
-	forecasts: ForecastView[];
-	leftPct: number;
-}) => {
-	const ref = useRef<HTMLDivElement>(null);
-	const [side, setSide] = useState<"left" | "right">(
-		leftPct > 58 ? "right" : "left",
-	);
-
-	useEffect(() => {
-		const el = ref.current;
-		if (!el) return;
-		const rect = el.getBoundingClientRect();
-		if (side === "left" && rect.right > window.innerWidth - 8) setSide("right");
-		else if (side === "right" && rect.left < 8) setSide("left");
-	}, [side]);
-
-	const totalIn =
-		numeric(month.inflows) + numeric(month.forecastInflowsRemaining);
-	const totalOut =
-		Math.abs(numeric(month.outflows)) +
-		Math.abs(numeric(month.forecastOutflowsRemaining));
-	const close = month.isFuture
-		? month.projectedClosingBalance
-		: month.closingBalance;
-	const manualForecasts = forecasts.filter((f) => f.kind === "manual");
-
-	return (
-		<div
-			ref={ref}
-			className="mono"
-			style={
-				{
-					position: "absolute",
-					top: 6,
-					[side === "right" ? "right" : "left"]:
-						side === "right" ? `${100 - leftPct + 2}%` : `${leftPct + 2}%`,
-					background: "var(--surface)",
-					border: "1px solid var(--border)",
-					borderRadius: "var(--radius-md)",
-					padding: "10px 12px",
-					fontSize: 11,
-					lineHeight: 1.75,
-					pointerEvents: "none",
-					minWidth: 190,
-					maxWidth: 250,
-					zIndex: 6,
-					boxShadow: "0 4px 16px rgba(21,19,31,0.08)",
-				} as React.CSSProperties
-			}
 		>
-			<div
-				style={{
-					fontWeight: 600,
-					color: "var(--white)",
-					marginBottom: 4,
-				}}
-			>
-				{month.label}
-				{month.isFuture ? (
-					<span style={{ color: "var(--muted)", fontWeight: 400 }}>
-						{" "}
-						· previsto
-					</span>
-				) : null}
-			</div>
-			<div style={{ color: "var(--cyan)" }}>↑ {formatMoneyNumber(totalIn)}</div>
-			<div style={{ color: "var(--rose)" }}>
-				↓ {formatMoneyNumber(totalOut)}
-			</div>
-			<div
-				style={{
-					color: Number(close) >= 0 ? "var(--purple)" : "var(--rose)",
-				}}
-			>
-				= {formatMoneyNumber(Number(close))}
-			</div>
-			{manualForecasts.length > 0 && (
-				<div
-					style={{
-						marginTop: 6,
-						paddingTop: 6,
-						borderTop: "1px solid var(--border)",
-					}}
-				>
-					<div
-						style={{
-							color: "var(--muted)",
-							fontSize: 10,
-							marginBottom: 2,
-						}}
-					>
-						previsões manuais
-					</div>
-					{manualForecasts.slice(0, 5).map((f) => (
-						<div
-							key={f.forecastId}
-							style={{
-								display: "flex",
-								justifyContent: "space-between",
-								gap: 8,
-							}}
-						>
-							<span
-								style={{
-									overflow: "hidden",
-									textOverflow: "ellipsis",
-									whiteSpace: "nowrap",
-									color: "var(--muted)",
-								}}
-							>
-								⠿ {f.description}
-							</span>
-							<span
-								style={{
-									color: Number(f.amount) < 0 ? "var(--rose)" : "var(--cyan)",
-									whiteSpace: "nowrap",
-								}}
-							>
-								{formatMoneyNumber(Math.abs(Number(f.amount)))}
-							</span>
-						</div>
-					))}
-					{manualForecasts.length > 5 && (
-						<div
-							style={{
-								color: "var(--muted2)",
-								fontSize: 10,
-							}}
-						>
-							+{manualForecasts.length - 5} mais
-						</div>
-					)}
-				</div>
-			)}
+			{/* Halves only carry the native value tooltips: left = the income
+			    bar, right = the expense bar (matching the bars' x-positions). */}
+			<div title={titleLeft} />
+			<div title={titleRight} />
 		</div>
 	);
 };
