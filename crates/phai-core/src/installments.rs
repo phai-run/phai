@@ -327,89 +327,109 @@ fn chain_anchor(chain: &InstallmentChain) -> Option<i32> {
 /// Merges chains that are the same real installment plan observed under
 /// different namings (see [`normalize_plan_name`]). Without this, each naming
 /// forks its own chain and every remaining parcela is projected once per fork.
-/// Identity = account + normalized name + declared total + per-parcela amount
-/// + timeline anchor; the freshest sighting donates the canonical naming.
+/// Identity = account + normalized name + declared total + per-parcela amount,
+/// with timeline anchors at most one month apart (a statement re-post lands up
+/// to one cycle after the POS capture, so the same parcela can cross a month
+/// boundary); the freshest sighting donates the canonical naming. Plans at the
+/// same merchant started ≥2 months apart keep distinct anchors and never merge.
 fn merge_renamed_chains(chains: Vec<InstallmentChain>) -> Vec<InstallmentChain> {
-    type MergeKey = (String, String, u32, Decimal, i32);
+    type MergeKey = (String, String, u32, Decimal);
     let mut merged: Vec<InstallmentChain> = Vec::new();
-    let mut groups: BTreeMap<MergeKey, Vec<InstallmentChain>> = BTreeMap::new();
+    let mut groups: BTreeMap<MergeKey, Vec<(i32, InstallmentChain)>> = BTreeMap::new();
 
     for chain in chains {
-        let key =
-            chain
-                .installments
-                .last()
-                .zip(chain_anchor(&chain))
-                .map(|(last, anchor)| -> MergeKey {
+        let key = chain.installments.last().zip(chain_anchor(&chain)).map(
+            |(last, anchor)| -> (MergeKey, i32) {
+                (
                     (
                         chain.account_id.clone(),
                         normalize_plan_name(&chain.base_description),
                         chain.total,
                         last.amount.abs().round_dp(2),
-                        anchor,
-                    )
-                });
+                    ),
+                    anchor,
+                )
+            },
+        );
         match key {
-            Some(key) => groups.entry(key).or_default().push(chain),
+            Some((key, anchor)) => groups.entry(key).or_default().push((anchor, chain)),
             // No installment evidence → nothing to merge on.
             None => merged.push(chain),
         }
     }
 
-    for (_, mut group) in groups {
-        if group.len() == 1 {
-            merged.append(&mut group);
-            continue;
+    for (_, mut keyed) in groups {
+        // Cluster by anchor adjacency: consecutive anchors ≤1 month apart are
+        // the same plan seen across a posting boundary.
+        keyed.sort_by_key(|(anchor, _)| *anchor);
+        let mut clusters: Vec<Vec<InstallmentChain>> = Vec::new();
+        let mut last_anchor: Option<i32> = None;
+        for (anchor, chain) in keyed {
+            match (last_anchor, clusters.last_mut()) {
+                (Some(prev), Some(cluster)) if anchor - prev <= 1 => cluster.push(chain),
+                _ => clusters.push(vec![chain]),
+            }
+            last_anchor = Some(anchor);
         }
-        // Freshest evidence first: its naming matches what the processor
-        // emits today, so reconciliation keeps matching new parcelas.
-        group.sort_by(|a, b| {
-            let last_date =
-                |c: &InstallmentChain| c.installments.last().map(|t| t.transaction_date);
-            last_date(b)
-                .cmp(&last_date(a))
-                .then(b.current.cmp(&a.current))
-                .then_with(|| a.base_description.cmp(&b.base_description))
-        });
-
-        let total = group[0].total;
-        let account_id = group[0].account_id.clone();
-        let base_description = group[0].base_description.clone();
-        let current = group.iter().map(|c| c.current).max().unwrap_or(0);
-        let first_date = group.iter().map(|c| c.first_date).min();
-        let mut installments: Vec<TransactionRecord> = group
-            .drain(..)
-            .flat_map(|c| c.installments.into_iter())
-            .collect();
-        installments.sort_by_key(|t| t.transaction_date);
-
-        let (Some(first_date), Some(projected_end)) = (
-            first_date,
-            first_date.and_then(|d| add_months(d, total.saturating_sub(1))),
-        ) else {
-            continue; // unreachable: every grouped chain carries installments
-        };
-        let remaining = total.saturating_sub(current);
-        let total_amount = installments
-            .iter()
-            .map(|tx| tx.amount)
-            .fold(Decimal::ZERO, |acc, v| acc + v);
-
-        merged.push(InstallmentChain {
-            account_id,
-            base_description,
-            total,
-            current,
-            installments,
-            first_date,
-            projected_end,
-            remaining,
-            released_next_month: remaining == 1,
-            total_amount,
-        });
+        for group in clusters {
+            merged.extend(merge_chain_cluster(group));
+        }
     }
 
     merged
+}
+
+/// Folds one cluster of same-plan chains into a single chain (passthrough for
+/// singleton clusters).
+fn merge_chain_cluster(mut group: Vec<InstallmentChain>) -> Vec<InstallmentChain> {
+    if group.len() == 1 {
+        return group;
+    }
+    // Freshest evidence first: its naming matches what the processor
+    // emits today, so reconciliation keeps matching new parcelas.
+    group.sort_by(|a, b| {
+        let last_date = |c: &InstallmentChain| c.installments.last().map(|t| t.transaction_date);
+        last_date(b)
+            .cmp(&last_date(a))
+            .then(b.current.cmp(&a.current))
+            .then_with(|| a.base_description.cmp(&b.base_description))
+    });
+
+    let total = group[0].total;
+    let account_id = group[0].account_id.clone();
+    let base_description = group[0].base_description.clone();
+    let current = group.iter().map(|c| c.current).max().unwrap_or(0);
+    let first_date = group.iter().map(|c| c.first_date).min();
+    let mut installments: Vec<TransactionRecord> = group
+        .drain(..)
+        .flat_map(|c| c.installments.into_iter())
+        .collect();
+    installments.sort_by_key(|t| t.transaction_date);
+
+    let (Some(first_date), Some(projected_end)) = (
+        first_date,
+        first_date.and_then(|d| add_months(d, total.saturating_sub(1))),
+    ) else {
+        return Vec::new(); // unreachable: every grouped chain carries installments
+    };
+    let remaining = total.saturating_sub(current);
+    let total_amount = installments
+        .iter()
+        .map(|tx| tx.amount)
+        .fold(Decimal::ZERO, |acc, v| acc + v);
+
+    vec![InstallmentChain {
+        account_id,
+        base_description,
+        total,
+        current,
+        installments,
+        first_date,
+        projected_end,
+        remaining,
+        released_next_month: remaining == 1,
+        total_amount,
+    }]
 }
 
 fn add_months(date: NaiveDate, months: u32) -> Option<NaiveDate> {
@@ -738,6 +758,31 @@ mod tests {
         assert_eq!(chains.len(), 1, "{chains:#?}");
         assert_eq!(chains[0].current, 5);
         assert_eq!(chains[0].base_description, "Globo Globoplay - Parcela");
+    }
+
+    #[test]
+    fn group_merges_statement_repost_that_crossed_a_month_boundary() {
+        // The statement line re-posts up to one cycle after the POS capture,
+        // so the same plan's anchors can differ by one month — still one plan.
+        let txs = vec![
+            make_tx_amount(
+                "h2",
+                "card",
+                "2026-05-01",
+                "Htm*Psicoeducacao 2/12",
+                "-59.88",
+            ),
+            make_tx_amount(
+                "h3",
+                "card",
+                "2026-05-10",
+                "Htm*Psicoeducacao - Parcela 3/12",
+                "-59.88",
+            ),
+        ];
+        let chains = group_into_chains(&txs);
+        assert_eq!(chains.len(), 1, "{chains:#?}");
+        assert_eq!(chains[0].current, 3);
     }
 
     #[test]
