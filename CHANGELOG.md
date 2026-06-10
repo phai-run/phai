@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.6.1](https://github.com/phai-run/phai/compare/v5.6.0...v5.6.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* **web:** boot fresh livestore store on schema drift and never skip seeding empty tables ([#136](https://github.com/phai-run/phai/issues/136)) ([763bb81](https://github.com/phai-run/phai/commit/763bb812235705aeb4e0cdce7e0f38564a9a0640))
+
 ## [5.6.0](https://github.com/phai-run/phai/compare/v5.5.0...v5.6.0) (2026-06-10)
 
 
