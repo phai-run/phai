@@ -1,7 +1,7 @@
 import { queryDb } from "@livestore/livestore";
 import { useStore } from "@livestore/react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { events, tables } from "../livestore/schema";
+import { events, STORE_ID, tables } from "../livestore/schema";
 import {
 	api,
 	type BridgeIdentity,
@@ -15,6 +15,27 @@ import {
 const MAX_RETRIES = 10;
 const pendingWrites$ = queryDb(tables.pendingWrites);
 const BRIDGE_IDENTITY_STORAGE_KEY = "phai.bridgeIdentity";
+const UNKNOWN_VERSION = "unknown";
+
+// One identity fetch per page load, shared by the bootstrap and every seed
+// hook. A rejection clears the memo so the next caller retries the bridge.
+let bridgeIdentityPromise: Promise<BridgeIdentity> | null = null;
+const getBridgeIdentity = (): Promise<BridgeIdentity> => {
+	if (!bridgeIdentityPromise) {
+		bridgeIdentityPromise = api.identity().catch((e: unknown) => {
+			bridgeIdentityPromise = null;
+			throw e;
+		});
+	}
+	return bridgeIdentityPromise;
+};
+
+/** Binary version of the bridge, or "unknown" while it is unreachable. */
+const getBridgeVersion = (): Promise<string> =>
+	getBridgeIdentity().then(
+		(identity) => identity.version ?? UNKNOWN_VERSION,
+		() => UNKNOWN_VERSION,
+	);
 
 export interface SyncStatus {
 	pending: number;
@@ -101,7 +122,9 @@ export const useBridgeSync = (): SyncStatus => {
 	});
 	const scheduleFlushRef = useRef<(() => void) | null>(null);
 
-	// 1. Seed reference data once.
+	// 1. Seed reference data once (re-runs when retry() bumps bootNonce after a
+	// failed bootstrap).
+	const [bootNonce, setBootNonce] = useState(0);
 	useEffect(() => {
 		let cancelled = false;
 		setIdentityReady(false);
@@ -110,23 +133,28 @@ export const useBridgeSync = (): SyncStatus => {
 		// Identity still drives the stale-write clear, which must run before the
 		// category/account commits (a bridge-identity change nukes all tables) —
 		// that ordering is preserved inside the handler.
-		Promise.all([api.identity(), api.categories(), api.accounts()])
+		Promise.all([getBridgeIdentity(), api.categories(), api.accounts()])
 			.then(([identity, cats, accs]) => {
 				if (cancelled) return;
 				if (clearStaleLocalWrites(store, identity)) {
 					setPending(0);
 				}
 				writeStoredBridgeIdentity(identity);
+				sweepStaleSeedStamps(identity.version ?? UNKNOWN_VERSION);
 				store.commit(events.categoriesSeeded({ ids: cats.ids }));
 				store.commit(events.accountsSeeded({ rows: accs.rows }));
 				setSeeded(true);
 				setIdentityReady(true);
 			})
-			.catch((e: unknown) => setError(String(e)));
+			.catch((e: unknown) => {
+				if (cancelled) return;
+				console.error("[phai] bridge bootstrap failed:", e);
+				setError(String(e));
+			});
 		return () => {
 			cancelled = true;
 		};
-	}, [store]);
+	}, [store, bootNonce]);
 
 	// 2. Drain the typed pending-write queue with exponential backoff.
 	useEffect(() => {
@@ -174,8 +202,13 @@ export const useBridgeSync = (): SyncStatus => {
 	}, [store, identityReady]);
 
 	const retry = useCallback(() => {
-		if (!identityReady) return;
 		setError(null);
+		if (!identityReady) {
+			// Bootstrap never completed (bridge was down): re-run it — the chip's
+			// retry button must never be a no-op.
+			setBootNonce((n) => n + 1);
+			return;
+		}
 		backoffRef.current.failures = 0;
 		if (backoffRef.current.timer) clearTimeout(backoffRef.current.timer);
 		void (async () => {
@@ -304,38 +337,98 @@ export interface SeedState {
 // localStorage (NOT LiveStore) so it never triggers an OPFS schema migration.
 const SEED_FRESH_MS = 5 * 60 * 1000;
 
-const seedTs = (key: string): number => {
+const SEED_STAMP_PREFIX = "phai:lastSync:";
+
+/**
+ * Stamps are keyed by store version AND bridge binary version: upgrading
+ * either one changes the key, so every stamp reads as stale and the fresh
+ * store/new binary always reseeds. (The v5.6.0 regression: un-versioned
+ * stamps stayed "fresh" across an upgrade and blocked the reseed of an
+ * empty store.)
+ */
+export const seedStampKey = (cacheKey: string, version: string): string =>
+	`${SEED_STAMP_PREFIX}${STORE_ID}:${version}:${cacheKey}`;
+
+const seedTs = (cacheKey: string, version: string): number => {
 	try {
-		return Number(localStorage.getItem(`phai:lastSync:${key}`)) || 0;
+		return Number(localStorage.getItem(seedStampKey(cacheKey, version))) || 0;
 	} catch {
 		return 0;
 	}
 };
-const markSeed = (key: string): void => {
+const markSeed = (cacheKey: string, version: string): void => {
 	try {
-		localStorage.setItem(`phai:lastSync:${key}`, String(Date.now()));
+		localStorage.setItem(seedStampKey(cacheKey, version), String(Date.now()));
 	} catch {
 		/* private mode / quota — fall back to always-fetch */
 	}
 };
-const clearSeed = (key: string): void => {
+// Removes the stamp for a cacheKey under every store/binary version, so a
+// manual reload() stays synchronous (no need to resolve the version first).
+const clearSeed = (cacheKey: string): void => {
 	try {
-		localStorage.removeItem(`phai:lastSync:${key}`);
+		const suffix = `:${cacheKey}`;
+		for (let i = localStorage.length - 1; i >= 0; i--) {
+			const k = localStorage.key(i);
+			if (k?.startsWith(SEED_STAMP_PREFIX) && k.endsWith(suffix)) {
+				localStorage.removeItem(k);
+			}
+		}
+	} catch {
+		/* ignore */
+	}
+};
+/** The localStorage subset the stamp sweep touches (injectable for tests). */
+export type StampStorage = Pick<Storage, "key" | "removeItem"> & {
+	readonly length: number;
+};
+
+/** Drops stamps from other store/binary versions (old formats included). */
+export const sweepStaleSeedStamps = (
+	version: string,
+	storage: StampStorage = localStorage,
+): void => {
+	try {
+		const currentPrefix = `${SEED_STAMP_PREFIX}${STORE_ID}:${version}:`;
+		for (let i = storage.length - 1; i >= 0; i--) {
+			const k = storage.key(i);
+			if (k?.startsWith(SEED_STAMP_PREFIX) && !k.startsWith(currentPrefix)) {
+				storage.removeItem(k);
+			}
+		}
 	} catch {
 		/* ignore */
 	}
 };
 
 /**
+ * Freshness alone is not enough to skip a seed: after a store-version bump
+ * the OPFS store is brand new and EMPTY while the stamps may still look
+ * fresh. Skip only when the data the stamp vouches for is actually there.
+ */
+export const shouldSkipSeed = (args: {
+	now: number;
+	stampedAt: number;
+	maxAgeMs: number;
+	isMissingData: boolean;
+}): boolean =>
+	args.stampedAt > 0 &&
+	args.now - args.stampedAt < args.maxAgeMs &&
+	!args.isMissingData;
+
+/**
  * Generic "fetch from bridge → commit a seed event" hook. Re-runs whenever
  * `deps` change (e.g. window controls) and exposes a manual `reload`. When a
  * `cacheKey` is given, the fetch is skipped while the last sync for that key is
- * still fresh (stale-while-revalidate): the cached data is already on screen.
+ * still fresh (stale-while-revalidate) AND the seeded table still has data —
+ * `isMissingData` is the caller's "my table is empty" probe, which overrides
+ * freshness after a store-version bump wipes the OPFS cache.
  */
 const useSeed = (
 	fetcher: () => Promise<void>,
 	deps: ReadonlyArray<unknown>,
 	cacheKey?: string,
+	isMissingData?: () => boolean,
 	maxAgeMs: number = SEED_FRESH_MS,
 ): SeedState => {
 	const [loading, setLoading] = useState(false);
@@ -347,27 +440,41 @@ const useSeed = (
 	}, [cacheKey]);
 
 	useEffect(() => {
-		// Fresh cache → skip the slow re-fetch; LiveStore already shows it.
-		if (cacheKey && Date.now() - seedTs(cacheKey) < maxAgeMs) {
-			setLoading(false);
-			return;
-		}
 		let cancelled = false;
-		setLoading(true);
-		setError(null);
-		fetcher()
-			.then(() => {
+		const run = async () => {
+			if (cacheKey) {
+				const version = await getBridgeVersion();
+				if (cancelled) return;
+				// Fresh cache + data on screen → skip the slow re-fetch.
+				const skip = shouldSkipSeed({
+					now: Date.now(),
+					stampedAt: seedTs(cacheKey, version),
+					maxAgeMs,
+					isMissingData: isMissingData ? isMissingData() : false,
+				});
+				if (skip) {
+					setLoading(false);
+					return;
+				}
+			}
+			setLoading(true);
+			setError(null);
+			try {
+				await fetcher();
 				if (!cancelled) {
 					setError(null);
-					if (cacheKey) markSeed(cacheKey);
+					if (cacheKey) markSeed(cacheKey, await getBridgeVersion());
 				}
-			})
-			.catch((e: unknown) => {
-				if (!cancelled) setError(String(e));
-			})
-			.finally(() => {
+			} catch (e: unknown) {
+				if (!cancelled) {
+					console.error(`[phai] seed failed (${cacheKey ?? "anon"}):`, e);
+					setError(String(e));
+				}
+			} finally {
 				if (!cancelled) setLoading(false);
-			});
+			}
+		};
+		void run();
 		return () => {
 			cancelled = true;
 		};
@@ -432,7 +539,16 @@ export const useTransactionsSeed = (
 			if (!page.hasMore) break;
 		}
 	}, [store, monthsBack, monthsAhead]);
-	return useSeed(fetcher, [fetcher], `tx:${monthsBack}:${monthsAhead}`);
+	const isMissingData = useCallback(
+		() => store.query(tables.transactions.count()) === 0,
+		[store],
+	);
+	return useSeed(
+		fetcher,
+		[fetcher],
+		`tx:${monthsBack}:${monthsAhead}`,
+		isMissingData,
+	);
 };
 
 const normalizeChart = (data: ChartData) =>
@@ -460,7 +576,16 @@ export const useChartSeed = (
 		const data = await api.chart(monthsBack, monthsAhead);
 		store.commit(events.chartSeeded({ months: normalizeChart(data) }));
 	}, [store, monthsBack, monthsAhead]);
-	return useSeed(fetcher, [fetcher], `chart:${monthsBack}:${monthsAhead}`);
+	const isMissingData = useCallback(
+		() => store.query(tables.chartMonths.count()) === 0,
+		[store],
+	);
+	return useSeed(
+		fetcher,
+		[fetcher],
+		`chart:${monthsBack}:${monthsAhead}`,
+		isMissingData,
+	);
 };
 
 const normalizeForecasts = (forecasts: ForecastRecord[]) =>
@@ -502,5 +627,20 @@ export const useForecastsSeed = (status: string | null): SeedState => {
 			events.forecastTemplatesSeeded({ rows: normalizeTemplates(templates) }),
 		);
 	}, [store, status]);
-	return useSeed(fetcher, [fetcher], `forecasts:${status ?? "all"}`);
+	const isMissingData = useCallback(
+		// One fetcher seeds both tables; either one empty means data is missing.
+		// (A user with legitimately zero forecasts refetches every mount — the
+		// correctness of "never show an empty store as fresh" wins over that
+		// micro-optimization.)
+		() =>
+			store.query(tables.forecasts.count()) === 0 ||
+			store.query(tables.forecastTemplates.count()) === 0,
+		[store],
+	);
+	return useSeed(
+		fetcher,
+		[fetcher],
+		`forecasts:${status ?? "all"}`,
+		isMissingData,
+	);
 };

@@ -7,7 +7,7 @@ import { unstable_batchedUpdates as batchUpdates } from 'react-dom'
 import { App } from './App'
 import './design/tokens.css'
 import LiveStoreWorker from './livestore/livestore.worker?worker'
-import { schema } from './livestore/schema'
+import { schema, STORE_ID } from './livestore/schema'
 
 const adapter = makePersistedAdapter({
   storage: { type: 'opfs' },
@@ -41,12 +41,8 @@ createRoot(document.getElementById('root')!).render(
       schema={schema}
       adapter={adapter}
       batchUpdates={batchUpdates}
-      // storeId namespaces the OPFS-persisted client DB. The local store is a
-      // disposable cache (BigQuery/SQLite is the source of truth, re-seeded on
-      // every load), so on a breaking LiveStore *table schema* change we bump
-      // the suffix to start a fresh store rather than hang migrating the old one.
-      // Bump this when you add/remove/retype a column in livestore/schema.ts.
-      storeId="phai-s3"
+      // Versioned in livestore/schema.ts (STORE_VERSION) — see the comment there.
+      storeId={STORE_ID}
       renderLoading={(status) => <Loading stage={status.stage} />}
       renderError={(error) => (
         <div

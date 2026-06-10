@@ -141,6 +141,8 @@ export interface NewForecast {
 export interface BridgeIdentity {
 	identity: string;
 	backend: string;
+	/** Binary version (CARGO_PKG_VERSION). Optional: `vite dev` may talk to an older binary. */
+	version?: string;
 }
 
 const trimParams = (

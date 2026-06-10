@@ -100,7 +100,7 @@ export const Dashboard = () => {
 		YEAR_WINDOW.monthsAhead,
 	);
 	const forecastSeed = useForecastsSeed(null);
-	useTransactionsSeed(
+	const txSeed = useTransactionsSeed(
 		YEAR_WINDOW.transactionMonthsBack,
 		YEAR_WINDOW.monthsAhead,
 	);
@@ -194,7 +194,7 @@ export const Dashboard = () => {
 		};
 	}, []);
 
-	const error = chartSeed.error ?? forecastSeed.error;
+	const error = chartSeed.error ?? forecastSeed.error ?? txSeed.error;
 	const loading = chartSeed.loading && months.length === 0;
 
 	return (
