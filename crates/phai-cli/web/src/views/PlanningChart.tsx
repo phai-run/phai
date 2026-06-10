@@ -3,6 +3,22 @@ import { formatMoneyNumber, numeric } from "../lib/format";
 import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView, ChartMode } from "./types";
+import {
+	BASELINE,
+	H,
+	PAD,
+	W,
+	bh,
+	buildModel,
+	cashY,
+	currentMonthKey,
+	innerH,
+	innerW,
+	type ChartModel,
+} from "./chart/model";
+import { ChartLegend } from "./chart/ChartLegend";
+
+export { buildModel } from "./chart/model";
 import type { CategoryMonthSeries } from "../lib/derivations";
 
 // Qualitative palette for the per-category "Despesas" stacked bars. Kept
@@ -22,93 +38,6 @@ const catColor = (index: number, total: number): string =>
 	index === total - 1 && total > CAT_COLORS.length
 		? "#9a9aae"
 		: CAT_COLORS[index % CAT_COLORS.length];
-
-// ── SVG dimensions for the full chart ─────────────────────────────────────
-const W = 960;
-const H = 290;
-const PAD = { top: 12, right: 8, bottom: 68, left: 8 };
-const innerW = W - PAD.left - PAD.right; // 944
-const innerH = H - PAD.top - PAD.bottom; // 210
-// Y where bars are rooted (baseline)
-const BASELINE = PAD.top + innerH; // 222
-// Max bar height (bars use 75% of innerH)
-const BAR_MAX = innerH * 0.75; // ~157.5
-
-const currentMonthKey = () => {
-	const d = new Date();
-	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-};
-
-// ── Model ──────────────────────────────────────────────────────────────────
-
-interface ChartModel {
-	realIns: number[];
-	fcIns: number[];
-	realOuts: number[];
-	fcOuts: number[];
-	balances: number[];
-	maxBar: number;
-	expMaxBar: number;
-	minBal: number;
-	balSpan: number;
-	cashMin: number;
-	cashSpan: number;
-}
-
-export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
-	const realIns = months.map((m) => Math.max(0, numeric(m.inflows)));
-	const fcIns = months.map((m) =>
-		Math.max(0, numeric(m.forecastInflowsRemaining)),
-	);
-	const realOuts = months.map((m) => Math.abs(numeric(m.outflows)));
-	const fcOuts = months.map((m) =>
-		Math.abs(numeric(m.forecastOutflowsRemaining)),
-	);
-	const balances = months.map((m) =>
-		m.isFuture ? numeric(m.projectedClosingBalance) : numeric(m.closingBalance),
-	);
-	const maxBar = Math.max(
-		1,
-		...months.map((_, i) => realIns[i] + fcIns[i]),
-		...months.map((_, i) => realOuts[i] + fcOuts[i]),
-	);
-	const expMaxBar = Math.max(
-		1,
-		...months.map((_, i) => realOuts[i] + fcOuts[i]),
-	);
-	const minBal = Math.min(0, ...balances);
-	const maxBal = Math.max(1, ...balances);
-	const balSpan = maxBal - minBal || 1;
-	const cashMax = Math.max(
-		1,
-		...balances,
-		...months.map((_, i) => realIns[i] + fcIns[i]),
-	);
-	const cashMin = Math.min(
-		0,
-		...balances,
-		...months.map((_, i) => -(realOuts[i] + fcOuts[i])),
-	);
-	const cashSpan = cashMax - cashMin || 1;
-	return {
-		realIns,
-		fcIns,
-		realOuts,
-		fcOuts,
-		balances,
-		maxBar,
-		expMaxBar,
-		minBal,
-		balSpan,
-		cashMin,
-		cashSpan,
-	};
-}
-
-// Convert bar magnitude → SVG height
-const bh = (v: number, maxBar: number) => (v / maxBar) * BAR_MAX;
-const cashY = (v: number, min: number, span: number) =>
-	PAD.top + (1 - (v - min) / span) * innerH;
 
 // ── Public component ───────────────────────────────────────────────────────
 
@@ -775,69 +704,6 @@ const FullChart = ({
 	);
 };
 
-// ── Legend ─────────────────────────────────────────────────────────────────
-
-const ChartLegend = ({
-	mode,
-	months,
-}: {
-	mode: ChartMode;
-	months: ReadonlyArray<ChartMonthView>;
-}) => {
-	const hasFc = months.some((m) => m.isFuture === 1);
-
-	const items: Array<{
-		color: string;
-		label: string;
-		dashed?: boolean;
-	}> = [];
-
-	if (mode === "caixa") {
-		items.push({ color: "var(--cyan)", label: "entradas" });
-		items.push({ color: "var(--rose)", label: "saídas" });
-		if (hasFc) {
-			items.push({ color: "#99f6e4", label: "entrada prevista" });
-			items.push({ color: "#fda4af", label: "saída prevista" });
-			items.push({ color: "var(--amber)", label: "parcela prevista" });
-		}
-		items.push({
-			color: "var(--purple)",
-			label: "saldo",
-			dashed: true,
-		});
-	} else if (mode === "despesas-barras") {
-		items.push({ color: "var(--rose)", label: "realizado" });
-		if (hasFc)
-			items.push({
-				color: "#fda4af",
-				label: "previsto",
-			});
-	}
-
-	return (
-		<div
-			className="mono"
-			style={{
-				display: "flex",
-				flexWrap: "wrap",
-				gap: 14,
-				fontSize: 10,
-				color: "var(--muted)",
-				marginTop: 6,
-			}}
-		>
-			{items.map((it) => (
-				<LegendSwatch
-					key={it.label}
-					color={it.color}
-					label={it.label}
-					dashed={it.dashed}
-				/>
-			))}
-		</div>
-	);
-};
-
 // ── Shared interaction overlay ─────────────────────────────────────────────
 
 const ColumnOverlay = ({
@@ -944,27 +810,3 @@ const MonthColumn = ({
 	);
 };
 
-// ── Legend swatch ──────────────────────────────────────────────────────────
-
-const LegendSwatch = ({
-	color,
-	label,
-	dashed,
-}: {
-	color: string;
-	label: string;
-	dashed?: boolean;
-}) => (
-	<span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-		<span
-			style={{
-				width: dashed ? 14 : 10,
-				height: dashed ? 0 : 10,
-				borderRadius: dashed ? 0 : 2,
-				background: color,
-				border: dashed ? `1.5px dashed ${color}` : "none",
-			}}
-		/>
-		{label}
-	</span>
-);
