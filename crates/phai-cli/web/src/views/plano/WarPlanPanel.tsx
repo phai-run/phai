@@ -2,6 +2,7 @@ import { queryDb } from "@livestore/livestore";
 import { useQuery } from "@livestore/react";
 import { useMemo, useState } from "react";
 import { tables } from "../../livestore/schema";
+import { categoryEmoji } from "../../lib/categoryEmoji";
 import { formatMoneyNumber } from "../../lib/format";
 import {
 	buildOverlayMap,
@@ -110,17 +111,18 @@ export const WarPlanPanel = ({
 					background: "var(--card)",
 				}}
 			>
-				<table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+				<table
+					style={{
+						width: "100%",
+						// "separate": collapsed borders make body cells paint through
+						// the sticky header while scrolling.
+						borderCollapse: "separate",
+						borderSpacing: 0,
+						fontSize: 14,
+					}}
+				>
 					<thead>
-						<tr
-							className="mono"
-							style={{
-								position: "sticky",
-								top: 0,
-								background: "var(--card)",
-								boxShadow: "0 1px 0 var(--border)",
-							}}
-						>
+						<tr className="mono">
 							<th style={thStyle}>categoria</th>
 							<th style={{ ...thStyle, textAlign: "right" }}>orçamento</th>
 							<th style={{ ...thStyle, textAlign: "right" }}>realizado</th>
@@ -152,7 +154,7 @@ export const WarPlanPanel = ({
 					gap: 16,
 					alignItems: "center",
 					padding: "10px 4px",
-					fontSize: 11,
+					fontSize: 12,
 					color: "var(--muted)",
 					flexWrap: "wrap",
 				}}
@@ -210,7 +212,7 @@ const SummaryCard = ({
 		<div
 			className="mono"
 			style={{
-				fontSize: 10,
+				fontSize: 11,
 				textTransform: "uppercase",
 				letterSpacing: "0.08em",
 				color: "var(--muted)",
@@ -253,9 +255,11 @@ const PlanRow = ({
 	const floored = target != null && target < row.realizado;
 
 	return (
-		<tr style={{ borderBottom: "1px solid var(--border)" }}>
+		<tr>
 			<td style={tdStyle}>
-				<span style={{ fontWeight: 500 }}>{row.parent}</span>
+				<span style={{ fontWeight: 500 }}>
+					{categoryEmoji(row.parent)} {row.parent}
+				</span>
 			</td>
 			<td className="mono" style={{ ...tdStyle, textAlign: "right" }}>
 				{row.orcamento != null ? formatMoneyNumber(row.orcamento) : "—"}
@@ -303,7 +307,7 @@ const PlanRow = ({
 					/>
 				</div>
 				{usagePct != null && (
-					<div className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>
+					<div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
 						{Math.round((row.realizado / (row.orcamento || 1)) * 100)}% do
 						orçamento
 					</div>
@@ -359,13 +363,23 @@ const thStyle: React.CSSProperties = {
 	padding: "8px 12px",
 	textAlign: "left",
 	fontWeight: 500,
-	fontSize: 11,
+	fontSize: 12,
 	textTransform: "uppercase",
 	letterSpacing: "0.06em",
 	color: "var(--muted)",
+	// Sticky on the th (not the tr): collapsed-border sticky rows don't paint
+	// their background reliably, so each header cell carries its own.
+	position: "sticky",
+	top: 0,
+	zIndex: 2,
+	background: "var(--card)",
+	boxShadow: "0 1px 0 var(--border)",
 };
 
 const tdStyle: React.CSSProperties = {
 	padding: "8px 12px",
 	verticalAlign: "middle",
+	// Row separator on the td: tr borders don't render with
+	// border-collapse: separate (which the sticky header requires).
+	borderBottom: "1px solid var(--border)",
 };
