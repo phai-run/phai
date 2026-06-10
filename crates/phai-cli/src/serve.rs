@@ -197,6 +197,9 @@ fn canonical_web_category(category_id: Option<&str>) -> Option<String> {
 struct BridgeIdentityResponse {
     identity: String,
     backend: String,
+    /// Binary version. The web app keys its seed-freshness stamps by this so
+    /// an upgraded binary always forces a full reseed of the client store.
+    version: String,
 }
 
 fn bridge_identity_response(config: &AppConfig) -> BridgeIdentityResponse {
@@ -226,6 +229,7 @@ fn bridge_identity_response(config: &AppConfig) -> BridgeIdentityResponse {
     BridgeIdentityResponse {
         identity: format!("{backend_label}:{digest:x}"),
         backend: backend_label.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 
@@ -2279,6 +2283,14 @@ fn is_origin_allowed(headers: &HeaderMap) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    // ── bridge_identity_response ───────────────────────────────────────────
+
+    #[test]
+    fn identity_response_includes_binary_version() {
+        let response = bridge_identity_response(&AppConfig::default());
+        assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
+    }
 
     // ── is_origin_allowed ──────────────────────────────────────────────────
 

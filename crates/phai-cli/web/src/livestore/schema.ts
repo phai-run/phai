@@ -26,6 +26,21 @@ import {
  * (client-only design, see ADR-0001).
  */
 
+/**
+ * Store version — bump on ANY schema change here: table columns, event payload
+ * schemas, or clientDocument value schemas. `STORE_ID` namespaces the
+ * OPFS-persisted client DB. LiveStore's own schema hash only covers table
+ * shapes (a clientDocument value is opaque JSON to it), so a value-schema
+ * change silently reuses the old state DB and the old rows fail to decode at
+ * query time (the v5.6.0 "no data" regression). Bumping abandons the old store
+ * and starts fresh — safe, because the store is a disposable cache re-seeded
+ * from the bridge (BigQuery/SQLite is the source of truth).
+ * Enforced by __tests__/store-version.test.ts: change the schema and the
+ * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
+ */
+export const STORE_VERSION = 4;
+export const STORE_ID = `phai-s${STORE_VERSION}`;
+
 // Computes current month as "YYYY-MM" for the default selectedMonth.
 const currentMonth = (() => {
 	const d = new Date();
