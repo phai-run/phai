@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.6.0](https://github.com/phai-run/phai/compare/v5.5.0...v5.6.0) (2026-06-10)
+
+
+### Features
+
+* **web:** modo planilha, plano de guerra e dedup de parcelas renomeadas ([#134](https://github.com/phai-run/phai/issues/134)) ([8c0ca52](https://github.com/phai-run/phai/commit/8c0ca5208a0468c353938529dcbd82a23865226e))
+
 ## [5.5.0](https://github.com/phai-run/phai/compare/v5.4.1...v5.5.0) (2026-06-03)
 
 
