@@ -1,5 +1,23 @@
+import { queryDb } from "@livestore/livestore";
+import { useQuery, useStore } from "@livestore/react";
+import { useCallback, useMemo, useState } from "react";
+import { AnimatePresence } from "framer-motion";
 import type { CardRow } from "../../bridge/api";
+import { events, tables } from "../../livestore/schema";
 import { formatMoneyNumber, numeric } from "../../lib/format";
+import {
+	buildOverlayMap,
+	effectiveCategory,
+	type TxView,
+} from "../../lib/derivations";
+import {
+	TransactionModal,
+	type ReviewPatch,
+} from "../../components/TransactionModal";
+
+const txAll$ = queryDb(tables.transactions);
+const overlay$ = queryDb(tables.reviewOverlay);
+const categories$ = queryDb(tables.categories.orderBy("id", "asc"));
 
 /**
  * Full-width detail panel for one credit card, rendered *below* the card grid
@@ -36,6 +54,46 @@ export const CardDetailPanel = ({
 			: card.state === "fechada"
 				? "FECHADA"
 				: "EM DIA";
+
+	// Clicking an installment opens the same edit modal as the planilha /
+	// categorias views — the row's transactionId maps into the seeded window.
+	const { store } = useStore();
+	const txRows = useQuery(txAll$) as ReadonlyArray<TxView>;
+	const overlay = useQuery(overlay$);
+	const categories = useQuery(categories$);
+	const overlayMap = useMemo(() => buildOverlayMap(overlay), [overlay]);
+	const categoryIds = useMemo(() => categories.map((c) => c.id), [categories]);
+	const txById = useMemo(
+		() => new Map(txRows.map((t) => [t.id, t])),
+		[txRows],
+	);
+	const [modalTx, setModalTx] = useState<TxView | null>(null);
+
+	const similarTxs = useMemo(() => {
+		if (!modalTx) return [] as TxView[];
+		const cat = effectiveCategory(modalTx, overlayMap);
+		return txRows.filter(
+			(t) =>
+				t.id !== modalTx.id &&
+				(effectiveCategory(t, overlayMap) === cat ||
+					(t.merchantName && t.merchantName === modalTx.merchantName)),
+		);
+	}, [modalTx, txRows, overlayMap]);
+
+	const submitModal = useCallback(
+		(transactionId: string, patch: ReviewPatch) => {
+			store.commit(
+				events.reviewSubmitted({
+					writeId: crypto.randomUUID(),
+					transactionId,
+					patch,
+					submittedAt: Date.now(),
+				}),
+			);
+			setModalTx(null);
+		},
+		[store],
+	);
 
 	const figures: Array<{ label: string; value: number; strong?: boolean }> = [
 		{ label: "fatura", value: numeric(card.total), strong: true },
@@ -176,6 +234,22 @@ export const CardDetailPanel = ({
 						{card.installments.map((row) => (
 							<div
 								key={row.transactionId}
+								role="button"
+								tabIndex={0}
+								title={
+									txById.has(row.transactionId)
+										? "editar transação"
+										: "fora da janela carregada"
+								}
+								onClick={() => {
+									const tx = txById.get(row.transactionId);
+									if (tx) setModalTx(tx);
+								}}
+								onKeyDown={(e) => {
+									if (e.key !== "Enter") return;
+									const tx = txById.get(row.transactionId);
+									if (tx) setModalTx(tx);
+								}}
 								style={{
 									display: "flex",
 									justifyContent: "space-between",
@@ -184,6 +258,9 @@ export const CardDetailPanel = ({
 									padding: "8px 12px",
 									borderRadius: "var(--radius-sm)",
 									border: "1px solid var(--border)",
+									cursor: txById.has(row.transactionId)
+										? "pointer"
+										: "default",
 									background: row.endingThisMonth
 										? "rgba(180,83,9,0.08)"
 										: "var(--bg)",
@@ -230,6 +307,20 @@ export const CardDetailPanel = ({
 					</div>
 				</>
 			)}
+
+			<AnimatePresence>
+				{modalTx && (
+					<TransactionModal
+						tx={modalTx}
+						overlay={overlayMap.get(modalTx.id)}
+						similarTxs={similarTxs}
+						overlayById={overlayMap}
+						categories={categoryIds}
+						onSubmit={(patch) => submitModal(modalTx.id, patch)}
+						onClose={() => setModalTx(null)}
+					/>
+				)}
+			</AnimatePresence>
 		</div>
 	);
 };

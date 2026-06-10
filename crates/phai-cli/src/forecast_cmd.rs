@@ -35,6 +35,10 @@ pub struct InstallmentsRefreshReport {
     /// Duplicate templates collapsed to `descartado` before re-materialising
     /// (their orphan forecasts deactivated). Self-heal — see ADR-0022.
     pub templates_deduped: usize,
+    /// Stale naming forks retired after re-derivation: active installment
+    /// templates no longer derived from any chain but shadowed by a derived
+    /// template for the same plan (same account/total/amount).
+    pub templates_retired: usize,
 }
 
 pub(crate) async fn run_refresh_installments(args: ForecastRefreshInstallmentsArgs) -> Result<()> {
@@ -51,6 +55,7 @@ pub(crate) async fn run_refresh_installments(args: ForecastRefreshInstallmentsAr
             "templates_upserted": report.templates_upserted,
             "forecasts_upserted": report.forecasts_upserted,
             "templates_deduped": report.templates_deduped,
+            "templates_retired": report.templates_retired,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
@@ -61,6 +66,9 @@ pub(crate) async fn run_refresh_installments(args: ForecastRefreshInstallmentsAr
         println!("  Forecasts gravados:    {}", report.forecasts_upserted);
         if report.templates_deduped > 0 {
             println!("  Duplicados colapsados: {}", report.templates_deduped);
+        }
+        if report.templates_retired > 0 {
+            println!("  Renomeados aposentados: {}", report.templates_retired);
         }
     }
     Ok(())
@@ -131,6 +139,11 @@ pub async fn refresh_installments(
             .map(|t| audit_event_for_template(t, "upsert", &config.actor_id))
             .collect::<Result<Vec<_>>>()?;
         store.insert_audit_events(&events).await?;
+        // A renamed plan keeps its old-name template behind: no chain derives
+        // it anymore, so neither the natural-key collapse above nor this
+        // upsert touches it — retire it or its parcelas project twice.
+        report.templates_retired =
+            retire_shadowed_templates(store, &templates, &config.actor_id).await?;
     }
     if !forecasts.is_empty() {
         report.forecasts_upserted = store.upsert_forecasts(&forecasts).await?;
@@ -446,13 +459,27 @@ async fn collapse_duplicate_templates(store: &dyn FinanceStore, actor_id: &str) 
     store.insert_audit_events(&template_events).await?;
 
     // Deactivate the demoted templates' non-realised forecasts.
+    deactivate_template_forecasts(store, &plan.demote_ids, "dedup-deactivate", actor_id).await?;
+
+    Ok(demoted_templates.len())
+}
+
+/// Set every non-realised, non-inactive forecast belonging to `template_ids`
+/// to `inativo`, with one audit event per row. Returns how many were touched.
+async fn deactivate_template_forecasts(
+    store: &dyn FinanceStore,
+    template_ids: &std::collections::HashSet<String>,
+    audit_action: &str,
+    actor_id: &str,
+) -> Result<usize> {
+    let now = Utc::now();
     let forecasts = store.list_forecasts(None, None, None).await?;
     let mut deactivated = Vec::new();
     for f in &forecasts {
         let belongs = f
             .template_id
             .as_deref()
-            .is_some_and(|tid| plan.demote_ids.contains(tid));
+            .is_some_and(|tid| template_ids.contains(tid));
         if belongs && !is_realized_status(&f.status) && f.status != "inativo" {
             let mut row = f.clone();
             row.status = "inativo".to_string();
@@ -464,12 +491,75 @@ async fn collapse_duplicate_templates(store: &dyn FinanceStore, actor_id: &str) 
         store.upsert_forecasts(&deactivated).await?;
         let forecast_events = deactivated
             .iter()
-            .map(|f| audit_event_for_forecast(f, "dedup-deactivate", actor_id))
+            .map(|f| audit_event_for_forecast(f, audit_action, actor_id))
             .collect::<Result<Vec<_>>>()?;
         store.insert_audit_events(&forecast_events).await?;
     }
+    Ok(deactivated.len())
+}
 
-    Ok(demoted_templates.len())
+/// Retire naming forks left behind by [`merge_renamed_chains`]: an `ativo`
+/// installment template that was NOT re-derived in this refresh, but whose
+/// plan (account + installments_total + per-parcela amount) IS covered by a
+/// template that was derived, is a stale alias of that plan — its description
+/// no longer matches what the processor emits. Demote it and deactivate its
+/// pending forecasts so the plan projects exactly once.
+async fn retire_shadowed_templates(
+    store: &dyn FinanceStore,
+    derived: &[ForecastTemplateRecord],
+    actor_id: &str,
+) -> Result<usize> {
+    use std::collections::HashSet;
+    let derived_ids: HashSet<&str> = derived.iter().map(|t| t.template_id.as_str()).collect();
+    let plan_of = |t: &ForecastTemplateRecord| -> Option<(String, String, Decimal)> {
+        let total = match t.metadata_json.get("installments_total") {
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            _ => return None,
+        };
+        Some((
+            t.account_id.clone().unwrap_or_default(),
+            total,
+            t.amount.abs().round_dp(2),
+        ))
+    };
+    let derived_plans: HashSet<(String, String, Decimal)> =
+        derived.iter().filter_map(plan_of).collect();
+
+    let existing = store.list_forecast_templates(None, None).await?;
+    let now = Utc::now();
+    let mut retired = Vec::new();
+    for t in &existing {
+        let alive = matches!(t.status.as_str(), "ativo" | "active");
+        if !alive || t.kind != "installment" || derived_ids.contains(t.template_id.as_str()) {
+            continue;
+        }
+        let Some(plan) = plan_of(t) else { continue };
+        if !derived_plans.contains(&plan) {
+            continue;
+        }
+        let mut row = t.clone();
+        row.status = "descartado".to_string();
+        row.updated_at = now;
+        if let serde_json::Value::Object(map) = &mut row.metadata_json {
+            map.insert("retired_shadowed".to_string(), json!(true));
+        }
+        retired.push(row);
+    }
+    if retired.is_empty() {
+        return Ok(0);
+    }
+    store.upsert_forecast_templates(&retired).await?;
+    let events = retired
+        .iter()
+        .map(|t| audit_event_for_template(t, "shadow-retire", actor_id))
+        .collect::<Result<Vec<_>>>()?;
+    store.insert_audit_events(&events).await?;
+
+    let ids: std::collections::HashSet<String> =
+        retired.iter().map(|t| t.template_id.clone()).collect();
+    deactivate_template_forecasts(store, &ids, "shadow-deactivate", actor_id).await?;
+    Ok(retired.len())
 }
 
 fn shift_months_back(date: NaiveDate, n: i32) -> Result<NaiveDate> {
@@ -1947,6 +2037,154 @@ pub fn refresh_one_line(report: &RefreshReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn temp_store() -> (tempfile::TempDir, AppConfig, Box<dyn FinanceStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AppConfig {
+            local_db_path: Some(dir.path().join("test.db")),
+            actor_id: "test-actor".into(),
+            ..AppConfig::default()
+        };
+        let store = open_store(&config).await.unwrap();
+        run_migrations(store.as_ref(), &config).await.unwrap();
+        (dir, config, store)
+    }
+
+    fn installment_tx(
+        id: &str,
+        date: NaiveDate,
+        description: &str,
+        amount: &str,
+    ) -> TransactionRecord {
+        TransactionRecord {
+            transaction_id: id.to_string(),
+            account_id: Some("card-1".to_string()),
+            transaction_date: date,
+            raw_description: description.to_string(),
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            amount: Decimal::from_str_exact(amount).unwrap(),
+            tx_type: "DEBIT".to_string(),
+            category_id: None,
+            category_source: "manual".to_string(),
+            context: None,
+            classifier_trace: None,
+            payment_status: "posted".to_string(),
+            source: "manual".to_string(),
+            actor_id: "test-actor".to_string(),
+            idempotency_key: id.to_string(),
+            metadata_json: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            enrichment_attempted_at: None,
+            amount_cents: None,
+        }
+    }
+
+    /// Regression: a plan whose description flips between the POS capture
+    /// ("Pdv*Beagle 4/5") and the statement line ("Beagle - Parcela 3/5") must
+    /// end the refresh with exactly ONE live template and ONE pending forecast
+    /// per remaining parcela — the stale naming fork (and its forecasts) is
+    /// retired, not left projecting the same parcela twice.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_retires_stale_naming_fork_of_renamed_plan() {
+        let (_dir, config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+        let two_months_ago = shift_months(today, -2).unwrap();
+        let last_month = shift_months(today, -1).unwrap();
+
+        store
+            .upsert_transactions(&[
+                installment_tx("t-old", two_months_ago, "Beagle - Parcela 3/5", "-102.86"),
+                installment_tx("t-new", last_month, "Pdv*Beagle 4/5", "-102.86"),
+            ])
+            .await
+            .unwrap();
+
+        // Stale fork left over from when the statement naming had its own
+        // chain: ativo template + a pending materialised forecast.
+        let stale_template = ForecastTemplateRecord {
+            template_id: "installment-stale".into(),
+            kind: "installment".into(),
+            description: "Beagle - Parcela".into(),
+            merchant_pattern: Some("Beagle - Parcela".into()),
+            category_id: None,
+            account_id: Some("card-1".into()),
+            amount: Decimal::from_str_exact("-102.86").unwrap(),
+            amount_lower: None,
+            amount_upper: None,
+            cadence: "monthly".into(),
+            next_due_day: None,
+            start_date: two_months_ago,
+            end_date: None,
+            remaining_count: Some(2),
+            source: "detected".into(),
+            confidence: None,
+            status: "ativo".into(),
+            metadata_json: json!({"installments_total": 5, "installments_current": 3}),
+            actor_id: "test-actor".into(),
+            idempotency_key: "tpl:installment-stale".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store
+            .upsert_forecast_templates(&[stale_template])
+            .await
+            .unwrap();
+        let stale_forecast = ForecastRecord {
+            forecast_id: "installment-stale-5".into(),
+            due_date: shift_months(today, 1),
+            description: "Beagle - Parcela (5/5)".into(),
+            amount: Decimal::from_str_exact("-102.86").unwrap(),
+            category_id: None,
+            account_id: Some("card-1".into()),
+            status: "ativo".into(),
+            recurrence: None,
+            actor_id: "test-actor".into(),
+            idempotency_key: "fc:installment-stale-5".into(),
+            metadata_json: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            template_id: Some("installment-stale".into()),
+            realized_transaction_id: None,
+            realized_at: None,
+        };
+        store.upsert_forecasts(&[stale_forecast]).await.unwrap();
+
+        let report = refresh_installments(store.as_ref(), &config, 12)
+            .await
+            .unwrap();
+        assert_eq!(report.templates_retired, 1, "{report:#?}");
+
+        // Exactly one live installment template for the plan.
+        let templates = store.list_forecast_templates(None, None).await.unwrap();
+        let live: Vec<_> = templates
+            .iter()
+            .filter(|t| t.kind == "installment" && t.status == "ativo")
+            .collect();
+        assert_eq!(live.len(), 1, "{live:#?}");
+        assert_eq!(live[0].description, "Pdv*Beagle");
+        let stale = templates
+            .iter()
+            .find(|t| t.template_id == "installment-stale")
+            .unwrap();
+        assert_eq!(stale.status, "descartado");
+
+        // The plan projects exactly once: the stale pending forecast is gone
+        // and only the canonical chain's remaining parcela stays ativo.
+        let forecasts = store.list_forecasts(None, None, None).await.unwrap();
+        let stale_fc = forecasts
+            .iter()
+            .find(|f| f.forecast_id == "installment-stale-5")
+            .unwrap();
+        assert_eq!(stale_fc.status, "inativo");
+        let pending: Vec<_> = forecasts
+            .iter()
+            .filter(|f| f.status == "ativo" && f.amount < Decimal::ZERO)
+            .collect();
+        assert_eq!(pending.len(), 1, "{pending:#?}");
+    }
 
     #[test]
     fn shift_months_handles_year_boundary() {

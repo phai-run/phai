@@ -2,6 +2,6 @@ packages:
   - .
 
 allowBuilds:
-  '@parcel/watcher': set this to true or false
-  esbuild: set this to true or false
-  msgpackr-extract: set this to true or false
+  "@parcel/watcher": true
+  esbuild: true
+  msgpackr-extract: true
