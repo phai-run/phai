@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.7.0](https://github.com/phai-run/phai/compare/v5.6.1...v5.7.0) (2026-06-11)
+
+
+### Features
+
+* **web:** opaque sticky sheet headers, larger type, category emojis, level-3 treemap tiles ([#138](https://github.com/phai-run/phai/issues/138)) ([98001d5](https://github.com/phai-run/phai/commit/98001d5681f32dc00c4426866c5502e4e0f27dd6))
+
 ## [5.6.1](https://github.com/phai-run/phai/compare/v5.6.0...v5.6.1) (2026-06-10)
 
 
