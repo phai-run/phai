@@ -6,6 +6,7 @@ import {
 	api,
 	type BridgeIdentity,
 	type ChartData,
+	type EnvelopeUpsert,
 	type ForecastRecord,
 	type ForecastTemplateRecord,
 	type ReviewFlushItem,
@@ -271,56 +272,52 @@ const drainQueue = async (
 	}
 
 	for (const r of rows) {
-		if (r.type !== "forecastMove") continue;
-		if (r.attempts >= MAX_RETRIES) {
-			store.commit(
-				events.writeFailed({
-					writeId: r.writeId,
-					error: "max retries exceeded",
-				}),
+		if (r.type === "forecastMove") {
+			await flushOne(store, r, errors, () =>
+				api.moveForecast(r.forecastId, (r.payload as { dueDate: string }).dueDate),
 			);
-			errors.push("max retries exceeded");
-			continue;
-		}
-		const dueDate = (r.payload as { dueDate: string }).dueDate;
-		try {
-			await api.moveForecast(r.forecastId, dueDate);
-			store.commit(events.writeAcked({ writeId: r.writeId }));
-		} catch (e: unknown) {
-			const msg = String(e);
-			store.commit(events.writeFailed({ writeId: r.writeId, error: msg }));
-			errors.push(msg);
-		}
-	}
-
-	for (const r of rows) {
-		if (r.type !== "forecastCreate") continue;
-		if (r.attempts >= MAX_RETRIES) {
-			store.commit(
-				events.writeFailed({
-					writeId: r.writeId,
-					error: "max retries exceeded",
-				}),
+		} else if (r.type === "forecastCreate") {
+			await flushOne(store, r, errors, () =>
+				api.createForecast(
+					r.payload as { description: string; amount: string; dueDate: string },
+				),
 			);
-			errors.push("max retries exceeded");
-			continue;
-		}
-		const payload = r.payload as {
-			description: string;
-			amount: string;
-			dueDate: string;
-		};
-		try {
-			await api.createForecast(payload);
-			store.commit(events.writeAcked({ writeId: r.writeId }));
-		} catch (e: unknown) {
-			const msg = String(e);
-			store.commit(events.writeFailed({ writeId: r.writeId, error: msg }));
-			errors.push(msg);
+		} else if (r.type === "forecastEnvelope") {
+			// The materializer queued the snake_case /api/forecast body verbatim.
+			await flushOne(store, r, errors, () =>
+				api.upsertForecast(r.payload as EnvelopeUpsert),
+			);
 		}
 	}
 
 	return errors;
+};
+
+/**
+ * Flush a single forecast write: POST it, ack on success, mark failed (and
+ * collect the error) otherwise. Rows past the retry budget fail terminally.
+ */
+const flushOne = async (
+	store: StoreApi,
+	row: PendingRow,
+	errors: string[],
+	send: () => Promise<unknown>,
+): Promise<void> => {
+	if (row.attempts >= MAX_RETRIES) {
+		store.commit(
+			events.writeFailed({ writeId: row.writeId, error: "max retries exceeded" }),
+		);
+		errors.push("max retries exceeded");
+		return;
+	}
+	try {
+		await send();
+		store.commit(events.writeAcked({ writeId: row.writeId }));
+	} catch (e: unknown) {
+		const msg = String(e);
+		store.commit(events.writeFailed({ writeId: row.writeId, error: msg }));
+		errors.push(msg);
+	}
 };
 
 export interface SeedState {

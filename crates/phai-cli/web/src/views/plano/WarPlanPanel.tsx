@@ -1,39 +1,57 @@
 import { queryDb } from "@livestore/livestore";
-import { useQuery } from "@livestore/react";
-import { useMemo, useState } from "react";
-import { tables } from "../../livestore/schema";
+import { useQuery, useStore } from "@livestore/react";
+import { useEffect, useMemo, useState } from "react";
+import { events, tables } from "../../livestore/schema";
 import { categoryEmoji } from "../../lib/categoryEmoji";
 import { formatMoneyNumber } from "../../lib/format";
 import {
+	buildEnvelopeWrites,
 	buildOverlayMap,
 	buildWarPlan,
-	simulateWarPlan,
+	simulateWarPlanGoals,
 	type TxView,
 	type WarPlanRow,
+	type WarPlanSubRow,
 } from "../../lib/derivations";
+import type { ChartSimulation } from "../chart/model";
 import type { ForecastView } from "../types";
 
 const txAll$ = queryDb(tables.transactions);
 const overlay$ = queryDb(tables.reviewOverlay);
 
 /**
- * Plano de guerra — the cost-cutting workbench for one month. Per parent
+ * Plano de guerra — the goal-setting workbench for one month. Per parent
  * category it lines up the budget envelope, the realized spend, the 3-month
  * average and the projection (`max(realizado, orçamento)` — the same envelope
- * model the chart uses). Typing a target budget into the "simular" column
- * recomputes the month's projection client-side, floored at what's already
- * spent, and shows the monthly + rest-of-year saving. Nothing is persisted —
- * it's a sandbox; the real budgets stay in the forecast envelopes.
+ * model the chart uses). Each SUBcategory carries a goal slider that opens at
+ * its 3-month average (floored at what is already spent); dragging recomputes
+ * the month + rest-of-year projection live, in the panel and in the annual
+ * chart above (via `onSimulationChange`). Confirming persists the touched
+ * parents' goals as monthly budget envelopes — plain `kind=manual` forecasts
+ * upserted through the bridge, so `phai forecast list` and the OpenClaw
+ * follow-ups see exactly what was saved here.
  */
 export const WarPlanPanel = ({
 	month,
 	forecasts,
 	isPast,
+	allForecasts,
+	persistMonths,
+	onSimulationChange,
+	onSaved,
 }: {
 	month: string;
 	forecasts: ForecastView[];
 	isPast: boolean;
+	/** Every seeded forecast (all months) — needed to find envelopes to update. */
+	allForecasts: ForecastView[];
+	/** Months ("YYYY-MM") a confirmed goal writes envelopes for. */
+	persistMonths: ReadonlyArray<string>;
+	/** Live goal simulation for the annual chart (null = no active goals). */
+	onSimulationChange: (sim: ChartSimulation | null) => void;
+	onSaved: () => void;
 }) => {
+	const { store } = useStore();
 	const txRows = useQuery(txAll$) as ReadonlyArray<TxView>;
 	const overlay = useQuery(overlay$);
 	const overlayMap = useMemo(() => buildOverlayMap(overlay), [overlay]);
@@ -56,52 +74,79 @@ export const WarPlanPanel = ({
 		[txRows, month, forecasts, overlayMap, isPast],
 	);
 
-	const [targets, setTargets] = useState<Map<string, number>>(new Map());
-	const sim = useMemo(() => simulateWarPlan(plan, targets), [plan, targets]);
+	// Goal sliders, keyed by the sub's categoryId. Reset when the month changes.
+	const [goals, setGoals] = useState<Map<string, number>>(new Map());
+	const [arming, setArming] = useState(false);
+	useEffect(() => {
+		setGoals(new Map());
+		setArming(false);
+	}, [month]);
 
-	const setTarget = (parent: string, raw: string) => {
-		setTargets((prev) => {
+	const sim = useMemo(() => simulateWarPlanGoals(plan, goals), [plan, goals]);
+	const hasGoals = sim.goalByParent.size > 0;
+
+	// Feed the live simulation to the annual chart; clear it on unmount.
+	useEffect(() => {
+		onSimulationChange(
+			!isPast && goals.size > 0
+				? { fromMonth: month, monthlySaving: sim.economiaMes }
+				: null,
+		);
+		return () => onSimulationChange(null);
+	}, [onSimulationChange, isPast, goals.size, month, sim.economiaMes]);
+
+	const setGoal = (categoryId: string, value: number) => {
+		setArming(false);
+		setGoals((prev) => {
 			const next = new Map(prev);
-			const value = Number(raw.replace(",", "."));
-			if (raw.trim() === "" || !Number.isFinite(value)) next.delete(parent);
-			else next.set(parent, value);
+			next.set(categoryId, value);
 			return next;
 		});
 	};
 
-	const monthsLeftInYear = 12 - Number(month.slice(5, 7));
-	const hasSim = targets.size > 0 && sim.economiaMes !== 0;
+	const saveGoals = () => {
+		const writes = buildEnvelopeWrites(
+			sim.goalByParent,
+			persistMonths,
+			allForecasts.map((f) => ({
+				forecastId: f.forecastId,
+				amount: f.amount,
+				categoryId: f.categoryId,
+				kind: f.kind,
+				status: f.status,
+				month: f.month,
+			})),
+		);
+		if (writes.length === 0) return;
+		store.commit(
+			...writes.map((w) =>
+				events.forecastEnvelopeUpserted({
+					writeId: crypto.randomUUID(),
+					forecastId: w.forecastId ?? "",
+					description: w.description,
+					amount: w.amount,
+					dueDate: w.dueDate,
+					categoryId: w.categoryId,
+					upsertedAt: Date.now(),
+				}),
+			),
+		);
+		setGoals(new Map());
+		setArming(false);
+		onSaved();
+	};
+
+	const canSave = hasGoals && !isPast && persistMonths.length > 0;
 	const maxProjecao = Math.max(1, ...plan.rows.map((r) => r.projecao));
 
 	return (
 		<section aria-label={`Plano de guerra de ${month}`}>
-			{/* Summary strip */}
-			<div
-				style={{
-					display: "grid",
-					gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-					gap: 12,
-					padding: "12px 0",
-				}}
-			>
-				<SummaryCard label="projeção do mês" value={plan.totalProjecao} />
-				<SummaryCard label="já realizado" value={plan.totalRealizado} />
-				<SummaryCard
-					label="com cortes simulados"
-					value={sim.projecaoSimulada}
-					accent={hasSim ? "var(--purple)" : undefined}
-				/>
-				<SummaryCard
-					label="economia / mês"
-					value={sim.economiaMes}
-					accent={hasSim ? "var(--green)" : undefined}
-				/>
-				<SummaryCard
-					label={`economia até dez (×${monthsLeftInYear})`}
-					value={sim.economiaMes * monthsLeftInYear}
-					accent={hasSim ? "var(--green)" : undefined}
-				/>
-			</div>
+			<PlanSummary
+				plan={plan}
+				sim={sim}
+				hasGoals={hasGoals}
+				monthsCount={Math.max(1, persistMonths.length)}
+			/>
 
 			<div
 				style={{
@@ -126,71 +171,165 @@ export const WarPlanPanel = ({
 							<th style={thStyle}>categoria</th>
 							<th style={{ ...thStyle, textAlign: "right" }}>orçamento</th>
 							<th style={{ ...thStyle, textAlign: "right" }}>realizado</th>
-							<th style={{ ...thStyle, width: "22%" }}>uso</th>
+							<th style={{ ...thStyle, width: "24%" }}>uso · meta</th>
 							<th style={{ ...thStyle, textAlign: "right" }}>média 3m</th>
 							<th style={{ ...thStyle, textAlign: "right" }}>projeção</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>simular corte</th>
+							<th style={{ ...thStyle, textAlign: "right" }}>meta</th>
 							<th style={{ ...thStyle, textAlign: "right" }}>Δ mês</th>
 						</tr>
 					</thead>
 					<tbody>
 						{plan.rows.map((row) => (
-							<PlanRow
+							<ParentRows
 								key={row.parent}
 								row={row}
 								maxProjecao={maxProjecao}
-								target={targets.get(row.parent)}
-								onTarget={(v) => setTarget(row.parent, v)}
+								goals={goals}
+								goal={sim.goalByParent.get(row.parent)}
+								simulated={sim.simulatedByParent.get(row.parent) ?? row.projecao}
+								disabled={isPast}
+								onGoal={setGoal}
 							/>
 						))}
 					</tbody>
 				</table>
 			</div>
 
-			<div
-				className="mono"
-				style={{
-					display: "flex",
-					gap: 16,
-					alignItems: "center",
-					padding: "10px 4px",
-					fontSize: 12,
-					color: "var(--muted)",
-					flexWrap: "wrap",
+			<PlanFooter
+				parcelas={plan.parcelasComprometidas}
+				showClear={goals.size > 0}
+				canSave={canSave}
+				arming={arming}
+				parentCount={sim.goalByParent.size}
+				monthCount={persistMonths.length}
+				onClear={() => {
+					setGoals(new Map());
+					setArming(false);
 				}}
-			>
-				{plan.parcelasComprometidas > 0 && (
-					<span>
-						parcelas já comprometidas no mês:{" "}
-						{formatMoneyNumber(plan.parcelasComprometidas)} (dentro das
-						categorias quando pagas)
-					</span>
-				)}
-				<span>
-					faturas de cartão não entram aqui — as compras já estão nas categorias.
-				</span>
-				{targets.size > 0 && (
-					<button
-						onClick={() => setTargets(new Map())}
-						className="mono"
-						style={{
-							marginLeft: "auto",
-							background: "transparent",
-							border: "1px solid var(--border)",
-							borderRadius: "var(--radius-full)",
-							padding: "4px 12px",
-							cursor: "pointer",
-							fontSize: 11,
-							color: "var(--muted)",
-						}}
-					>
-						zerar simulação
-					</button>
-				)}
-			</div>
+				onArm={() => setArming(true)}
+				onSave={saveGoals}
+			/>
 		</section>
 	);
 };
+
+const PlanSummary = ({
+	plan,
+	sim,
+	hasGoals,
+	monthsCount,
+}: {
+	plan: ReturnType<typeof buildWarPlan>;
+	sim: ReturnType<typeof simulateWarPlanGoals>;
+	hasGoals: boolean;
+	monthsCount: number;
+}) => {
+	const deltaAccent = hasGoals
+		? sim.economiaMes >= 0
+			? "var(--green)"
+			: "var(--rose)"
+		: undefined;
+	return (
+		<div
+			style={{
+				display: "grid",
+				gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+				gap: 12,
+				padding: "12px 0",
+			}}
+		>
+			<SummaryCard label="projeção do mês" value={plan.totalProjecao} />
+			<SummaryCard label="já realizado" value={plan.totalRealizado} />
+			<SummaryCard
+				label="com metas"
+				value={sim.projecaoSimulada}
+				accent={hasGoals ? "var(--purple)" : undefined}
+			/>
+			<SummaryCard label="Δ / mês" value={sim.economiaMes} accent={deltaAccent} />
+			<SummaryCard
+				label={`Δ até dez (×${monthsCount})`}
+				value={sim.economiaMes * monthsCount}
+				accent={deltaAccent}
+			/>
+		</div>
+	);
+};
+
+const footerButton = (kind: "muted" | "outline" | "solid"): React.CSSProperties => ({
+	background: kind === "solid" ? "var(--purple)" : "transparent",
+	color:
+		kind === "solid" ? "#fff" : kind === "outline" ? "var(--purple)" : "var(--muted)",
+	border: kind === "solid" ? "none" : `1px solid ${kind === "outline" ? "var(--purple)" : "var(--border)"}`,
+	borderRadius: "var(--radius-full)",
+	padding: "4px 14px",
+	cursor: "pointer",
+	fontSize: 11,
+});
+
+const PlanFooter = ({
+	parcelas,
+	showClear,
+	canSave,
+	arming,
+	parentCount,
+	monthCount,
+	onClear,
+	onArm,
+	onSave,
+}: {
+	parcelas: number;
+	showClear: boolean;
+	canSave: boolean;
+	arming: boolean;
+	parentCount: number;
+	monthCount: number;
+	onClear: () => void;
+	onArm: () => void;
+	onSave: () => void;
+}) => (
+	<div
+		className="mono"
+		style={{
+			display: "flex",
+			gap: 16,
+			alignItems: "center",
+			padding: "10px 4px",
+			fontSize: 12,
+			color: "var(--muted)",
+			flexWrap: "wrap",
+		}}
+	>
+		{parcelas > 0 && (
+			<span>
+				parcelas já comprometidas no mês: {formatMoneyNumber(parcelas)} (dentro
+				das categorias quando pagas)
+			</span>
+		)}
+		<span>
+			faturas de cartão não entram aqui — as compras já estão nas categorias.
+		</span>
+		{showClear && (
+			<button
+				onClick={onClear}
+				className="mono"
+				style={{ marginLeft: "auto", ...footerButton("muted") }}
+			>
+				zerar metas
+			</button>
+		)}
+		{canSave &&
+			(arming ? (
+				<button onClick={onSave} className="mono" style={footerButton("solid")}>
+					confirmar {parentCount} {parentCount === 1 ? "categoria" : "categorias"}{" "}
+					× {monthCount} {monthCount === 1 ? "mês" : "meses"}
+				</button>
+			) : (
+				<button onClick={onArm} className="mono" style={footerButton("outline")}>
+					salvar metas até dez
+				</button>
+			))}
+	</div>
+);
 
 const SummaryCard = ({
 	label,
@@ -233,128 +372,223 @@ const SummaryCard = ({
 	</div>
 );
 
-const PlanRow = ({
+/** Right-aligned Δ: "−X" = saving (green), "+X" = increase (rose), "—" idle. */
+const DeltaCell = ({
+	active,
+	delta,
+	small,
+}: {
+	active: boolean;
+	delta: number;
+	small?: boolean;
+}) => (
+	<td
+		className="mono"
+		style={{
+			...tdStyle,
+			textAlign: "right",
+			fontSize: small ? 12 : undefined,
+			color:
+				!active || delta === 0
+					? "var(--muted)"
+					: delta > 0
+						? "var(--green)"
+						: "var(--rose)",
+		}}
+	>
+		{active && delta !== 0
+			? `${delta > 0 ? "−" : "+"}${formatMoneyNumber(Math.abs(delta))}`
+			: "—"}
+	</td>
+);
+
+/** One parent category: the summary row plus a goal-slider row per sub. */
+const ParentRows = ({
 	row,
 	maxProjecao,
-	target,
-	onTarget,
+	goals,
+	goal,
+	simulated,
+	disabled,
+	onGoal,
 }: {
 	row: WarPlanRow;
 	maxProjecao: number;
-	target: number | undefined;
-	onTarget: (raw: string) => void;
+	goals: ReadonlyMap<string, number>;
+	/** Confirmed envelope goal for this parent (set once any sub is touched). */
+	goal: number | undefined;
+	simulated: number;
+	disabled: boolean;
+	onGoal: (categoryId: string, value: number) => void;
 }) => {
 	const overBudget = row.orcamento != null && row.realizado > row.orcamento;
-	const usagePct =
-		row.orcamento != null && row.orcamento > 0
-			? Math.min(100, (row.realizado / row.orcamento) * 100)
-			: null;
-	const simulated =
-		target != null ? Math.max(row.realizado, Math.max(0, target)) : null;
-	const delta = simulated != null ? row.projecao - simulated : 0;
-	const floored = target != null && target < row.realizado;
+	const delta = row.projecao - simulated;
+	// Uncategorized spend can't carry a budget — no sliders for "—".
+	const slidable = !disabled && row.parent !== "—";
 
 	return (
-		<tr>
-			<td style={tdStyle}>
-				<span style={{ fontWeight: 500 }}>
-					{categoryEmoji(row.parent)} {row.parent}
-				</span>
-			</td>
-			<td className="mono" style={{ ...tdStyle, textAlign: "right" }}>
-				{row.orcamento != null ? formatMoneyNumber(row.orcamento) : "—"}
-			</td>
-			<td
-				className="mono"
-				style={{
-					...tdStyle,
-					textAlign: "right",
-					color: overBudget ? "var(--rose)" : "var(--text)",
-				}}
-			>
-				{formatMoneyNumber(row.realizado)}
-			</td>
-			<td style={tdStyle}>
-				<div
-					aria-hidden
-					style={{
-						position: "relative",
-						height: 8,
-						borderRadius: 4,
-						background: "var(--border)",
-						overflow: "hidden",
-					}}
-				>
-					{/* Scale bars against the biggest projection so categories compare visually. */}
-					<div
-						style={{
-							position: "absolute",
-							inset: 0,
-							width: `${(row.projecao / maxProjecao) * 100}%`,
-							background: "var(--chip, rgba(124,93,250,0.18))",
-							borderRadius: 4,
-						}}
-					/>
-					<div
-						style={{
-							position: "absolute",
-							inset: 0,
-							width: `${(row.realizado / maxProjecao) * 100}%`,
-							background: overBudget ? "var(--rose)" : "var(--purple)",
-							borderRadius: 4,
-							opacity: 0.85,
-						}}
-					/>
-				</div>
-				{usagePct != null && (
-					<div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
-						{Math.round((row.realizado / (row.orcamento || 1)) * 100)}% do
-						orçamento
-					</div>
-				)}
-			</td>
-			<td className="mono" style={{ ...tdStyle, textAlign: "right", color: "var(--muted)" }}>
-				{row.media3m > 0 ? formatMoneyNumber(row.media3m) : "—"}
-			</td>
-			<td className="mono" style={{ ...tdStyle, textAlign: "right", fontWeight: 600 }}>
-				{formatMoneyNumber(row.projecao)}
-			</td>
-			<td style={{ ...tdStyle, textAlign: "right" }}>
-				<input
-					inputMode="decimal"
-					aria-label={`novo orçamento para ${row.parent}`}
-					placeholder={
-						row.orcamento != null ? String(Math.round(row.orcamento)) : "—"
-					}
-					value={target ?? ""}
-					onChange={(e) => onTarget(e.target.value)}
+		<>
+			<tr>
+				<td style={tdStyle}>
+					<span style={{ fontWeight: 500 }}>
+						{categoryEmoji(row.parent)} {row.parent}
+					</span>
+				</td>
+				<td className="mono" style={{ ...tdStyle, textAlign: "right" }}>
+					{row.orcamento != null ? formatMoneyNumber(row.orcamento) : "—"}
+				</td>
+				<td
 					className="mono"
 					style={{
-						width: 90,
+						...tdStyle,
 						textAlign: "right",
-						border: `1px solid ${floored ? "var(--amber)" : "var(--border)"}`,
-						borderRadius: "var(--radius-sm)",
-						padding: "4px 8px",
-						fontSize: 12,
-						background: "var(--bg)",
+						color: overBudget ? "var(--rose)" : "var(--text)",
 					}}
+				>
+					{formatMoneyNumber(row.realizado)}
+				</td>
+				<td style={tdStyle}>
+					<div
+						aria-hidden
+						style={{
+							position: "relative",
+							height: 8,
+							borderRadius: 4,
+							background: "var(--border)",
+							overflow: "hidden",
+						}}
+					>
+						{/* Scale bars against the biggest projection so categories compare visually. */}
+						<div
+							style={{
+								position: "absolute",
+								inset: 0,
+								width: `${(row.projecao / maxProjecao) * 100}%`,
+								background: "var(--chip, rgba(124,93,250,0.18))",
+								borderRadius: 4,
+							}}
+						/>
+						<div
+							style={{
+								position: "absolute",
+								inset: 0,
+								width: `${(row.realizado / maxProjecao) * 100}%`,
+								background: overBudget ? "var(--rose)" : "var(--purple)",
+								borderRadius: 4,
+								opacity: 0.85,
+							}}
+						/>
+					</div>
+					{row.orcamento != null && row.orcamento > 0 && (
+						<div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+							{Math.round((row.realizado / row.orcamento) * 100)}% do orçamento
+						</div>
+					)}
+				</td>
+				<td
+					className="mono"
+					style={{ ...tdStyle, textAlign: "right", color: "var(--muted)" }}
+				>
+					{row.media3m > 0 ? formatMoneyNumber(row.media3m) : "—"}
+				</td>
+				<td className="mono" style={{ ...tdStyle, textAlign: "right", fontWeight: 600 }}>
+					{formatMoneyNumber(row.projecao)}
+				</td>
+				<td
+					className="mono"
+					style={{
+						...tdStyle,
+						textAlign: "right",
+						color: goal != null ? "var(--purple)" : "var(--muted)",
+						fontWeight: goal != null ? 600 : 400,
+					}}
+				>
+					{goal != null ? formatMoneyNumber(goal) : "—"}
+				</td>
+				<DeltaCell active={goal != null} delta={delta} />
+			</tr>
+			{slidable &&
+				row.subs.map((sub) => (
+					<SubGoalRow
+						key={sub.categoryId}
+						sub={sub}
+						goal={goals.get(sub.categoryId)}
+						onGoal={onGoal}
+					/>
+				))}
+		</>
+	);
+};
+
+/** Round a slider ceiling up to a friendly increment. */
+const sliderMax = (sub: WarPlanSubRow): number =>
+	Math.max(100, Math.ceil((Math.max(sub.goalBase, sub.realizado) * 1.5) / 50) * 50);
+
+const SubGoalRow = ({
+	sub,
+	goal,
+	onGoal,
+}: {
+	sub: WarPlanSubRow;
+	goal: number | undefined;
+	onGoal: (categoryId: string, value: number) => void;
+}) => {
+	const value = goal ?? sub.goalBase;
+	const floored = value < sub.realizado;
+	const saving = goal != null ? sub.goalBase - goal : 0;
+
+	return (
+		<tr style={{ background: "var(--bg)" }}>
+			<td style={{ ...tdStyle, paddingLeft: 28, fontSize: 12, color: "var(--muted)" }}>
+				↳ {sub.sub === "—" ? "(geral)" : sub.sub}
+			</td>
+			<td style={tdStyle} />
+			<td
+				className="mono"
+				style={{ ...tdStyle, textAlign: "right", fontSize: 12, color: "var(--muted)" }}
+			>
+				{sub.realizado > 0 ? formatMoneyNumber(sub.realizado) : "—"}
+			</td>
+			<td style={tdStyle}>
+				<input
+					type="range"
+					min={0}
+					max={sliderMax(sub)}
+					step={10}
+					value={value}
+					aria-label={`meta mensal para ${sub.categoryId}`}
+					onChange={(e) => onGoal(sub.categoryId, Number(e.target.value))}
+					style={{ width: "100%", accentColor: floored ? "var(--amber)" : "var(--purple)" }}
 					title={
 						floored
 							? "abaixo do já realizado — o piso é o que já foi gasto"
-							: "simule um novo orçamento mensal"
+							: "arraste para definir a meta mensal"
 					}
 				/>
 			</td>
 			<td
 				className="mono"
+				style={{ ...tdStyle, textAlign: "right", fontSize: 12, color: "var(--muted)" }}
+			>
+				{sub.media3m > 0 ? formatMoneyNumber(sub.media3m) : "—"}
+			</td>
+			<td style={tdStyle} />
+			<td
+				className="mono"
 				style={{
 					...tdStyle,
 					textAlign: "right",
-					color: delta > 0 ? "var(--green)" : "var(--muted)",
+					fontSize: 12,
+					color: floored
+						? "var(--amber)"
+						: goal != null
+							? "var(--purple)"
+							: "var(--muted)",
 				}}
 			>
-				{simulated != null && delta > 0 ? `−${formatMoneyNumber(delta)}` : "—"}
+				{formatMoneyNumber(value)}
 			</td>
+			<DeltaCell active={goal != null} delta={saving} small />
 		</tr>
 	);
 };

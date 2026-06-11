@@ -33,54 +33,89 @@ export interface ChartModel {
 	cashSpan: number;
 }
 
-export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
-	const realIns = months.map((m) => Math.max(0, numeric(m.inflows)));
-	const fcIns = months.map((m) =>
-		Math.max(0, numeric(m.forecastInflowsRemaining)),
-	);
-	const realOuts = months.map((m) => Math.abs(numeric(m.outflows)));
-	const fcOuts = months.map((m) =>
-		Math.abs(numeric(m.forecastOutflowsRemaining)),
-	);
-	const balances = months.map((m) =>
-		m.isFuture ? numeric(m.projectedClosingBalance) : numeric(m.closingBalance),
-	);
+/** Series → axis/scale fields, shared by buildModel and the goal overlay. */
+const withScale = (series: {
+	realIns: number[];
+	fcIns: number[];
+	realOuts: number[];
+	fcOuts: number[];
+	balances: number[];
+}): ChartModel => {
+	const { realIns, fcIns, realOuts, fcOuts, balances } = series;
 	const maxBar = Math.max(
 		1,
-		...months.map((_, i) => realIns[i] + fcIns[i]),
-		...months.map((_, i) => realOuts[i] + fcOuts[i]),
+		...realIns.map((v, i) => v + fcIns[i]),
+		...realOuts.map((v, i) => v + fcOuts[i]),
 	);
-	const expMaxBar = Math.max(
-		1,
-		...months.map((_, i) => realOuts[i] + fcOuts[i]),
-	);
+	const expMaxBar = Math.max(1, ...realOuts.map((v, i) => v + fcOuts[i]));
 	const minBal = Math.min(0, ...balances);
 	const maxBal = Math.max(1, ...balances);
 	const balSpan = maxBal - minBal || 1;
-	const cashMax = Math.max(
-		1,
-		...balances,
-		...months.map((_, i) => realIns[i] + fcIns[i]),
-	);
+	const cashMax = Math.max(1, ...balances, ...realIns.map((v, i) => v + fcIns[i]));
 	const cashMin = Math.min(
 		0,
 		...balances,
-		...months.map((_, i) => -(realOuts[i] + fcOuts[i])),
+		...realOuts.map((v, i) => -(v + fcOuts[i])),
 	);
 	const cashSpan = cashMax - cashMin || 1;
-	return {
-		realIns,
-		fcIns,
-		realOuts,
+	return { ...series, maxBar, expMaxBar, minBal, balSpan, cashMin, cashSpan };
+};
+
+export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
+	return withScale({
+		realIns: months.map((m) => Math.max(0, numeric(m.inflows))),
+		fcIns: months.map((m) => Math.max(0, numeric(m.forecastInflowsRemaining))),
+		realOuts: months.map((m) => Math.abs(numeric(m.outflows))),
+		fcOuts: months.map((m) => Math.abs(numeric(m.forecastOutflowsRemaining))),
+		balances: months.map((m) =>
+			m.isFuture
+				? numeric(m.projectedClosingBalance)
+				: numeric(m.closingBalance),
+		),
+	});
+}
+
+/** A live war-plan goal simulation projected onto the cash chart. */
+export interface ChartSimulation {
+	/** First month ("YYYY-MM") the monthly saving applies to. */
+	fromMonth: string;
+	/** Saving vs. the baseline projection (negative = goals above it). */
+	monthlySaving: number;
+}
+
+/**
+ * Overlay a war-plan goal simulation on a chart model: from `fromMonth` on,
+ * each month's forecast outflow shrinks by the monthly saving (a positive
+ * saving never cuts below zero — realized spend is untouchable), and every
+ * FUTURE month's balance shifts by the savings accumulated up to it. Realized
+ * balances (past + current month) stay as observed. Scale is recomputed so
+ * the overlay renders like any other model.
+ */
+export function applySimulationToModel(
+	model: ChartModel,
+	months: ReadonlyArray<ChartMonthView>,
+	sim: ChartSimulation,
+): ChartModel {
+	const fcOuts = [...model.fcOuts];
+	const balances = [...model.balances];
+	let accumulated = 0;
+	for (let i = 0; i < months.length; i++) {
+		if (months[i].month < sim.fromMonth) continue;
+		const applied =
+			sim.monthlySaving > 0
+				? Math.min(sim.monthlySaving, fcOuts[i])
+				: sim.monthlySaving;
+		fcOuts[i] -= applied;
+		accumulated += applied;
+		if (months[i].isFuture) balances[i] += accumulated;
+	}
+	return withScale({
+		realIns: model.realIns,
+		fcIns: model.fcIns,
+		realOuts: model.realOuts,
 		fcOuts,
 		balances,
-		maxBar,
-		expMaxBar,
-		minBal,
-		balSpan,
-		cashMin,
-		cashSpan,
-	};
+	});
 }
 
 // Convert bar magnitude → SVG height

@@ -231,3 +231,121 @@ describe("Review write persistence (web C5)", () => {
 		expect(store.query(tables.pendingWrites.select()).length).toBe(0);
 	});
 });
+
+describe("Envelope goal writes (war plan)", () => {
+	let store: Awaited<ReturnType<typeof createStorePromise>>;
+
+	beforeAll(async () => {
+		store = await createStorePromise({
+			schema,
+			storeId: "envelope-test",
+			adapter: makeInMemoryAdapter(),
+			debug: { instanceId: "envelope-test" },
+		});
+	});
+
+	afterAll(() => {
+		store?.sqliteDbWrapper?.close?.();
+	});
+
+	it("create-mode queues a snake_case payload and inserts an optimistic envelope", () => {
+		store.commit(
+			events.forecastEnvelopeUpserted({
+				writeId: "we1",
+				forecastId: "",
+				description: "meta alimentacao",
+				amount: "-450.00",
+				dueDate: "2026-07-31",
+				categoryId: "alimentacao",
+				upsertedAt: 1,
+			}),
+		);
+
+		const pending = store.query(
+			tables.pendingWrites.select().where({ writeId: "we1" }),
+		);
+		expect(pending.length).toBe(1);
+		expect(pending[0].type).toBe("forecastEnvelope");
+		// drainQueue POSTs this verbatim to /api/forecast.
+		expect(pending[0].payload).toEqual({
+			forecast_id: null,
+			description: "meta alimentacao",
+			amount: "-450.00",
+			due_date: "2026-07-31",
+			category_id: "alimentacao",
+		});
+
+		// The optimistic forecast row makes the envelope visible immediately.
+		const optimistic = store.query(
+			tables.forecasts.select().where({ forecastId: "we1" }),
+		);
+		expect(optimistic.length).toBe(1);
+		expect(optimistic[0]).toMatchObject({
+			amount: "-450.00",
+			categoryId: "alimentacao",
+			dueDate: "2026-07-31",
+			status: "ativo",
+			kind: "manual",
+		});
+
+		store.commit(events.writeAcked({ writeId: "we1" }));
+		expect(
+			store.query(tables.pendingWrites.select().where({ writeId: "we1" }))
+				.length,
+		).toBe(0);
+	});
+
+	it("update-mode re-amounts the existing forecast row in place", () => {
+		store.commit(
+			events.forecastsSeeded({
+				rows: [
+					{
+						forecastId: "f-env-1",
+						dueDate: "2026-06-05",
+						description: "envelope casa",
+						amount: "-700.00",
+						categoryId: "moradia",
+						accountId: null,
+						status: "ativo",
+						kind: "manual",
+						draggable: 1,
+					},
+				],
+			}),
+		);
+		store.commit(
+			events.forecastEnvelopeUpserted({
+				writeId: "we2",
+				forecastId: "f-env-1",
+				description: "",
+				amount: "-350.00",
+				dueDate: "2026-06-30",
+				categoryId: "moradia",
+				upsertedAt: 2,
+			}),
+		);
+
+		const pending = store.query(
+			tables.pendingWrites.select().where({ writeId: "we2" }),
+		);
+		expect(pending[0].payload).toEqual({
+			forecast_id: "f-env-1",
+			description: "",
+			amount: "-350.00",
+			due_date: "2026-06-30",
+			category_id: "moradia",
+		});
+
+		const rows = store.query(
+			tables.forecasts.select().where({ forecastId: "f-env-1" }),
+		);
+		expect(rows.length).toBe(1);
+		expect(rows[0].amount).toBe("-350.00");
+		expect(rows[0].dueDate).toBe("2026-06-30");
+		// No phantom extra row keyed by the writeId.
+		expect(
+			store.query(tables.forecasts.select().where({ forecastId: "we2" }))
+				.length,
+		).toBe(0);
+	});
+});

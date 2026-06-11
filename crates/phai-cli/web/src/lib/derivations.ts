@@ -453,6 +453,23 @@ export interface PlanForecast {
 	month: string | null;
 }
 
+/** One slider row: a subcategory ("—" when the parent is flat). */
+export interface WarPlanSubRow {
+	sub: string;
+	/** Full category id: the parent alone for "—", else "parent:sub". */
+	categoryId: string;
+	/** Realized expense magnitude in the selected month. */
+	realizado: number;
+	/** Average realized magnitude over the 3 calendar months before `month`. */
+	media3m: number;
+	/**
+	 * Where the goal slider opens: the 3-month average, floored at what is
+	 * already spent (money out the door can't be budgeted away). Envelope-only
+	 * parents (no transactions at all) open at the envelope itself.
+	 */
+	goalBase: number;
+}
+
 export interface WarPlanRow {
 	parent: string;
 	/** Realized expense magnitude in the selected month. */
@@ -467,6 +484,8 @@ export interface WarPlanRow {
 	 * the month is closed.
 	 */
 	projecao: number;
+	/** Subcategory slider rows, heaviest (realized or average) first. */
+	subs: WarPlanSubRow[];
 }
 
 export interface WarPlan {
@@ -479,6 +498,25 @@ export interface WarPlan {
 }
 
 const ACTIVE_FORECAST_STATUSES = new Set(["ativo", "active"]);
+
+/**
+ * A budget envelope is an ACTIVE parent-level EXPENSE forecast. Card bills
+ * (no category), sub-level planned items and installment forecasts are not
+ * budgets. Single predicate shared by the war plan (reading envelopes) and
+ * the goal persistence (updating them) so the two can never disagree.
+ */
+export const isBudgetEnvelope = (f: {
+	amount: string;
+	categoryId: string | null;
+	kind: string;
+	status: string;
+}): boolean =>
+	ACTIVE_FORECAST_STATUSES.has(f.status) &&
+	isNegative(f.amount) &&
+	f.kind !== "installment" &&
+	f.categoryId != null &&
+	f.categoryId !== "" &&
+	!f.categoryId.includes(":");
 
 /** Previous `n` calendar months of a "YYYY-MM" key, most recent first. */
 export const previousMonths = (month: string, n: number): string[] => {
@@ -506,6 +544,97 @@ export const previousMonths = (month: string, n: number): string[] => {
  * excluded from the per-category rows; installments surface as a single
  * committed magnitude so the table never double-counts a real expense.
  */
+/** Per-sub spend magnitudes accumulated while bucketing transactions. */
+interface SubSpend {
+	realizado: number;
+	historico: number;
+}
+
+/** Slider rows for one parent; envelope-only parents get a pseudo-sub. */
+const buildSubRows = (
+	parent: string,
+	subCells: ReadonlyMap<string, SubSpend> | undefined,
+	orcamento: number | null,
+): WarPlanSubRow[] => {
+	const subs: WarPlanSubRow[] = Array.from(subCells?.entries() ?? [])
+		.map(([subKey, cell]) => ({
+			sub: subKey,
+			categoryId: subKey === "—" ? parent : `${parent}:${subKey}`,
+			realizado: cell.realizado,
+			media3m: cell.historico / 3,
+			goalBase: Math.max(cell.historico / 3, cell.realizado),
+		}))
+		.sort(
+			(a, b) =>
+				Math.max(b.realizado, b.media3m) - Math.max(a.realizado, a.media3m),
+		);
+	if (subs.length === 0 && orcamento != null) {
+		// Envelope-only parent: a pseudo-sub so the envelope itself is sliddable.
+		subs.push({
+			sub: "—",
+			categoryId: parent,
+			realizado: 0,
+			media3m: 0,
+			goalBase: orcamento,
+		});
+	}
+	return subs;
+};
+
+/**
+ * Bucket expense magnitudes by parent → subKey for the war plan: the selected
+ * month's spend plus the 3 previous months' (for the average). History-only
+ * parents stay in — no spend this month, but they still deserve a slider.
+ */
+const accumulateSpend = (
+	transactions: ReadonlyArray<TxView>,
+	month: string,
+	overlayMap: Map<string, ReviewOverlay>,
+): Map<string, Map<string, SubSpend>> => {
+	const spendBy = new Map<string, Map<string, SubSpend>>();
+	const history = new Set(previousMonths(month, 3));
+	for (const tx of transactions) {
+		if (!isNegative(tx.amount)) continue;
+		const inMonth = tx.month === month;
+		if (!inMonth && !history.has(tx.month)) continue;
+		const { parent, sub } = parseCategory(effectiveCategory(tx, overlayMap));
+		const subKey = sub ?? "—";
+		const mag = Math.abs(toCents(tx.amount)) / 100;
+		let subs = spendBy.get(parent);
+		if (!subs) {
+			subs = new Map();
+			spendBy.set(parent, subs);
+		}
+		const cell = subs.get(subKey) ?? { realizado: 0, historico: 0 };
+		if (inMonth) cell.realizado += mag;
+		else cell.historico += mag;
+		subs.set(subKey, cell);
+	}
+	return spendBy;
+};
+
+/** Sum a month's active envelopes per parent + its committed installments. */
+const accumulateEnvelopes = (
+	monthForecasts: ReadonlyArray<PlanForecast>,
+	month: string,
+): { orcamentoBy: Map<string, number>; parcelasComprometidas: number } => {
+	const orcamentoBy = new Map<string, number>();
+	let parcelasComprometidas = 0;
+	for (const f of monthForecasts) {
+		if (f.month !== month) continue;
+		if (!ACTIVE_FORECAST_STATUSES.has(f.status)) continue;
+		if (!isNegative(f.amount)) continue;
+		const mag = Math.abs(toCents(f.amount)) / 100;
+		if (f.kind === "installment") {
+			parcelasComprometidas += mag;
+		} else if (isBudgetEnvelope(f)) {
+			const cat = f.categoryId as string;
+			orcamentoBy.set(cat, (orcamentoBy.get(cat) ?? 0) + mag);
+		}
+	}
+	return { orcamentoBy, parcelasComprometidas };
+};
+
 export const buildWarPlan = (
 	transactions: ReadonlyArray<TxView>,
 	month: string,
@@ -513,54 +642,28 @@ export const buildWarPlan = (
 	overlayMap: Map<string, ReviewOverlay>,
 	mode: "open" | "past" = "open",
 ): WarPlan => {
-	const realizadoBy = new Map<string, number>();
-	const historyBy = new Map<string, number>();
-	const history = new Set(previousMonths(month, 3));
-
-	for (const tx of transactions) {
-		if (!isNegative(tx.amount)) continue;
-		const inMonth = tx.month === month;
-		const inHistory = history.has(tx.month);
-		if (!inMonth && !inHistory) continue;
-		const parent = parseCategory(effectiveCategory(tx, overlayMap)).parent;
-		const mag = Math.abs(toCents(tx.amount)) / 100;
-		if (inMonth) realizadoBy.set(parent, (realizadoBy.get(parent) ?? 0) + mag);
-		else historyBy.set(parent, (historyBy.get(parent) ?? 0) + mag);
-	}
-
-	const orcamentoBy = new Map<string, number>();
-	let parcelasComprometidas = 0;
-	for (const f of monthForecasts) {
-		if (f.month !== month) continue;
-		if (!ACTIVE_FORECAST_STATUSES.has(f.status)) continue;
-		const mag = Math.abs(toCents(f.amount)) / 100;
-		if (!isNegative(f.amount)) continue;
-		if (f.kind === "installment") {
-			parcelasComprometidas += mag;
-			continue;
-		}
-		const cat = f.categoryId ?? "";
-		// Parent-level category = a budget envelope; anything else (card bills
-		// with no category, sub-category planned items) is not a budget.
-		if (cat !== "" && !cat.includes(":")) {
-			orcamentoBy.set(cat, (orcamentoBy.get(cat) ?? 0) + mag);
-		}
-	}
-
-	const parents = new Set<string>([
-		...realizadoBy.keys(),
-		...orcamentoBy.keys(),
-	]);
+	const spendBy = accumulateSpend(transactions, month, overlayMap);
+	const { orcamentoBy, parcelasComprometidas } = accumulateEnvelopes(
+		monthForecasts,
+		month,
+	);
+	const parents = new Set<string>([...spendBy.keys(), ...orcamentoBy.keys()]);
 	const rows: WarPlanRow[] = [];
 	for (const parent of parents) {
-		const realizado = realizadoBy.get(parent) ?? 0;
 		const orcamento = orcamentoBy.get(parent) ?? null;
-		const media3m = (historyBy.get(parent) ?? 0) / 3;
+		const subs = buildSubRows(parent, spendBy.get(parent), orcamento);
+		const realizado = subs.reduce((s, x) => s + x.realizado, 0);
+		const media3m = subs.reduce((s, x) => s + x.media3m, 0);
 		const projecao =
 			mode === "past" ? realizado : Math.max(realizado, orcamento ?? 0);
-		rows.push({ parent, realizado, orcamento, media3m, projecao });
+		rows.push({ parent, realizado, orcamento, media3m, projecao, subs });
 	}
-	rows.sort((a, b) => b.projecao - a.projecao);
+	rows.sort(
+		(a, b) =>
+			b.projecao - a.projecao ||
+			b.media3m - a.media3m ||
+			a.parent.localeCompare(b.parent),
+	);
 
 	return {
 		rows,
@@ -598,6 +701,151 @@ export const simulateWarPlan = (
 	return {
 		projecaoSimulada: sim,
 		economiaMes: plan.totalProjecao - sim,
+	};
+};
+
+export interface WarPlanGoalSimulation {
+	/** Projected month total with the slider goals applied. */
+	projecaoSimulada: number;
+	/** Baseline projection minus simulated (negative = goals above projection). */
+	economiaMes: number;
+	/**
+	 * Per-parent envelope goal (sum of its sub sliders) for parents with at
+	 * least one explicit goal — exactly what gets persisted on confirm.
+	 */
+	goalByParent: Map<string, number>;
+	/** Per-parent simulated month total (baseline projecao when untouched). */
+	simulatedByParent: Map<string, number>;
+}
+
+const round2 = (v: number): number => Math.round(v * 100) / 100;
+
+/**
+ * Apply per-subcategory goal sliders to a war plan. `goals` is keyed by the
+ * sub's `categoryId`. A parent with at least one explicit goal switches to
+ * goal mode: its month projection becomes the sum over its subs of
+ * `max(realizado, goal ?? goalBase)` — realized spend is a floor, and
+ * untouched sliders sit at their opening value so the math always matches
+ * what the sliders display. Untouched parents keep the baseline projection.
+ */
+export const simulateWarPlanGoals = (
+	plan: WarPlan,
+	goals: ReadonlyMap<string, number>,
+): WarPlanGoalSimulation => {
+	let sim = 0;
+	const goalByParent = new Map<string, number>();
+	const simulatedByParent = new Map<string, number>();
+	for (const row of plan.rows) {
+		const touched = row.subs.some((s) => goals.has(s.categoryId));
+		if (!touched) {
+			sim += row.projecao;
+			simulatedByParent.set(row.parent, row.projecao);
+			continue;
+		}
+		let simulated = 0;
+		let goalTotal = 0;
+		for (const s of row.subs) {
+			const goal = Math.max(0, goals.get(s.categoryId) ?? s.goalBase);
+			goalTotal += goal;
+			simulated += Math.max(s.realizado, goal);
+		}
+		goalByParent.set(row.parent, round2(goalTotal));
+		simulatedByParent.set(row.parent, simulated);
+		sim += simulated;
+	}
+	return {
+		projecaoSimulada: sim,
+		economiaMes: plan.totalProjecao - sim,
+		goalByParent,
+		simulatedByParent,
+	};
+};
+
+// ── Envelope persistence (goal → monthly budget forecasts) ──────────────────
+
+/** The forecast fields needed to find the envelopes a goal must update. */
+export interface EnvelopeForecastRef {
+	forecastId: string;
+	amount: string;
+	categoryId: string | null;
+	kind: string;
+	status: string;
+	month: string | null;
+}
+
+/** One bridge write: update (forecastId set) or create (null) an envelope. */
+export interface EnvelopeWrite {
+	forecastId: string | null;
+	month: string;
+	categoryId: string;
+	/** Negative decimal string — envelopes are expenses. */
+	amount: string;
+	/** Empty on update (the bridge keeps the existing description). */
+	description: string;
+	dueDate: string;
+}
+
+/** Last calendar day of a "YYYY-MM" month, as "YYYY-MM-DD". */
+export const lastDayOfMonth = (month: string): string => {
+	const [y, m] = month.split("-").map(Number);
+	const day = y && m ? new Date(y, m, 0).getDate() : 1;
+	return `${month}-${String(day).padStart(2, "0")}`;
+};
+
+/**
+ * Turn confirmed parent goals into bridge writes, one per (parent, month).
+ * When a month already has envelope forecasts for the parent, the first one
+ * is re-amounted so the month's envelope TOTAL equals the goal (siblings are
+ * left alone, never flipped positive); otherwise a new envelope forecast is
+ * created. Due dates sit on the last day of the month so the envelope keeps
+ * counting as "remaining" in the cash chart for the whole month.
+ */
+export const buildEnvelopeWrites = (
+	goalByParent: ReadonlyMap<string, number>,
+	months: ReadonlyArray<string>,
+	existing: ReadonlyArray<EnvelopeForecastRef>,
+): EnvelopeWrite[] => {
+	const parents = Array.from(goalByParent.keys())
+		.filter((p) => p !== "—") // uncategorized spend can't carry a budget
+		.sort((a, b) => a.localeCompare(b));
+	return parents.flatMap((parent) =>
+		months.map((month) =>
+			envelopeWriteFor(parent, goalByParent.get(parent) ?? 0, month, existing),
+		),
+	);
+};
+
+/** The single (parent, month) write: update the first envelope or create one. */
+const envelopeWriteFor = (
+	parent: string,
+	goal: number,
+	month: string,
+	existing: ReadonlyArray<EnvelopeForecastRef>,
+): EnvelopeWrite => {
+	const envelopes = existing.filter(
+		(f) => f.month === month && f.categoryId === parent && isBudgetEnvelope(f),
+	);
+	const dueDate = lastDayOfMonth(month);
+	if (envelopes.length === 0) {
+		return {
+			forecastId: null,
+			month,
+			categoryId: parent,
+			amount: (-goal).toFixed(2),
+			description: `meta ${parent}`,
+			dueDate,
+		};
+	}
+	const siblings = envelopes
+		.slice(1)
+		.reduce((s, f) => s + Math.abs(toCents(f.amount)) / 100, 0);
+	return {
+		forecastId: envelopes[0].forecastId,
+		month,
+		categoryId: parent,
+		amount: (-Math.max(0, round2(goal - siblings))).toFixed(2),
+		description: "",
+		dueDate,
 	};
 };
 

@@ -4,6 +4,7 @@ import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView, ChartMode } from "./types";
 import {
+	applySimulationToModel,
 	BASELINE,
 	H,
 	PAD,
@@ -15,6 +16,7 @@ import {
 	innerH,
 	innerW,
 	type ChartModel,
+	type ChartSimulation,
 } from "./chart/model";
 import { ChartLegend } from "./chart/ChartLegend";
 
@@ -48,6 +50,7 @@ export const PlanningChart = ({
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
+	simulation,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
@@ -55,8 +58,15 @@ export const PlanningChart = ({
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
+	/** Live war-plan goal overlay: shifts forecast outflows + future balances. */
+	simulation?: ChartSimulation | null;
 }) => {
-	const model = useMemo(() => buildModel(months), [months]);
+	const model = useMemo(() => {
+		const base = buildModel(months);
+		return simulation && simulation.monthlySaving !== 0
+			? applySimulationToModel(base, months, simulation)
+			: base;
+	}, [months, simulation]);
 	const [mode, setMode] = useState<ChartMode>("caixa");
 
 	const handleKeyDown = (e: React.KeyboardEvent) => {
