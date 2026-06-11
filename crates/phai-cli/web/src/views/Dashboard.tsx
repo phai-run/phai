@@ -20,6 +20,7 @@ import { CardsPanel } from "./CardsPanel";
 import { CashDecisionPanel, type CashWhen } from "./cash/CashDecisionPanel";
 import { PlanilhaView } from "./planilha/PlanilhaView";
 import { WarPlanPanel } from "./plano/WarPlanPanel";
+import type { ChartSimulation } from "./chart/model";
 import type { ChartMonthView, ForecastView } from "./types";
 
 const DETAIL_MODES = [
@@ -169,6 +170,21 @@ export const Dashboard = () => {
 		);
 	};
 
+	// Live war-plan goal simulation: lifted plain React state (NOT the ui
+	// clientDocument — slider drags would commit an event per pixel). The
+	// panel clears it on unmount, so it never outlives the plano mode.
+	const [warSim, setWarSim] = useState<ChartSimulation | null>(null);
+
+	// Months a confirmed goal writes envelopes for: the selected month through
+	// December, never a past month.
+	const persistMonths = useMemo(
+		() =>
+			months
+				.filter((m) => m.month >= selected && m.month >= currentMonth)
+				.map((m) => m.month),
+		[months, selected, currentMonth],
+	);
+
 	// Compact strip visibility. The strip is position:fixed, so toggling it
 	// never changes document flow — the old sticky variant swapped the tall
 	// hero for a thin one in place, and that height jump moved the page under
@@ -265,6 +281,9 @@ export const Dashboard = () => {
 						selectedMonth={selected}
 						onSelectMonth={(m) => setUi({ selectedMonth: m })}
 						onDropForecast={moveForecast}
+						simulation={
+							(ui.detailMode || "planilha") === "plano" ? warSim : null
+						}
 					/>
 				)}
 			</div>
@@ -367,6 +386,13 @@ export const Dashboard = () => {
 						month={selected}
 						forecasts={forecastsByMonth.get(selected) ?? []}
 						isPast={heroWhen === "past"}
+						allForecasts={forecasts}
+						persistMonths={persistMonths}
+						onSimulationChange={setWarSim}
+						onSaved={() => {
+							forecastSeed.reload();
+							chartSeed.reload();
+						}}
 					/>
 				) : (
 					<MonthDetail

@@ -326,6 +326,13 @@ enum StoreRequest {
         due_date: NaiveDate,
         resp: oneshot::Sender<Result<MoveForecastResult>>,
     },
+    /// Re-amount an existing forecast in place (`POST /api/forecast` with
+    /// `forecast_id` — the web planner's envelope upsert).
+    PatchForecast {
+        forecast_id: String,
+        patch: ForecastPatch,
+        resp: oneshot::Sender<Result<Option<String>>>,
+    },
     ApplyHumanReview {
         writes: Vec<ReviewWrite>,
         resp: oneshot::Sender<Vec<ReviewWriteOutcome>>,
@@ -338,82 +345,110 @@ async fn store_actor_loop(
     mut rx: mpsc::Receiver<StoreRequest>,
 ) {
     while let Some(req) = rx.recv().await {
-        match req {
-            StoreRequest::GetChartData {
-                months_back,
-                months_ahead,
-                resp,
-            } => {
-                let result =
-                    build_chart_data(store.as_ref(), months_back, months_ahead, true).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::ListForecastTemplates { kind, status, resp } => {
-                let result = store
-                    .list_forecast_templates(kind.as_deref(), status.as_deref())
-                    .await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::AcceptTemplate {
-                template_id,
-                materialize_months,
-                resp,
-            } => {
-                let result =
-                    handle_accept_template(store.as_ref(), &template_id, materialize_months).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::DismissTemplate { template_id, resp } => {
-                let result = handle_dismiss_template(store.as_ref(), &template_id).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::UpsertForecast { record, resp } => {
-                let result = upsert_forecast(store.as_ref(), *record).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::ListCategoryIds { resp } => {
-                let result = list_web_category_ids(store.as_ref()).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::GetAccounts { resp } => {
-                let result = store.get_accounts().await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::Cards { month, resp } => {
-                let result = build_cards_api(store.as_ref(), month.as_deref()).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::ReviewQueue { params, resp } => {
-                let result = load_review_queue(store.as_ref(), params).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::TransactionsWindow { params, resp } => {
-                let result = load_transactions_window(store.as_ref(), params).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::ListForecastsEnriched {
-                status,
-                from,
-                until,
-                resp,
-            } => {
-                let result =
-                    list_forecasts_enriched(store.as_ref(), status.as_deref(), from, until).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::MoveForecast {
-                forecast_id,
-                due_date,
-                resp,
-            } => {
-                let result = move_forecast(store.as_ref(), &forecast_id, due_date).await;
-                let _ = resp.send(result);
-            }
-            StoreRequest::ApplyHumanReview { writes, resp } => {
-                let outcomes = apply_review_writes(store.as_ref(), &config, writes).await;
-                let _ = resp.send(outcomes);
-            }
+        // Two-stage dispatch: read-only requests first; anything it hands
+        // back is a write and goes through the mutation handler.
+        if let Some(req) = try_handle_store_query(store.as_ref(), req).await {
+            handle_store_mutation(store.as_ref(), &config, req).await;
         }
+    }
+}
+
+/// Serve the read-only store requests; hands back writes untouched.
+async fn try_handle_store_query(
+    store: &dyn FinanceStore,
+    req: StoreRequest,
+) -> Option<StoreRequest> {
+    match req {
+        StoreRequest::GetChartData {
+            months_back,
+            months_ahead,
+            resp,
+        } => {
+            let result = build_chart_data(store, months_back, months_ahead, true).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::ListForecastTemplates { kind, status, resp } => {
+            let result = store
+                .list_forecast_templates(kind.as_deref(), status.as_deref())
+                .await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::ListCategoryIds { resp } => {
+            let result = list_web_category_ids(store).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::GetAccounts { resp } => {
+            let result = store.get_accounts().await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::Cards { month, resp } => {
+            let result = build_cards_api(store, month.as_deref()).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::ReviewQueue { params, resp } => {
+            let result = load_review_queue(store, params).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::TransactionsWindow { params, resp } => {
+            let result = load_transactions_window(store, params).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::ListForecastsEnriched {
+            status,
+            from,
+            until,
+            resp,
+        } => {
+            let result = list_forecasts_enriched(store, status.as_deref(), from, until).await;
+            let _ = resp.send(result);
+        }
+        write => return Some(write),
+    }
+    None
+}
+
+/// Serve the store requests that write (template decisions, forecast
+/// upserts/moves/patches, human review). Query requests never reach here —
+/// `try_handle_store_query` consumes them.
+async fn handle_store_mutation(store: &dyn FinanceStore, config: &AppConfig, req: StoreRequest) {
+    match req {
+        StoreRequest::AcceptTemplate {
+            template_id,
+            materialize_months,
+            resp,
+        } => {
+            let result = handle_accept_template(store, &template_id, materialize_months).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::DismissTemplate { template_id, resp } => {
+            let result = handle_dismiss_template(store, &template_id).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::UpsertForecast { record, resp } => {
+            let result = upsert_forecast(store, *record).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::MoveForecast {
+            forecast_id,
+            due_date,
+            resp,
+        } => {
+            let result = move_forecast(store, &forecast_id, due_date).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::PatchForecast {
+            forecast_id,
+            patch,
+            resp,
+        } => {
+            let result = patch_forecast(store, &forecast_id, patch).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::ApplyHumanReview { writes, resp } => {
+            let outcomes = apply_review_writes(store, config, writes).await;
+            let _ = resp.send(outcomes);
+        }
+        _ => debug_assert!(false, "query request leaked past try_handle_store_query"),
     }
 }
 
@@ -746,6 +781,73 @@ async fn apply_review_writes(
         outcomes.push(outcome);
     }
     outcomes
+}
+
+/// Field updates for an existing forecast; `None` keeps the stored value.
+struct ForecastPatch {
+    amount: Decimal,
+    due_date: Option<NaiveDate>,
+    description: Option<String>,
+    category_id: Option<String>,
+    account_id: Option<String>,
+}
+
+/// Re-amount (and optionally re-date/relabel) an existing forecast in place,
+/// preserving provenance (template link, metadata, status, creator). This is
+/// the "upsert" half of the web planner's envelope writes: the budget total
+/// for a (category, month) must replace the old envelope, never stack a new
+/// forecast on top of it. Returns `None` when the id is unknown.
+async fn patch_forecast(
+    store: &dyn FinanceStore,
+    forecast_id: &str,
+    patch: ForecastPatch,
+) -> Result<Option<String>> {
+    let Some(mut record) = store
+        .get_forecast(forecast_id)
+        .await
+        .context("get_forecast")?
+    else {
+        return Ok(None);
+    };
+    record.amount = patch.amount;
+    if let Some(due) = patch.due_date {
+        record.due_date = Some(due);
+    }
+    if let Some(description) = patch.description {
+        record.description = description;
+    }
+    if let Some(category_id) = patch.category_id {
+        record.category_id = Some(category_id);
+    }
+    if let Some(account_id) = patch.account_id {
+        record.account_id = Some(account_id);
+    }
+    record.updated_at = Utc::now();
+    // The key derives from (actor, description, due_date) — recompute like
+    // move_forecast so a re-dated envelope stays deduplicatable.
+    record.idempotency_key = String::new();
+    ensure_forecast_idempotency(&mut record).context("idempotency")?;
+    let diff =
+        serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
+    store
+        .upsert_forecasts(&[record])
+        .await
+        .context("upsert_forecasts")?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "forecast".into(),
+        entity_id: forecast_id.to_string(),
+        action: "upsert".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: diff,
+    };
+    store
+        .insert_audit_events(&[event])
+        .await
+        .context("audit patch_forecast")?;
+    Ok(Some(forecast_id.to_string()))
 }
 
 async fn upsert_forecast(store: &dyn FinanceStore, mut record: ForecastRecord) -> Result<String> {
@@ -1463,6 +1565,9 @@ struct EventsResponse {
 
 #[derive(Deserialize)]
 struct ForecastBody {
+    /// When set, the request re-amounts that existing forecast in place
+    /// (envelope upsert from the web planner) instead of creating a new one.
+    forecast_id: Option<String>,
     #[serde(default)]
     description: String,
     amount: String,
@@ -1789,6 +1894,64 @@ async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl Int
     }
 }
 
+/// Route a `ForecastPatch` through the store actor and map the outcome to an
+/// HTTP response (the update half of `POST /api/forecast`).
+async fn patch_forecast_response(
+    tx: &Arc<RwLock<mpsc::Sender<StoreRequest>>>,
+    forecast_id: String,
+    patch: ForecastPatch,
+) -> axum::response::Response {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(tx).await;
+    if tx
+        .send(StoreRequest::PatchForecast {
+            forecast_id,
+            patch,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(Some(forecast_id))) => {
+            Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
+        }
+        Ok(Ok(None)) => error_response(StatusCode::NOT_FOUND, "forecast não encontrado"),
+        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(_) => actor_silent(),
+    }
+}
+
+/// Input-length guardrails: prevent extremely long strings from landing in
+/// the database. The limits match typical UX constraints (description is a
+/// short label, not a free-text note). `Some` carries the 400 to return.
+fn validate_forecast_body_lengths(body: &ForecastBody) -> Option<axum::response::Response> {
+    const MAX_DESC_LEN: usize = 500;
+    const MAX_ID_LEN: usize = 100;
+    let too_long = |field: &str, len: usize, max: usize| {
+        Some(error_response(
+            StatusCode::BAD_REQUEST,
+            format!("{field} muito longo ({len} caracteres; máximo {max})"),
+        ))
+    };
+    if body.description.len() > MAX_DESC_LEN {
+        return too_long("description", body.description.len(), MAX_DESC_LEN);
+    }
+    if let Some(len) = body.category_id.as_deref().map(str::len) {
+        if len > MAX_ID_LEN {
+            return too_long("category_id", len, MAX_ID_LEN);
+        }
+    }
+    if let Some(len) = body.account_id.as_deref().map(str::len) {
+        if len > MAX_ID_LEN {
+            return too_long("account_id", len, MAX_ID_LEN);
+        }
+    }
+    None
+}
+
 async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl IntoResponse {
     let amount = match Decimal::from_str(body.amount.trim()) {
         Ok(d) => d,
@@ -1803,48 +1966,26 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
         Ok(d) => d,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
-    // Input-length guardrails: prevent extremely long strings from landing in
-    // the database. The limits match typical UX constraints (description is a
-    // short label, not a free-text note).
-    const MAX_DESC_LEN: usize = 500;
-    const MAX_ID_LEN: usize = 100;
-    if body.description.len() > MAX_DESC_LEN {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "description muito longo ({} caracteres; máximo {})",
-                body.description.len(),
-                MAX_DESC_LEN
-            ),
-        );
+    if let Some(resp) = validate_forecast_body_lengths(&body) {
+        return resp;
     }
-    if body
-        .category_id
+    // Envelope upsert: a forecast_id re-amounts that forecast in place
+    // instead of stacking a new one onto the (category, month) budget.
+    if let Some(forecast_id) = body
+        .forecast_id
         .as_deref()
-        .is_some_and(|c| c.len() > MAX_ID_LEN)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
     {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "category_id muito longo ({} caracteres; máximo {})",
-                body.category_id.as_deref().unwrap().len(),
-                MAX_ID_LEN
-            ),
-        );
-    }
-    if body
-        .account_id
-        .as_deref()
-        .is_some_and(|a| a.len() > MAX_ID_LEN)
-    {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "account_id muito longo ({} caracteres; máximo {})",
-                body.account_id.as_deref().unwrap().len(),
-                MAX_ID_LEN
-            ),
-        );
+        let description = body.description.trim();
+        let patch = ForecastPatch {
+            amount,
+            due_date,
+            description: (!description.is_empty()).then(|| description.to_string()),
+            category_id: body.category_id.clone(),
+            account_id: body.account_id.clone(),
+        };
+        return patch_forecast_response(&tx, forecast_id.to_string(), patch).await;
     }
     let record = Box::new(ForecastRecord {
         forecast_id: String::new(),
@@ -2743,6 +2884,77 @@ mod tests {
         assert_eq!(diff["forecast_id"], "fc-test-1");
         assert_eq!(diff["description"], "Internet 500Mbps");
         assert_eq!(diff["amount"], "-119.90");
+    }
+
+    // ── ForecastBody contract (envelope upsert) ────────────────────────────
+
+    #[test]
+    fn forecast_body_accepts_optional_forecast_id() {
+        let body: ForecastBody = serde_json::from_str(
+            r#"{"amount":"-450.00","due_date":"2026-07-31","category_id":"alimentacao","forecast_id":"f-1"}"#,
+        )
+        .unwrap();
+        assert_eq!(body.forecast_id.as_deref(), Some("f-1"));
+
+        let body: ForecastBody =
+            serde_json::from_str(r#"{"amount":"-450.00","forecast_id":null}"#).unwrap();
+        assert!(body.forecast_id.is_none());
+    }
+
+    // ── Behavioral: forecast patch against a real SQLite store ─────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn patch_forecast_reamounts_in_place_preserving_provenance() {
+        let (_dir, _config, store) = temp_store().await;
+        let mut envelope = sample_forecast("f-env-1", Some("tpl-1"));
+        envelope.category_id = Some("moradia".into());
+        upsert_forecast(store.as_ref(), envelope).await.unwrap();
+
+        let patched = patch_forecast(
+            store.as_ref(),
+            "f-env-1",
+            ForecastPatch {
+                amount: Decimal::from_str("-222.33").unwrap(),
+                due_date: Some(NaiveDate::from_ymd_opt(2026, 4, 30).unwrap()),
+                description: None,
+                category_id: None,
+                account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(patched.as_deref(), Some("f-env-1"));
+
+        let stored = store.get_forecast("f-env-1").await.unwrap().unwrap();
+        assert_eq!(stored.amount, Decimal::from_str("-222.33").unwrap());
+        assert_eq!(
+            stored.due_date,
+            Some(NaiveDate::from_ymd_opt(2026, 4, 30).unwrap())
+        );
+        // Untouched fields keep their original values.
+        assert_eq!(stored.description, "Aluguel");
+        assert_eq!(stored.category_id.as_deref(), Some("moradia"));
+        assert_eq!(stored.template_id.as_deref(), Some("tpl-1"));
+        assert_eq!(stored.status, "ativo");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn patch_forecast_unknown_id_returns_none() {
+        let (_dir, _config, store) = temp_store().await;
+        let patched = patch_forecast(
+            store.as_ref(),
+            "missing",
+            ForecastPatch {
+                amount: Decimal::from_str("-1.00").unwrap(),
+                due_date: None,
+                description: None,
+                category_id: None,
+                account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(patched.is_none());
     }
 
     // ── Behavioral: ApplyHumanReview against a real SQLite store ────────────

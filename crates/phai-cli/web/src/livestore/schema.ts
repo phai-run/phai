@@ -38,7 +38,7 @@ import {
  * Enforced by __tests__/store-version.test.ts: change the schema and the
  * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
  */
-export const STORE_VERSION = 4;
+export const STORE_VERSION = 5;
 export const STORE_ID = `phai-s${STORE_VERSION}`;
 
 // Computes current month as "YYYY-MM" for the default selectedMonth.
@@ -344,6 +344,20 @@ export const events = {
 			createdAt: Schema.Number,
 		}),
 	}),
+	// A war-plan goal confirmed as a monthly budget envelope. forecastId ""
+	// creates a new envelope; otherwise the existing one is re-amounted.
+	forecastEnvelopeUpserted: Events.synced({
+		name: "v1.ForecastEnvelopeUpserted",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			forecastId: Schema.String,
+			description: Schema.String,
+			amount: Schema.String,
+			dueDate: Schema.String,
+			categoryId: Schema.String,
+			upsertedAt: Schema.Number,
+		}),
+	}),
 	writeAcked: Events.synced({
 		name: "v1.WriteAcked",
 		schema: Schema.Struct({ writeId: Schema.String }),
@@ -443,6 +457,43 @@ const materializers = State.SQLite.materializers(events, {
 			kind: "manual",
 			draggable: 1,
 		}),
+	],
+	"v1.ForecastEnvelopeUpserted": ({
+		writeId,
+		forecastId,
+		description,
+		amount,
+		dueDate,
+		categoryId,
+		upsertedAt,
+	}) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "forecastEnvelope",
+			forecastId,
+			// drainQueue POSTs this verbatim to /api/forecast (snake_case body).
+			payload: {
+				forecast_id: forecastId || null,
+				description,
+				amount,
+				due_date: dueDate,
+				category_id: categoryId,
+			},
+			createdAt: upsertedAt,
+			attempts: 0,
+		}),
+		forecastId
+			? tables.forecasts.update({ amount, dueDate }).where({ forecastId })
+			: tables.forecasts.insert({
+					forecastId: writeId,
+					description,
+					amount,
+					dueDate,
+					categoryId,
+					status: "ativo",
+					kind: "manual",
+					draggable: 1,
+				}),
 	],
 	"v1.WriteAcked": ({ writeId }) =>
 		tables.pendingWrites.delete().where({ writeId }),
