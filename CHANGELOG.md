@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.8.0](https://github.com/phai-run/phai/compare/v5.7.0...v5.8.0) (2026-06-11)
+
+
+### Features
+
+* **web:** metas por subcategoria no plano de guerra com envelopes persistidos ([#140](https://github.com/phai-run/phai/issues/140)) ([4a72843](https://github.com/phai-run/phai/commit/4a72843ac258c85e9c82def1a8bd1d4ce190054e))
+
 ## [5.7.0](https://github.com/phai-run/phai/compare/v5.6.1...v5.7.0) (2026-06-11)
 
 
