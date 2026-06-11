@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { squarify } from "../../lib/treemap";
+import { categoryEmoji } from "../../lib/categoryEmoji";
 import {
 	effectiveCategory,
 	parseCategory,
@@ -12,9 +13,11 @@ import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 /**
  * Categorias as a drillable treemap. Level 1 tiles the month's expense
  * magnitude by parent category; clicking a tile drills into a sub-treemap of
- * its subcategories; clicking a subcategory lists the individual transactions
- * (amount-sorted rows — click one to open the shared edit modal via
- * `onEditTx`). A breadcrumb walks back up; Escape goes one level up.
+ * its subcategories; clicking a subcategory tiles its individual transactions
+ * the same way (value always visible; whatever is too small to stay legible
+ * falls back to compact rows below the board). Clicking a transaction opens
+ * the shared edit modal via `onEditTx`. A breadcrumb walks back up; Escape
+ * goes one level up.
  *
  * Pure presentation: the caller owns filtering (the filter bar applies before
  * `txs` arrives) and editing (modal + write path).
@@ -145,7 +148,7 @@ export const CategoryTreemap = ({
 				background: "transparent",
 				border: "none",
 				padding: 0,
-				fontSize: 12,
+				fontSize: 13,
 				cursor: active ? "default" : "pointer",
 				color: active ? "var(--text)" : "var(--purple)",
 				fontWeight: active ? 600 : 400,
@@ -190,7 +193,7 @@ export const CategoryTreemap = ({
 				)}
 				<span
 					className="mono"
-					style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)" }}
+					style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted)" }}
 				>
 					{drill.level === 1
 						? "clique numa categoria para abrir"
@@ -203,6 +206,7 @@ export const CategoryTreemap = ({
 					buckets={parents}
 					total={monthTotal}
 					colorOf={(key) => colorFor(parentIndex.get(key) ?? 0)}
+					emojiOf={(key) => categoryEmoji(key)}
 					onOpen={(key) => setDrill({ level: 2, parent: key })}
 				/>
 			)}
@@ -212,6 +216,7 @@ export const CategoryTreemap = ({
 					buckets={subs}
 					total={subs.reduce((s, b) => s + b.total, 0)}
 					colorOf={() => colorFor(parentIndex.get(drill.parent) ?? 0)}
+					emojiOf={() => categoryEmoji(drill.parent)}
 					shade
 					onOpen={(key) =>
 						setDrill({ level: 3, parent: drill.parent, sub: key })
@@ -220,11 +225,13 @@ export const CategoryTreemap = ({
 			)}
 
 			{drill.level === 3 && (
-				<TxList
+				<TxBoard
 					txs={
 						subs.find((b) => b.key === drill.sub)?.txs ??
 						([] as ReadonlyArray<TxView>)
 					}
+					color={colorFor(parentIndex.get(drill.parent) ?? 0)}
+					emoji={categoryEmoji(drill.parent)}
 					onEditTx={onEditTx}
 				/>
 			)}
@@ -297,12 +304,14 @@ const TreemapBoard = ({
 	buckets,
 	total,
 	colorOf,
+	emojiOf,
 	onOpen,
 	shade,
 }: {
 	buckets: ReadonlyArray<Bucket>;
 	total: number;
 	colorOf: (key: string) => string;
+	emojiOf?: (key: string) => string;
 	onOpen: (key: string) => void;
 	/** Level 2: same hue family, opacity scaled by share. */
 	shade?: boolean;
@@ -387,7 +396,7 @@ const TreemapBoard = ({
 					>
 						<span
 							style={{
-								fontSize: big ? 13 : 10,
+								fontSize: big ? 14 : 11,
 								fontWeight: 600,
 								maxWidth: "100%",
 								overflow: "hidden",
@@ -396,13 +405,14 @@ const TreemapBoard = ({
 								textShadow: "0 1px 2px rgba(0,0,0,0.25)",
 							}}
 						>
+							{emojiOf ? `${emojiOf(r.id)} ` : ""}
 							{r.id}
 						</span>
 						{big && (
 							<span
 								className="mono"
 								style={{
-									fontSize: 11,
+									fontSize: 12,
 									opacity: 0.95,
 									textShadow: "0 1px 2px rgba(0,0,0,0.25)",
 								}}
@@ -417,12 +427,28 @@ const TreemapBoard = ({
 	);
 };
 
-/** Level 3 — the subcategory's transactions, amount-sorted, modal on click. */
-const TxList = ({
+// Legibility floor for level-3 tiles: below this share of the board a tile
+// cannot render a readable value, so the transaction moves to the row list.
+const MIN_TILE_SHARE_PCT = 2.5;
+const MAX_TILES = 30;
+
+const txMagnitude = (tx: TxView) => Math.abs(toCents(tx.amount)) / 100;
+
+/**
+ * Level 3 — the subcategory's transactions as treemap tiles, value always
+ * visible (the whole point of the drill: see where the money went at a
+ * glance). Transactions too small to stay legible as squares fall back to
+ * compact amount-sorted rows below the board; click anything to edit.
+ */
+const TxBoard = ({
 	txs,
+	color,
+	emoji,
 	onEditTx,
 }: {
 	txs: ReadonlyArray<TxView>;
+	color: string;
+	emoji: string;
 	onEditTx: (tx: TxView) => void;
 }) => {
 	const sorted = useMemo(
@@ -432,95 +458,290 @@ const TxList = ({
 			),
 		[txs],
 	);
-	const total = sorted.reduce((s, t) => s + Math.abs(toCents(t.amount)) / 100, 0);
-	const max = Math.abs(toCents(sorted[0]?.amount ?? "0")) / 100 || 1;
+	const total = sorted.reduce((s, t) => s + txMagnitude(t), 0);
+
+	// Sorted descending, so the legible prefix is contiguous.
+	const tiles = useMemo(
+		() =>
+			total > 0
+				? sorted
+						.slice(0, MAX_TILES)
+						.filter((t) => (txMagnitude(t) / total) * 100 >= MIN_TILE_SHARE_PCT)
+				: [],
+		[sorted, total],
+	);
+	const rest = sorted.slice(tiles.length);
+	const maxMag = txMagnitude(sorted[0] ?? ({ amount: "0" } as TxView)) || 1;
+
+	const rects = useMemo(
+		() =>
+			squarify(
+				tiles.map((t) => ({ id: t.id, value: txMagnitude(t) })),
+				0,
+				0,
+				100,
+				100,
+			),
+		[tiles],
+	);
+	const byId = useMemo(() => new Map(tiles.map((t) => [t.id, t])), [tiles]);
+
+	if (sorted.length === 0) {
+		return (
+			<div
+				className="mono"
+				style={{
+					padding: 32,
+					textAlign: "center",
+					color: "var(--muted)",
+					fontSize: 13,
+					border: "1px dashed var(--border)",
+					borderRadius: "var(--radius-md)",
+				}}
+			>
+				Sem despesas para os filtros atuais.
+			</div>
+		);
+	}
 
 	return (
-		<div
-			style={{
-				border: "1px solid var(--border)",
-				borderRadius: "var(--radius-md)",
-				background: "var(--card)",
-				overflow: "hidden",
-			}}
-		>
-			{sorted.map((tx) => {
-				const mag = Math.abs(toCents(tx.amount)) / 100;
-				return (
-					<button
-						key={tx.id}
-						onClick={() => onEditTx(tx)}
-						title="editar transação"
-						style={{
-							position: "relative",
-							display: "flex",
-							gap: 12,
-							alignItems: "baseline",
-							width: "100%",
-							textAlign: "left",
-							background: "transparent",
-							border: "none",
-							borderBottom: "1px solid var(--border)",
-							padding: "9px 14px",
-							cursor: "pointer",
-							fontSize: 13,
-						}}
-					>
-						{/* Magnitude bar behind the row — instant visual ranking. */}
-						<span
-							aria-hidden
-							style={{
-								position: "absolute",
-								left: 0,
-								top: 0,
-								bottom: 0,
-								width: `${(mag / max) * 100}%`,
-								background: "rgba(109,74,255,0.07)",
-							}}
+		<div>
+			{tiles.length > 0 && (
+				<div
+					style={{
+						position: "relative",
+						width: "100%",
+						aspectRatio: "16 / 6.5",
+						minHeight: 240,
+						borderRadius: "var(--radius-md)",
+						overflow: "hidden",
+					}}
+				>
+					{rects.map((r) => (
+						<TxTile
+							key={r.id}
+							tx={byId.get(r.id)!}
+							rect={r}
+							color={color}
+							emoji={emoji}
+							maxMag={maxMag}
+							onEditTx={onEditTx}
 						/>
-						<span className="mono" style={{ color: "var(--muted)", fontSize: 11 }}>
-							{tx.postedAt.slice(8, 10)}/{tx.postedAt.slice(5, 7)}
-						</span>
-						<span
+					))}
+				</div>
+			)}
+
+			{rest.length > 0 && (
+				<div
+					style={{
+						border: "1px solid var(--border)",
+						borderRadius: "var(--radius-md)",
+						background: "var(--card)",
+						overflow: "hidden",
+						marginTop: tiles.length > 0 ? 10 : 0,
+					}}
+				>
+					{tiles.length > 0 && (
+						<div
+							className="mono"
 							style={{
-								flex: 1,
-								overflow: "hidden",
-								textOverflow: "ellipsis",
-								whiteSpace: "nowrap",
+								padding: "8px 14px",
+								fontSize: 11,
+								color: "var(--muted)",
+								borderBottom: "1px solid var(--border)",
+								textTransform: "uppercase",
+								letterSpacing: "0.06em",
 							}}
 						>
-							{sheetLabel(tx)}
-							{tx.installmentMarker ? (
-								<span
-									className="mono"
-									style={{ color: "var(--muted)", fontSize: 10, marginLeft: 8 }}
-								>
-									parcela {tx.installmentMarker}
-								</span>
-							) : null}
-						</span>
-						<span
-							className="mono"
-							style={{ fontWeight: 600, whiteSpace: "nowrap" }}
-						>
-							{formatMoneyNumber(mag)}
-						</span>
-					</button>
-				);
-			})}
+							menores demais para o quadro ({rest.length})
+						</div>
+					)}
+					{rest.map((tx) => (
+						<RestRow
+							key={tx.id}
+							tx={tx}
+							emoji={emoji}
+							maxMag={maxMag}
+							onEditTx={onEditTx}
+						/>
+					))}
+				</div>
+			)}
+
 			<div
 				className="mono"
 				style={{
 					display: "flex",
 					justifyContent: "space-between",
-					padding: "9px 14px",
+					padding: "9px 4px",
 					fontSize: 12,
 					color: "var(--muted)",
 				}}
 			>
-				<span>{sorted.length} transações · clique para editar</span>
+				<span>
+					{sorted.length} transaç{sorted.length === 1 ? "ão" : "ões"} · clique
+					para editar
+				</span>
 				<span style={{ fontWeight: 600 }}>{formatMoneyNumber(total)}</span>
 			</div>
 		</div>
+	);
+};
+
+/** One level-3 tile: emoji + label when there is room, value always. */
+const TxTile = ({
+	tx,
+	rect,
+	color,
+	emoji,
+	maxMag,
+	onEditTx,
+}: {
+	tx: TxView;
+	rect: { x: number; y: number; w: number; h: number };
+	color: string;
+	emoji: string;
+	maxMag: number;
+	onEditTx: (tx: TxView) => void;
+}) => {
+	const mag = txMagnitude(tx);
+	const big = rect.w * rect.h >= 6; // room for label + value lines
+	const label = sheetLabel(tx);
+	const marker = tx.installmentMarker ? ` · ${tx.installmentMarker}` : "";
+	return (
+		<button
+			onClick={() => onEditTx(tx)}
+			title={`${label} · ${formatMoneyNumber(mag)}${marker} · editar`}
+			style={{
+				position: "absolute",
+				left: `${rect.x}%`,
+				top: `${rect.y}%`,
+				width: `${rect.w}%`,
+				height: `${rect.h}%`,
+				background: color,
+				opacity: 0.45 + 0.55 * (mag / maxMag),
+				border: "2px solid var(--bg)",
+				borderRadius: 6,
+				cursor: "pointer",
+				display: "flex",
+				flexDirection: "column",
+				alignItems: "flex-start",
+				justifyContent: big ? "flex-start" : "center",
+				padding: big ? "8px 10px" : "2px 6px",
+				overflow: "hidden",
+				color: "#fff",
+				transition: "filter 120ms",
+			}}
+			onMouseEnter={(e) => {
+				(e.currentTarget as HTMLElement).style.filter = "brightness(1.12)";
+			}}
+			onMouseLeave={(e) => {
+				(e.currentTarget as HTMLElement).style.filter = "";
+			}}
+		>
+			{big && (
+				<span
+					style={{
+						fontSize: 13,
+						fontWeight: 600,
+						maxWidth: "100%",
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
+						textShadow: "0 1px 2px rgba(0,0,0,0.25)",
+					}}
+				>
+					{emoji} {label}
+				</span>
+			)}
+			<span
+				className="mono"
+				style={{
+					fontSize: big ? 12 : 11,
+					fontWeight: big ? 400 : 600,
+					maxWidth: "100%",
+					overflow: "hidden",
+					textOverflow: "ellipsis",
+					whiteSpace: "nowrap",
+					opacity: 0.95,
+					textShadow: "0 1px 2px rgba(0,0,0,0.25)",
+				}}
+			>
+				{formatMoneyNumber(mag)}
+				{big ? marker : ""}
+			</span>
+		</button>
+	);
+};
+
+/** A below-the-board row for transactions too small to tile legibly. */
+const RestRow = ({
+	tx,
+	emoji,
+	maxMag,
+	onEditTx,
+}: {
+	tx: TxView;
+	emoji: string;
+	maxMag: number;
+	onEditTx: (tx: TxView) => void;
+}) => {
+	const mag = txMagnitude(tx);
+	return (
+		<button
+			onClick={() => onEditTx(tx)}
+			title="editar transação"
+			style={{
+				position: "relative",
+				display: "flex",
+				gap: 12,
+				alignItems: "baseline",
+				width: "100%",
+				textAlign: "left",
+				background: "transparent",
+				border: "none",
+				borderBottom: "1px solid var(--border)",
+				padding: "9px 14px",
+				cursor: "pointer",
+				fontSize: 14,
+			}}
+		>
+			{/* Magnitude bar behind the row — instant visual ranking. */}
+			<span
+				aria-hidden
+				style={{
+					position: "absolute",
+					left: 0,
+					top: 0,
+					bottom: 0,
+					width: `${(mag / maxMag) * 100}%`,
+					background: "rgba(109,74,255,0.07)",
+				}}
+			/>
+			<span className="mono" style={{ color: "var(--muted)", fontSize: 12 }}>
+				{tx.postedAt.slice(8, 10)}/{tx.postedAt.slice(5, 7)}
+			</span>
+			<span
+				style={{
+					flex: 1,
+					overflow: "hidden",
+					textOverflow: "ellipsis",
+					whiteSpace: "nowrap",
+				}}
+			>
+				{emoji} {sheetLabel(tx)}
+				{tx.installmentMarker ? (
+					<span
+						className="mono"
+						style={{ color: "var(--muted)", fontSize: 11, marginLeft: 8 }}
+					>
+						parcela {tx.installmentMarker}
+					</span>
+				) : null}
+			</span>
+			<span className="mono" style={{ fontWeight: 600, whiteSpace: "nowrap" }}>
+				{formatMoneyNumber(mag)}
+			</span>
+		</button>
 	);
 };

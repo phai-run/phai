@@ -14,6 +14,7 @@ import {
 	TransactionModal,
 	type ReviewPatch,
 } from "../../components/TransactionModal";
+import { categoryEmoji } from "../../lib/categoryEmoji";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 import {
 	buildAccountMap,
@@ -302,21 +303,15 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 				<table
 					style={{
 						width: "100%",
-						borderCollapse: "collapse",
-						fontSize: 13,
+						// "separate": with collapsed borders, body cells z-fight the
+						// sticky header and paint through it while scrolling.
+						borderCollapse: "separate",
+						borderSpacing: 0,
+						fontSize: 14,
 					}}
 				>
 					<thead>
-						<tr
-							className="mono"
-							style={{
-								position: "sticky",
-								top: 0,
-								zIndex: 2,
-								background: "var(--card)",
-								boxShadow: "0 1px 0 var(--border)",
-							}}
-						>
+						<tr className="mono">
 							<th style={{ ...thStyle, width: 34 }}>
 								<input
 									type="checkbox"
@@ -352,7 +347,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 											cursor: "pointer",
 											color:
 												sort.key === col.key ? "var(--purple)" : "var(--muted)",
-											fontSize: 11,
+											fontSize: 12,
 											textTransform: "uppercase",
 											letterSpacing: "0.06em",
 											padding: 0,
@@ -524,6 +519,14 @@ const thStyle: React.CSSProperties = {
 	padding: "8px 10px",
 	textAlign: "left",
 	fontWeight: 500,
+	// Sticky lives on each th, not the tr: with collapsed table borders some
+	// engines skip painting a sticky row's background, so body rows scrolled
+	// through it. The th needs its own opaque background.
+	position: "sticky",
+	top: 0,
+	zIndex: 2,
+	background: "var(--card)",
+	boxShadow: "0 1px 0 var(--border)",
 };
 
 const SheetRow = ({
@@ -557,7 +560,6 @@ const SheetRow = ({
 					? "var(--purple-50, rgba(124,93,250,0.08))"
 					: undefined,
 				boxShadow: focused ? "inset 2px 0 0 var(--purple)" : undefined,
-				borderBottom: "1px solid var(--border)",
 				userSelect: "none",
 			}}
 		>
@@ -592,13 +594,13 @@ const SheetRow = ({
 				{tx.purpose && (
 					<div
 						className="mono"
-						style={{ fontSize: 10, color: "var(--muted)" }}
+						style={{ fontSize: 11, color: "var(--muted)" }}
 					>
 						{tx.purpose}
 					</div>
 				)}
 			</td>
-			<td className="mono" style={{ ...tdStyle, fontSize: 11, color: "var(--muted)" }}>
+			<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
 				{accountLabel}
 			</td>
 			<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
@@ -616,14 +618,16 @@ const SheetRow = ({
 						borderRadius: "var(--radius-full)",
 						padding: "3px 10px",
 						cursor: "pointer",
-						fontSize: 11,
-						maxWidth: 200,
+						fontSize: 12,
+						maxWidth: 220,
 						overflow: "hidden",
 						textOverflow: "ellipsis",
 						whiteSpace: "nowrap",
 					}}
 				>
-					{category ?? "sem categoria"}
+					{category
+						? `${categoryEmoji(category, !negative)} ${category}`
+						: "❓ sem categoria"}
 				</button>
 			</td>
 			<td
@@ -637,7 +641,7 @@ const SheetRow = ({
 			>
 				{formatMoneyNumber(toCents(tx.amount) / 100)}
 			</td>
-			<td className="mono" style={{ ...tdStyle, fontSize: 11, color: "var(--muted)" }}>
+			<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
 				{tx.installmentMarker ?? ""}
 			</td>
 		</tr>
@@ -647,6 +651,9 @@ const SheetRow = ({
 const tdStyle: React.CSSProperties = {
 	padding: "6px 10px",
 	verticalAlign: "top",
+	// Row separator lives on the td: tr borders don't render with
+	// border-collapse: separate (which the sticky header requires).
+	borderBottom: "1px solid var(--border)",
 };
 
 interface SheetFilterState {

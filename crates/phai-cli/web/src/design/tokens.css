@@ -15,6 +15,11 @@
 	--muted: #5b5b70; /* secondary text, metadata */
 	--muted2: #9a9aae; /* decorative only — never body text */
 	--border: #e5e3ef; /* card and hairline edges */
+	/* Aliases the views already reference. They were never defined — an
+	   undefined var() resolves to nothing (transparent background, inherited
+	   color), which is what made sticky table headers see-through. */
+	--card: var(--surface);
+	--text: var(--white);
 
 	--font-display: "Space Grotesk", system-ui, sans-serif;
 	--font-body: "Inter", system-ui, sans-serif;
@@ -47,7 +52,7 @@ body {
 	background: var(--bg);
 	color: var(--white);
 	font-family: var(--font-body);
-	font-size: 15px;
+	font-size: 16px;
 	line-height: 1.6;
 	-webkit-font-smoothing: antialiased;
 }
