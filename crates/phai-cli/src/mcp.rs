@@ -247,12 +247,8 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 /// Handle one request; `None` for notifications (no reply expected).
 fn handle(message: &Value) -> Option<Value> {
     let method = message.get("method").and_then(Value::as_str)?;
-    let id = message.get("id").cloned();
     // No id → notification. The only ones we expect are lifecycle no-ops.
-    let id = match id {
-        Some(id) => id,
-        None => return None,
-    };
+    let id = message.get("id").cloned()?;
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
 
     let reply = match method {
