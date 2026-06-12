@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.9.1](https://github.com/phai-run/phai/compare/v5.9.0...v5.9.1) (2026-06-12)
+
+
+### Bug Fixes
+
+* tighten financial invariants ([c58bb20](https://github.com/phai-run/phai/commit/c58bb202aed6bfc5039c484d2325c78995be9cd8))
+
 ## [5.9.0](https://github.com/phai-run/phai/compare/v5.8.0...v5.9.0) (2026-06-12)
 
 
