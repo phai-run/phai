@@ -18,24 +18,24 @@ export const ChartLegend = ({
 	}> = [];
 
 	if (mode === "caixa") {
-		items.push({ color: "var(--cyan)", label: "entradas" });
-		items.push({ color: "var(--rose)", label: "saídas" });
+		items.push({ color: "var(--cyan)", label: "income" });
+		items.push({ color: "var(--rose)", label: "expenses" });
 		if (hasFc) {
-			items.push({ color: "#99f6e4", label: "entrada prevista" });
-			items.push({ color: "#fda4af", label: "saída prevista" });
-			items.push({ color: "var(--amber)", label: "parcela prevista" });
+			items.push({ color: "#99f6e4", label: "forecast income" });
+			items.push({ color: "#fda4af", label: "forecast expenses" });
+			items.push({ color: "var(--amber)", label: "forecast installment" });
 		}
 		items.push({
 			color: "var(--purple)",
-			label: "saldo",
+			label: "balance",
 			dashed: true,
 		});
 	} else if (mode === "despesas-barras") {
-		items.push({ color: "var(--rose)", label: "realizado" });
+		items.push({ color: "var(--rose)", label: "actual" });
 		if (hasFc)
 			items.push({
 				color: "#fda4af",
-				label: "previsto",
+				label: "forecast",
 			});
 	}
 

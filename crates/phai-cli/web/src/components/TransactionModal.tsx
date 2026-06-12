@@ -268,10 +268,10 @@ export const TransactionModal = ({
 								}}
 							>
 								{t === "edit"
-									? "Editar"
+									? "Edit"
 									: t === "raw"
 										? "JSON"
-										: `Similares (${similarTxs.length})`}
+										: `Similar (${similarTxs.length})`}
 							</button>
 						))}
 					</div>
@@ -412,21 +412,21 @@ const EditForm = ({
 			{postedAt} · {accountId}
 		</div>
 
-		<FieldRow label="categoria">
+		<FieldRow label="category">
 			<input
 				list="phai-modal-cats"
 				value={category}
 				onChange={(e) => setCategory(e.target.value)}
-				placeholder="categoria"
+				placeholder="category"
 				className="mono"
 				style={{ ...inputStyle, color: "var(--cyan)", flex: 1 }}
 			/>
 		</FieldRow>
-		<FieldRow label="descrição">
+		<FieldRow label="description">
 			<input
 				value={description}
 				onChange={(e) => setDescription(e.target.value)}
-				placeholder="descrição"
+				placeholder="description"
 				className="mono"
 				style={{ ...inputStyle, flex: 1 }}
 			/>
@@ -440,11 +440,11 @@ const EditForm = ({
 				style={{ ...inputStyle, flex: 1 }}
 			/>
 		</FieldRow>
-		<FieldRow label="propósito">
+		<FieldRow label="purpose">
 			<input
 				value={purpose}
 				onChange={(e) => setPurpose(e.target.value)}
-				placeholder="propósito"
+				placeholder="purpose"
 				className="mono"
 				style={{ ...inputStyle, flex: 1 }}
 			/>
@@ -461,10 +461,10 @@ const EditForm = ({
 					borderColor: "transparent",
 				}}
 			>
-				salvar →
+				save →
 			</button>
 			<button onClick={onCancel} className="mono" style={pillStyle}>
-				cancelar
+				cancel
 			</button>
 		</div>
 	</div>
@@ -540,7 +540,7 @@ const SimilarPanel = ({
 	if (similarTxs.length === 0) {
 		return (
 			<p className="mono" style={{ color: "var(--muted)", fontSize: 13 }}>
-				Sem transações similares nesta janela.
+				No similar transactions in this window.
 			</p>
 		);
 	}
@@ -557,11 +557,11 @@ const SimilarPanel = ({
 				}}
 			>
 				<button onClick={onSelectAll} className="mono" style={pillStyle}>
-					selecionar todas ({similarTxs.length})
+					select all ({similarTxs.length})
 				</button>
 				{selected.size > 0 && (
 					<button onClick={onClearAll} className="mono" style={pillStyle}>
-						limpar ({selected.size})
+						clear ({selected.size})
 					</button>
 				)}
 				{selected.size > 0 && (
@@ -577,7 +577,7 @@ const SimilarPanel = ({
 								opacity: !hasPatch ? 0.4 : 1,
 							}}
 						>
-							aplicar campos em {selected.size} →
+							apply fields to {selected.size} →
 						</button>
 					</>
 				)}

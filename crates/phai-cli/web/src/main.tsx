@@ -30,7 +30,7 @@ const Loading = ({ stage }: { stage: string }) => (
       φ
     </span>
     <span className="mono" style={{ color: 'var(--muted)' }}>
-      carregando… ({stage})
+      loading… ({stage})
     </span>
   </div>
 )

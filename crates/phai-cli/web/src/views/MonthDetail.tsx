@@ -310,7 +310,7 @@ const MonthSummary = ({
 	installmentCount: number;
 	installmentSum: number;
 }) => {
-	const monthName = new Date(month + "-15").toLocaleString("pt-BR", {
+	const monthName = new Date(month + "-15").toLocaleString("en-US", {
 		month: "long",
 		year: "numeric",
 	});
@@ -352,7 +352,7 @@ const MonthSummary = ({
 							padding: "1px 8px",
 						}}
 					>
-						previsto
+						forecast
 					</span>
 				)}
 			</div>
@@ -366,9 +366,9 @@ const MonthSummary = ({
 						color: "var(--amber)",
 					}}
 				>
-					{installmentCount} parcela{installmentCount !== 1 ? "s" : ""} ·{" "}
+					{installmentCount} installment{installmentCount !== 1 ? "s" : ""} ·{" "}
 					{formatMoneyNumber(-installmentSum)} ·{" "}
-					{forecastCount > 0 ? `${forecastCount} previsões` : ""}
+					{forecastCount > 0 ? `${forecastCount} forecasts` : ""}
 				</div>
 			)}
 		</div>

@@ -56,7 +56,7 @@ test.describe("phai web — keyboard recategorization", () => {
 		await page.waitForTimeout(500);
 
 		// The category picker should appear (a motion div with a category search input)
-		const pickerInput = page.locator('input[placeholder*="categoria"]');
+		const pickerInput = page.locator('input[placeholder*="category"]');
 		const pickerVisible = await pickerInput.isVisible().catch(() => false);
 
 		if (!pickerVisible) {
@@ -77,7 +77,7 @@ test.describe("phai web — keyboard recategorization", () => {
 				await page.waitForTimeout(200);
 
 				// Save
-				const saveBtn = page.locator("button:has-text('salvar')");
+				const saveBtn = page.locator("button:has-text('save')");
 				if ((await saveBtn.count()) > 0) {
 					await saveBtn.first().click();
 					await page.waitForTimeout(500);

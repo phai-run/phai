@@ -53,7 +53,7 @@ export const CardsPanel = ({
 	return (
 		<section style={{ marginTop: 24 }}>
 			<h2 style={{ fontSize: 14, color: "var(--muted)", margin: "0 0 12px" }}>
-				Cartões
+				Cards
 			</h2>
 			<div
 				style={{
@@ -148,13 +148,13 @@ const CardTile = ({
 						style={{ fontSize: 11, color: accent }}
 						title={
 							open
-								? "Fatura em aberto — ainda vai sair do caixa"
+								? "Open bill — still leaving your cash"
 								: closed
-									? "Fatura fechada para o mês selecionado"
-									: "Sem fatura no mês selecionado"
+									? "Bill closed for the selected month"
+									: "No bill in the selected month"
 						}
 					>
-						{open ? "ABERTA" : closed ? "FECHADA" : "EM DIA"}
+						{open ? "OPEN" : closed ? "CLOSED" : "SETTLED"}
 					</span>
 				</div>
 				<div style={{ fontSize: 22, fontWeight: 700, marginTop: 6 }}>
@@ -165,10 +165,10 @@ const CardTile = ({
 					style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}
 				>
 					{card.cycleMonth
-						? `ciclo ${card.cycleMonth.slice(5, 7)}/${card.cycleMonth.slice(2, 4)}`
+						? `cycle ${card.cycleMonth.slice(5, 7)}/${card.cycleMonth.slice(2, 4)}`
 						: "—"}
 					{card.dueDate
-						? ` · vence ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}`
+						? ` · due ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}`
 						: ""}
 					{open && openAmount > 0
 						? ` · em aberto ${formatMoneyCompact(openAmount)}`
@@ -182,9 +182,9 @@ const CardTile = ({
 						marginTop: 10,
 					}}
 				>
-					<CardMetric label="parcelado" value={installmentDebt} />
-					<CardMetric label="este mês" value={installmentMonthAmount} />
-					<CardMetric label="termina" value={installmentEndingAmount} />
+					<CardMetric label="installments" value={installmentDebt} />
+					<CardMetric label="this month" value={installmentMonthAmount} />
+					<CardMetric label="ending" value={installmentEndingAmount} />
 				</div>
 				{usedPct != null && limit != null && (
 					<div style={{ marginTop: 10 }}>
@@ -205,7 +205,7 @@ const CardTile = ({
 							/>
 						</div>
 						<div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>
-							{usedPct}% do limite ({formatMoneyNumber(limit)})
+							{usedPct}% of limit ({formatMoneyNumber(limit)})
 						</div>
 					</div>
 				)}
@@ -221,11 +221,11 @@ const CardTile = ({
 						}}
 					>
 						<span>
-							{card.installmentCount} parcela
+							{card.installmentCount} installment
 							{card.installmentCount !== 1 ? "s" : ""}
 						</span>
 						<span style={{ color: accent }}>
-							{expanded ? "▾ fechar" : "▸ ver detalhes"}
+							{expanded ? "▾ close" : "▸ details"}
 						</span>
 					</div>
 				)}

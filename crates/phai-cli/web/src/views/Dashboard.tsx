@@ -24,9 +24,9 @@ import type { ChartSimulation } from "./chart/model";
 import type { ChartMonthView, ForecastView } from "./types";
 
 const DETAIL_MODES = [
-	{ id: "planilha", label: "planilha" },
-	{ id: "categorias", label: "categorias" },
-	{ id: "plano", label: "planejamento" },
+	{ id: "planilha", label: "sheet" },
+	{ id: "categorias", label: "categories" },
+	{ id: "plano", label: "planning" },
 ] as const;
 
 // Seeding window: the 12 months of the current calendar year.
@@ -314,7 +314,7 @@ export const Dashboard = () => {
 			>
 				<div
 					role="tablist"
-					aria-label="modo de visualização do mês"
+					aria-label="month view mode"
 					style={{
 						display: "inline-flex",
 						gap: 2,
@@ -361,7 +361,7 @@ export const Dashboard = () => {
 							textAlign: "center",
 						}}
 					>
-						Sem dados de caixa.{" "}
+						No cash data.{" "}
 						<button
 							onClick={() => {
 								chartSeed.reload();
@@ -376,7 +376,7 @@ export const Dashboard = () => {
 								fontSize: 13,
 							}}
 						>
-							↻ tentar novamente
+							↻ retry
 						</button>
 					</div>
 				) : (ui.detailMode || "planilha") === "planilha" ? (

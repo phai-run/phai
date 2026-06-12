@@ -159,7 +159,7 @@ export const CategoryTreemap = ({
 	);
 
 	return (
-		<section aria-label="categorias do mês (treemap)">
+		<section aria-label="month categories (treemap)">
 			{/* Breadcrumb */}
 			<div
 				style={{
@@ -171,7 +171,7 @@ export const CategoryTreemap = ({
 				}}
 			>
 				{crumb(
-					`despesas ${formatMoneyNumber(monthTotal)}`,
+					`expenses ${formatMoneyNumber(monthTotal)}`,
 					{ level: 1 },
 					drill.level === 1,
 				)}
@@ -196,8 +196,8 @@ export const CategoryTreemap = ({
 					style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted)" }}
 				>
 					{drill.level === 1
-						? "clique numa categoria para abrir"
-						: "Esc volta um nível"}
+						? "click a category to open it"
+						: "Esc goes up one level"}
 				</span>
 			</div>
 
@@ -249,11 +249,11 @@ export const CategoryTreemap = ({
 					}}
 				>
 					<span style={{ color: "var(--green)" }}>
-						entradas {formatMoneyNumber(incomeTotal)}
+						income {formatMoneyNumber(incomeTotal)}
 					</span>
 					<span>
-						{income.length} transação{income.length > 1 ? "ões" : ""} — edite
-						pela planilha ou clique abaixo
+						{income.length} transaction{income.length > 1 ? "s" : ""} — edit
+						in the sheet or click below
 					</span>
 				</div>
 			)}
@@ -342,7 +342,7 @@ const TreemapBoard = ({
 					borderRadius: "var(--radius-md)",
 				}}
 			>
-				Sem despesas para os filtros atuais.
+				No expenses for the current filters.
 			</div>
 		);
 	}
@@ -499,7 +499,7 @@ const TxBoard = ({
 					borderRadius: "var(--radius-md)",
 				}}
 			>
-				Sem despesas para os filtros atuais.
+				No expenses for the current filters.
 			</div>
 		);
 	}
@@ -579,8 +579,8 @@ const TxBoard = ({
 				}}
 			>
 				<span>
-					{sorted.length} transaç{sorted.length === 1 ? "ão" : "ões"} · clique
-					para editar
+					{sorted.length} transaction{sorted.length === 1 ? "" : "s"} · click
+					to edit
 				</span>
 				<span style={{ fontWeight: 600 }}>{formatMoneyNumber(total)}</span>
 			</div>
@@ -611,7 +611,7 @@ const TxTile = ({
 	return (
 		<button
 			onClick={() => onEditTx(tx)}
-			title={`${label} · ${formatMoneyNumber(mag)}${marker} · editar`}
+			title={`${label} · ${formatMoneyNumber(mag)}${marker} · edit`}
 			style={{
 				position: "absolute",
 				left: `${rect.x}%`,
@@ -690,7 +690,7 @@ const RestRow = ({
 	return (
 		<button
 			onClick={() => onEditTx(tx)}
-			title="editar transação"
+			title="edit transaction"
 			style={{
 				position: "relative",
 				display: "flex",
@@ -735,7 +735,7 @@ const RestRow = ({
 						className="mono"
 						style={{ color: "var(--muted)", fontSize: 11, marginLeft: 8 }}
 					>
-						parcela {tx.installmentMarker}
+						installment {tx.installmentMarker}
 					</span>
 				) : null}
 			</span>

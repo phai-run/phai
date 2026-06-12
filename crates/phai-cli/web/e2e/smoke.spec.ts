@@ -86,10 +86,10 @@ test.describe("phai web — hierarchical category groups", () => {
 		// Look for category group containers (bordered divs with parent
 		// headers). The parent header is a button that toggles expand/collapse.
 		const groupButtons = page.locator(
-			"button:has(> span:first-child:has-text('▸')):not(:has-text('previsão'))",
+			"button:has(> span:first-child:has-text('▸')):not(:has-text('forecast'))",
 		);
 		const groupButtonsExpanded = page.locator(
-			"button:has(> span:first-child:has-text('▾')):not(:has-text('previsão'))",
+			"button:has(> span:first-child:has-text('▾')):not(:has-text('forecast'))",
 		);
 
 		// At least one expandable group should exist (either collapsed or
@@ -138,7 +138,7 @@ test.describe("phai web — hierarchical category groups", () => {
 		// Find an expanded group (▾ indicator).
 		const expandedBtn = page
 			.locator(
-				"button:has(> span:first-child:has-text('▾')):not(:has-text('previsão'))",
+				"button:has(> span:first-child:has-text('▾')):not(:has-text('forecast'))",
 			)
 			.first();
 
@@ -147,7 +147,7 @@ test.describe("phai web — hierarchical category groups", () => {
 			// No expanded groups — find a collapsed one and expand it.
 			const collapsedBtn = page
 				.locator(
-					"button:has(> span:first-child:has-text('▸')):not(:has-text('previsão'))",
+					"button:has(> span:first-child:has-text('▸')):not(:has-text('forecast'))",
 				)
 				.first();
 			const collapsedCount = await collapsedBtn.count();
