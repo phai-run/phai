@@ -80,9 +80,34 @@ phai sync pluggy --pluggy-config pluggy-config.json
 phai report daily-pulse
 phai report monthly-spend
 phai report card-summary
+
+# Or open the interactive web app
+phai serve
 ```
 
 See [BigQuery setup](#bigquery-setup) below for the multi-device backend.
+
+## The web app
+
+`phai serve` opens a local-only web app (no cloud, no accounts — the browser talks to your own binary). One screen, three ways to look at a month, all editable in place. *Screenshots below run on a synthetic demo dataset.*
+
+The headline: cash balance, income vs expenses vs net for the selected month, and a 12-month chart mixing what happened with what's forecast — installment chains, recurring bills and budget envelopes included:
+
+![Dashboard — cash balance and 12-month chart](docs/screenshots/dashboard.png)
+
+**Sheet** — every transaction as one flat row: sort any column, edit category inline (or open the full edit modal), shift/cmd multi-select with bulk apply, live totals for the current filter. Spreadsheet ergonomics without the spreadsheet:
+
+![Sheet mode — flat editable transaction grid](docs/screenshots/sheet.png)
+
+**Categories** — a drillable treemap of the month's expenses: click a category to open its subcategories, click a subcategory to see the individual transactions, click one to edit it:
+
+![Categories mode — drillable expense treemap](docs/screenshots/categories.png)
+
+**Planning** — per category: budget envelope vs spent vs 3-month average vs projection, with a goal slider per subcategory. Drag to simulate cuts (the annual chart updates live), confirm to persist the goals as monthly budget envelopes — visible to `phai forecast list` and any agent on top:
+
+![Planning mode — budgets, goals and the cut simulator](docs/screenshots/planning.png)
+
+Everything runs client-side on [LiveStore](https://livestore.dev) seeded from the local bridge; writes flush back through the binary with a full audit trail. No Node on your machine — the web app is embedded in the binary at build time ([ADR-0001](docs/adr/0001-single-binary-rust-cli.md)).
 
 ## Why phai
 
@@ -151,7 +176,6 @@ phai forecast scenario       What-if: project balance with a hypothetical recurr
 phai rule upsert/list/inspect Classification rule management
 phai account upsert          Create or update an account
 phai budget upsert/list      Category budget management
-phai serve [--port 8080]  Local web dashboard for forecast review (WebSocket API)
 phai self check              Check for available updates
 phai self update             Force-update to the latest release
 ```
