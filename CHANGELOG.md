@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.9.0](https://github.com/phai-run/phai/compare/v5.8.0...v5.9.0) (2026-06-12)
+
+
+### Features
+
+* **cli:** MCP server — read-only reports over stdio (phai mcp) ([#146](https://github.com/phai-run/phai/issues/146)) ([f3280ef](https://github.com/phai-run/phai/commit/f3280efdf17ff4f2d32aa188bf6577e12d3e2b36))
+* **cli:** phai serve install — launchd agent + Phai.app launcher (macOS) ([#147](https://github.com/phai-run/phai/issues/147)) ([0ef4ee2](https://github.com/phai-run/phai/commit/0ef4ee2283fa913176a2e663d2800cf504198f74))
+* **web:** English UI ([#142](https://github.com/phai-run/phai/issues/142)) ([798143d](https://github.com/phai-run/phai/commit/798143dec7ea2caaca04a82fa992ceb237a2f1e1))
+
 ## [5.8.0](https://github.com/phai-run/phai/compare/v5.7.0...v5.8.0) (2026-06-11)
 
 
