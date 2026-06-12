@@ -241,7 +241,7 @@ async fn retry_via_completion_openai(
 /// trailing whitespace).
 fn parse_json_lenient(text: &str) -> Result<EnrichmentResult> {
     if let Ok(parsed) = serde_json::from_str::<EnrichmentResult>(text) {
-        return Ok(parsed);
+        return parsed.validate_llm_output();
     }
     let start = text.find('{').context("nenhum '{' na resposta do LLM")?;
     let end = text.rfind('}').context("nenhum '}' na resposta do LLM")?;
@@ -250,7 +250,8 @@ fn parse_json_lenient(text: &str) -> Result<EnrichmentResult> {
     }
     let candidate = &text[start..=end];
     serde_json::from_str::<EnrichmentResult>(candidate)
-        .with_context(|| format!("falha ao parsear JSON extraído: {candidate}"))
+        .with_context(|| format!("falha ao parsear JSON extraído: {candidate}"))?
+        .validate_llm_output()
 }
 
 #[cfg(test)]
@@ -483,5 +484,19 @@ mod tests {
         assert!(parsed.needs_user_input);
         assert!(parsed.user_prompt.is_some());
         assert!(parsed.confidence < 0.60);
+    }
+
+    #[test]
+    fn test_parse_json_lenient_rejects_unknown_category() {
+        let raw = r#"{
+            "reasoning": "x",
+            "merchant_name": "Coin Shop",
+            "category": "cripto",
+            "subcategory": "memecoin",
+            "confidence": 0.99,
+            "needs_user_input": false,
+            "user_prompt": null
+        }"#;
+        assert!(parse_json_lenient(raw).is_err());
     }
 }

@@ -2,6 +2,7 @@ use crate::idempotency::category_id;
 use crate::models::decimal_from_str;
 use crate::models::RuleRecord;
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc};
 use deunicode::deunicode;
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -14,6 +15,8 @@ pub struct CompiledRule {
     pub amount_sign: Option<AmountSign>,
     matcher: RuleMatcher,
     amount_match: Option<Decimal>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +57,8 @@ pub fn compile_rules(rows: &[RuleRecord]) -> Result<Vec<CompiledRule>> {
             .then_with(|| right.has_amount_match().cmp(&left.has_amount_match()))
             .then_with(|| right.matcher_rank().cmp(&left.matcher_rank()))
             .then_with(|| right.matcher_len().cmp(&left.matcher_len()))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.created_at.cmp(&left.created_at))
             .then_with(|| left.rule_id.cmp(&right.rule_id))
     });
     Ok(compiled)
@@ -148,7 +153,7 @@ impl CompiledRule {
         match &self.matcher {
             RuleMatcher::ContainsAny(needles) => needles
                 .iter()
-                .any(|needle| normalized_description.contains(needle)),
+                .any(|needle| contains_bounded(normalized_description, needle)),
             RuleMatcher::Exact(needle) => normalized_description == needle,
             RuleMatcher::TransactionIdExact(needle) => {
                 normalized_transaction_id.is_some_and(|transaction_id| transaction_id == needle)
@@ -215,6 +220,7 @@ fn parse_dsl_rule(row: &RuleRecord) -> Result<Option<CompiledRule>> {
         )
     })?;
     build_contains_rule(
+        row,
         &row.rule_id,
         vec![strip_wrapping_quotes(needle).to_string()],
         normalize_category_target(target)?,
@@ -229,17 +235,18 @@ fn parse_json_rule(row: &RuleRecord) -> Result<Option<CompiledRule>> {
     let value: Value = serde_json::from_str(&row.body)
         .with_context(|| format!("Rule {} contém JSON inválido", row.rule_id))?;
 
-    if let Some(rule) = parse_legacy_context_rule(&row.rule_id, &value)? {
+    if let Some(rule) = parse_legacy_context_rule(row, &value)? {
         return Ok(Some(rule));
     }
-    if let Some(rule) = parse_legacy_yaml_rule(&row.rule_id, &value)? {
+    if let Some(rule) = parse_legacy_yaml_rule(row, &value)? {
         return Ok(Some(rule));
     }
 
     Ok(None)
 }
 
-fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<CompiledRule>> {
+fn parse_legacy_context_rule(row: &RuleRecord, value: &Value) -> Result<Option<CompiledRule>> {
+    let rule_id = row.rule_id.as_str();
     let match_type = value
         .get("match_type")
         .and_then(Value::as_str)
@@ -282,7 +289,9 @@ fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<Comp
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .and_then(|value| decimal_from_str(value).ok());
+        .map(decimal_from_str)
+        .transpose()
+        .with_context(|| format!("Rule {rule_id} contém valor_match inválido"))?;
     let context = value
         .get("finalidade")
         .and_then(Value::as_str)
@@ -294,6 +303,7 @@ fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<Comp
     let category_id = category_id(category, subcategory);
     let rule = match match_type {
         "descricao_exata" | "description_exact" => build_exact_rule(
+            row,
             rule_id,
             normalize_text(needle),
             category_id,
@@ -302,6 +312,7 @@ fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<Comp
             amount_sign,
         )?,
         "pluggy_id" => build_transaction_id_rule(
+            row,
             rule_id,
             normalize_identifier(needle),
             category_id,
@@ -309,6 +320,7 @@ fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<Comp
             amount_sign,
         )?,
         _ => build_contains_rule(
+            row,
             rule_id,
             vec![normalize_text(needle)],
             category_id,
@@ -321,7 +333,8 @@ fn parse_legacy_context_rule(rule_id: &str, value: &Value) -> Result<Option<Comp
     Ok(Some(rule))
 }
 
-fn parse_legacy_yaml_rule(rule_id: &str, value: &Value) -> Result<Option<CompiledRule>> {
+fn parse_legacy_yaml_rule(row: &RuleRecord, value: &Value) -> Result<Option<CompiledRule>> {
+    let rule_id = row.rule_id.as_str();
     let contains_any = value
         .get("match")
         .and_then(|matcher| matcher.get("contains_any"))
@@ -361,6 +374,7 @@ fn parse_legacy_yaml_rule(rule_id: &str, value: &Value) -> Result<Option<Compile
     )?;
 
     build_contains_rule(
+        row,
         rule_id,
         needles,
         category_id(category, subcategory),
@@ -372,6 +386,7 @@ fn parse_legacy_yaml_rule(rule_id: &str, value: &Value) -> Result<Option<Compile
 }
 
 fn build_contains_rule(
+    row: &RuleRecord,
     rule_id: &str,
     needles: Vec<String>,
     category_id: String,
@@ -397,10 +412,13 @@ fn build_contains_rule(
         amount_sign,
         matcher: RuleMatcher::ContainsAny(needles),
         amount_match,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     })
 }
 
 fn build_exact_rule(
+    row: &RuleRecord,
     rule_id: &str,
     needle: String,
     category_id: String,
@@ -422,10 +440,13 @@ fn build_exact_rule(
         amount_sign,
         matcher: RuleMatcher::Exact(needle),
         amount_match,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     })
 }
 
 fn build_transaction_id_rule(
+    row: &RuleRecord,
     rule_id: &str,
     transaction_id: String,
     category_id: String,
@@ -445,6 +466,8 @@ fn build_transaction_id_rule(
         amount_sign,
         matcher: RuleMatcher::TransactionIdExact(transaction_id),
         amount_match: None,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     })
 }
 
@@ -495,6 +518,24 @@ fn normalize_identifier(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
+fn contains_bounded(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    haystack.match_indices(needle).any(|(start, _)| {
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        before_ok && after_ok
+    })
+}
+
 fn amounts_match(actual: Decimal, expected: Decimal) -> bool {
     actual.abs().round_dp(2) == expected.abs().round_dp(2)
 }
@@ -502,17 +543,25 @@ fn amounts_match(actual: Decimal, expected: Decimal) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
 
     fn rule(rule_id: &str, body: &str) -> RuleRecord {
+        rule_at(
+            rule_id,
+            body,
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        )
+    }
+
+    fn rule_at(rule_id: &str, body: &str, updated_at: DateTime<Utc>) -> RuleRecord {
         RuleRecord {
             rule_id: rule_id.to_string(),
             body: body.to_string(),
             status: "active".to_string(),
             actor_id: "test-actor".to_string(),
             idempotency_key: format!("rule:{rule_id}"),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: updated_at,
+            updated_at,
         }
     }
 
@@ -587,6 +636,41 @@ mod tests {
         let (category_id, source) = apply_rules("Farmacia Central", None, false, &compiled);
         assert_eq!(category_id.as_deref(), Some("saude:farmacia"));
         assert_eq!(source, "rule");
+    }
+
+    #[test]
+    fn newer_rule_wins_equal_specificity() {
+        let old = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let new = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
+        let compiled = compile_rules(&[
+            rule_at(
+                "a_old",
+                "if description contains farmacia then category saude:farmacia",
+                old,
+            ),
+            rule_at(
+                "z_new",
+                "if description contains farmacia then category saude:consulta",
+                new,
+            ),
+        ])
+        .unwrap();
+
+        let (category_id, _) = apply_rules("Farmacia Central", None, false, &compiled);
+        assert_eq!(category_id.as_deref(), Some("saude:consulta"));
+    }
+
+    #[test]
+    fn contains_rule_does_not_match_inside_word() {
+        let compiled = compile_rules(&[rule(
+            "uber_rule",
+            "if description contains uber then category transporte:taxi-app",
+        )])
+        .unwrap();
+
+        let (category_id, source) = apply_rules("SUPERMERCADO UBERLANDIA", None, false, &compiled);
+        assert_eq!(category_id, None);
+        assert_eq!(source, "unclassified");
     }
 
     #[test]

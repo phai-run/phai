@@ -28,15 +28,15 @@ pub fn map_pluggy_category(cat: &str) -> CategoryHint {
         // ── transporte ────────────────────────────────────────────────
         "Gas stations" => hint("transporte", Some("combustivel"), 0.15),
         "Transportation" => hint("transporte", None, 0.05),
-        "Ride-sharing" => hint("transporte", Some("aplicativo"), 0.12),
-        "Public transportation" => hint("transporte", Some("publico"), 0.10),
+        "Ride-sharing" => hint("transporte", Some("taxi-app"), 0.12),
+        "Public transportation" => hint("transporte", Some("transporte-publico"), 0.10),
 
         // ── educação ──────────────────────────────────────────────────
         "Education" => hint("educacao", None, 0.08),
 
         // ── lazer / entretenimento ────────────────────────────────────
         "Entertainment" => hint("lazer", None, 0.05),
-        "Sports and fitness" => hint("saude", Some("fitness"), 0.08),
+        "Sports and fitness" => hint("pessoal", Some("cuidado-fisico"), 0.08),
         "Travel" => hint("lazer", Some("viagem"), 0.10),
 
         // ── moradia / utilities ───────────────────────────────────────
@@ -116,5 +116,20 @@ mod tests {
         let h = map_pluggy_category("Education");
         assert_eq!(h.category, Some("educacao"));
         assert!(h.subcategory.is_none());
+    }
+
+    #[test]
+    fn test_pluggy_map_uses_llm_taxonomy_subcategories() {
+        let ride = map_pluggy_category("Ride-sharing");
+        assert_eq!(ride.category, Some("transporte"));
+        assert_eq!(ride.subcategory, Some("taxi-app"));
+
+        let public = map_pluggy_category("Public transportation");
+        assert_eq!(public.category, Some("transporte"));
+        assert_eq!(public.subcategory, Some("transporte-publico"));
+
+        let fitness = map_pluggy_category("Sports and fitness");
+        assert_eq!(fitness.category, Some("pessoal"));
+        assert_eq!(fitness.subcategory, Some("cuidado-fisico"));
     }
 }

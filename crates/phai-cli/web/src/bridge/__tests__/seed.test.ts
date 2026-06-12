@@ -232,6 +232,219 @@ describe("Review write persistence (web C5)", () => {
 	});
 });
 
+describe("Pending write failures", () => {
+	let store: Awaited<ReturnType<typeof createStorePromise>>;
+
+	beforeAll(async () => {
+		store = await createStorePromise({
+			schema,
+			storeId: "pending-failures-test",
+			adapter: makeInMemoryAdapter(),
+			debug: { instanceId: "pending-failures-test" },
+		});
+	});
+
+	afterAll(() => {
+		store?.sqliteDbWrapper?.close?.();
+	});
+
+	it("records failed attempts without removing the queued write", () => {
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "wf1",
+				transactionId: "tx-fail",
+				patch: {
+					description: "edit",
+					merchantName: null,
+					purpose: null,
+					categoryId: "food",
+				},
+				submittedAt: 1,
+			}),
+		);
+		store.commit(
+			events.writeFailed({
+				writeId: "wf1",
+				error: "503 Service Unavailable",
+				attempts: 1,
+			}),
+		);
+
+		const pending = store.query(
+			tables.pendingWrites.select().where({ writeId: "wf1" }),
+		);
+		expect(pending.length).toBe(1);
+		expect(pending[0].attempts).toBe(1);
+		expect(pending[0].lastError).toBe("503 Service Unavailable");
+		expect(
+			store.query(tables.reviewOverlay.select().where({ transactionId: "tx-fail" }))
+				.length,
+		).toBe(1);
+	});
+
+	it("abandons terminal review failures and rolls back their overlay", () => {
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "wa-review",
+				transactionId: "tx-abandon",
+				patch: {
+					description: null,
+					merchantName: null,
+					purpose: null,
+					categoryId: "old",
+				},
+				submittedAt: 2,
+			}),
+		);
+		store.commit(
+			events.writeAbandoned({
+				writeId: "wa-review",
+				type: "review",
+				transactionId: "tx-abandon",
+				forecastId: "",
+				error: "max retries exceeded",
+			}),
+		);
+
+		expect(
+			store.query(tables.pendingWrites.select().where({ writeId: "wa-review" }))
+				.length,
+		).toBe(0);
+		expect(
+			store.query(
+				tables.reviewOverlay.select().where({ transactionId: "tx-abandon" }),
+			).length,
+		).toBe(0);
+	});
+
+	it("does not roll back a newer review overlay for the same transaction", () => {
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "wa-old",
+				transactionId: "tx-race",
+				patch: {
+					description: null,
+					merchantName: null,
+					purpose: null,
+					categoryId: "old",
+				},
+				submittedAt: 5,
+			}),
+		);
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "wa-new",
+				transactionId: "tx-race",
+				patch: {
+					description: null,
+					merchantName: null,
+					purpose: null,
+					categoryId: "new",
+				},
+				submittedAt: 6,
+			}),
+		);
+		store.commit(
+			events.writeAbandoned({
+				writeId: "wa-old",
+				type: "review",
+				transactionId: "tx-race",
+				forecastId: "",
+				error: "max retries exceeded",
+			}),
+		);
+
+		const overlay = store.query(
+			tables.reviewOverlay.select().where({ transactionId: "tx-race" }),
+		);
+		expect(overlay.length).toBe(1);
+		expect(overlay[0].writeId).toBe("wa-new");
+		expect(overlay[0].categoryId).toBe("new");
+	});
+
+	it("abandons terminal forecast failures and rolls back optimistic state", () => {
+		store.commit(
+			events.forecastMoved({
+				writeId: "wa-move",
+				forecastId: "fc-move",
+				dueDate: "2026-08-10",
+				movedAt: 3,
+			}),
+		);
+		store.commit(
+			events.writeAbandoned({
+				writeId: "wa-move",
+				type: "forecastMove",
+				transactionId: "",
+				forecastId: "fc-move",
+				error: "max retries exceeded",
+			}),
+		);
+		expect(
+			store.query(tables.forecastOverlay.select().where({ forecastId: "fc-move" }))
+				.length,
+		).toBe(0);
+
+		store.commit(
+			events.forecastCreated({
+				writeId: "wa-create",
+				description: "manual forecast",
+				amount: "-10.00",
+				dueDate: "2026-08-01",
+				createdAt: 4,
+			}),
+		);
+		store.commit(
+			events.writeAbandoned({
+				writeId: "wa-create",
+				type: "forecastCreate",
+				transactionId: "",
+				forecastId: "",
+				error: "max retries exceeded",
+			}),
+		);
+		expect(
+			store.query(tables.forecasts.select().where({ forecastId: "wa-create" }))
+				.length,
+		).toBe(0);
+	});
+
+	it("does not roll back a newer forecast move overlay for the same forecast", () => {
+		store.commit(
+			events.forecastMoved({
+				writeId: "move-old",
+				forecastId: "fc-race",
+				dueDate: "2026-08-10",
+				movedAt: 7,
+			}),
+		);
+		store.commit(
+			events.forecastMoved({
+				writeId: "move-new",
+				forecastId: "fc-race",
+				dueDate: "2026-09-10",
+				movedAt: 8,
+			}),
+		);
+		store.commit(
+			events.writeAbandoned({
+				writeId: "move-old",
+				type: "forecastMove",
+				transactionId: "",
+				forecastId: "fc-race",
+				error: "max retries exceeded",
+			}),
+		);
+
+		const overlay = store.query(
+			tables.forecastOverlay.select().where({ forecastId: "fc-race" }),
+		);
+		expect(overlay.length).toBe(1);
+		expect(overlay[0].writeId).toBe("move-new");
+		expect(overlay[0].dueDate).toBe("2026-09-10");
+	});
+});
+
 describe("Envelope goal writes (war plan)", () => {
 	let store: Awaited<ReturnType<typeof createStorePromise>>;
 

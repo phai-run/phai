@@ -108,17 +108,68 @@ pub fn pluggy_transaction_idempotency(transaction_id: &str) -> String {
     format!("pluggy:{transaction_id}")
 }
 
+pub fn pluggy_transaction_fingerprint(
+    account_id: Option<&str>,
+    transaction_date: NaiveDate,
+    amount: Decimal,
+    raw_description: &str,
+) -> Result<String> {
+    let amount_cents = decimal_cents_part(amount, "amount da transação Pluggy")?;
+    let description = raw_description
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    Ok(hash_key(&[
+        optional_str_part(account_id),
+        &transaction_date.format("%Y-%m-%d").to_string(),
+        &amount_cents,
+        &description,
+    ]))
+}
+
+pub fn pluggy_transaction_natural_idempotency(row: &TransactionRecord) -> Result<String> {
+    let fingerprint = pluggy_transaction_fingerprint(
+        row.account_id.as_deref(),
+        row.transaction_date,
+        row.amount,
+        &row.raw_description,
+    )?;
+    Ok(format!("pluggy-fp:{}", &fingerprint[..16]))
+}
+
 pub fn manual_transaction_idempotency(actor_id: &str) -> String {
     format!("manual:{actor_id}:{}", Uuid::now_v7())
 }
 
-pub fn forecast_idempotency(actor_id: &str, description: &str, date: NaiveDate) -> String {
-    let description_hash = hash_key(&[&slugify(description)]);
-    format!(
-        "forecast:{actor_id}:{}:{}",
-        &description_hash[..16],
-        date.format("%Y-%m-%d")
-    )
+pub struct ForecastIdempotencyParts<'a> {
+    pub actor_id: &'a str,
+    pub description: &'a str,
+    pub date: NaiveDate,
+    pub amount: Decimal,
+    pub account_id: Option<&'a str>,
+    pub category_id: Option<&'a str>,
+    pub recurrence: Option<&'a str>,
+    pub template_id: Option<&'a str>,
+}
+
+pub fn forecast_idempotency(parts: ForecastIdempotencyParts<'_>) -> Result<String> {
+    let actor_id = parts.actor_id;
+    let amount_cents = decimal_cents_part(parts.amount, "amount do forecast")?;
+    let date_text = parts.date.format("%Y-%m-%d").to_string();
+    let parts = [
+        actor_id.to_string(),
+        slugify(parts.description),
+        date_text,
+        amount_cents,
+        optional_str_part(parts.account_id).to_string(),
+        optional_str_part(parts.category_id).to_string(),
+        optional_str_part(parts.recurrence).to_string(),
+        optional_str_part(parts.template_id).to_string(),
+    ];
+    let part_refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    let fingerprint = hash_key(&part_refs);
+    Ok(format!("forecast:{actor_id}:{}", &fingerprint[..16]))
 }
 
 pub fn rule_idempotency(slug: &str) -> String {
@@ -153,11 +204,16 @@ pub fn ensure_rule_idempotency(row: &mut RuleRecord) {
 
 pub fn ensure_forecast_idempotency(row: &mut ForecastRecord) -> Result<()> {
     if row.idempotency_key.trim().is_empty() {
-        row.idempotency_key = forecast_idempotency(
-            &row.actor_id,
-            &row.description,
-            row.due_date.context("due_date ausente para forecast")?,
-        );
+        row.idempotency_key = forecast_idempotency(ForecastIdempotencyParts {
+            actor_id: &row.actor_id,
+            description: &row.description,
+            date: row.due_date.context("due_date ausente para forecast")?,
+            amount: row.amount,
+            account_id: row.account_id.as_deref(),
+            category_id: row.category_id.as_deref(),
+            recurrence: row.recurrence.as_deref(),
+            template_id: row.template_id.as_deref(),
+        })?;
     }
     Ok(())
 }
@@ -184,11 +240,75 @@ mod tests {
     }
 
     #[test]
+    fn pluggy_fingerprint_is_stable_across_external_id_changes() {
+        let date = NaiveDate::from_ymd_opt(2026, 5, 3).unwrap();
+        let key_a = pluggy_transaction_fingerprint(
+            Some("card"),
+            date,
+            Decimal::new(-10000, 2),
+            " Loja  A ",
+        )
+        .unwrap();
+        let key_b =
+            pluggy_transaction_fingerprint(Some("card"), date, Decimal::new(-10000, 2), "loja a")
+                .unwrap();
+        assert_eq!(key_a, key_b);
+    }
+
+    #[test]
     fn forecast_key_is_deterministic() {
         let date = NaiveDate::from_ymd_opt(2026, 3, 27).unwrap();
-        let key_a = forecast_idempotency("test-actor", "Consulta recorrente", date);
-        let key_b = forecast_idempotency("test-actor", "Consulta recorrente", date);
+        let key_a = forecast_idempotency(ForecastIdempotencyParts {
+            actor_id: "test-actor",
+            description: "Consulta recorrente",
+            date,
+            amount: Decimal::new(-10000, 2),
+            account_id: Some("checking"),
+            category_id: Some("saude"),
+            recurrence: Some("monthly"),
+            template_id: None,
+        })
+        .unwrap();
+        let key_b = forecast_idempotency(ForecastIdempotencyParts {
+            actor_id: "test-actor",
+            description: "Consulta recorrente",
+            date,
+            amount: Decimal::new(-10000, 2),
+            account_id: Some("checking"),
+            category_id: Some("saude"),
+            recurrence: Some("monthly"),
+            template_id: None,
+        })
+        .unwrap();
         assert_eq!(key_a, key_b);
+    }
+
+    #[test]
+    fn forecast_key_changes_when_amount_or_account_changes() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 27).unwrap();
+        let key_a = forecast_idempotency(ForecastIdempotencyParts {
+            actor_id: "test-actor",
+            description: "Internet",
+            date,
+            amount: Decimal::new(-10000, 2),
+            account_id: Some("account-a"),
+            category_id: None,
+            recurrence: None,
+            template_id: None,
+        })
+        .unwrap();
+        let key_b = forecast_idempotency(ForecastIdempotencyParts {
+            actor_id: "test-actor",
+            description: "Internet",
+            date,
+            amount: Decimal::new(-15000, 2),
+            account_id: Some("account-b"),
+            category_id: None,
+            recurrence: None,
+            template_id: None,
+        })
+        .unwrap();
+        assert_ne!(key_a, key_b);
     }
 
     #[test]

@@ -34,6 +34,7 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, Timelike};
 use moka::future::Cache;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -150,10 +151,21 @@ impl EnrichmentPipeline {
         exclude_id: &str,
         threshold_percent: u8,
     ) -> Result<Vec<(TransactionRecord, u32)>> {
-        let candidates = store
-            .similar_transactions(keyword, exclude_id, true)
-            .await
-            .context("similar_transactions falhou no find_retroactive_matches")?;
+        let mut candidates = Vec::new();
+        let mut seen = BTreeSet::new();
+        for term in retroactive_prefilter_keywords(keyword) {
+            let rows = store
+                .similar_transactions(&term, exclude_id, true)
+                .await
+                .with_context(|| {
+                    format!("similar_transactions falhou no find_retroactive_matches ({term})")
+                })?;
+            for row in rows {
+                if seen.insert(row.transaction_id.clone()) {
+                    candidates.push(row);
+                }
+            }
+        }
         Ok(fuzzy_filter(keyword, candidates, threshold_percent))
     }
 
@@ -398,6 +410,23 @@ fn split_category_id(category_id: Option<&str>) -> (String, String) {
     }
 }
 
+fn retroactive_prefilter_keywords(keyword: &str) -> Vec<String> {
+    let normalized = keyword.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let mut terms = vec![normalized.clone()];
+    let prefix = normalized
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(3)
+        .collect::<String>();
+    if prefix.len() == 3 && prefix != normalized {
+        terms.push(prefix);
+    }
+    terms
+}
+
 /// Best-effort hour extraction from transaction metadata (ISO 8601).
 ///
 /// Priority: `creditCardMetadata.purchaseDate` (most precise — actual
@@ -446,7 +475,7 @@ mod tests {
     use chrono::NaiveDate;
     use rust_decimal::Decimal;
     use serde_json::json;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Mutex;
 
     type AnnotateCall = (String, Option<String>, Option<String>);
@@ -456,6 +485,7 @@ mod tests {
     struct MockStore {
         pub on_date: Vec<ContextTx>,
         pub similar: Vec<TransactionRecord>,
+        pub similar_by_keyword: BTreeMap<String, Vec<TransactionRecord>>,
         pub mark_attempted_calls: Mutex<Vec<String>>,
         pub annotated: Mutex<Vec<AnnotateCall>>,
     }
@@ -752,10 +782,13 @@ mod tests {
         }
         async fn similar_transactions(
             &self,
-            _: &str,
+            keyword: &str,
             _: &str,
             _: bool,
         ) -> Result<Vec<TransactionRecord>> {
+            if let Some(rows) = self.similar_by_keyword.get(keyword) {
+                return Ok(rows.clone());
+            }
             Ok(self.similar.clone())
         }
         async fn find_anatomy_donors(&self, _: &str, _: &str) -> Result<Vec<TransactionRecord>> {
@@ -1055,6 +1088,33 @@ mod tests {
             assert!(w[0].1 >= w[1].1);
         }
         assert_eq!(matches[0].0.transaction_id, "near");
+    }
+
+    #[tokio::test]
+    async fn test_find_retroactive_matches_uses_prefix_prefilter_for_typos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipeline = build_pipeline(&tmp);
+        let mut similar_by_keyword = BTreeMap::new();
+        similar_by_keyword.insert("sapiens".to_string(), vec![]);
+        similar_by_keyword.insert(
+            "sap".to_string(),
+            vec![tx_record(
+                "typo",
+                "SAPIENZ PARQUE RESTAURANTE",
+                -1000,
+                "unclassified",
+            )],
+        );
+        let store = MockStore {
+            similar_by_keyword,
+            ..MockStore::default()
+        };
+        let matches = pipeline
+            .find_retroactive_matches(&store, "sapiens", "current", 40)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0.transaction_id, "typo");
     }
 
     #[test]

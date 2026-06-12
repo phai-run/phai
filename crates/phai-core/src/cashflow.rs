@@ -25,7 +25,7 @@ pub fn cash_month_for(
     closing_day: Option<u32>,
     due_day: Option<u32>,
 ) -> String {
-    let Some(closing) = closing_day.filter(|_| is_credit) else {
+    let Some(closing) = closing_day.filter(|day| is_credit && (1..=31).contains(day)) else {
         return format!("{:04}-{:02}", date.year(), date.month());
     };
     // A charge on or after the closing day belongs to the cycle that closes
@@ -33,7 +33,7 @@ pub fn cash_month_for(
     // of the new cycle (Nubank's OFX DTSTART = closing day is inclusive). A due
     // day that precedes the closing day rolls payment one more month.
     let mut offset: i32 = if date.day() >= closing { 1 } else { 0 };
-    if let Some(due) = due_day {
+    if let Some(due) = due_day.filter(|day| (1..=31).contains(day)) {
         if due < closing {
             offset += 1;
         }
@@ -110,6 +110,22 @@ mod tests {
         assert_eq!(
             cash_month_for(d(2026, 12, 28), true, Some(3), Some(10)),
             "2027-01"
+        );
+    }
+
+    #[test]
+    fn invalid_billing_days_do_not_shift_cash_month() {
+        assert_eq!(
+            cash_month_for(d(2026, 4, 10), true, Some(0), Some(10)),
+            "2026-04"
+        );
+        assert_eq!(
+            cash_month_for(d(2026, 4, 10), true, Some(32), Some(10)),
+            "2026-04"
+        );
+        assert_eq!(
+            cash_month_for(d(2026, 4, 10), true, Some(25), Some(0)),
+            "2026-04"
         );
     }
 }

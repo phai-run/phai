@@ -14,7 +14,7 @@ import {
 } from "./api";
 
 const MAX_RETRIES = 10;
-const pendingWrites$ = queryDb(tables.pendingWrites);
+const pendingWrites$ = queryDb(tables.pendingWrites.orderBy("createdAt", "asc"));
 const BRIDGE_IDENTITY_STORAGE_KEY = "phai.bridgeIdentity";
 const UNKNOWN_VERSION = "unknown";
 
@@ -75,13 +75,11 @@ const writeStoredBridgeIdentity = (identity: BridgeIdentity) => {
 	}
 };
 
-const shouldClearLocalWrites = (
+export const shouldClearLocalWrites = (
 	previousIdentity: string | null,
 	nextIdentity: string,
-	queuedWriteCount: number,
-): boolean =>
-	(previousIdentity !== null && previousIdentity !== nextIdentity) ||
-	(previousIdentity === null && queuedWriteCount > 0);
+	_queuedWriteCount: number,
+): boolean => previousIdentity !== null && previousIdentity !== nextIdentity;
 
 const clearStaleLocalWrites = (store: StoreApi, identity: BridgeIdentity) => {
 	const previous = readStoredBridgeIdentity();
@@ -122,6 +120,13 @@ export const useBridgeSync = (): SyncStatus => {
 		timer: null as ReturnType<typeof setTimeout> | null,
 	});
 	const scheduleFlushRef = useRef<(() => void) | null>(null);
+
+	const clearBackoffTimer = () => {
+		if (backoffRef.current.timer) {
+			clearTimeout(backoffRef.current.timer);
+			backoffRef.current.timer = null;
+		}
+	};
 
 	// 1. Seed reference data once (re-runs when retry() bumps bootNonce after a
 	// failed bootstrap).
@@ -184,8 +189,10 @@ export const useBridgeSync = (): SyncStatus => {
 		};
 
 		const scheduleFlush = () => {
+			clearBackoffTimer();
 			const delay = Math.min(1000 * 2 ** backoffRef.current.failures, 30000);
 			backoffRef.current.timer = setTimeout(() => {
+				backoffRef.current.timer = null;
 				void flush();
 			}, delay);
 		};
@@ -198,7 +205,7 @@ export const useBridgeSync = (): SyncStatus => {
 		scheduleFlush();
 		return () => {
 			sub();
-			if (backoffRef.current.timer) clearTimeout(backoffRef.current.timer);
+			clearBackoffTimer();
 		};
 	}, [store, identityReady]);
 
@@ -211,9 +218,12 @@ export const useBridgeSync = (): SyncStatus => {
 			return;
 		}
 		backoffRef.current.failures = 0;
-		if (backoffRef.current.timer) clearTimeout(backoffRef.current.timer);
+		clearBackoffTimer();
+		if (flushing.current) {
+			scheduleFlushRef.current?.();
+			return;
+		}
 		void (async () => {
-			flushing.current = false;
 			const rows = store.query(pendingWrites$) as ReadonlyArray<PendingRow>;
 			if (rows.length > 0) {
 				try {
@@ -250,22 +260,24 @@ const drainQueue = async (
 		}));
 		try {
 			const res = await api.flushReviews(items);
-			store.commit(
-				...res.acked.map((writeId) => events.writeAcked({ writeId })),
-			);
-			store.commit(
-				...res.failed.map((f) =>
-					events.writeFailed({ writeId: f.writeId, error: f.error }),
-				),
-			);
+			if (res.acked.length > 0) {
+				store.commit(
+					...res.acked.map((writeId) => events.writeAcked({ writeId })),
+				);
+			}
+			const failedEvents = res.failed.map((f) => {
+				const row = reviews.find((r) => r.writeId === f.writeId);
+				return retryOrAbandonEvent(row, f.writeId, f.error);
+			});
+			if (failedEvents.length > 0) {
+				store.commit(...failedEvents);
+			}
 			for (const f of res.failed) errors.push(f.error);
 		} catch (e: unknown) {
 			// Whole batch failed (network) — mark each so the chip surfaces it.
 			const msg = String(e);
 			store.commit(
-				...reviews.map((r) =>
-					events.writeFailed({ writeId: r.writeId, error: msg }),
-				),
+				...reviews.map((r) => retryOrAbandonEvent(r, r.writeId, msg)),
 			);
 			errors.push(msg);
 		}
@@ -305,7 +317,13 @@ const flushOne = async (
 ): Promise<void> => {
 	if (row.attempts >= MAX_RETRIES) {
 		store.commit(
-			events.writeFailed({ writeId: row.writeId, error: "max retries exceeded" }),
+			events.writeAbandoned({
+				writeId: row.writeId,
+				type: row.type,
+				transactionId: row.transactionId,
+				forecastId: row.forecastId,
+				error: "max retries exceeded",
+			}),
 		);
 		errors.push("max retries exceeded");
 		return;
@@ -315,9 +333,27 @@ const flushOne = async (
 		store.commit(events.writeAcked({ writeId: row.writeId }));
 	} catch (e: unknown) {
 		const msg = String(e);
-		store.commit(events.writeFailed({ writeId: row.writeId, error: msg }));
+		store.commit(retryOrAbandonEvent(row, row.writeId, msg));
 		errors.push(msg);
 	}
+};
+
+const retryOrAbandonEvent = (
+	row: PendingRow | undefined,
+	writeId: string,
+	error: string,
+) => {
+	const attempts = (row?.attempts ?? 0) + 1;
+	if (attempts >= MAX_RETRIES) {
+		return events.writeAbandoned({
+			writeId,
+			type: row?.type ?? "",
+			transactionId: row?.transactionId ?? "",
+			forecastId: row?.forecastId ?? "",
+			error,
+		});
+	}
+	return events.writeFailed({ writeId, error, attempts });
 };
 
 export interface SeedState {
@@ -422,7 +458,7 @@ export const shouldSkipSeed = (args: {
  * freshness after a store-version bump wipes the OPFS cache.
  */
 const useSeed = (
-	fetcher: () => Promise<void>,
+	fetcher: (isCurrent: () => boolean) => Promise<void>,
 	deps: ReadonlyArray<unknown>,
 	cacheKey?: string,
 	isMissingData?: () => boolean,
@@ -438,6 +474,7 @@ const useSeed = (
 
 	useEffect(() => {
 		let cancelled = false;
+		const isCurrent = () => !cancelled;
 		const run = async () => {
 			if (cacheKey) {
 				const version = await getBridgeVersion();
@@ -457,7 +494,7 @@ const useSeed = (
 			setLoading(true);
 			setError(null);
 			try {
-				await fetcher();
+				await fetcher(isCurrent);
 				if (!cancelled) {
 					setError(null);
 					if (cacheKey) markSeed(cacheKey, await getBridgeVersion());
@@ -513,7 +550,7 @@ export const useTransactionsSeed = (
 	monthsAhead: number,
 ): SeedState => {
 	const { store } = useStore();
-	const fetcher = useCallback(async () => {
+	const fetcher = useCallback(async (isCurrent: () => boolean) => {
 		let offset = 0;
 		let isFirstPage = true;
 		// eslint-disable-next-line no-constant-condition
@@ -525,6 +562,7 @@ export const useTransactionsSeed = (
 				limit: TRANSACTIONS_PAGE_SIZE,
 				offset,
 			});
+			if (!isCurrent()) return;
 			const normalized = normalizeTransactions(page.rows);
 			if (isFirstPage) {
 				store.commit(events.transactionsSeeded({ rows: normalized }));
@@ -569,8 +607,9 @@ export const useChartSeed = (
 	monthsAhead: number,
 ): SeedState => {
 	const { store } = useStore();
-	const fetcher = useCallback(async () => {
+	const fetcher = useCallback(async (isCurrent: () => boolean) => {
 		const data = await api.chart(monthsBack, monthsAhead);
+		if (!isCurrent()) return;
 		store.commit(events.chartSeeded({ months: normalizeChart(data) }));
 	}, [store, monthsBack, monthsAhead]);
 	const isMissingData = useCallback(
@@ -612,11 +651,12 @@ const normalizeTemplates = (templates: ForecastTemplateRecord[]) =>
 /** Re-seed forecasts + templates from the bridge; reload after mutations. */
 export const useForecastsSeed = (status: string | null): SeedState => {
 	const { store } = useStore();
-	const fetcher = useCallback(async () => {
+	const fetcher = useCallback(async (isCurrent: () => boolean) => {
 		const [{ forecasts }, { templates }] = await Promise.all([
 			api.forecasts({ status }),
 			api.forecastTemplates({}),
 		]);
+		if (!isCurrent()) return;
 		store.commit(
 			events.forecastsSeeded({ rows: normalizeForecasts(forecasts) }),
 		);

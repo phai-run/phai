@@ -538,13 +538,12 @@ pub fn decimal_from_str(value: &str) -> Result<Decimal> {
     if trimmed.is_empty() {
         return Err(anyhow!("String vazia não pode ser parseada como decimal"));
     }
-    // US/international format: digits with optional dot decimal separator, no commas
-    if trimmed.contains('.') && !trimmed.contains(',') {
-        return Decimal::from_str(trimmed)
-            .with_context(|| format!("Falha ao parsear decimal '{value}'"));
-    }
-    // Brazilian format: dots as thousand separators, comma as decimal separator
-    let cleaned = trimmed.replace('.', "").replace(',', ".");
+    let cleaned = match (trimmed.rfind('.'), trimmed.rfind(',')) {
+        (Some(dot), Some(comma)) if dot > comma => trimmed.replace(',', ""),
+        (Some(_), Some(_)) => trimmed.replace('.', "").replace(',', "."),
+        (None, Some(_)) => trimmed.replace('.', "").replace(',', "."),
+        _ => trimmed.to_string(),
+    };
     Decimal::from_str(&cleaned).with_context(|| format!("Falha ao parsear decimal '{value}'"))
 }
 
@@ -604,6 +603,18 @@ mod tests {
         let before = Utc::now();
         let dt = parse_datetime_or_now(Some("2026-04-15 12:00:00 UTC"));
         assert!(dt >= before);
+    }
+
+    #[test]
+    fn decimal_from_str_accepts_us_thousands_format() {
+        assert_eq!(
+            decimal_from_str("1,234.56").unwrap(),
+            Decimal::new(123456, 2)
+        );
+        assert_eq!(
+            decimal_from_str("1.234,56").unwrap(),
+            Decimal::new(123456, 2)
+        );
     }
 
     use chrono::Datelike;
