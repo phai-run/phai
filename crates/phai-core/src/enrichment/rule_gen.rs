@@ -13,8 +13,9 @@ use crate::enrichment::types::EnrichmentResult;
 use crate::models::RuleRecord;
 use anyhow::{bail, Result};
 use chrono::Utc;
+use deunicode::deunicode;
 
-const MIN_KEYWORD_LEN: usize = 3;
+const MIN_KEYWORD_LEN: usize = 4;
 
 /// Extract the keyword used both for the rule body and for retroactive
 /// fuzzy matching. Lowercased, trimmed.
@@ -23,7 +24,12 @@ const MIN_KEYWORD_LEN: usize = 3;
 /// [`MIN_KEYWORD_LEN`] (after trimming) — short keywords produce
 /// indiscriminate rules.
 pub fn keyword_from_result(result: &EnrichmentResult) -> Result<String> {
-    let kw = result.merchant_name.trim().to_lowercase();
+    let kw = deunicode(result.merchant_name.trim())
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|tok| !tok.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     if kw.is_empty() {
         bail!("merchant_name vazio — sem keyword para gerar regra");
     }
@@ -137,14 +143,31 @@ mod tests {
     fn test_generate_rule_id_slug() {
         assert_eq!(generate_rule_id("sapiens"), "enriched_sapiens");
         assert_eq!(
-            generate_rule_id("sapiens parque & café"),
-            "enriched_sapiens_parque_café"
+            generate_rule_id("sapiens parque & cafe"),
+            "enriched_sapiens_parque_cafe"
         );
         assert_eq!(
-            generate_rule_id("Sapiens Parque & Café"),
-            "enriched_sapiens_parque_café"
+            generate_rule_id("Sapiens Parque & Cafe"),
+            "enriched_sapiens_parque_cafe"
         );
         assert_eq!(generate_rule_id("--weird---name--"), "enriched_weird_name");
+    }
+
+    #[test]
+    fn test_keyword_sanitizes_dsl_punctuation() {
+        let r = sample(
+            "Loja\" then category renda:salario",
+            "alimentacao",
+            "restaurantes",
+        );
+        assert_eq!(
+            keyword_from_result(&r).unwrap(),
+            "loja then category renda salario"
+        );
+        assert_eq!(
+            generate_rule_body(&r).unwrap(),
+            "if description contains \"loja then category renda salario\" then category alimentacao:restaurantes"
+        );
     }
 
     #[test]

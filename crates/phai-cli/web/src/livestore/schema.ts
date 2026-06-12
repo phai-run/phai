@@ -38,7 +38,7 @@ import {
  * Enforced by __tests__/store-version.test.ts: change the schema and the
  * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
  */
-export const STORE_VERSION = 5;
+export const STORE_VERSION = 6;
 export const STORE_ID = `phai-s${STORE_VERSION}`;
 
 // Computes current month as "YYYY-MM" for the default selectedMonth.
@@ -75,6 +75,7 @@ export const tables = {
 		name: "reviewOverlay",
 		columns: {
 			transactionId: State.SQLite.text({ primaryKey: true }),
+			writeId: State.SQLite.text({ default: "" }),
 			description: State.SQLite.text({ nullable: true }),
 			merchantName: State.SQLite.text({ nullable: true }),
 			purpose: State.SQLite.text({ nullable: true }),
@@ -151,6 +152,7 @@ export const tables = {
 		name: "forecastOverlay",
 		columns: {
 			forecastId: State.SQLite.text({ primaryKey: true }),
+			writeId: State.SQLite.text({ default: "" }),
 			dueDate: State.SQLite.text({ nullable: true }),
 		},
 	}),
@@ -364,7 +366,21 @@ export const events = {
 	}),
 	writeFailed: Events.synced({
 		name: "v1.WriteFailed",
-		schema: Schema.Struct({ writeId: Schema.String, error: Schema.String }),
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			error: Schema.String,
+			attempts: Schema.Number,
+		}),
+	}),
+	writeAbandoned: Events.synced({
+		name: "v1.WriteAbandoned",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			type: Schema.String,
+			transactionId: Schema.String,
+			forecastId: Schema.String,
+			error: Schema.String,
+		}),
 	}),
 
 	uiSet: tables.ui.set,
@@ -418,7 +434,7 @@ const materializers = State.SQLite.materializers(events, {
 			attempts: 0,
 		}),
 		tables.reviewOverlay
-			.insert({ transactionId, ...patch })
+			.insert({ transactionId, writeId, ...patch })
 			.onConflict("transactionId", "replace"),
 	],
 	"v1.ForecastMoved": ({ writeId, forecastId, dueDate, movedAt }) => [
@@ -431,7 +447,7 @@ const materializers = State.SQLite.materializers(events, {
 			attempts: 0,
 		}),
 		tables.forecastOverlay
-			.insert({ forecastId, dueDate })
+			.insert({ forecastId, writeId, dueDate })
 			.onConflict("forecastId", "replace"),
 	],
 	"v1.ForecastCreated": ({
@@ -497,8 +513,22 @@ const materializers = State.SQLite.materializers(events, {
 	],
 	"v1.WriteAcked": ({ writeId }) =>
 		tables.pendingWrites.delete().where({ writeId }),
-	"v1.WriteFailed": ({ writeId, error }) =>
-		tables.pendingWrites.update({ lastError: error }).where({ writeId }),
+	"v1.WriteFailed": ({ writeId, error, attempts }) =>
+		tables.pendingWrites
+			.update({ lastError: error, attempts })
+			.where({ writeId }),
+	"v1.WriteAbandoned": ({ writeId, type, transactionId, forecastId }) => [
+		tables.pendingWrites.delete().where({ writeId }),
+		...(type === "review" && transactionId
+			? [tables.reviewOverlay.delete().where({ transactionId, writeId })]
+			: []),
+		...(type === "forecastMove" && forecastId
+			? [tables.forecastOverlay.delete().where({ forecastId, writeId })]
+			: []),
+		...(type === "forecastCreate" || (type === "forecastEnvelope" && !forecastId)
+			? [tables.forecasts.delete().where({ forecastId: writeId })]
+			: []),
+	],
 });
 
 const state = State.SQLite.makeState({ tables, materializers });

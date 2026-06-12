@@ -4,10 +4,62 @@
 //! The pipeline (Phase 3) and LLM layer (Phase 2) consume these types but
 //! they live here so the storage layer can also produce `ContextTx` rows.
 
+use anyhow::{bail, Result};
 use chrono::Weekday;
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+pub const LLM_CATEGORY_TAXONOMY: &[(&str, &[&str])] = &[
+    (
+        "alimentacao",
+        &["restaurantes", "mercado", "padaria", "delivery", "bar"],
+    ),
+    (
+        "transporte",
+        &[
+            "combustivel",
+            "taxi-app",
+            "transporte-publico",
+            "estacionamento",
+            "manutencao",
+        ],
+    ),
+    ("saude", &["farmacia", "consulta", "exame", "plano"]),
+    ("educacao", &["escola", "curso", "livros"]),
+    (
+        "moradia",
+        &[
+            "aluguel",
+            "condominio",
+            "energia",
+            "agua",
+            "internet",
+            "manutencao",
+        ],
+    ),
+    ("lazer", &["viagem", "evento", "streaming", "hobby"]),
+    (
+        "pessoal",
+        &["vestuario", "cuidado-fisico", "presentes", "servicos"],
+    ),
+    ("compras", &["varejo", "eletronicos", "casa"]),
+    (
+        "financeiro",
+        &["investimento", "emprestimo", "tarifa", "imposto"],
+    ),
+    ("renda", &["salario", "freelance", "reembolso"]),
+    ("outros", &["nao-categorizado"]),
+];
+
+pub fn is_known_llm_category_pair(category: &str, subcategory: &str) -> bool {
+    let category = category.trim();
+    let subcategory = subcategory.trim();
+    LLM_CATEGORY_TAXONOMY
+        .iter()
+        .find(|(known, _)| *known == category)
+        .is_some_and(|(_, subs)| subs.contains(&subcategory))
+}
 
 /// Information returned by the BrasilAPI `cnpj/v1/{cnpj}` endpoint.
 ///
@@ -104,6 +156,26 @@ pub struct EnrichmentResult {
     /// Pergunta em PT-BR para o usuário caso `needs_user_input` seja
     /// `true`.
     pub user_prompt: Option<String>,
+}
+
+impl EnrichmentResult {
+    pub fn validate_llm_output(mut self) -> Result<Self> {
+        self.reasoning = self.reasoning.trim().to_string();
+        self.merchant_name = self.merchant_name.trim().to_string();
+        self.category = self.category.trim().to_string();
+        self.subcategory = self.subcategory.trim().to_string();
+        if !self.confidence.is_finite() || !(0.0..=1.0).contains(&self.confidence) {
+            bail!("confidence fora do intervalo [0,1]: {}", self.confidence);
+        }
+        if !is_known_llm_category_pair(&self.category, &self.subcategory) {
+            bail!(
+                "categoria LLM desconhecida: {}:{}",
+                self.category,
+                self.subcategory
+            );
+        }
+        Ok(self)
+    }
 }
 
 /// Pipeline decision derived from an `EnrichmentResult` by applying
@@ -236,5 +308,21 @@ mod tests {
         let schema = schemars::schema_for!(EnrichmentResult);
         let obj = schema.schema.object.expect("object schema");
         assert!(obj.properties.contains_key("reasoning"));
+    }
+
+    #[test]
+    fn test_validate_llm_output_rejects_unknown_category() {
+        let mut value = sample_result(0.9, false);
+        value.category = "cripto".to_string();
+        value.subcategory = "memecoin".to_string();
+        assert!(value.validate_llm_output().is_err());
+    }
+
+    #[test]
+    fn test_validate_llm_output_rejects_invalid_confidence() {
+        assert!(sample_result(1.5, false).validate_llm_output().is_err());
+        let mut nan_value = sample_result(0.9, false);
+        nan_value.confidence = f32::NAN;
+        assert!(nan_value.validate_llm_output().is_err());
     }
 }

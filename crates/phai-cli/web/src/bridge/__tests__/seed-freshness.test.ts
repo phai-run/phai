@@ -11,7 +11,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { STORE_ID } from "../../livestore/schema";
-import { seedStampKey, shouldSkipSeed, sweepStaleSeedStamps } from "../sync";
+import {
+	seedStampKey,
+	shouldClearLocalWrites,
+	shouldSkipSeed,
+	sweepStaleSeedStamps,
+} from "../sync";
 
 // vitest's jsdom localStorage is a non-functional stub; back the sweep's
 // injectable StampStorage with a Map instead.
@@ -115,5 +120,19 @@ describe("sweepStaleSeedStamps", () => {
 		expect(storage.getItem(seedStampKey("tx:12:3", "5.6.0"))).toBeNull();
 		expect(storage.getItem(seedStampKey("tx:12:3", "5.6.1"))).toBe("333");
 		expect(storage.getItem("phai.bridgeIdentity")).toBe("keep-me");
+	});
+});
+
+describe("shouldClearLocalWrites", () => {
+	it("does not clear queued writes when no previous identity was persisted", () => {
+		expect(shouldClearLocalWrites(null, "sqlite:local", 2)).toBe(false);
+	});
+
+	it("clears queued writes when the persisted identity changes", () => {
+		expect(shouldClearLocalWrites("sqlite:old", "sqlite:new", 2)).toBe(true);
+	});
+
+	it("keeps queued writes when the persisted identity matches", () => {
+		expect(shouldClearLocalWrites("sqlite:local", "sqlite:local", 2)).toBe(false);
 	});
 });

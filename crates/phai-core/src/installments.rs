@@ -211,8 +211,8 @@ pub struct InstallmentChain {
 ///
 /// Grouping key: `(account_id, base_description, total)`.
 pub fn group_into_chains(transactions: &[TransactionRecord]) -> Vec<InstallmentChain> {
-    // Key: (account_id, base_description, total)
-    type Key = (String, String, u32);
+    // Key: (account_id, base_description, total, timeline_anchor)
+    type Key = (String, String, u32, i32);
 
     let mut groups: BTreeMap<Key, Vec<TransactionRecord>> = BTreeMap::new();
 
@@ -223,14 +223,21 @@ pub fn group_into_chains(transactions: &[TransactionRecord]) -> Vec<InstallmentC
         };
 
         let account_id = tx.account_id.clone().unwrap_or_default();
-        let key: Key = (account_id, marker.base_description.clone(), marker.total);
+        let anchor = tx.transaction_date.year() * 12 + tx.transaction_date.month() as i32
+            - marker.current as i32;
+        let key: Key = (
+            account_id,
+            marker.base_description.clone(),
+            marker.total,
+            anchor,
+        );
         groups.entry(key).or_default().push(tx.clone());
     }
 
     let chains: Vec<InstallmentChain> = groups
         .into_iter()
         .filter_map(
-            |((account_id, base_description, total), mut installments)| {
+            |((account_id, base_description, total, _anchor), mut installments)| {
                 installments.sort_by_key(|tx| tx.transaction_date);
 
                 let first_date = installments.first()?.transaction_date;
@@ -637,6 +644,17 @@ mod tests {
         let descriptions: Vec<&str> = chains.iter().map(|c| c.base_description.as_str()).collect();
         assert!(descriptions.contains(&"ITEM A"));
         assert!(descriptions.contains(&"ITEM B"));
+    }
+
+    #[test]
+    fn group_keeps_same_merchant_plans_with_different_start_months_apart() {
+        let txs = vec![
+            make_tx("a1", "card", "2026-01-05", "APPLE 1/12"),
+            make_tx("a2", "card", "2026-02-05", "APPLE 2/12"),
+            make_tx("b1", "card", "2026-03-05", "APPLE 1/12"),
+        ];
+        let chains = group_into_chains(&txs);
+        assert_eq!(chains.len(), 2, "{chains:#?}");
     }
 
     #[test]

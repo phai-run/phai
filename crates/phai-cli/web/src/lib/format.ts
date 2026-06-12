@@ -15,17 +15,20 @@ const toNumber = (amount: string | null | undefined): number => {
 /**
  * Parse a decimal string to integer cents. Used for client-side running totals
  * so addition stays exact (no float drift). Handles a leading sign and at most
- * two fractional digits; extra precision is truncated (amounts are money).
+ * two fractional digits; extra precision is rounded to the nearest cent.
  */
 export const toCents = (amount: string | null | undefined): number => {
   if (amount == null || amount === '') return 0
   const s = amount.trim()
-  const neg = s.startsWith('-')
-  const digits = s.replace(/^[+-]/, '')
-  const [whole, frac = ''] = digits.split('.')
-  const w = Number.parseInt(whole || '0', 10)
+  const match = /^([+-])?(\d*)(?:\.(\d*))?$/.exec(s)
+  if (!match || (match[2] === '' && (match[3] ?? '') === '')) return 0
+  const neg = match[1] === '-'
+  const whole = match[2] || '0'
+  const frac = match[3] ?? ''
+  const w = Number.parseInt(whole, 10)
   if (!Number.isFinite(w)) return 0
-  const cents = Number.parseInt((frac + '00').slice(0, 2), 10) || 0
+  let cents = Number.parseInt((frac + '00').slice(0, 2), 10) || 0
+  if (Number.parseInt((frac + '000')[2] ?? '0', 10) >= 5) cents += 1
   const total = w * 100 + cents
   return neg ? -total : total
 }

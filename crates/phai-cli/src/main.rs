@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use phai_core::enrichment::replication::{find_and_replicate, ReplicationOutcome};
 use phai_core::idempotency::{
     category_id, ensure_account_idempotency, ensure_forecast_idempotency, ensure_rule_idempotency,
-    ensure_transaction_idempotency, manual_transaction_idempotency,
+    ensure_transaction_idempotency, manual_transaction_idempotency, pluggy_transaction_fingerprint,
 };
 use phai_core::installments::{group_into_chains, InstallmentChain};
 use phai_core::legacy::load_legacy_bundle;
@@ -2847,27 +2847,13 @@ async fn upsert_transactions_chunked(
 }
 
 /// Fingerprint used to detect Pluggy emitting two distinct `transaction_id`s
-/// for what is logically the same posted event. We saw this in production on
-/// 2026-02-06: two "Pagamento recebido" rows at +R$7905,62 on `aline_cartao`
-/// with different UUIDs. The pluggy_id-based idempotency couldn't catch the
-/// pair because the upstream IDs were genuinely different.
-///
-/// Conservative on what counts as a match — date, account, signed amount and
-/// the description normalised to lowercase + trimmed. Anything more lenient
-/// risks merging legitimate same-day repeats (a user really did pay two
-/// R$50 parking fees the same morning).
-fn dedup_fingerprint(row: &TransactionRecord) -> String {
-    let desc = row
-        .raw_description
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    format!(
-        "{date}|{account}|{amount}|{desc}",
-        date = row.transaction_date.format("%Y-%m-%d"),
-        account = row.account_id.as_deref().unwrap_or(""),
-        amount = decimal_text(row.amount),
+/// for what is logically the same posted event.
+fn dedup_fingerprint(row: &TransactionRecord) -> Result<String> {
+    pluggy_transaction_fingerprint(
+        row.account_id.as_deref(),
+        row.transaction_date,
+        row.amount,
+        &row.raw_description,
     )
 }
 
@@ -2908,7 +2894,7 @@ async fn dedup_pluggy_duplicates(
     let mut fingerprint_to_existing: BTreeMap<String, String> = BTreeMap::new();
     for row in &existing {
         if row.source == "pluggy" {
-            fingerprint_to_existing.insert(dedup_fingerprint(row), row.transaction_id.clone());
+            fingerprint_to_existing.insert(dedup_fingerprint(row)?, row.transaction_id.clone());
         }
     }
     let mut kept = Vec::with_capacity(incoming.len());
@@ -2918,7 +2904,7 @@ async fn dedup_pluggy_duplicates(
             kept.push(row);
             continue;
         }
-        let fp = dedup_fingerprint(&row);
+        let fp = dedup_fingerprint(&row)?;
         match fingerprint_to_existing.get(&fp) {
             Some(existing_id) if existing_id != &row.transaction_id => {
                 let diff = json!({

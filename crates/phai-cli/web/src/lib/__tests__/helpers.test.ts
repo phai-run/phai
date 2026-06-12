@@ -29,9 +29,11 @@ describe("toCents", () => {
 		expect(toCents("42")).toBe(4200);
 	});
 
-	it("handles amounts with more than 2 fractional digits (truncation)", () => {
-		// 3.456 → 345 (truncated, not rounded)
-		expect(toCents("3.456")).toBe(345);
+	it("handles amounts with more than 2 fractional digits (rounding)", () => {
+		expect(toCents("3.456")).toBe(346);
+		expect(toCents("-3.456")).toBe(-346);
+		expect(toCents("1.004")).toBe(100);
+		expect(toCents("1.995")).toBe(200);
 	});
 
 	it("handles zero values", () => {

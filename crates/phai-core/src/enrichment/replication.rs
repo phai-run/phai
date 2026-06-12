@@ -67,11 +67,14 @@ pub fn select_donor<'a>(
     candidates
         .iter()
         .rev() // most-recent last so max_by_key returns the most-recent among ties
-        .max_by_key(|d| {
+        .filter_map(|d| {
             let same_category = d.category_id.as_deref() == target_category_id;
             let close_amount = amount_within_tolerance(d.amount, target_amount);
-            (same_category as u8) * 2 + (close_amount as u8)
+            let score = (same_category as u8) * 2 + (close_amount as u8);
+            (score > 0).then_some((d, score))
         })
+        .max_by_key(|(_, score)| *score)
+        .map(|(d, _)| d)
 }
 
 fn amount_within_tolerance(donor: Decimal, target: Decimal) -> bool {
@@ -296,6 +299,19 @@ mod tests {
     fn test_select_donor_returns_none_for_empty_candidates() {
         let result = select_donor(&[], Some("alimentacao:restaurantes"), Decimal::new(-100, 2));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_select_donor_rejects_zero_score_candidates() {
+        let candidates = vec![record(
+            "unrelated",
+            "compras:eletronicos",
+            -700_000,
+            Some("Monitor"),
+            Some("trabalho"),
+        )];
+        let donor = select_donor(&candidates, Some("educacao:livros"), Decimal::new(-3500, 2));
+        assert!(donor.is_none());
     }
 
     #[test]

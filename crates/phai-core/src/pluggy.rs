@@ -1,4 +1,6 @@
-use crate::idempotency::{account_idempotency, category_id, pluggy_transaction_idempotency};
+use crate::idempotency::{
+    account_idempotency, category_id, pluggy_transaction_natural_idempotency,
+};
 use crate::legacy::{load_account_registry, AccountRegistryEntry};
 use crate::models::{
     json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
@@ -567,7 +569,7 @@ fn build_transaction_record(
     let created_at = parse_datetime_or_now(payload.created_at.as_deref());
     let updated_at = parse_datetime_or_now(payload.updated_at.as_deref());
 
-    Ok(TransactionRecord {
+    let mut record = TransactionRecord {
         transaction_id: payload.id.clone(),
         account_id: registry
             .map(|entry| entry.account_id.clone())
@@ -592,7 +594,7 @@ fn build_transaction_record(
         ),
         source: "pluggy".to_string(),
         actor_id: actor_id.to_string(),
-        idempotency_key: pluggy_transaction_idempotency(&payload.id),
+        idempotency_key: String::new(),
         metadata_json: json!({
             "pluggy_account_id": payload.account_id,
             "pluggy_category": payload.category,
@@ -602,7 +604,9 @@ fn build_transaction_record(
         updated_at,
         enrichment_attempted_at: None,
         amount_cents: None,
-    })
+    };
+    record.idempotency_key = pluggy_transaction_natural_idempotency(&record)?;
+    Ok(record)
 }
 
 /// Build the reqwest client used to talk to Pluggy, enforcing HTTPS for any

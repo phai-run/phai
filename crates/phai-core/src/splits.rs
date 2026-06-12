@@ -1,5 +1,6 @@
 use crate::idempotency::hash_key;
 use crate::models::{decimal_from_str, TransactionRecord};
+use crate::split_payload::decimal_to_cents_exact;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -230,14 +231,18 @@ fn parse_line_amount(raw: &Value, parent_amount: Decimal, index: usize) -> Resul
     let explicit_sign =
         raw_text.trim_start().starts_with('-') || raw_text.trim_start().starts_with('+');
     let parsed = decimal_from_str(&raw_text)
-        .with_context(|| format!("amount inválido na linha {}", index + 1))?
-        .round_dp(2);
+        .with_context(|| format!("amount inválido na linha {}", index + 1))?;
     if explicit_sign {
-        Ok(parsed)
+        decimal_to_cents_exact(parsed, &format!("amount da linha {}", index + 1))
+            .map(|cents| Decimal::from_i128_with_scale(cents, 2))
     } else if parent_amount.is_sign_negative() {
-        Ok(-parsed.abs())
+        let signed = -parsed.abs();
+        decimal_to_cents_exact(signed, &format!("amount da linha {}", index + 1))
+            .map(|cents| Decimal::from_i128_with_scale(cents, 2))
     } else {
-        Ok(parsed.abs())
+        let signed = parsed.abs();
+        decimal_to_cents_exact(signed, &format!("amount da linha {}", index + 1))
+            .map(|cents| Decimal::from_i128_with_scale(cents, 2))
     }
 }
 
@@ -282,8 +287,9 @@ pub fn validate_split_payload(
         .iter()
         .fold(Decimal::ZERO, |acc, line| acc + line.amount)
         .round_dp(2);
-    let parent_amount = parent_amount.round_dp(2);
-    let difference = (parent_amount - split_total).round_dp(2);
+    let parent_cents = decimal_to_cents_exact(parent_amount, "amount da transação pai")?;
+    let parent_amount = Decimal::from_i128_with_scale(parent_cents, 2);
+    let difference = parent_amount - split_total;
     if difference != Decimal::ZERO {
         bail!(
             "Soma do split ({}) não bate com a transação pai ({})",
@@ -498,6 +504,20 @@ mod tests {
         let err = validate_split_payload("tx-1", decimal_from_str("-100.00").unwrap(), payload)
             .unwrap_err();
         assert!(err.to_string().contains("não bate"));
+    }
+
+    #[test]
+    fn rejects_fractional_cent_line_amounts() {
+        let payload = serde_json::from_value(json!({
+            "lines": [
+                {"description": "Mercado", "amount": "33.335"},
+                {"description": "Limpeza", "amount": "66.665"}
+            ]
+        }))
+        .unwrap();
+        let err = validate_split_payload("tx-1", decimal_from_str("-100.00").unwrap(), payload)
+            .unwrap_err();
+        assert!(err.to_string().contains("2 casas decimais"));
     }
 
     #[test]
