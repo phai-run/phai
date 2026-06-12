@@ -155,6 +155,8 @@ phai admin import-legacy     Import from legacy CSV files
 phai sync pluggy             Sync transactions from Pluggy
 phai report <subcommand>     See "Reports" above
 phai serve                   Start the web app — the interactive surface for review and forecasts
+phai serve install           Run the web app at login (launchd) + a clickable Phai.app launcher
+phai serve uninstall         Remove the launchd agent and the launcher app
 phai mcp                     Serve read-only reports as MCP tools over stdio (Claude, IDEs, agents)
 phai tx upsert-manual        Add a manual transaction
 phai tx categorize           Assign category to a transaction

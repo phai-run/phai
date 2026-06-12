@@ -79,6 +79,7 @@ proposed → active → superseded
 | [0025](0025-cashflow-basis-bill-explosion.md) | Cash-flow basis with credit-card bill explosion is the canonical reporting model | accepted |
 | [0026](0026-single-view-chain-canonical-source.md) | One deduped view chain is the single source of truth for all reporting | accepted |
 | [0027](0027-mcp-server-read-only-self-exec.md) | MCP server: read-only v1, hand-rolled stdio loop, self-exec tools | active |
+| [0028](0028-launchd-agent-and-launcher-app.md) | `phai serve install`: launchd agent + launcher app, not a daemon | active |
 
 ---
 

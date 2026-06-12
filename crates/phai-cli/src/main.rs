@@ -40,6 +40,7 @@ mod pulse;
 mod self_cmd;
 mod serve;
 mod serve_assets;
+mod serve_install;
 mod sync_notify;
 mod update;
 mod update_state;
@@ -134,6 +135,8 @@ enum Commands {
             help = "porta do servidor web (80 = http://phai.localhost; portas <1024 exigem sudo)"
         )]
         port: u16,
+        #[command(subcommand)]
+        command: Option<ServeCommand>,
     },
     /// Push the daily pulse to an external channel (WhatsApp via webhook).
     Notify {
@@ -145,6 +148,14 @@ enum Commands {
         #[command(subcommand)]
         command: SelfCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum ServeCommand {
+    /// Install a launchd agent so the web app runs at login and stays up.
+    Install(serve_install::InstallArgs),
+    /// Stop and remove the launchd agent.
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -3209,7 +3220,11 @@ async fn main() -> Result<()> {
             BudgetCommand::List(args) => budget_list(args).await,
         },
         Some(Commands::Mcp) => mcp::run(),
-        Some(Commands::Serve { port }) => serve::run(port).await,
+        Some(Commands::Serve { port, command }) => match command {
+            None => serve::run(port).await,
+            Some(ServeCommand::Install(args)) => serve_install::install(args),
+            Some(ServeCommand::Uninstall) => serve_install::uninstall(),
+        },
         Some(Commands::Notify { command }) => match command {
             NotifyCommand::Whatsapp(args) => notify_whatsapp(args).await,
         },
