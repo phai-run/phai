@@ -50,10 +50,10 @@ export const CardDetailPanel = ({
 	const accent = cardAccent(card.state);
 	const stateLabel =
 		card.state === "aberta"
-			? "ABERTA"
+			? "OPEN"
 			: card.state === "fechada"
-				? "FECHADA"
-				: "EM DIA";
+				? "CLOSED"
+				: "SETTLED";
 
 	// Clicking an installment opens the same edit modal as the planilha /
 	// categorias views — the row's transactionId maps into the seeded window.
@@ -96,11 +96,11 @@ export const CardDetailPanel = ({
 	);
 
 	const figures: Array<{ label: string; value: number; strong?: boolean }> = [
-		{ label: "fatura", value: numeric(card.total), strong: true },
-		{ label: "em aberto", value: numeric(card.openAmount) },
-		{ label: "parcelado", value: numeric(card.installmentDebt) },
-		{ label: "este mês", value: numeric(card.installmentMonthAmount) },
-		{ label: "termina", value: numeric(card.installmentEndingAmount) },
+		{ label: "bill", value: numeric(card.total), strong: true },
+		{ label: "open", value: numeric(card.openAmount) },
+		{ label: "installments", value: numeric(card.installmentDebt) },
+		{ label: "this month", value: numeric(card.installmentMonthAmount) },
+		{ label: "ending", value: numeric(card.installmentEndingAmount) },
 	];
 
 	return (
@@ -129,15 +129,15 @@ export const CardDetailPanel = ({
 				</span>
 				<span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
 					{card.cycleMonth
-						? `ciclo ${card.cycleMonth.slice(5, 7)}/${card.cycleMonth.slice(2, 4)}`
+						? `cycle ${card.cycleMonth.slice(5, 7)}/${card.cycleMonth.slice(2, 4)}`
 						: ""}
-					{card.dueDate ? ` · vence ${ddmm(card.dueDate)}` : ""}
+					{card.dueDate ? ` · due ${ddmm(card.dueDate)}` : ""}
 				</span>
 				<button
 					type="button"
 					onClick={onClose}
 					className="mono"
-					aria-label="fechar detalhes do cartão"
+					aria-label="close card details"
 					style={{
 						marginLeft: "auto",
 						background: "transparent",
@@ -147,7 +147,7 @@ export const CardDetailPanel = ({
 						fontSize: 13,
 					}}
 				>
-					× fechar
+					× close
 				</button>
 			</div>
 
@@ -207,7 +207,7 @@ export const CardDetailPanel = ({
 						fontSize: 12,
 					}}
 				>
-					ver transações do cartão →
+					view card transactions →
 				</button>
 			)}
 
@@ -222,7 +222,7 @@ export const CardDetailPanel = ({
 							margin: "18px 0 8px",
 						}}
 					>
-						parcelas em aberto ({card.installmentCount})
+						open installments ({card.installmentCount})
 					</div>
 					<div
 						style={{
@@ -238,8 +238,8 @@ export const CardDetailPanel = ({
 								tabIndex={0}
 								title={
 									txById.has(row.transactionId)
-										? "editar transação"
-										: "fora da janela carregada"
+										? "edit transaction"
+										: "outside the loaded window"
 								}
 								onClick={() => {
 									const tx = txById.get(row.transactionId);
@@ -288,7 +288,7 @@ export const CardDetailPanel = ({
 										}}
 									>
 										{row.marker}
-										{row.endingThisMonth ? " · termina este mês" : ""}
+										{row.endingThisMonth ? " · ends this month" : ""}
 									</div>
 								</div>
 								<span

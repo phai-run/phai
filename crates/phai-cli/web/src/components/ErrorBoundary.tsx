@@ -47,7 +47,7 @@ export class ViewErrorBoundary extends Component<Props, State> {
 							color: "var(--rose)",
 						}}
 					>
-						{this.props.viewName} · algo deu errado
+						{this.props.viewName} · something went wrong
 					</h2>
 					<pre
 						className="mono"
@@ -64,7 +64,7 @@ export class ViewErrorBoundary extends Component<Props, State> {
 							wordBreak: "break-word",
 						}}
 					>
-						{this.state.error?.message ?? "Erro desconhecido"}
+						{this.state.error?.message ?? "Unknown error"}
 					</pre>
 					<div
 						style={{

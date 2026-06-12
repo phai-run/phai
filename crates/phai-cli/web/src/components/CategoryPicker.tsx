@@ -151,8 +151,8 @@ export const CategoryPicker = ({
 						onKeyDown={handleKeyDown}
 						placeholder={
 							selectedCount > 1
-								? `categoria para ${selectedCount} transações…`
-								: "categoria…"
+								? `category for ${selectedCount} transactions…`
+								: "category…"
 						}
 						className="mono"
 						style={{
@@ -179,7 +179,7 @@ export const CategoryPicker = ({
 								textAlign: "center",
 							}}
 						>
-							nenhuma categoria encontrada
+							no category found
 						</div>
 					)}
 					{filtered.map((cat, idx) => {
@@ -233,7 +233,7 @@ export const CategoryPicker = ({
 						textAlign: "right",
 					}}
 				>
-					↑↓ navegar · ↵ aplicar · esc fechar
+					↑↓ navigate · ↵ apply · esc close
 				</div>
 			</motion.div>
 		</>

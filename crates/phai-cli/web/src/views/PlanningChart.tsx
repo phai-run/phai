@@ -102,7 +102,7 @@ export const PlanningChart = ({
 		<div
 			tabIndex={0}
 			role="application"
-			aria-label="gráfico de caixa — use ←→ para navegar entre meses"
+			aria-label="cash chart — use ←→ to move between months"
 			onKeyDown={handleKeyDown}
 			style={{ outline: "none" }}
 		>
@@ -133,7 +133,7 @@ const ModeSelector = ({
 }) => (
 	<div
 		role="radiogroup"
-		aria-label="Modo do gráfico"
+		aria-label="Chart mode"
 		style={{
 			display: "inline-flex",
 			background: "var(--surface)",
@@ -144,12 +144,12 @@ const ModeSelector = ({
 		}}
 	>
 		<ModeChip
-			label="Caixa"
+			label="Cash"
 			active={mode === "caixa"}
 			onClick={() => onChange("caixa")}
 		/>
 		<ModeChip
-			label="Despesas"
+			label="Expenses"
 			active={mode === "despesas-barras"}
 			onClick={() => onChange("despesas-barras")}
 		/>
@@ -271,26 +271,26 @@ const FullChart = ({
 									`${cat}: ${money(mag)} (${total > 0 ? Math.round((mag / total) * 100) : 0}%)`,
 							)
 					: [];
-				const txt = [`despesas ${m.label} · ${money(total)}`, ...lines].join("\n");
+				const txt = [`expenses ${m.label} · ${money(total)}`, ...lines].join("\n");
 				return { left: txt, right: txt };
 			}
 			const balance = model.balances[i];
-			const saldoLine = `saldo ${m.isFuture ? "projetado " : ""}${money(balance)}`;
+			const saldoLine = `${m.isFuture ? "projected " : ""}balance ${money(balance)}`;
 			const left = [
-				`entradas ${m.label}`,
-				`realizado ${money(model.realIns[i])}`,
-				...(model.fcIns[i] > 0 ? [`previsto +${money(model.fcIns[i])}`] : []),
+				`income ${m.label}`,
+				`actual ${money(model.realIns[i])}`,
+				...(model.fcIns[i] > 0 ? [`forecast +${money(model.fcIns[i])}`] : []),
 				`total ${money(model.realIns[i] + model.fcIns[i])}`,
 				saldoLine,
 			].join("\n");
 			const right = [
-				`saídas ${m.label}`,
-				`realizado ${money(model.realOuts[i])}`,
+				`expenses ${m.label}`,
+				`actual ${money(model.realOuts[i])}`,
 				...(model.fcOuts[i] > 0
 					? [
-							`previsto +${money(model.fcOuts[i])}${
+							`forecast +${money(model.fcOuts[i])}${
 								committedMag[i] > 0
-									? ` (parcelas ${money(Math.min(committedMag[i], model.fcOuts[i]))})`
+									? ` (installments ${money(Math.min(committedMag[i], model.fcOuts[i]))})`
 									: ""
 							}`,
 						]
@@ -327,18 +327,18 @@ const FullChart = ({
 				</span>
 				{!isExpensesMode && (
 					<span style={{ color: "var(--cyan)" }}>
-						entradas <CountMoney value={yearIn} />
+						income <CountMoney value={yearIn} />
 					</span>
 				)}
 				<span style={{ color: "var(--rose)" }}>
-					saídas <CountMoney value={-yearOut} />
+					expenses <CountMoney value={-yearOut} />
 				</span>
 				<span
 					style={{
 						color: yearIn - yearOut >= 0 ? "var(--green)" : "var(--rose)",
 					}}
 				>
-					resultado {yearIn - yearOut >= 0 ? "+" : ""}
+					net {yearIn - yearOut >= 0 ? "+" : ""}
 					<CountMoney value={yearIn - yearOut} />
 				</span>
 			</div>
@@ -382,8 +382,8 @@ const FullChart = ({
 					role="img"
 					aria-label={
 						mode === "caixa"
-							? "gráfico de caixa mensal — barras de entradas e saídas, linha de saldo"
-							: "gráfico de despesas mensais"
+							? "monthly cash chart — income and expense bars, balance line"
+							: "monthly expenses chart"
 					}
 					style={{ display: "block" }}
 				>
@@ -810,7 +810,7 @@ const MonthColumn = ({
 				display: "grid",
 				gridTemplateColumns: "1fr 1fr",
 			}}
-			aria-label={`selecionar ${month}`}
+			aria-label={`select ${month}`}
 		>
 			{/* Halves only carry the native value tooltips: left = the income
 			    bar, right = the expense bar (matching the bars' x-positions). */}

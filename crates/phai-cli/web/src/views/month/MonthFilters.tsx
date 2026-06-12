@@ -126,12 +126,12 @@ export const FilterBar = ({
 					⌕
 				</span>
 				<input
-					placeholder="buscar transações…"
+					placeholder="search transactions…"
 					value={textInput}
 					onChange={handleTextChange}
 					className="mono"
 					style={{ ...inputStyle, paddingLeft: 26, width: "100%" }}
-					aria-label="busca textual"
+					aria-label="text search"
 				/>
 			</div>
 
@@ -140,12 +140,12 @@ export const FilterBar = ({
 			{/* Structural filters */}
 			<input
 				list="phai-cats"
-				placeholder="categoria…"
+				placeholder="category…"
 				value={ui.categoryFilter ?? ""}
 				onChange={handleCategoryChange}
 				className="mono"
 				style={{ ...inputStyle, color: "var(--cyan)", width: 150 }}
-				aria-label="filtrar por categoria"
+				aria-label="filter by category"
 			/>
 
 			{/* Account filter */}
@@ -155,9 +155,9 @@ export const FilterBar = ({
 					onChange={handleAccountChange}
 					className="mono"
 					style={selectStyle}
-					aria-label="conta"
+					aria-label="account"
 				>
-					<option value="">todas · conta</option>
+					<option value="">all · accounts</option>
 					{accounts.map((a) => (
 						<option key={a.id} value={a.id}>
 							{a.label || a.id}
@@ -173,9 +173,9 @@ export const FilterBar = ({
 					onChange={handleOwnerChange}
 					className="mono"
 					style={selectStyle}
-					aria-label="responsável"
+					aria-label="owner"
 				>
-					<option value="">todos · responsável</option>
+					<option value="">all · owners</option>
 					{owners.map((o) => (
 						<option key={o} value={o}>
 							{o}
@@ -192,28 +192,28 @@ export const FilterBar = ({
 				color="var(--amber)"
 				onClick={toggleInstallments}
 			>
-				parcelas
+				installments
 			</ToggleBtn>
 			<ToggleBtn
 				active={ui.subscriptionsOnly}
 				color="var(--cyan)"
 				onClick={toggleSubscriptions}
 			>
-				assinaturas
+				subscriptions
 			</ToggleBtn>
 			<ToggleBtn
 				active={ui.uncategorizedOnly}
 				color="var(--rose)"
 				onClick={toggleUncategorized}
 			>
-				sem categoria
+				uncategorized
 			</ToggleBtn>
 			<ToggleBtn
 				active={ui.unreviewedOnly}
 				color="var(--purple)"
 				onClick={toggleUnreviewed}
 			>
-				não revisadas
+				unreviewed
 			</ToggleBtn>
 
 			{/* Clear filters */}
@@ -227,7 +227,7 @@ export const FilterBar = ({
 						borderColor: "var(--rose)",
 					}}
 				>
-					× limpar
+					× clear
 				</button>
 			)}
 		</div>
@@ -257,21 +257,21 @@ export const FilterSummary = ({
 		}}
 	>
 		<span>
-			{count} transação{count !== 1 ? "ões" : ""}
+			{count} transaction{count !== 1 ? "s" : ""}
 		</span>
 		{selectedCount != null && selectedCount > 0 && (
 			<span style={{ color: "var(--purple)" }}>
-				{selectedCount} selecionada{selectedCount !== 1 ? "s" : ""}
+				{selectedCount} selected
 			</span>
 		)}
 		{saidas > 0 && (
 			<span style={{ color: "var(--rose)" }}>
-				saídas {formatMoneyNumber(-saidas)}
+				expenses {formatMoneyNumber(-saidas)}
 			</span>
 		)}
 		{entradas > 0 && (
 			<span style={{ color: "var(--cyan)" }}>
-				entradas {formatMoneyNumber(entradas)}
+				income {formatMoneyNumber(entradas)}
 			</span>
 		)}
 		{(saidas > 0 || entradas > 0) && (
@@ -280,7 +280,7 @@ export const FilterSummary = ({
 					color: entradas - saidas >= 0 ? "var(--green)" : "var(--rose)",
 				}}
 			>
-				líquido {entradas - saidas >= 0 ? "+" : ""}
+				net {entradas - saidas >= 0 ? "+" : ""}
 				{formatMoneyNumber(entradas - saidas)}
 			</span>
 		)}

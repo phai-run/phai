@@ -130,7 +130,7 @@ export const ForecastSection = ({
 		return (
 			<div style={{ padding: "10px 0" }}>
 				<button onClick={openAdd} className="mono" style={addBtnStyle}>
-					+ nova previsão
+					+ new forecast
 				</button>
 			</div>
 		);
@@ -160,9 +160,9 @@ export const ForecastSection = ({
 			>
 				<span>{open ? "▾" : "▸"}</span>
 				<span style={{ color: "var(--cyan)" }}>
-					{forecasts.length} previsão{forecasts.length !== 1 ? "ões" : ""}
+					{forecasts.length} forecast{forecasts.length !== 1 ? "s" : ""}
 				</span>
-				<span>para {month}</span>
+				<span>for {month}</span>
 			</button>
 
 			<AnimatePresence>
@@ -188,9 +188,9 @@ export const ForecastSection = ({
 								const isMoving = movingId === f.forecastId;
 								const lockReason =
 									f.kind === "installment"
-										? "parcela — bloqueada"
+										? "installment — locked"
 										: f.kind === "subscription"
-											? "assinatura — bloqueada"
+											? "subscription — locked"
 											: null;
 								return (
 									<div
@@ -198,7 +198,7 @@ export const ForecastSection = ({
 										tabIndex={0}
 										role="option"
 										aria-selected={isSelected}
-										aria-label={`previsão ${f.description}${locked ? " — " + lockReason : ""}`}
+										aria-label={`forecast ${f.description}${locked ? " — " + lockReason : ""}`}
 										onClick={() => {
 											setSelectedId((prev) =>
 												prev === f.forecastId ? null : f.forecastId,
@@ -219,10 +219,10 @@ export const ForecastSection = ({
 										}}
 										title={
 											locked
-												? (lockReason ?? "bloqueada")
+												? (lockReason ?? "locked")
 												: !isSelected
-													? "clique para selecionar; arraste para outro mês"
-													: "Ctrl+←/→ move mês; Ctrl+M abre seletor"
+													? "click to select; drag to another month"
+													: "Ctrl+←/→ moves month; Ctrl+M opens picker"
 										}
 										style={{
 											display: "flex",
@@ -307,7 +307,7 @@ export const ForecastSection = ({
 						>
 							<input
 								autoFocus
-								placeholder="descrição da previsão"
+								placeholder="forecast description"
 								value={description}
 								onChange={(e) => setDescription(e.target.value)}
 								className="mono"
@@ -325,14 +325,14 @@ export const ForecastSection = ({
 									color="var(--rose)"
 									onClick={setOut}
 								>
-									saída
+									expense
 								</ToggleBtn>
 								<ToggleBtn
 									active={!outflow}
 									color="var(--green)"
 									onClick={setIn}
 								>
-									entrada
+									income
 								</ToggleBtn>
 								<input
 									inputMode="decimal"
@@ -357,10 +357,10 @@ export const ForecastSection = ({
 										opacity: !description.trim() || !amount.trim() ? 0.4 : 1,
 									}}
 								>
-									adicionar →
+									add →
 								</button>
 								<button onClick={closeAdd} className="mono" style={pillStyle}>
-									cancelar
+									cancel
 								</button>
 							</div>
 						</div>
@@ -372,7 +372,7 @@ export const ForecastSection = ({
 						style={{ marginTop: 8 }}
 					>
 						<button onClick={openAdd} className="mono" style={addBtnStyle}>
-							+ nova previsão
+							+ new forecast
 						</button>
 					</motion.div>
 				)}
@@ -402,7 +402,7 @@ export const ForecastSection = ({
 								marginBottom: 6,
 							}}
 						>
-							mover previsão para:
+							move forecast to:
 						</div>
 						<div
 							style={{
@@ -435,7 +435,7 @@ export const ForecastSection = ({
 							className="mono"
 							style={pillStyle}
 						>
-							cancelar
+							cancel
 						</button>
 					</motion.div>
 				)}

@@ -40,7 +40,7 @@ export const App = () => {
 					(e.target as HTMLElement).style.top = "-100px";
 				}}
 			>
-				Pular para conteúdo
+				Skip to content
 			</a>
 
 			<header
@@ -102,10 +102,10 @@ const SyncChip = ({
 			? "var(--amber)"
 			: "var(--green)";
 	const label = error
-		? `erro · ${error}`
+		? `error · ${error}`
 		: pending > 0
-			? `${pending} pendente${pending === 1 ? "" : "s"}`
-			: "sincronizado";
+			? `${pending} pending`
+			: "synced";
 	return (
 		<div
 			className="mono"
@@ -145,7 +145,7 @@ const SyncChip = ({
 						color: "inherit",
 					}}
 				>
-					tentar novamente
+					retry
 				</button>
 			)}
 		</div>

@@ -169,7 +169,7 @@ export const EmptyState = ({ message }: { message: string }) => (
 );
 
 export const LoadingNote = ({
-	message = "carregando…",
+	message = "loading…",
 }: {
 	message?: string;
 }) => (
@@ -224,7 +224,7 @@ export const ChartSkeleton = () => (
 			height: 150,
 			padding: "12px 0 28px",
 		}}
-		aria-label="carregando caixa"
+		aria-label="loading cash chart"
 	>
 		{Array.from({ length: 12 }).map((_, i) => (
 			<div

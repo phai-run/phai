@@ -140,7 +140,7 @@ export const WarPlanPanel = ({
 	const maxProjecao = Math.max(1, ...plan.rows.map((r) => r.projecao));
 
 	return (
-		<section aria-label={`Plano de guerra de ${month}`}>
+		<section aria-label={`Planning for ${month}`}>
 			<PlanSummary
 				plan={plan}
 				sim={sim}
@@ -168,14 +168,14 @@ export const WarPlanPanel = ({
 				>
 					<thead>
 						<tr className="mono">
-							<th style={thStyle}>categoria</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>orçamento</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>realizado</th>
-							<th style={{ ...thStyle, width: "24%" }}>uso · meta</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>média 3m</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>projeção</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>meta</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>Δ mês</th>
+							<th style={thStyle}>category</th>
+							<th style={{ ...thStyle, textAlign: "right" }}>budget</th>
+							<th style={{ ...thStyle, textAlign: "right" }}>spent</th>
+							<th style={{ ...thStyle, width: "24%" }}>usage · goal</th>
+							<th style={{ ...thStyle, textAlign: "right" }}>3-mo avg</th>
+							<th style={{ ...thStyle, textAlign: "right" }}>projection</th>
+							<th style={{ ...thStyle, textAlign: "right" }}>goal</th>
+							<th style={{ ...thStyle, textAlign: "right" }}>Δ month</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -238,16 +238,16 @@ const PlanSummary = ({
 				padding: "12px 0",
 			}}
 		>
-			<SummaryCard label="projeção do mês" value={plan.totalProjecao} />
-			<SummaryCard label="já realizado" value={plan.totalRealizado} />
+			<SummaryCard label="month projection" value={plan.totalProjecao} />
+			<SummaryCard label="already spent" value={plan.totalRealizado} />
 			<SummaryCard
-				label="com metas"
+				label="with goals"
 				value={sim.projecaoSimulada}
 				accent={hasGoals ? "var(--purple)" : undefined}
 			/>
-			<SummaryCard label="Δ / mês" value={sim.economiaMes} accent={deltaAccent} />
+			<SummaryCard label="Δ / month" value={sim.economiaMes} accent={deltaAccent} />
 			<SummaryCard
-				label={`Δ até dez (×${monthsCount})`}
+				label={`Δ through Dec (×${monthsCount})`}
 				value={sim.economiaMes * monthsCount}
 				accent={deltaAccent}
 			/>
@@ -301,12 +301,12 @@ const PlanFooter = ({
 	>
 		{parcelas > 0 && (
 			<span>
-				parcelas já comprometidas no mês: {formatMoneyNumber(parcelas)} (dentro
-				das categorias quando pagas)
+				installments already committed this month: {formatMoneyNumber(parcelas)}
+				(inside their categories once paid)
 			</span>
 		)}
 		<span>
-			faturas de cartão não entram aqui — as compras já estão nas categorias.
+			card bills are not counted here — their purchases already live in the categories.
 		</span>
 		{showClear && (
 			<button
@@ -314,18 +314,18 @@ const PlanFooter = ({
 				className="mono"
 				style={{ marginLeft: "auto", ...footerButton("muted") }}
 			>
-				zerar metas
+				reset goals
 			</button>
 		)}
 		{canSave &&
 			(arming ? (
 				<button onClick={onSave} className="mono" style={footerButton("solid")}>
-					confirmar {parentCount} {parentCount === 1 ? "categoria" : "categorias"}{" "}
-					× {monthCount} {monthCount === 1 ? "mês" : "meses"}
+					confirm {parentCount} {parentCount === 1 ? "category" : "categories"}{" "}
+					× {monthCount} {monthCount === 1 ? "month" : "months"}
 				</button>
 			) : (
 				<button onClick={onArm} className="mono" style={footerButton("outline")}>
-					salvar metas até dez
+					save goals through Dec
 				</button>
 			))}
 	</div>
@@ -481,7 +481,7 @@ const ParentRows = ({
 					</div>
 					{row.orcamento != null && row.orcamento > 0 && (
 						<div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
-							{Math.round((row.realizado / row.orcamento) * 100)}% do orçamento
+							{Math.round((row.realizado / row.orcamento) * 100)}% of budget
 						</div>
 					)}
 				</td>
@@ -556,13 +556,13 @@ const SubGoalRow = ({
 					max={sliderMax(sub)}
 					step={10}
 					value={value}
-					aria-label={`meta mensal para ${sub.categoryId}`}
+					aria-label={`monthly goal for ${sub.categoryId}`}
 					onChange={(e) => onGoal(sub.categoryId, Number(e.target.value))}
 					style={{ width: "100%", accentColor: floored ? "var(--amber)" : "var(--purple)" }}
 					title={
 						floored
-							? "abaixo do já realizado — o piso é o que já foi gasto"
-							: "arraste para definir a meta mensal"
+							? "below what is already spent — spent is the floor"
+							: "drag to set the monthly goal"
 					}
 				/>
 			</td>

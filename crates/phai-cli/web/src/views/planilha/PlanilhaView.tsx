@@ -35,11 +35,11 @@ const categories$ = queryDb(tables.categories.orderBy("id", "asc"));
 const accounts$ = queryDb(tables.accounts.orderBy("label", "asc"));
 
 const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string }> = [
-	{ key: "date", label: "data", width: "64px" },
-	{ key: "description", label: "descrição" },
-	{ key: "account", label: "conta", width: "120px" },
-	{ key: "category", label: "categoria", width: "220px" },
-	{ key: "amount", label: "valor", width: "110px" },
+	{ key: "date", label: "date", width: "64px" },
+	{ key: "description", label: "description" },
+	{ key: "account", label: "account", width: "120px" },
+	{ key: "category", label: "category", width: "220px" },
+	{ key: "amount", label: "amount", width: "110px" },
 ];
 
 /**
@@ -277,7 +277,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 	const allVisibleSelected = rowCount > 0 && selectedIds.size === rowCount;
 
 	return (
-		<section aria-label={`Planilha de ${month}`}>
+		<section aria-label={`Sheet for ${month}`}>
 			<SheetFilterBar
 				ui={ui}
 				setUi={setUi}
@@ -315,7 +315,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 							<th style={{ ...thStyle, width: 34 }}>
 								<input
 									type="checkbox"
-									aria-label="selecionar tudo"
+									aria-label="select all"
 									checked={allVisibleSelected}
 									onChange={() =>
 										setSelectedIds(
@@ -360,7 +360,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 									</button>
 								</th>
 							))}
-							<th style={{ ...thStyle, width: 70 }}>parcela</th>
+							<th style={{ ...thStyle, width: 70 }}>installment</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -391,7 +391,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 							fontSize: 13,
 						}}
 					>
-						Nenhuma transação para os filtros atuais.
+						No transactions for the current filters.
 					</div>
 				)}
 			</div>
@@ -408,19 +408,19 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					flexWrap: "wrap",
 				}}
 			>
-				<span>{rowCount} transações</span>
+				<span>{rowCount} transactions</span>
 				<span style={{ color: "var(--green)" }}>
-					entradas {formatMoneyNumber(totals.entradas)}
+					income {formatMoneyNumber(totals.entradas)}
 				</span>
 				<span style={{ color: "var(--rose)" }}>
-					saídas {formatMoneyNumber(totals.saidas)}
+					expenses {formatMoneyNumber(totals.saidas)}
 				</span>
 				<span style={{ color: totals.net >= 0 ? "var(--green)" : "var(--rose)" }}>
-					resultado {formatMoneyNumber(totals.net)}
+					net {formatMoneyNumber(totals.net)}
 				</span>
 				<span style={{ marginLeft: "auto", opacity: 0.7 }}>
-					↑↓ navegar · espaço selecionar · Enter/clique editar · k categorizar ·
-					shift+clique intervalo
+					↑↓ navigate · space select · Enter/click edit · k categorize ·
+					shift+click range
 				</span>
 			</div>
 
@@ -428,7 +428,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 			{selectedIds.size > 0 && (
 				<div
 					role="toolbar"
-					aria-label="ações em lote"
+					aria-label="bulk actions"
 					style={{
 						position: "sticky",
 						bottom: 12,
@@ -446,7 +446,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					}}
 				>
 					<span className="mono" style={{ fontSize: 12 }}>
-						{selectedIds.size} selecionada{selectedIds.size > 1 ? "s" : ""} ·{" "}
+						{selectedIds.size} selected ·{" "}
 						{formatMoneyNumber(selectionTotal)}
 					</span>
 					<button
@@ -467,7 +467,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 							fontSize: 12,
 						}}
 					>
-						categorizar
+						categorize
 					</button>
 					<button
 						onClick={() => setSelectedIds(new Set())}
@@ -482,7 +482,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 							fontSize: 12,
 						}}
 					>
-						limpar
+						clear
 					</button>
 				</div>
 			)}
@@ -566,7 +566,7 @@ const SheetRow = ({
 			<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
 				<input
 					type="checkbox"
-					aria-label={`selecionar ${sheetLabel(tx)}`}
+					aria-label={`select ${sheetLabel(tx)}`}
 					checked={selected}
 					onChange={(e) =>
 						onClick(tx, idx, {
@@ -608,7 +608,7 @@ const SheetRow = ({
 					data-cat-chip
 					onClick={(e) => onCategoryClick(tx, e.currentTarget)}
 					className="mono"
-					title="alterar categoria (Enter)"
+					title="change category (Enter)"
 					style={{
 						background: category ? "var(--chip, #f1eefc)" : "transparent",
 						color: category ? "var(--purple)" : "var(--amber)",
@@ -627,7 +627,7 @@ const SheetRow = ({
 				>
 					{category
 						? `${categoryEmoji(category, !negative)} ${category}`
-						: "❓ sem categoria"}
+						: "❓ uncategorized"}
 				</button>
 			</td>
 			<td
@@ -697,7 +697,7 @@ const SheetFilterBar = ({
 		>
 			<input
 				type="search"
-				placeholder={`buscar em ${count} transações…`}
+				placeholder={`search ${count} transactions…`}
 				value={ui.textFilter ?? ""}
 				onChange={(e) => setUi({ textFilter: e.target.value || null })}
 				className="mono"
@@ -711,7 +711,7 @@ const SheetFilterBar = ({
 				}}
 			/>
 			<select
-				aria-label="filtrar por conta"
+				aria-label="filter by account"
 				value={ui.accountFilter ?? ""}
 				onChange={(e) => setUi({ accountFilter: e.target.value || null })}
 				className="mono"
@@ -723,7 +723,7 @@ const SheetFilterBar = ({
 					background: "var(--card)",
 				}}
 			>
-				<option value="">todas as contas</option>
+				<option value="">all accounts</option>
 				{accounts.map((a) => (
 					<option key={a.id} value={a.id}>
 						{a.label}
@@ -735,21 +735,21 @@ const SheetFilterBar = ({
 				style={chip(ui.uncategorizedOnly)}
 				onClick={() => setUi({ uncategorizedOnly: !ui.uncategorizedOnly })}
 			>
-				sem categoria
+				uncategorized
 			</button>
 			<button
 				className="mono"
 				style={chip(ui.unreviewedOnly)}
 				onClick={() => setUi({ unreviewedOnly: !ui.unreviewedOnly })}
 			>
-				não revisadas
+				unreviewed
 			</button>
 			<button
 				className="mono"
 				style={chip(ui.installmentsOnly)}
 				onClick={() => setUi({ installmentsOnly: !ui.installmentsOnly })}
 			>
-				parcelas
+				installments
 			</button>
 		</div>
 	);
