@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.9.2](https://github.com/phai-run/phai/compare/v5.9.1...v5.9.2) (2026-06-12)
+
+
+### Bug Fixes
+
+* **serve:** block DNS rebinding + harden serve bridge and BigQuery search ([253f81e](https://github.com/phai-run/phai/commit/253f81e55ff0a95a0d436156fd07625472e460b3))
+* **serve:** block DNS rebinding, stop error leaks, cap event batch ([7d11794](https://github.com/phai-run/phai/commit/7d11794bcb3226b8b7d650f25489c408212da42f))
+* **storage:** escape LIKE wildcards in BigQuery search ([55fe27c](https://github.com/phai-run/phai/commit/55fe27c6b6fa1e0f21a5d458ad1974a9e9dee9ad))
+
 ## [5.9.1](https://github.com/phai-run/phai/compare/v5.9.0...v5.9.1) (2026-06-12)
 
 
