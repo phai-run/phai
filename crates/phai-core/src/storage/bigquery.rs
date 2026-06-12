@@ -317,6 +317,21 @@ fn field<S: Into<String>>(name: S, value: BqValue) -> (String, BqValue) {
     (name.into(), value)
 }
 
+/// Escape a user search term for use inside a `LIKE @pattern` clause. BigQuery
+/// treats `\` as the default LIKE escape character, so prefixing `%`, `_` and
+/// `\` makes the term match literally instead of acting as wildcards (a search
+/// for `50%` or `a_b` would otherwise over-match).
+fn escape_like_term(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for ch in term.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn batch_array_param(
     name: &str,
     fields: Vec<(&str, BqType)>,
@@ -1026,7 +1041,7 @@ impl FinanceStore for BigQueryStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<TransactionRecord>> {
-        let pattern = format!("%{}%", query.to_ascii_lowercase());
+        let pattern = format!("%{}%", escape_like_term(&query.to_ascii_lowercase()));
         let sql = format!(
             "
             SELECT
@@ -4253,7 +4268,7 @@ impl FinanceStore for BigQueryStore {
         exclude_id: &str,
         only_uncategorized: bool,
     ) -> Result<Vec<TransactionRecord>> {
-        let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+        let pattern = format!("%{}%", escape_like_term(&keyword.to_ascii_lowercase()));
         let category_filter = if only_uncategorized {
             "AND (category_id IS NULL OR category_source IN ('unclassified', 'fallback', 'pluggy'))"
         } else {
@@ -4442,5 +4457,22 @@ mod param_smoke {
         assert_eq!(r1[0].as_deref(), Some("row-2"));
         assert_eq!(r0[4], None);
         assert_eq!(r1[4].as_deref(), Some("here"));
+    }
+}
+
+#[cfg(test)]
+mod like_escape {
+    use super::escape_like_term;
+
+    #[test]
+    fn plain_term_is_unchanged() {
+        assert_eq!(escape_like_term("uber"), "uber");
+    }
+
+    #[test]
+    fn wildcards_are_escaped() {
+        assert_eq!(escape_like_term("50%"), "50\\%");
+        assert_eq!(escape_like_term("a_b"), "a\\_b");
+        assert_eq!(escape_like_term("c:\\d"), "c:\\\\d");
     }
 }

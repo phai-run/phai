@@ -1603,6 +1603,14 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> axum::respo
     (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
 }
 
+/// Log an internal failure server-side and return a generic 500. The error
+/// itself (anyhow context chains leak the DB path, BigQuery project/dataset and
+/// raw driver text) must never reach the client.
+fn internal_error(e: impl std::fmt::Display) -> axum::response::Response {
+    eprintln!("[phai serve] erro interno: {e}");
+    error_response(StatusCode::INTERNAL_SERVER_ERROR, "erro interno")
+}
+
 fn actor_unavailable() -> axum::response::Response {
     error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1670,7 +1678,7 @@ async fn get_review_queue(
             })
             .into_response()
         }
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -1706,7 +1714,7 @@ async fn get_transactions(
             has_more: result.has_more,
         })
         .into_response(),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -1723,7 +1731,7 @@ async fn get_categories(State(tx): Store) -> impl IntoResponse {
     }
     match resp_rx.await {
         Ok(Ok(ids)) => Json(CategoriesResponse { ids }).into_response(),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -1748,7 +1756,7 @@ async fn get_cards(State(tx): Store, Query(q): Query<CardsQuery>) -> impl IntoRe
     }
     match resp_rx.await {
         Ok(Ok(rows)) => Json(CardsResponse { rows }).into_response(),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -1768,7 +1776,7 @@ async fn get_accounts(State(tx): Store) -> impl IntoResponse {
             rows: accounts.iter().map(AccountRow::from_record).collect(),
         })
         .into_response(),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -1789,7 +1797,7 @@ async fn get_chart(State(tx): Store, Query(q): Query<ChartQuery>) -> impl IntoRe
     }
     match resp_rx.await {
         Ok(Ok(chart)) => Json(chart).into_response(),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -1824,7 +1832,7 @@ async fn get_forecasts(State(tx): Store, Query(q): Query<ForecastsQuery>) -> imp
             let rows: Vec<Value> = forecasts.iter().map(ForecastWithKind::to_json).collect();
             Json(serde_json::json!({ "forecasts": rows })).into_response()
         }
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -1849,12 +1857,23 @@ async fn get_forecast_templates(
     match resp_rx.await {
         // ForecastTemplateRecord serialises as snake_case; the frontend adapts.
         Ok(Ok(templates)) => Json(serde_json::json!({ "templates": templates })).into_response(),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
 
+/// Upper bound on a single `/api/events` batch. Each write is applied serially
+/// on the single store actor (DB read + write + audit insert), so an unbounded
+/// batch would stall every other request. The UI flushes far fewer than this.
+const MAX_EVENT_WRITES: usize = 1000;
+
 async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl IntoResponse {
+    if body.writes.len() > MAX_EVENT_WRITES {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("batch de eventos excede o limite de {MAX_EVENT_WRITES} writes"),
+        );
+    }
     let writes: Vec<ReviewWrite> = body
         .writes
         .into_iter()
@@ -1919,7 +1938,7 @@ async fn patch_forecast_response(
             Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
         }
         Ok(Ok(None)) => error_response(StatusCode::NOT_FOUND, "forecast não encontrado"),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -2021,7 +2040,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
         Ok(Ok(forecast_id)) => {
             Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
         }
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -2073,7 +2092,7 @@ async fn post_forecast_move(
             StatusCode::BAD_REQUEST,
             "não é possível mover forecast para um mês passado",
         ),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -2121,7 +2140,7 @@ async fn post_dismiss_template(
     }
     match resp_rx.await {
         Ok(Ok(())) => Json(serde_json::json!({ "template_id": template_id })).into_response(),
-        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
 }
@@ -2291,12 +2310,31 @@ async fn shutdown_signal() {
     eprintln!("\n[phai serve] encerrando...");
 }
 
-/// Reject `/api` requests whose `Origin` is not localhost. Runs before every
-/// API handler.
+/// Reject `/api` requests that are not addressed to a loopback host or whose
+/// `Origin` is not localhost. Runs before every API handler.
+///
+/// The `Host` check is the anti-DNS-rebinding defense: an attacker page on
+/// `evil.com` that rebinds DNS to `127.0.0.1` reaches us with `Host: evil.com`,
+/// and same-origin browser GETs carry no `Origin` header — so the origin check
+/// alone never fires on reads. Pinning `Host` to the loopback names we actually
+/// serve closes that hole.
 async fn guard_origin(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    if !is_host_allowed(req.headers()) {
+        let host = req
+            .headers()
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<missing>");
+        eprintln!(
+            "[phai serve] host rejeitado: {host} — {} {}",
+            req.method(),
+            req.uri().path()
+        );
+        return (StatusCode::FORBIDDEN, "Host não permitido").into_response();
+    }
     if !is_origin_allowed(req.headers()) {
         let origin = req
             .headers()
@@ -2403,6 +2441,27 @@ fn open_browser(url: &str) {
     }
 }
 
+/// Loopback hosts we answer to. The bind address is always `127.0.0.1`
+/// (`LOCAL_BIND_HOST`), and the app is reached via `phai.localhost` or plain
+/// `localhost`/`127.0.0.1`; anything else in the `Host` header is a rebinding
+/// attempt or a misrouted request.
+fn host_allowed(host: &str) -> bool {
+    // Strip the optional `:port`. Loopback hosts never contain `[` (no IPv6
+    // literal — we bind v4 only), so splitting on the first `:` is safe.
+    let hostname = host.split(':').next().unwrap_or(host);
+    matches!(hostname, "127.0.0.1" | "localhost" | "phai.localhost")
+}
+
+/// Reject requests whose `Host` header is not a loopback name. A missing `Host`
+/// is allowed (HTTP/1.0 / direct-socket integrations); browsers always send one,
+/// so the rebinding vector is covered.
+fn is_host_allowed(headers: &HeaderMap) -> bool {
+    match headers.get("host") {
+        None => true,
+        Some(v) => v.to_str().map(host_allowed).unwrap_or(false),
+    }
+}
+
 /// Permite apenas conexões de localhost ou sem Origin (curl, integração direta).
 /// Rejeita qualquer outro Origin para prevenir Cross-Site Request Forgery.
 fn is_origin_allowed(headers: &HeaderMap) -> bool {
@@ -2497,6 +2556,40 @@ mod tests {
             HeaderValue::from_static("http://192.168.1.100:8080"),
         );
         assert!(!is_origin_allowed(&h));
+    }
+
+    // ── is_host_allowed (anti-DNS-rebinding) ───────────────────────────────
+
+    #[test]
+    fn host_absent_is_allowed() {
+        assert!(is_host_allowed(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn loopback_hosts_allowed() {
+        for value in [
+            "127.0.0.1",
+            "127.0.0.1:80",
+            "localhost",
+            "localhost:8080",
+            "phai.localhost",
+            "phai.localhost:80",
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert("host", HeaderValue::from_str(value).unwrap());
+            assert!(is_host_allowed(&h), "host {value} should be allowed");
+        }
+    }
+
+    #[test]
+    fn rebinding_host_rejected() {
+        // DNS rebinding: attacker domain resolves to 127.0.0.1 but the Host
+        // header still carries the attacker's name.
+        for value in ["evil.example.com", "evil.example.com:80", "192.168.1.5"] {
+            let mut h = HeaderMap::new();
+            h.insert("host", HeaderValue::from_str(value).unwrap());
+            assert!(!is_host_allowed(&h), "host {value} must be rejected");
+        }
     }
 
     // ── DTO serialisation contract (camelCase) ─────────────────────────────
