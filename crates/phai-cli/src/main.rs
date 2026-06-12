@@ -35,6 +35,7 @@ mod cashflow_chart;
 mod enrich;
 mod forecast_cmd;
 mod human_format;
+mod mcp;
 mod pulse;
 mod self_cmd;
 mod serve;
@@ -120,6 +121,10 @@ enum Commands {
         #[command(subcommand)]
         command: BudgetCommand,
     },
+    /// Serve phai's read-only reports as MCP tools over stdio (for Claude,
+    /// IDEs and other MCP clients). See ADR-0027.
+    #[command(name = "mcp")]
+    Mcp,
     /// Start the local web app (LiveStore UI) bridged to your store.
     #[command(name = "serve")]
     Serve {
@@ -3203,6 +3208,7 @@ async fn main() -> Result<()> {
             BudgetCommand::Upsert(args) => budget_upsert(args).await,
             BudgetCommand::List(args) => budget_list(args).await,
         },
+        Some(Commands::Mcp) => mcp::run(),
         Some(Commands::Serve { port }) => serve::run(port).await,
         Some(Commands::Notify { command }) => match command {
             NotifyCommand::Whatsapp(args) => notify_whatsapp(args).await,

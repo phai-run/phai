@@ -155,6 +155,7 @@ phai admin import-legacy     Import from legacy CSV files
 phai sync pluggy             Sync transactions from Pluggy
 phai report <subcommand>     See "Reports" above
 phai serve                   Start the web app — the interactive surface for review and forecasts
+phai mcp                     Serve read-only reports as MCP tools over stdio (Claude, IDEs, agents)
 phai tx upsert-manual        Add a manual transaction
 phai tx categorize           Assign category to a transaction
 phai tx set-anatomy          Edit human transaction fields
@@ -229,9 +230,12 @@ cargo install --git https://github.com/phai-run/phai.git --bin phai
 
 ## AI assistant integration
 
-The `integrations/openclaw/` directory contains a shell wrapper + skill definition that exposes `phai` to an AI assistant. The pattern (wrapper + skill markdown) adapts to Claude Skills, OpenClaw, or any frame that exec's commands — phai stays LLM-neutral.
+Two ways in, same engine:
 
-Agents should always invoke reports with `--raw` to get JSON instead of the human-friendly default.
+- **MCP** — `phai mcp` starts a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio exposing the read-only report surface (pulse, monthly spend, cashflow, cards, budgets, installments, forecast vs actual, transaction search) as tools. Point any MCP client at the command — e.g. for Claude Code: `claude mcp add phai -- phai mcp`. Read-only by design ([ADR-0027](docs/adr/0027-mcp-server-read-only-self-exec.md)).
+- **Shell** — the `integrations/openclaw/` directory contains a wrapper + skill definition for agents that exec commands (OpenClaw, Claude Skills, anything). Agents should always invoke reports with `--raw` to get JSON instead of the human-friendly default.
+
+phai stays LLM-neutral either way: the model reads and proposes; classification stays rules-first.
 
 ## Architecture
 

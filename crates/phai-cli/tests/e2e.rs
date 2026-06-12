@@ -5848,3 +5848,84 @@ fn forecast_refresh_materialises_open_card_bill() {
     assert_eq!(count_after, 1, "second refresh must not duplicate forecast");
     drop(conn);
 }
+
+// ── phai mcp — stdio MCP server ─────────────────────────────────────────────
+
+/// Full protocol round-trip against a seeded SQLite store: initialize,
+/// tools/list, then a tools/call that re-execs the binary and must return the
+/// same JSON the CLI's `--raw` path produces.
+#[test]
+fn mcp_serves_reports_over_stdio() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let mut child = envs(&mut cargo_bin(), &config_dir, &data_dir)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn phai mcp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut lines = BufReader::new(stdout).lines();
+    fn ask(
+        stdin: &mut impl Write,
+        lines: &mut impl Iterator<Item = std::io::Result<String>>,
+        msg: &str,
+    ) -> Value {
+        stdin.write_all(msg.as_bytes()).expect("write");
+        stdin.write_all(b"\n").expect("write nl");
+        stdin.flush().expect("flush");
+        let line = lines.next().expect("reply").expect("read reply");
+        serde_json::from_str(&line).expect("reply is JSON")
+    }
+
+    let init = ask(
+        &mut stdin,
+        &mut lines,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+    );
+    assert_eq!(init["result"]["serverInfo"]["name"], "phai");
+    assert!(init["result"]["capabilities"]["tools"].is_object());
+
+    // Notification: must produce no reply (the next reply belongs to id 2).
+    stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+        .expect("write notification");
+
+    let list = ask(
+        &mut stdin,
+        &mut lines,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    );
+    let tools = list["result"]["tools"].as_array().expect("tools array");
+    assert!(tools.iter().any(|t| t["name"] == "monthly_spend"));
+
+    let call = ask(
+        &mut stdin,
+        &mut lines,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"monthly_spend","arguments":{"month":"2026-03"}}}"#,
+    );
+    assert_eq!(call["result"]["isError"], false, "call failed: {call}");
+    let text = call["result"]["content"][0]["text"].as_str().expect("text");
+    let payload: Value = serde_json::from_str(text).expect("tool output is JSON");
+    assert!(payload.is_object() || payload.is_array());
+
+    // Bad input is rejected before any subprocess runs.
+    let bad = ask(
+        &mut stdin,
+        &mut lines,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"monthly_spend","arguments":{"month":"march"}}}"#,
+    );
+    assert_eq!(bad["result"]["isError"], true);
+
+    drop(stdin); // EOF → clean exit
+    let status = child.wait().expect("wait");
+    assert!(status.success());
+}

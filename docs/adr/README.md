@@ -78,6 +78,7 @@ proposed → active → superseded
 | [0024](0024-cashflow-chart-accrual-source.md) | Cashflow chart sources from `v_cashflow` (accrual) with a net-derived saldo line | superseded by [0025](0025-cashflow-basis-bill-explosion.md) |
 | [0025](0025-cashflow-basis-bill-explosion.md) | Cash-flow basis with credit-card bill explosion is the canonical reporting model | accepted |
 | [0026](0026-single-view-chain-canonical-source.md) | One deduped view chain is the single source of truth for all reporting | accepted |
+| [0027](0027-mcp-server-read-only-self-exec.md) | MCP server: read-only v1, hand-rolled stdio loop, self-exec tools | active |
 
 ---
 
