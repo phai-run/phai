@@ -201,6 +201,110 @@ fn write_app_bundle(port: u16) -> Result<PathBuf> {
     Ok(bundle)
 }
 
+fn dock_plist() -> Result<PathBuf> {
+    Ok(home()?.join("Library/Preferences/com.apple.dock.plist"))
+}
+
+/// One `persistent-apps` array entry pointing at `bundle`. `_CFURLStringType`
+/// `0` is an absolute path; macOS rewrites it to a `file://` URL on read, so
+/// [`dock_already_pins`] matches by path substring rather than exact value.
+fn dock_tile_entry(bundle: &Path) -> String {
+    format!(
+        "<dict><key>tile-data</key><dict><key>file-data</key><dict>\
+         <key>_CFURLString</key><string>{}</string>\
+         <key>_CFURLStringType</key><integer>0</integer>\
+         </dict></dict></dict>",
+        xml_escape(&bundle.display().to_string())
+    )
+}
+
+/// True when a `defaults read … persistent-apps` dump already lists `bundle`.
+/// Matched on the absolute path, which survives macOS rewriting it into a
+/// `file://` URL (the URL still contains the path).
+fn dock_already_pins(defaults_dump: &str, bundle: &Path) -> bool {
+    defaults_dump.contains(&bundle.display().to_string())
+}
+
+/// Add `bundle` to the Dock (idempotent). Returns `true` if a tile was added,
+/// `false` if it was already pinned. Best-effort: the Dock is a convenience,
+/// never a reason to fail the install.
+fn pin_to_dock(bundle: &Path) -> Result<bool> {
+    let dump = Command::new("defaults")
+        .args(["read", "com.apple.dock", "persistent-apps"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if dock_already_pins(&dump, bundle) {
+        return Ok(false);
+    }
+    let add = Command::new("defaults")
+        .args([
+            "write",
+            "com.apple.dock",
+            "persistent-apps",
+            "-array-add",
+            &dock_tile_entry(bundle),
+        ])
+        .output()
+        .context("failed to run defaults write for the Dock")?;
+    if !add.status.success() {
+        bail!(
+            "defaults write failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        );
+    }
+    let _ = Command::new("killall").arg("Dock").output();
+    Ok(true)
+}
+
+/// Remove every Dock tile pointing at `bundle`. Best-effort and never fails the
+/// uninstall — a leftover tile is a cosmetic annoyance the user can drag out.
+/// Returns `true` if at least one tile was removed.
+fn unpin_from_dock(bundle: &Path) -> Result<bool> {
+    let needle = bundle.display().to_string();
+    let plist = dock_plist()?;
+    let plist_str = plist.display().to_string();
+    // Flush the cfprefs cache to disk so PlistBuddy reads the live array.
+    let _ = Command::new("defaults")
+        .args(["read", "com.apple.dock", "persistent-apps"])
+        .output();
+    let mut matching = Vec::new();
+    let mut index = 0;
+    loop {
+        let probe = Command::new("/usr/libexec/PlistBuddy")
+            .args([
+                "-c",
+                &format!("Print persistent-apps:{index}:tile-data:file-data:_CFURLString"),
+                &plist_str,
+            ])
+            .output();
+        match probe {
+            Ok(out) if out.status.success() => {
+                if String::from_utf8_lossy(&out.stdout).contains(&needle) {
+                    matching.push(index);
+                }
+                index += 1;
+            }
+            // Index out of range (or PlistBuddy missing) → end of the array.
+            _ => break,
+        }
+    }
+    if matching.is_empty() {
+        return Ok(false);
+    }
+    // Delete from the tail so earlier indices stay valid as the array shrinks.
+    for idx in matching.iter().rev() {
+        let _ = Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", &format!("Delete persistent-apps:{idx}"), &plist_str])
+            .output();
+    }
+    // Reload the edited prefs and redraw the Dock.
+    let _ = Command::new("killall").arg("cfprefsd").output();
+    let _ = Command::new("killall").arg("Dock").output();
+    Ok(true)
+}
+
 pub fn install(args: InstallArgs) -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("phai serve install is macOS-only for now (launchd)");
@@ -235,7 +339,14 @@ pub fn install(args: InstallArgs) -> Result<()> {
     println!("✅ launchd agent installed: {}", plist_path.display());
     println!("   serving {url} at login (logs: {})", log.display());
     println!("✅ launcher app: {}", bundle.display());
-    println!("   it's in Launchpad/Spotlight as “Phai” — drag it to the Dock to pin it.");
+    match pin_to_dock(&bundle) {
+        Ok(true) => println!("   pinned to the Dock — click the φ icon to open it."),
+        Ok(false) => println!("   already in the Dock — click the φ icon to open it."),
+        Err(e) => println!(
+            "   (couldn't pin to the Dock automatically: {e} — drag {} there yourself)",
+            bundle.display()
+        ),
+    }
     if !env.is_empty() {
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         println!("   captured into the agent: {}", keys.join(", "));
@@ -256,6 +367,10 @@ pub fn uninstall() -> Result<()> {
         removed.push(plist_path.display().to_string());
     }
     let bundle = app_bundle_path()?;
+    // Drop the Dock tile before the bundle so it never lingers as a broken icon.
+    if let Ok(true) = unpin_from_dock(&bundle) {
+        removed.push(format!("{} (Dock tile)", bundle.display()));
+    }
     if bundle.exists() {
         std::fs::remove_dir_all(&bundle)
             .with_context(|| format!("failed to remove {}", bundle.display()))?;
@@ -340,5 +455,43 @@ mod tests {
         // "icns" magic + non-trivial size — guards against a corrupted asset.
         assert_eq!(&ICON_BYTES[..4], b"icns");
         assert!(ICON_BYTES.len() > 50_000);
+    }
+
+    #[test]
+    fn dock_tile_entry_points_at_the_bundle() {
+        let entry = dock_tile_entry(Path::new("/Users/alex/Applications/Phai.app"));
+        assert!(entry.contains("<key>_CFURLString</key>"));
+        assert!(entry.contains("<string>/Users/alex/Applications/Phai.app</string>"));
+        assert!(entry.contains("<key>_CFURLStringType</key>"));
+        assert!(entry.contains("<integer>0</integer>"));
+    }
+
+    #[test]
+    fn dock_tile_entry_escapes_xml_in_path() {
+        let entry = dock_tile_entry(Path::new("/Users/a&b/Applications/Phai.app"));
+        assert!(entry.contains("/Users/a&amp;b/Applications/Phai.app"));
+        assert!(!entry.contains("a&b"));
+    }
+
+    #[test]
+    fn dock_already_pins_matches_file_url_form() {
+        // macOS rewrites the stored path into a file:// URL; the path substring
+        // still matches.
+        let dump = r#"(
+            { "tile-data" = { "file-data" = {
+                "_CFURLString" = "file:///Users/alex/Applications/Phai.app/"; }; }; }
+        )"#;
+        let bundle = Path::new("/Users/alex/Applications/Phai.app");
+        assert!(dock_already_pins(dump, bundle));
+    }
+
+    #[test]
+    fn dock_already_pins_is_false_when_absent() {
+        let dump = r#"( { "tile-data" = { "file-data" = {
+            "_CFURLString" = "file:///Applications/Safari.app/"; }; }; } )"#;
+        assert!(!dock_already_pins(
+            dump,
+            Path::new("/Users/alex/Applications/Phai.app")
+        ));
     }
 }
