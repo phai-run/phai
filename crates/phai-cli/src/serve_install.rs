@@ -1,22 +1,44 @@
 //! `phai serve install` / `uninstall` — run the web app at login (macOS).
 //!
-//! Two artifacts, both owned by these commands (ADR-0028):
+//! Two flavors:
 //!
-//! 1. **launchd agent** `~/Library/LaunchAgents/run.phai.serve.plist` —
-//!    launchd keeps `phai serve` alive (RunAtLoad + KeepAlive) and restarts
-//!    it across crashes and reboots. The plist points at the absolute path of
-//!    the current binary; the self-updater replaces that path atomically, so
-//!    the agent always starts whatever version is installed. A custom
-//!    `PHAI_CONFIG_DIR`/`FINANCE_OS_CONFIG_DIR` in effect at install time is
-//!    captured into the plist so the daemon serves the same store the user
-//!    installed from.
+//! - **User agent** (default, no `--system`) — a launchd *agent* in the
+//!   `gui/<uid>` domain. No sudo, no profiles, fully removed by `uninstall`.
+//!   A user agent cannot bind privileged ports (< 1024); on port 80 it
+//!   crash-loops with `Permission denied`.
+//! - **System daemon** (`--system`) — a launchd *daemon* at
+//!   `/Library/LaunchDaemons/run.phai.serve.plist`, owned `root:wheel`, loaded
+//!   into the `system` domain. This is the supported way to bind port 80
+//!   (`http://phai.localhost/`). The privileged steps run through a *single*
+//!   native macOS admin-auth prompt (`osascript … with administrator
+//!   privileges`) rather than a hand-typed `sudo` sequence — see ADR-0029.
+//!
+//! Artifacts owned by these commands (ADR-0028, ADR-0029):
+//!
+//! 1. **launchd agent/daemon** — launchd keeps `phai serve` alive (RunAtLoad +
+//!    KeepAlive) and restarts it across crashes and reboots. The plist points
+//!    at the absolute path of the current binary; the self-updater replaces
+//!    that path atomically, so it always starts whatever version is installed.
+//!    A custom `PHAI_CONFIG_DIR`/`FINANCE_OS_*` in effect at install time is
+//!    captured into the plist so the service serves the same store the user
+//!    installed from. The system daemon additionally captures `HOME` (a root
+//!    process inherits none of the user's environment) so the BigQuery
+//!    `service_account_path` and config resolve, and runs with
+//!    `--no-auto-update`.
 //! 2. **Launcher app** `~/Applications/Phai.app` — a minimal bundle whose
 //!    executable opens the web app in the default browser. It shows up in
 //!    Launchpad/Spotlight with the φ icon and can be pinned to the Dock;
 //!    "installing phai" ends with something clickable.
 //!
-//! Both are plain files under `$HOME` — no sudo, no profiles, fully removed
-//! by `uninstall`.
+//! ## Security trade-off (system daemon)
+//!
+//! The root daemon executes the per-user binary at `~/.local/bin/phai`, which
+//! is writable by the (non-root) user. On a multi-user machine that is a local
+//! privilege-escalation vector: anyone who can write that path gets code
+//! execution as root at next launch. We accept this on a single-admin personal
+//! Mac because it preserves `phai self update` (the updater rewrites that same
+//! user-writable path in place). A signed/notarized `.pkg` that installs into a
+//! root-owned location is the intended future hardening (see ADR-0029).
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -26,11 +48,27 @@ use std::process::Command;
 const AGENT_LABEL: &str = "run.phai.serve";
 const ICON_BYTES: &[u8] = include_bytes!("../assets/Phai.icns");
 
+/// Absolute path of the system LaunchDaemon plist (`--system`).
+const SYSTEM_DAEMON_PLIST: &str = "/Library/LaunchDaemons/run.phai.serve.plist";
+
 #[derive(Args, Debug)]
 pub struct InstallArgs {
-    /// Port the agent serves on (default 80 → http://phai.localhost).
+    /// Port the service serves on (default 80 → http://phai.localhost).
     #[arg(long, default_value_t = 80)]
     pub port: u16,
+
+    /// Install a root LaunchDaemon (port 80 capable) via one macOS admin-auth
+    /// prompt, instead of a user agent. Required to bind privileged ports.
+    #[arg(long)]
+    pub system: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct UninstallArgs {
+    /// Remove the root LaunchDaemon (installed with `--system`) via one macOS
+    /// admin-auth prompt, instead of the user agent.
+    #[arg(long)]
+    pub system: bool,
 }
 
 fn home() -> Result<PathBuf> {
@@ -49,6 +87,12 @@ fn app_bundle_path() -> Result<PathBuf> {
 
 fn log_path() -> Result<PathBuf> {
     Ok(home()?.join("Library/Logs/phai/serve.log"))
+}
+
+/// Log path for the root daemon. A root process cannot write the user's
+/// `~/Library/Logs`, so the system daemon logs under the machine-wide tree.
+fn system_log_path() -> PathBuf {
+    PathBuf::from("/Library/Logs/phai/serve.log")
 }
 
 /// The URL the launcher opens. Port 80 gets the friendly host.
@@ -78,23 +122,103 @@ fn captured_env() -> Vec<(String, String)> {
     .collect()
 }
 
-/// launchd property list for the serve agent.
+/// Env for the root daemon: the captured config dirs plus `HOME`. A root
+/// process inherits none of the user's environment, so without `HOME` the
+/// BigQuery `service_account_path` and on-disk config would not resolve.
+fn captured_system_env(home: &Path) -> Vec<(String, String)> {
+    let mut env = vec![("HOME".to_string(), home.display().to_string())];
+    env.extend(captured_env());
+    env
+}
+
+/// Single-quote a string for safe inclusion in a `/bin/sh` command, closing and
+/// reopening the quote around any embedded `'`. The result is injection-proof:
+/// no shell metacharacter inside `s` is interpreted.
+fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Build the `/bin/sh` command that installs the root daemon: create the log
+/// dir, copy the staged plist into place, fix ownership/mode, then reload it.
+/// Run as root via `osascript … with administrator privileges`. `staged` is a
+/// temp file holding the plist body; `log_dir` is where the daemon writes its
+/// log. Every path is single-quoted so spaces and metacharacters are safe.
+fn system_install_shell(staged: &Path, dest: &str, log_dir: &Path) -> String {
+    let staged = sh_single_quote(&staged.display().to_string());
+    let dest = sh_single_quote(dest);
+    let log_dir = sh_single_quote(&log_dir.display().to_string());
+    format!(
+        "mkdir -p {log_dir} && cp {staged} {dest} && \
+         chown root:wheel {dest} && chmod 644 {dest} && \
+         (launchctl bootout system/{label} 2>/dev/null || true) && \
+         launchctl bootstrap system {dest}",
+        label = AGENT_LABEL,
+    )
+}
+
+/// Build the `/bin/sh` command that removes the root daemon: bootout (ignore
+/// failure) then delete the plist. Run as root via osascript.
+fn system_uninstall_shell(dest: &str) -> String {
+    let dest = sh_single_quote(dest);
+    format!(
+        "(launchctl bootout system/{label} 2>/dev/null || true) && rm -f {dest}",
+        label = AGENT_LABEL,
+    )
+}
+
+/// Wrap a `/bin/sh` command so `osascript` runs it as root behind the native
+/// admin-auth dialog. The inner command is embedded as an AppleScript string
+/// literal, so we escape AppleScript's `\` and `"`.
+fn osascript_admin(shell_cmd: &str) -> String {
+    let applescript_literal = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("do shell script \"{applescript_literal}\" with administrator privileges")
+}
+
+/// `<key>EnvironmentVariables</key>` block, or empty when nothing is captured.
+fn env_block(env: &[(String, String)]) -> String {
+    if env.is_empty() {
+        return String::new();
+    }
+    let entries: String = env
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "\n      <key>{}</key>\n      <string>{}</string>",
+                xml_escape(k),
+                xml_escape(v)
+            )
+        })
+        .collect();
+    format!("\n    <key>EnvironmentVariables</key>\n    <dict>{entries}\n    </dict>")
+}
+
+/// launchd property list for the serve agent (user domain).
 fn agent_plist(exe: &Path, port: u16, log: &Path, env: &[(String, String)]) -> String {
-    let env_block = if env.is_empty() {
-        String::new()
-    } else {
-        let entries: String = env
-            .iter()
-            .map(|(k, v)| {
-                format!(
-                    "\n      <key>{}</key>\n      <string>{}</string>",
-                    xml_escape(k),
-                    xml_escape(v)
-                )
-            })
-            .collect();
-        format!("\n    <key>EnvironmentVariables</key>\n    <dict>{entries}\n    </dict>")
-    };
+    serve_plist(exe, port, log, env, &[])
+}
+
+/// launchd property list for the root serve daemon (`--system`).
+///
+/// Identical shape to the user agent plus `--no-auto-update` (the root daemon
+/// must not rewrite its own binary) and a captured `HOME` so a root process
+/// resolves the user's config and BigQuery `service_account_path`.
+fn system_daemon_plist(exe: &Path, port: u16, log: &Path, env: &[(String, String)]) -> String {
+    serve_plist(exe, port, log, env, &["--no-auto-update"])
+}
+
+/// Shared plist body. `extra_args` are appended to `ProgramArguments` after the
+/// `--port N` pair (e.g. `--no-auto-update` for the root daemon).
+fn serve_plist(
+    exe: &Path,
+    port: u16,
+    log: &Path,
+    env: &[(String, String)],
+    extra_args: &[&str],
+) -> String {
+    let extra: String = extra_args
+        .iter()
+        .map(|a| format!("\n      <string>{}</string>", xml_escape(a)))
+        .collect();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -107,7 +231,7 @@ fn agent_plist(exe: &Path, port: u16, log: &Path, env: &[(String, String)]) -> S
       <string>{exe}</string>
       <string>serve</string>
       <string>--port</string>
-      <string>{port}</string>
+      <string>{port}</string>{extra}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -124,6 +248,7 @@ fn agent_plist(exe: &Path, port: u16, log: &Path, env: &[(String, String)]) -> S
         exe = xml_escape(&exe.display().to_string()),
         port = port,
         log = xml_escape(&log.display().to_string()),
+        env_block = env_block(env),
     )
 }
 
@@ -167,6 +292,26 @@ fn launchctl(args: &[&str]) -> Result<std::process::Output> {
         .args(args)
         .output()
         .context("failed to run launchctl")
+}
+
+/// Run `shell_cmd` as root behind the native macOS admin-auth dialog. Returns
+/// an error if the user cancels the prompt or the privileged command fails.
+fn run_admin(shell_cmd: &str) -> Result<()> {
+    let script = osascript_admin(shell_cmd);
+    let out = Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .context("failed to run osascript")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        // osascript error -128 == user cancelled the auth dialog.
+        if err.contains("-128") {
+            bail!("admin authorization cancelled");
+        }
+        bail!("privileged step failed: {err}");
+    }
+    Ok(())
 }
 
 fn gui_domain() -> String {
@@ -309,6 +454,15 @@ pub fn install(args: InstallArgs) -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("phai serve install is macOS-only for now (launchd)");
     }
+    if args.system {
+        install_system(args.port)
+    } else {
+        install_user_agent(args.port)
+    }
+}
+
+/// User-domain launchd agent (default). No sudo; cannot bind ports < 1024.
+fn install_user_agent(port: u16) -> Result<()> {
     let exe = std::env::current_exe().context("cannot resolve current executable")?;
     let plist_path = agent_plist_path()?;
     let log = log_path()?;
@@ -319,7 +473,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let env = captured_env();
-    std::fs::write(&plist_path, agent_plist(&exe, args.port, &log, &env))
+    std::fs::write(&plist_path, agent_plist(&exe, port, &log, &env))
         .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
     // Idempotent (re)load: boot out any previous instance, then bootstrap.
@@ -333,8 +487,8 @@ pub fn install(args: InstallArgs) -> Result<()> {
         );
     }
 
-    let bundle = write_app_bundle(args.port)?;
-    let url = app_url(args.port);
+    let bundle = write_app_bundle(port)?;
+    let url = app_url(port);
 
     println!("✅ launchd agent installed: {}", plist_path.display());
     println!("   serving {url} at login (logs: {})", log.display());
@@ -354,10 +508,67 @@ pub fn install(args: InstallArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
+/// Root LaunchDaemon (`--system`) — the only way to bind port 80. All
+/// privileged steps run through a single native admin-auth prompt (ADR-0029).
+fn install_system(port: u16) -> Result<()> {
+    let exe = std::env::current_exe().context("cannot resolve current executable")?;
+    let home = home()?;
+    let log = system_log_path();
+    let env = captured_system_env(&home);
+
+    // Security: the root daemon executes the user-writable binary at
+    // `~/.local/bin/phai` — a local privilege-escalation vector on multi-user
+    // machines. Accepted on a single-admin personal Mac to preserve
+    // `phai self update`. See the module header and ADR-0029.
+    println!(
+        "⚠️  the root daemon runs {} as root — keep that path writable only by you.",
+        exe.display()
+    );
+
+    // Stage the plist in a temp file, then copy it into place as root. This
+    // keeps the osascript command short and avoids embedding the plist body.
+    let body = system_daemon_plist(&exe, port, &log, &env);
+    let staged = std::env::temp_dir().join("run.phai.serve.plist.staged");
+    std::fs::write(&staged, &body)
+        .with_context(|| format!("failed to stage plist at {}", staged.display()))?;
+
+    let log_dir = log.parent().unwrap_or(Path::new("/Library/Logs/phai"));
+    let shell = system_install_shell(&staged, SYSTEM_DAEMON_PLIST, log_dir);
+    let result = run_admin(&shell);
+    let _ = std::fs::remove_file(&staged);
+    result.context("installing the root daemon")?;
+
+    let bundle = write_app_bundle(port)?;
+    let url = app_url(port);
+
+    println!("✅ root LaunchDaemon installed: {SYSTEM_DAEMON_PLIST}");
+    println!("   serving {url} at boot (logs: {})", log.display());
+    println!("✅ launcher app: {}", bundle.display());
+    match pin_to_dock(&bundle) {
+        Ok(true) => println!("   pinned to the Dock — click the φ icon to open it."),
+        Ok(false) => println!("   already in the Dock — click the φ icon to open it."),
+        Err(e) => println!(
+            "   (couldn't pin to the Dock automatically: {e} — drag {} there yourself)",
+            bundle.display()
+        ),
+    }
+    let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    println!("   captured into the daemon: {}", keys.join(", "));
+    Ok(())
+}
+
+pub fn uninstall(args: UninstallArgs) -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("phai serve uninstall is macOS-only for now (launchd)");
     }
+    if args.system {
+        uninstall_system()
+    } else {
+        uninstall_user_agent()
+    }
+}
+
+fn uninstall_user_agent() -> Result<()> {
     let plist_path = agent_plist_path()?;
     let _ = launchctl(&["bootout", &format!("{}/{AGENT_LABEL}", gui_domain())]);
     let mut removed = Vec::new();
@@ -366,6 +577,24 @@ pub fn uninstall() -> Result<()> {
             .with_context(|| format!("failed to remove {}", plist_path.display()))?;
         removed.push(plist_path.display().to_string());
     }
+    remove_launcher_bundle(&mut removed)?;
+    report_removed(removed, "agent and launcher");
+    Ok(())
+}
+
+/// Remove the root daemon (`--system`) via one admin-auth prompt, then remove
+/// the user-owned launcher bundle without elevation.
+fn uninstall_system() -> Result<()> {
+    let shell = system_uninstall_shell(SYSTEM_DAEMON_PLIST);
+    run_admin(&shell).context("removing the root daemon")?;
+
+    let mut removed = vec![SYSTEM_DAEMON_PLIST.to_string()];
+    remove_launcher_bundle(&mut removed)?;
+    report_removed(removed, "daemon and launcher");
+    Ok(())
+}
+
+fn remove_launcher_bundle(removed: &mut Vec<String>) -> Result<()> {
     let bundle = app_bundle_path()?;
     // Drop the Dock tile before the bundle so it never lingers as a broken icon.
     if let Ok(true) = unpin_from_dock(&bundle) {
@@ -376,14 +605,17 @@ pub fn uninstall() -> Result<()> {
             .with_context(|| format!("failed to remove {}", bundle.display()))?;
         removed.push(bundle.display().to_string());
     }
+    Ok(())
+}
+
+fn report_removed(removed: Vec<String>, what: &str) {
     if removed.is_empty() {
-        println!("nothing to remove — agent and launcher were not installed.");
+        println!("nothing to remove — {what} were not installed.");
     } else {
         for r in removed {
             println!("removed {r}");
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -493,5 +725,86 @@ mod tests {
             dump,
             Path::new("/Users/alex/Applications/Phai.app")
         ));
+    }
+
+    #[test]
+    fn system_daemon_plist_has_label_port_no_auto_update_and_home() {
+        let plist = system_daemon_plist(
+            Path::new("/Users/alex/.local/bin/phai"),
+            80,
+            Path::new("/Library/Logs/phai/serve.log"),
+            &[
+                ("HOME".into(), "/Users/alex".into()),
+                ("PHAI_CONFIG_DIR".into(), "/Users/alex/cfg".into()),
+            ],
+        );
+        assert!(plist.contains("<string>run.phai.serve</string>"));
+        assert!(plist.contains("<string>/Users/alex/.local/bin/phai</string>"));
+        assert!(plist.contains("<string>--port</string>"));
+        assert!(plist.contains("<string>80</string>"));
+        // The root daemon must never rewrite its own binary.
+        assert!(plist.contains("<string>--no-auto-update</string>"));
+        // HOME is required so a root process resolves the user's config.
+        assert!(plist.contains("<key>HOME</key>"));
+        assert!(plist.contains("<string>/Users/alex</string>"));
+        assert!(plist.contains("<key>PHAI_CONFIG_DIR</key>"));
+    }
+
+    #[test]
+    fn user_agent_plist_has_no_no_auto_update_flag() {
+        let plist = agent_plist(
+            Path::new("/usr/local/bin/phai"),
+            80,
+            Path::new("/tmp/x.log"),
+            &[],
+        );
+        assert!(!plist.contains("--no-auto-update"));
+    }
+
+    #[test]
+    fn sh_single_quote_neutralizes_metacharacters() {
+        assert_eq!(sh_single_quote("/tmp/plain"), "'/tmp/plain'");
+        // A space stays inside the quotes; a single quote is closed/reopened.
+        assert_eq!(sh_single_quote("/Users/a b/x"), "'/Users/a b/x'");
+        assert_eq!(sh_single_quote("a'b"), "'a'\\''b'");
+        // No way to break out: `$(...)`, `;`, `&&` are all literal.
+        let q = sh_single_quote("x; rm -rf / #$(whoami)");
+        assert!(q.starts_with('\'') && q.ends_with('\''));
+        assert!(!q.contains("'; rm"));
+    }
+
+    #[test]
+    fn system_install_shell_quotes_paths_with_spaces() {
+        let cmd = system_install_shell(
+            Path::new("/tmp/My Stage/run.phai.serve.plist"),
+            "/Library/LaunchDaemons/run.phai.serve.plist",
+            Path::new("/Library/Logs/phai"),
+        );
+        // Staged path with a space is single-quoted as one argument.
+        assert!(cmd.contains("'/tmp/My Stage/run.phai.serve.plist'"));
+        assert!(cmd.contains("chown root:wheel '/Library/LaunchDaemons/run.phai.serve.plist'"));
+        assert!(cmd.contains("chmod 644 '/Library/LaunchDaemons/run.phai.serve.plist'"));
+        assert!(cmd.contains("mkdir -p '/Library/Logs/phai'"));
+        assert!(cmd.contains("launchctl bootout system/run.phai.serve"));
+        assert!(cmd
+            .contains("launchctl bootstrap system '/Library/LaunchDaemons/run.phai.serve.plist'"));
+    }
+
+    #[test]
+    fn system_uninstall_shell_boots_out_then_removes() {
+        let cmd = system_uninstall_shell("/Library/LaunchDaemons/run.phai.serve.plist");
+        assert!(cmd.contains("launchctl bootout system/run.phai.serve"));
+        assert!(cmd.contains("rm -f '/Library/LaunchDaemons/run.phai.serve.plist'"));
+        // bootout must tolerate "not loaded" so uninstall is idempotent.
+        assert!(cmd.contains("|| true"));
+    }
+
+    #[test]
+    fn osascript_admin_wraps_and_escapes_for_applescript() {
+        let script = osascript_admin("cp 'a' 'b' && echo \"hi\"");
+        assert!(script.starts_with("do shell script \""));
+        assert!(script.ends_with("\" with administrator privileges"));
+        // The inner double quotes are escaped for the AppleScript string literal.
+        assert!(script.contains("echo \\\"hi\\\""));
     }
 }
