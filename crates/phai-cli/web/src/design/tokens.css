@@ -154,6 +154,29 @@ code,
 	}
 }
 
+/* Gentle entrance when real data replaces a skeleton (N7). Honours
+   prefers-reduced-motion: the content appears instantly, no slide. */
+@keyframes fade-in-soft {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+.fade-in-soft {
+	animation: fade-in-soft 280ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.fade-in-soft {
+		animation: none;
+	}
+}
+
 /* The app ships a light (white) base unconditionally — per product direction.
    No prefers-color-scheme dark override (it would violate the white requirement
    and the current palette's ink color is dark). */
