@@ -214,31 +214,17 @@ export const CountMoney = ({
 	);
 };
 
-/** Animated placeholder for the cash chart while the first seed loads (N7). */
-export const ChartSkeleton = () => (
-	<div
-		style={{
-			display: "flex",
-			alignItems: "flex-end",
-			gap: 8,
-			height: 150,
-			padding: "12px 0 28px",
-		}}
-		aria-label="loading cash chart"
-	>
-		{Array.from({ length: 12 }).map((_, i) => (
-			<div
-				key={i}
-				className="skeleton"
-				style={{
-					flex: 1,
-					height: `${35 + ((i * 41) % 55)}%`,
-					borderRadius: 4,
-				}}
-			/>
-		))}
-	</div>
-);
+/**
+ * Branded loading skeletons live in `./Skeleton`. Re-exported here so existing
+ * `import … from "../components/ui"` call sites keep working.
+ */
+export {
+	ChartSkeleton,
+	HeroSkeleton,
+	ListSkeleton,
+	CardGridSkeleton,
+	DashboardSkeleton,
+} from "./Skeleton";
 
 export const Toast = ({
 	message,

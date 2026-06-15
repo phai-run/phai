@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type CardRow } from "../bridge/api";
-import { Card } from "../components/ui";
+import { Card, CardGridSkeleton } from "../components/ui";
 import { formatMoneyCompact, formatMoneyNumber, numeric } from "../lib/format";
 import { CardDetailPanel } from "./cards/CardDetailPanel";
 
@@ -42,7 +42,17 @@ export const CardsPanel = ({
 	}, [month]);
 
 	if (error) return null; // non-critical panel; stay silent on failure
-	if (!rows) return null;
+	if (!rows)
+		return (
+			<section style={{ marginTop: 24 }}>
+				<h2
+					style={{ fontSize: 14, color: "var(--muted)", margin: "0 0 12px" }}
+				>
+					Cards
+				</h2>
+				<CardGridSkeleton />
+			</section>
+		);
 	// Only show real credit cards (those with a credit limit or an open bill).
 	const cards = rows.filter(
 		(c) => c.creditLimit != null || c.state === "aberta",
@@ -51,7 +61,7 @@ export const CardsPanel = ({
 	const expanded = cards.find((c) => c.accountId === expandedId) ?? null;
 
 	return (
-		<section style={{ marginTop: 24 }}>
+		<section className="fade-in-soft" style={{ marginTop: 24 }}>
 			<h2 style={{ fontSize: 14, color: "var(--muted)", margin: "0 0 12px" }}>
 				Cards
 			</h2>

@@ -13,7 +13,12 @@ import {
 	expensesByMonthCategory,
 	type TxView as TxViewD,
 } from "../lib/derivations";
-import { ChartSkeleton, ErrorNote, Skeleton } from "../components/ui";
+import {
+	ChartSkeleton,
+	ErrorNote,
+	HeroSkeleton,
+	ListSkeleton,
+} from "../components/ui";
 import { PlanningChart } from "./PlanningChart";
 import { MonthDetail } from "./MonthDetail";
 import { CardsPanel } from "./CardsPanel";
@@ -225,9 +230,11 @@ export const Dashboard = () => {
 			>
 				{error && !loading && <ErrorNote error={error} />}
 				{loading ? (
-					<Skeleton height={96} />
+					<HeroSkeleton />
 				) : heroRow ? (
-					<CashDecisionPanel row={heroRow} when={heroWhen} compact={false} />
+					<div className="fade-in-soft">
+						<CashDecisionPanel row={heroRow} when={heroWhen} compact={false} />
+					</div>
 				) : null}
 			</div>
 
@@ -274,6 +281,7 @@ export const Dashboard = () => {
 				{loading ? (
 					<ChartSkeleton />
 				) : months.length === 0 ? null : (
+					<div className="fade-in-soft">
 					<PlanningChart
 						months={months}
 						forecastsByMonth={forecastsByMonth}
@@ -285,6 +293,7 @@ export const Dashboard = () => {
 							(ui.detailMode || "planilha") === "plano" ? warSim : null
 						}
 					/>
+					</div>
 				)}
 			</div>
 
@@ -351,7 +360,11 @@ export const Dashboard = () => {
 					})}
 				</div>
 
-				{months.length === 0 && !loading ? (
+				{loading ? (
+					<div style={{ marginTop: 8 }}>
+						<ListSkeleton />
+					</div>
+				) : months.length === 0 ? (
 					<div
 						className="mono"
 						style={{
