@@ -1,6 +1,7 @@
 import { useClientDocument } from "@livestore/react";
 import { tables } from "./livestore/schema";
 import { useBridgeSync } from "./bridge/sync";
+import { useUnsyncedGuard } from "./hooks/useUnsyncedGuard";
 import { DndProvider } from "./lib/dnd";
 import { Dashboard } from "./views/Dashboard";
 import { ViewErrorBoundary } from "./components/ErrorBoundary";
@@ -16,6 +17,8 @@ export const App = () => {
 	const [ui] = useClientDocument(tables.ui);
 	void ui; // read to trigger LiveStore hydration
 	const sync = useBridgeSync();
+	// Warn before closing while writes haven't reached the bridge yet.
+	useUnsyncedGuard(sync.pending);
 
 	return (
 		<>
@@ -87,7 +90,7 @@ export const App = () => {
 	);
 };
 
-const SyncChip = ({
+export const SyncChip = ({
 	pending,
 	error,
 	onRetry,
@@ -106,15 +109,28 @@ const SyncChip = ({
 		: pending > 0
 			? `${pending} pending`
 			: "synced";
+	const title = error
+		? "Sync failed — click to retry"
+		: pending > 0
+			? `${pending} change(s) still syncing — click to force a sync`
+			: "All changes saved — click to re-check";
 	return (
-		<div
+		<button
+			type="button"
 			className="mono"
+			onClick={() => onRetry?.()}
+			title={title}
+			aria-label={title}
 			style={{
 				fontSize: 11,
 				color,
 				display: "flex",
 				alignItems: "center",
 				gap: 6,
+				background: "transparent",
+				border: "none",
+				padding: 0,
+				cursor: "pointer",
 			}}
 		>
 			<span
@@ -131,23 +147,6 @@ const SyncChip = ({
 				</span>
 			)}
 			{label}
-			{error && onRetry && (
-				<button
-					onClick={onRetry}
-					className="mono"
-					style={{
-						background: "transparent",
-						border: "1px solid currentColor",
-						borderRadius: "var(--radius-full)",
-						padding: "2px 8px",
-						cursor: "pointer",
-						fontSize: 10,
-						color: "inherit",
-					}}
-				>
-					retry
-				</button>
-			)}
-		</div>
+		</button>
 	);
 };
