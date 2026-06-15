@@ -1,5 +1,19 @@
 # Changelog
 
+## [5.10.0](https://github.com/phai-run/phai/compare/v5.9.2...v5.10.0) (2026-06-15)
+
+
+### Features
+
+* **serve:** phai serve install --system — root LaunchDaemon on port 80 via admin-auth prompt ([#154](https://github.com/phai-run/phai/issues/154)) ([6bef3c4](https://github.com/phai-run/phai/commit/6bef3c45750df17b30105ca830279fb75d9ca165))
+* **serve:** pin Phai.app to the Dock on install ([#155](https://github.com/phai-run/phai/issues/155)) ([cb53fb9](https://github.com/phai-run/phai/commit/cb53fb959997fa1b206bde3d49bcac18e5009c6a))
+* **web:** branded loading skeletons for cold start ([#153](https://github.com/phai-run/phai/issues/153)) ([25a8cf8](https://github.com/phai-run/phai/commit/25a8cf8eca5a9bb909e1d22d03b610d0b7ffb8cc))
+
+
+### Performance Improvements
+
+* **serve:** add TTL read cache to the web bridge ([#152](https://github.com/phai-run/phai/issues/152)) ([fa0ef0a](https://github.com/phai-run/phai/commit/fa0ef0a1bf726563ab65e8f3430c2bfed6c1c5e3))
+
 ## [5.9.2](https://github.com/phai-run/phai/compare/v5.9.1...v5.9.2) (2026-06-12)
 
 
