@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Query, State},
+    extract::{Query, RawQuery, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -60,6 +60,7 @@ const DEFAULT_TRANSACTIONS_LIMIT: usize = 5000;
 
 use crate::cashflow_chart::{build_chart_data, ChartData};
 use crate::forecast_cmd::materialise_template_forecasts;
+use crate::serve_cache::ReadCache;
 use crate::{
     all_transactions_for_review, apply_human_review, load_config, parse_month_ref,
     review_human_rows, HumanReviewPatch, ReviewFilters, ReviewHumanKind,
@@ -1596,11 +1597,61 @@ struct DismissTemplateBody {
 
 // ── HTTP handlers ────────────────────────────────────────────────────────
 
-type Store = State<Arc<RwLock<mpsc::Sender<StoreRequest>>>>;
+/// Shared axum state for the `/api` handlers: the (hot-swappable) store-actor
+/// sender plus the in-memory read cache.
+#[derive(Clone)]
+struct BridgeState {
+    tx: Arc<RwLock<mpsc::Sender<StoreRequest>>>,
+    cache: ReadCache,
+}
+
+type Store = State<BridgeState>;
 
 /// Build a JSON error response with the given status.
 fn error_response(status: StatusCode, message: impl Into<String>) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
+}
+
+/// A cached `200 application/json` response built from raw bytes.
+fn cached_json_response(body: Arc<[u8]>) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        body.to_vec(),
+    )
+        .into_response()
+}
+
+/// Serve a read either from cache or by computing it once. On a fresh miss the
+/// closure runs, and only a successful body (`Ok`) is serialized, cached under
+/// `key`, and returned. Errors are returned verbatim and never cached.
+async fn cached_read<F, Fut, T>(
+    cache: &ReadCache,
+    key: String,
+    compute: F,
+) -> axum::response::Response
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, axum::response::Response>>,
+    T: Serialize,
+{
+    if let Some(body) = cache.get(&key) {
+        return cached_json_response(body);
+    }
+    match compute().await {
+        Ok(value) => match serde_json::to_vec(&value) {
+            Ok(bytes) => {
+                let body: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+                cache.store(key, body.clone());
+                cached_json_response(body)
+            }
+            Err(e) => internal_error(e),
+        },
+        Err(resp) => resp,
+    }
 }
 
 /// Log an internal failure server-side and return a generic 500. The error
@@ -1638,171 +1689,206 @@ async fn api_status() -> Json<Value> {
 }
 
 async fn get_review_queue(
-    State(tx): Store,
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
     Query(q): Query<ReviewQueueQuery>,
 ) -> impl IntoResponse {
-    let filters = ReviewFilters {
-        month: q.month,
-        account_id: q.account_id,
-        owner_accounts: None,
-        owner: q.owner,
-        merchant: q.merchant,
-        category: q
-            .category
-            .as_deref()
-            .map(|value| crate::category_key_from_input(value, None)),
-    };
-    let params = ReviewQueueParams {
-        filters,
-        include_reviewed: q.include_reviewed,
-        limit: q.limit.unwrap_or(DEFAULT_REVIEW_QUEUE_LIMIT),
-    };
-    let tx = clone_actor_tx(&tx).await;
-    let accounts = fetch_accounts(&tx).await;
-    let (resp_tx, resp_rx) = oneshot::channel();
-    if tx
-        .send(StoreRequest::ReviewQueue {
-            params,
-            resp: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        Ok(Ok(rows)) => {
-            let lookup = cash_month_lookup(&accounts);
-            Json(ReviewQueueResponse {
-                rows: tx_rows_with_cash_month(&rows, &lookup),
+    let key = ReadCache::key("/api/review-queue", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let filters = ReviewFilters {
+            month: q.month,
+            account_id: q.account_id,
+            owner_accounts: None,
+            owner: q.owner,
+            merchant: q.merchant,
+            category: q
+                .category
+                .as_deref()
+                .map(|value| crate::category_key_from_input(value, None)),
+        };
+        let params = ReviewQueueParams {
+            filters,
+            include_reviewed: q.include_reviewed,
+            limit: q.limit.unwrap_or(DEFAULT_REVIEW_QUEUE_LIMIT),
+        };
+        let tx = clone_actor_tx(&state.tx).await;
+        let accounts = fetch_accounts(&tx).await;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if tx
+            .send(StoreRequest::ReviewQueue {
+                params,
+                resp: resp_tx,
             })
-            .into_response()
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
         }
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+        match resp_rx.await {
+            Ok(Ok(rows)) => {
+                let lookup = cash_month_lookup(&accounts);
+                Ok(ReviewQueueResponse {
+                    rows: tx_rows_with_cash_month(&rows, &lookup),
+                })
+            }
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
 async fn get_transactions(
-    State(tx): Store,
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
     Query(q): Query<TransactionsQuery>,
 ) -> impl IntoResponse {
-    let params = TransactionsWindowParams {
-        months_back: q.months_back.unwrap_or(DEFAULT_TRANSACTIONS_MONTHS_BACK),
-        months_ahead: q.months_ahead.unwrap_or(0),
-        include_reviewed: q.include_reviewed.unwrap_or(true),
-        limit: q.limit.unwrap_or(DEFAULT_TRANSACTIONS_LIMIT),
-        offset: q.offset.unwrap_or(0),
-    };
-    let tx = clone_actor_tx(&tx).await;
-    let (resp_tx, resp_rx) = oneshot::channel();
-    if tx
-        .send(StoreRequest::TransactionsWindow {
-            params,
-            resp: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        Ok(Ok(result)) => Json(TransactionsResponse {
-            rows: result.rows,
-            total: result.total,
-            offset: result.offset,
-            has_more: result.has_more,
-        })
-        .into_response(),
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+    let key = ReadCache::key("/api/transactions", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let params = TransactionsWindowParams {
+            months_back: q.months_back.unwrap_or(DEFAULT_TRANSACTIONS_MONTHS_BACK),
+            months_ahead: q.months_ahead.unwrap_or(0),
+            include_reviewed: q.include_reviewed.unwrap_or(true),
+            limit: q.limit.unwrap_or(DEFAULT_TRANSACTIONS_LIMIT),
+            offset: q.offset.unwrap_or(0),
+        };
+        let tx = clone_actor_tx(&state.tx).await;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if tx
+            .send(StoreRequest::TransactionsWindow {
+                params,
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            Ok(Ok(result)) => Ok(TransactionsResponse {
+                rows: result.rows,
+                total: result.total,
+                offset: result.offset,
+                has_more: result.has_more,
+            }),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
-async fn get_categories(State(tx): Store) -> impl IntoResponse {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
-    if tx
-        .send(StoreRequest::ListCategoryIds { resp: resp_tx })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        Ok(Ok(ids)) => Json(CategoriesResponse { ids }).into_response(),
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+async fn get_categories(State(state): Store) -> impl IntoResponse {
+    let key = ReadCache::key("/api/categories", None);
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::ListCategoryIds { resp: resp_tx })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            Ok(Ok(ids)) => Ok(CategoriesResponse { ids }),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
-async fn get_cards(State(tx): Store, Query(q): Query<CardsQuery>) -> impl IntoResponse {
+async fn get_cards(
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<CardsQuery>,
+) -> impl IntoResponse {
     if let Some(month) = q.month.as_deref() {
         if let Err(e) = parse_month_ref(month) {
             return error_response(StatusCode::BAD_REQUEST, e.to_string());
         }
     }
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
-    if tx
-        .send(StoreRequest::Cards {
-            month: q.month,
-            resp: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        Ok(Ok(rows)) => Json(CardsResponse { rows }).into_response(),
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+    let key = ReadCache::key("/api/cards", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::Cards {
+                month: q.month,
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            Ok(Ok(rows)) => Ok(CardsResponse { rows }),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
-async fn get_accounts(State(tx): Store) -> impl IntoResponse {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
-    if tx
-        .send(StoreRequest::GetAccounts { resp: resp_tx })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        Ok(Ok(accounts)) => Json(AccountsResponse {
-            rows: accounts.iter().map(AccountRow::from_record).collect(),
-        })
-        .into_response(),
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+async fn get_accounts(State(state): Store) -> impl IntoResponse {
+    let key = ReadCache::key("/api/accounts", None);
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::GetAccounts { resp: resp_tx })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            Ok(Ok(accounts)) => Ok(AccountsResponse {
+                rows: accounts.iter().map(AccountRow::from_record).collect(),
+            }),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
-async fn get_chart(State(tx): Store, Query(q): Query<ChartQuery>) -> impl IntoResponse {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
-    if tx
-        .send(StoreRequest::GetChartData {
-            months_back: q.months_back.unwrap_or(6),
-            months_ahead: q.months_ahead.unwrap_or(6),
-            resp: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        Ok(Ok(chart)) => Json(chart).into_response(),
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+async fn get_chart(
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<ChartQuery>,
+) -> impl IntoResponse {
+    let key = ReadCache::key("/api/chart", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::GetChartData {
+                months_back: q.months_back.unwrap_or(6),
+                months_ahead: q.months_ahead.unwrap_or(6),
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            Ok(Ok(chart)) => Ok(chart),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
-async fn get_forecasts(State(tx): Store, Query(q): Query<ForecastsQuery>) -> impl IntoResponse {
+async fn get_forecasts(
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<ForecastsQuery>,
+) -> impl IntoResponse {
     let from = match parse_opt_date(q.from.as_deref()) {
         Ok(d) => d,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
@@ -1811,55 +1897,64 @@ async fn get_forecasts(State(tx): Store, Query(q): Query<ForecastsQuery>) -> imp
         Ok(d) => d,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
-    if tx
-        .send(StoreRequest::ListForecastsEnriched {
-            status: q.status,
-            from,
-            until,
-            resp: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        // Each forecast keeps its snake_case fields and gains computed
-        // `kind`/`draggable` planning metadata; the frontend adapts.
-        Ok(Ok(forecasts)) => {
-            let rows: Vec<Value> = forecasts.iter().map(ForecastWithKind::to_json).collect();
-            Json(serde_json::json!({ "forecasts": rows })).into_response()
+    let key = ReadCache::key("/api/forecasts", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::ListForecastsEnriched {
+                status: q.status,
+                from,
+                until,
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
         }
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+        match resp_rx.await {
+            // Each forecast keeps its snake_case fields and gains computed
+            // `kind`/`draggable` planning metadata; the frontend adapts.
+            Ok(Ok(forecasts)) => {
+                let rows: Vec<Value> = forecasts.iter().map(ForecastWithKind::to_json).collect();
+                Ok(serde_json::json!({ "forecasts": rows }))
+            }
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
 async fn get_forecast_templates(
-    State(tx): Store,
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
     Query(q): Query<TemplatesQuery>,
 ) -> impl IntoResponse {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
-    if tx
-        .send(StoreRequest::ListForecastTemplates {
-            kind: q.kind,
-            status: q.status,
-            resp: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return actor_unavailable();
-    }
-    match resp_rx.await {
-        // ForecastTemplateRecord serialises as snake_case; the frontend adapts.
-        Ok(Ok(templates)) => Json(serde_json::json!({ "templates": templates })).into_response(),
-        Ok(Err(e)) => internal_error(e),
-        Err(_) => actor_silent(),
-    }
+    let key = ReadCache::key("/api/forecast-templates", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::ListForecastTemplates {
+                kind: q.kind,
+                status: q.status,
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            // ForecastTemplateRecord serialises as snake_case; the frontend adapts.
+            Ok(Ok(templates)) => Ok(serde_json::json!({ "templates": templates })),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
 }
 
 /// Upper bound on a single `/api/events` batch. Each write is applied serially
@@ -1867,7 +1962,7 @@ async fn get_forecast_templates(
 /// batch would stall every other request. The UI flushes far fewer than this.
 const MAX_EVENT_WRITES: usize = 1000;
 
-async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl IntoResponse {
+async fn post_events(State(state): Store, Json(body): Json<EventsBody>) -> impl IntoResponse {
     if body.writes.len() > MAX_EVENT_WRITES {
         return error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -1884,7 +1979,7 @@ async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl Int
         })
         .collect();
     let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
+    let tx = clone_actor_tx(&state.tx).await;
     if tx
         .send(StoreRequest::ApplyHumanReview {
             writes,
@@ -1907,6 +2002,10 @@ async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl Int
                     }
                 }
             }
+            // Any acked write mutated the store — invalidate cached reads.
+            if !acked.is_empty() {
+                state.cache.bust();
+            }
             Json(EventsResponse { acked, failed }).into_response()
         }
         Err(_) => actor_silent(),
@@ -1916,12 +2015,12 @@ async fn post_events(State(tx): Store, Json(body): Json<EventsBody>) -> impl Int
 /// Route a `ForecastPatch` through the store actor and map the outcome to an
 /// HTTP response (the update half of `POST /api/forecast`).
 async fn patch_forecast_response(
-    tx: &Arc<RwLock<mpsc::Sender<StoreRequest>>>,
+    state: &BridgeState,
     forecast_id: String,
     patch: ForecastPatch,
 ) -> axum::response::Response {
     let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(tx).await;
+    let tx = clone_actor_tx(&state.tx).await;
     if tx
         .send(StoreRequest::PatchForecast {
             forecast_id,
@@ -1935,6 +2034,7 @@ async fn patch_forecast_response(
     }
     match resp_rx.await {
         Ok(Ok(Some(forecast_id))) => {
+            state.cache.bust();
             Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
         }
         Ok(Ok(None)) => error_response(StatusCode::NOT_FOUND, "forecast não encontrado"),
@@ -1971,7 +2071,7 @@ fn validate_forecast_body_lengths(body: &ForecastBody) -> Option<axum::response:
     None
 }
 
-async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl IntoResponse {
+async fn post_forecast(State(state): Store, Json(body): Json<ForecastBody>) -> impl IntoResponse {
     let amount = match Decimal::from_str(body.amount.trim()) {
         Ok(d) => d,
         Err(_) => {
@@ -2004,7 +2104,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
             category_id: body.category_id.clone(),
             account_id: body.account_id.clone(),
         };
-        return patch_forecast_response(&tx, forecast_id.to_string(), patch).await;
+        return patch_forecast_response(&state, forecast_id.to_string(), patch).await;
     }
     let record = Box::new(ForecastRecord {
         forecast_id: String::new(),
@@ -2025,7 +2125,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
         realized_at: None,
     });
     let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
+    let tx = clone_actor_tx(&state.tx).await;
     if tx
         .send(StoreRequest::UpsertForecast {
             record,
@@ -2038,6 +2138,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
     }
     match resp_rx.await {
         Ok(Ok(forecast_id)) => {
+            state.cache.bust();
             Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
         }
         Ok(Err(e)) => internal_error(e),
@@ -2046,7 +2147,7 @@ async fn post_forecast(State(tx): Store, Json(body): Json<ForecastBody>) -> impl
 }
 
 async fn post_forecast_move(
-    State(tx): Store,
+    State(state): Store,
     Json(body): Json<MoveForecastBody>,
 ) -> impl IntoResponse {
     let due_date = match NaiveDate::parse_from_str(body.due_date.trim(), "%Y-%m-%d") {
@@ -2059,7 +2160,7 @@ async fn post_forecast_move(
         }
     };
     let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
+    let tx = clone_actor_tx(&state.tx).await;
     if tx
         .send(StoreRequest::MoveForecast {
             forecast_id: body.forecast_id,
@@ -2075,12 +2176,15 @@ async fn post_forecast_move(
         Ok(Ok(MoveForecastResult::Moved {
             forecast_id,
             status,
-        })) => Json(serde_json::json!({
-            "forecastId": forecast_id,
-            "dueDate": due_date.format("%Y-%m-%d").to_string(),
-            "status": status,
-        }))
-        .into_response(),
+        })) => {
+            state.cache.bust();
+            Json(serde_json::json!({
+                "forecastId": forecast_id,
+                "dueDate": due_date.format("%Y-%m-%d").to_string(),
+                "status": status,
+            }))
+            .into_response()
+        }
         Ok(Ok(MoveForecastResult::NotFound)) => {
             error_response(StatusCode::NOT_FOUND, "forecast não encontrado")
         }
@@ -2098,11 +2202,11 @@ async fn post_forecast_move(
 }
 
 async fn post_accept_template(
-    State(tx): Store,
+    State(state): Store,
     Json(body): Json<AcceptTemplateBody>,
 ) -> impl IntoResponse {
     let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
+    let tx = clone_actor_tx(&state.tx).await;
     if tx
         .send(StoreRequest::AcceptTemplate {
             template_id: body.template_id,
@@ -2115,19 +2219,22 @@ async fn post_accept_template(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Ok(result)) => {
+            state.cache.bust();
+            Json(result).into_response()
+        }
         Ok(Err(e)) => error_response(StatusCode::BAD_REQUEST, e.to_string()),
         Err(_) => actor_silent(),
     }
 }
 
 async fn post_dismiss_template(
-    State(tx): Store,
+    State(state): Store,
     Json(body): Json<DismissTemplateBody>,
 ) -> impl IntoResponse {
     let template_id = body.template_id.clone();
     let (resp_tx, resp_rx) = oneshot::channel();
-    let tx = clone_actor_tx(&tx).await;
+    let tx = clone_actor_tx(&state.tx).await;
     if tx
         .send(StoreRequest::DismissTemplate {
             template_id: body.template_id,
@@ -2139,7 +2246,10 @@ async fn post_dismiss_template(
         return actor_unavailable();
     }
     match resp_rx.await {
-        Ok(Ok(())) => Json(serde_json::json!({ "template_id": template_id })).into_response(),
+        Ok(Ok(())) => {
+            state.cache.bust();
+            Json(serde_json::json!({ "template_id": template_id })).into_response()
+        }
         Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
@@ -2204,7 +2314,10 @@ pub async fn run(port: u16) -> Result<()> {
         }
     });
 
-    let app_state = store_tx;
+    let app_state = BridgeState {
+        tx: store_tx,
+        cache: ReadCache::default(),
+    };
 
     // All `/api` routes are guarded by the same-origin check so a malicious
     // page cannot drive the bridge via the user's browser (CSRF). Requests
@@ -3512,5 +3625,62 @@ mod tests {
         assert!(by_id("f-manual").draggable);
         assert_eq!(by_id("f-inst").kind, "installment");
         assert!(!by_id("f-inst").draggable);
+    }
+
+    // ── cached_read get-or-compute wiring ──────────────────────────────────
+
+    /// A fresh key runs the closure and serializes the body; the same key on a
+    /// second call returns the cached bytes without re-running the closure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cached_read_computes_once_then_serves_from_cache() {
+        let cache = ReadCache::default();
+        let key = ReadCache::key("/api/categories", None);
+        let calls = std::cell::Cell::new(0);
+
+        let first = cached_read(&cache, key.clone(), || async {
+            calls.set(calls.get() + 1);
+            Ok::<_, axum::response::Response>(CategoriesResponse {
+                ids: vec!["alimentacao".into()],
+            })
+        })
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(calls.get(), 1);
+
+        // Second call hits the cache: the closure must not run again.
+        let _second = cached_read(&cache, key.clone(), || async {
+            calls.set(calls.get() + 1);
+            Ok::<_, axum::response::Response>(CategoriesResponse { ids: vec![] })
+        })
+        .await;
+        assert_eq!(calls.get(), 1, "second read must be served from cache");
+
+        // A bust forces the closure to run again.
+        cache.bust();
+        let _third = cached_read(&cache, key, || async {
+            calls.set(calls.get() + 1);
+            Ok::<_, axum::response::Response>(CategoriesResponse { ids: vec![] })
+        })
+        .await;
+        assert_eq!(calls.get(), 2, "bust must force a re-query");
+    }
+
+    /// An error outcome is returned verbatim and never cached: the next call
+    /// re-runs the closure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cached_read_does_not_cache_errors() {
+        let cache = ReadCache::default();
+        let key = ReadCache::key("/api/accounts", None);
+        let calls = std::cell::Cell::new(0);
+
+        for _ in 0..2 {
+            let resp = cached_read(&cache, key.clone(), || async {
+                calls.set(calls.get() + 1);
+                Err::<CategoriesResponse, _>(internal_error("boom"))
+            })
+            .await;
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        assert_eq!(calls.get(), 2, "errors must never be cached");
     }
 }

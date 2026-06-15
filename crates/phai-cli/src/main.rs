@@ -40,6 +40,7 @@ mod pulse;
 mod self_cmd;
 mod serve;
 mod serve_assets;
+mod serve_cache;
 mod serve_install;
 mod sync_notify;
 mod update;
