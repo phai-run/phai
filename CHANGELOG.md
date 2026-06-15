@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.11.0](https://github.com/phai-run/phai/compare/v5.10.0...v5.11.0) (2026-06-15)
+
+
+### Features
+
+* **web:** warn before closing with unsynced writes + make sync chip clickable ([#157](https://github.com/phai-run/phai/issues/157)) ([d6dee85](https://github.com/phai-run/phai/commit/d6dee85a78332210842af96242d7d4dcfd5e909a))
+
 ## [5.10.0](https://github.com/phai-run/phai/compare/v5.9.2...v5.10.0) (2026-06-15)
 
 
