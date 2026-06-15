@@ -368,7 +368,11 @@ export interface SeedState {
 // this window we skip the re-fetch entirely so reloads/remounts are instant.
 // A manual reload() or an expired window forces a refresh. Stored in
 // localStorage (NOT LiveStore) so it never triggers an OPFS schema migration.
-const SEED_FRESH_MS = 5 * 60 * 1000;
+// The bridge also serves these reads from an in-memory TTL cache that busts on
+// any write, and the upstream BigQuery is only refreshed by cron a few times a
+// day — so a wide window here is safe: stale-while-revalidate still revalidates
+// in the background.
+const SEED_FRESH_MS = 60 * 60 * 1000;
 
 const SEED_STAMP_PREFIX = "phai:lastSync:";
 
