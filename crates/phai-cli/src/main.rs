@@ -153,10 +153,11 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ServeCommand {
-    /// Install a launchd agent so the web app runs at login and stays up.
+    /// Install a launchd agent (or, with --system, a root daemon) so the web
+    /// app runs at login/boot and stays up.
     Install(serve_install::InstallArgs),
-    /// Stop and remove the launchd agent.
-    Uninstall,
+    /// Stop and remove the launchd agent (or, with --system, the root daemon).
+    Uninstall(serve_install::UninstallArgs),
 }
 
 #[derive(Subcommand)]
@@ -3210,7 +3211,7 @@ async fn main() -> Result<()> {
         Some(Commands::Serve { port, command }) => match command {
             None => serve::run(port).await,
             Some(ServeCommand::Install(args)) => serve_install::install(args),
-            Some(ServeCommand::Uninstall) => serve_install::uninstall(),
+            Some(ServeCommand::Uninstall(args)) => serve_install::uninstall(args),
         },
         Some(Commands::Notify { command }) => match command {
             NotifyCommand::Whatsapp(args) => notify_whatsapp(args).await,
