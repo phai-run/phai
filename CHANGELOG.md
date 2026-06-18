@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.14.0](https://github.com/phai-run/phai/compare/v5.13.0...v5.14.0) (2026-06-18)
+
+
+### Features
+
+* **update:** confirm minisign signature verification on update ([#165](https://github.com/phai-run/phai/issues/165)) ([6ddd6b9](https://github.com/phai-run/phai/commit/6ddd6b907c0e4efe87f4107dd28b6efbf1f9fcea))
+
 ## [5.13.0](https://github.com/phai-run/phai/compare/v5.12.0...v5.13.0) (2026-06-18)
 
 
