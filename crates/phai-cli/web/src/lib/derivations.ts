@@ -139,6 +139,30 @@ export const effectiveCategory = (
 	return o?.categoryId ?? tx.categoryId;
 };
 
+/**
+ * Merge a transaction with its optimistic review overlay so every downstream
+ * consumer (sheet labels, treemap, filters, sums) sees the edited values — not
+ * just the category. Without this, an edited description/merchant only shows in
+ * the modal (which reads the overlay) while the list keeps the stale seed value
+ * until a full re-seed. `??` keeps unset patch fields (null) from clobbering the
+ * seed; an explicit empty string still clears.
+ */
+export const effectiveTx = (
+	tx: TxView,
+	overlayMap: Map<string, ReviewOverlay>,
+): TxView => {
+	const o = overlayMap.get(tx.id);
+	if (!o) return tx;
+	return {
+		...tx,
+		description: o.description ?? tx.description,
+		merchantName: o.merchantName ?? tx.merchantName,
+		purpose: o.purpose ?? tx.purpose,
+		categoryId: o.categoryId ?? tx.categoryId,
+		commitmentTier: o.commitmentTier ?? tx.commitmentTier,
+	};
+};
+
 // ── Account lookup ─────────────────────────────────────────────────────────
 
 export interface AccountInfo {

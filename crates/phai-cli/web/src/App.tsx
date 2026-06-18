@@ -1,6 +1,7 @@
+import { useEffect, useState } from "react";
 import { useClientDocument } from "@livestore/react";
 import { tables } from "./livestore/schema";
-import { useBridgeSync } from "./bridge/sync";
+import { getBridgeVersion, useBridgeSync } from "./bridge/sync";
 import { useUnsyncedGuard } from "./hooks/useUnsyncedGuard";
 import { DndProvider } from "./lib/dnd";
 import { Dashboard } from "./views/Dashboard";
@@ -20,8 +21,46 @@ export const App = () => {
 	// Warn before closing while writes haven't reached the bridge yet.
 	useUnsyncedGuard(sync.pending);
 
+	const [version, setVersion] = useState<string | null>(null);
+	useEffect(() => {
+		getBridgeVersion().then(setVersion, () => setVersion(null));
+	}, []);
+
 	return (
 		<>
+			{/* Floating sync + version badge — always visible, scroll-independent */}
+			<div
+				style={{
+					position: "fixed",
+					top: 8,
+					right: 12,
+					zIndex: 90,
+					display: "flex",
+					alignItems: "center",
+					gap: 10,
+					background: "var(--bg)",
+					border: "1px solid var(--border)",
+					borderRadius: "var(--radius-full)",
+					padding: "4px 12px",
+					boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
+				}}
+			>
+				<SyncChip
+					pending={sync.pending}
+					error={sync.error}
+					onRetry={sync.retry}
+				/>
+				{version && (
+					<span
+						className="mono"
+						title="running version"
+						style={{ fontSize: 11, color: "var(--muted2)" }}
+					>
+						v{version}
+					</span>
+				)}
+			</div>
+
 			<a
 				href="#main-content"
 				className="mono"
@@ -70,13 +109,6 @@ export const App = () => {
 				>
 					phai
 				</strong>
-				<div style={{ marginLeft: "auto" }}>
-					<SyncChip
-						pending={sync.pending}
-						error={sync.error}
-						onRetry={sync.retry}
-					/>
-				</div>
 			</header>
 
 			<DndProvider>
