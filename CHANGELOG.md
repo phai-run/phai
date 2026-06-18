@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.15.0](https://github.com/phai-run/phai/compare/v5.14.1...v5.15.0) (2026-06-18)
+
+
+### Features
+
+* complete quality bug batch ([6994d14](https://github.com/phai-run/phai/commit/6994d14a5ac8185a8af9426f9a0718daa42ab4df))
+
+
+### Bug Fixes
+
+* **web:** reflect edits in the list, floating sync+version badge ([#169](https://github.com/phai-run/phai/issues/169)) ([f7c3f34](https://github.com/phai-run/phai/commit/f7c3f3455cb08f07a558994e34ad6f2e60504cff))
+
 ## [5.14.1](https://github.com/phai-run/phai/compare/v5.14.0...v5.14.1) (2026-06-18)
 
 
