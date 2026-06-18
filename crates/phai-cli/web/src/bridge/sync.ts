@@ -32,7 +32,7 @@ const getBridgeIdentity = (): Promise<BridgeIdentity> => {
 };
 
 /** Binary version of the bridge, or "unknown" while it is unreachable. */
-const getBridgeVersion = (): Promise<string> =>
+export const getBridgeVersion = (): Promise<string> =>
 	getBridgeIdentity().then(
 		(identity) => identity.version ?? UNKNOWN_VERSION,
 		() => UNKNOWN_VERSION,

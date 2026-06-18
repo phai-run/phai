@@ -22,6 +22,7 @@ import {
 	COMMITMENT_TIER_LABELS,
 	COMMITMENT_TIERS,
 	effectiveCategory,
+	effectiveTx,
 	filterTransactions,
 	fixedCategoriesFromForecasts,
 	sheetLabel,
@@ -84,7 +85,11 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 	const tableRef = useRef<HTMLDivElement>(null);
 
 	const rows = useMemo(() => {
-		const monthTxs = transactionsForMonth(txRows, month);
+		// Bake the optimistic overlay in first so edited description/merchant/
+		// category reflect everywhere (sheet, sums, sort), not just the modal.
+		const monthTxs = transactionsForMonth(txRows, month).map((tx) =>
+			effectiveTx(tx, overlayMap),
+		);
 		const filtered = filterTransactions(
 			monthTxs,
 			{

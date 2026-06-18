@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { events, tables } from "../livestore/schema";
 import {
 	commitmentTier,
+	effectiveTx,
 	fixedCategoriesFromForecasts,
 	type CommitmentTier,
 } from "../lib/derivations";
@@ -99,16 +100,17 @@ export const MonthDetail = ({
 		[overlayById],
 	);
 
-	// Transactions for this month
+	// Transactions for this month, with the optimistic overlay baked in so edits
+	// reflect in the treemap/sums immediately (not just the modal).
 	const monthTxs = useMemo(
 		() =>
 			txRows
 				.filter((t) => t.month === month)
 				.map((t) => ({
-					...t,
+					...effectiveTx(t, overlayById),
 					accountLabel: accountById.get(t.accountId)?.label || t.accountId,
 				})),
-		[txRows, month, accountById],
+		[txRows, month, accountById, overlayById],
 	);
 
 	// ── Debounced text filter ───────────────────────────────────────────
