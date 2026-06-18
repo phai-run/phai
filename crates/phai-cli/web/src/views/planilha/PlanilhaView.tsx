@@ -19,11 +19,15 @@ import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 import {
 	buildAccountMap,
 	buildOverlayMap,
+	COMMITMENT_TIER_LABELS,
+	COMMITMENT_TIERS,
 	effectiveCategory,
 	filterTransactions,
+	fixedCategoriesFromForecasts,
 	sheetLabel,
 	sortForSheet,
 	transactionsForMonth,
+	type CommitmentTier,
 	type SheetSort,
 	type SheetSortKey,
 	type TxView,
@@ -33,6 +37,7 @@ const txAll$ = queryDb(tables.transactions.orderBy("postedAt", "desc"));
 const overlay$ = queryDb(tables.reviewOverlay);
 const categories$ = queryDb(tables.categories.orderBy("id", "asc"));
 const accounts$ = queryDb(tables.accounts.orderBy("label", "asc"));
+const forecasts$ = queryDb(tables.forecasts);
 
 const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string }> = [
 	{ key: "date", label: "date", width: "64px" },
@@ -56,10 +61,15 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 	const overlay = useQuery(overlay$);
 	const categories = useQuery(categories$);
 	const accounts = useQuery(accounts$);
+	const forecasts = useQuery(forecasts$);
 
 	const overlayMap = useMemo(() => buildOverlayMap(overlay), [overlay]);
 	const accountMap = useMemo(() => buildAccountMap(accounts), [accounts]);
 	const categoryIds = useMemo(() => categories.map((c) => c.id), [categories]);
+	const fixedCategories = useMemo(
+		() => fixedCategoriesFromForecasts(forecasts),
+		[forecasts],
+	);
 
 	const [sort, setSort] = useState<SheetSort>({ key: "date", dir: -1 });
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -85,15 +95,17 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 				installmentsOnly: ui.installmentsOnly,
 				subscriptionsOnly: ui.subscriptionsOnly,
 				unreviewedOnly: ui.unreviewedOnly,
+				tierFilter: (ui.tierFilter as CommitmentTier | null) ?? null,
 			},
 			overlayMap,
 			accountMap,
+			fixedCategories,
 		).filter(
 			(tx) =>
 				!ui.uncategorizedOnly || (effectiveCategory(tx, overlayMap) ?? "") === "",
 		);
 		return sortForSheet(filtered, sort, overlayMap, accountMap);
-	}, [txRows, month, ui, overlayMap, accountMap, sort]);
+	}, [txRows, month, ui, overlayMap, accountMap, fixedCategories, sort]);
 
 	// Reset selection when the month or the visible set changes size.
 	const rowCount = rows.length;
@@ -662,6 +674,7 @@ interface SheetFilterState {
 	uncategorizedOnly: boolean;
 	unreviewedOnly: boolean;
 	installmentsOnly: boolean;
+	tierFilter: string | null;
 }
 
 /** Compact filter strip shared with the grouped view via the ui document. */
@@ -685,6 +698,25 @@ const SheetFilterBar = ({
 		cursor: "pointer",
 		fontSize: 12,
 	});
+	// Controllability tiers (ADR-0030): single-select, distinct colours.
+	const tierColor: Record<CommitmentTier, string> = {
+		locked: "#9a9aae",
+		cancellable: "var(--amber)",
+		variable: "var(--green)",
+	};
+	const tierChip = (tier: CommitmentTier): React.CSSProperties => {
+		const active = ui.tierFilter === tier;
+		const c = tierColor[tier];
+		return {
+			background: active ? c : "transparent",
+			color: active ? "#1a1a1a" : "var(--muted)",
+			border: `1px solid ${active ? c : "var(--border)"}`,
+			borderRadius: "var(--radius-full)",
+			padding: "4px 12px",
+			cursor: "pointer",
+			fontSize: 12,
+		};
+	};
 	return (
 		<div
 			style={{
@@ -751,6 +783,29 @@ const SheetFilterBar = ({
 			>
 				installments
 			</button>
+			<span
+				aria-hidden
+				style={{
+					width: 1,
+					alignSelf: "stretch",
+					minHeight: 20,
+					background: "var(--border)",
+					margin: "0 2px",
+				}}
+			/>
+			{COMMITMENT_TIERS.map((tier) => (
+				<button
+					key={tier}
+					className="mono"
+					style={tierChip(tier)}
+					aria-pressed={ui.tierFilter === tier}
+					onClick={() =>
+						setUi({ tierFilter: ui.tierFilter === tier ? null : tier })
+					}
+				>
+					{COMMITMENT_TIER_LABELS[tier]}
+				</button>
+			))}
 		</div>
 	);
 };
