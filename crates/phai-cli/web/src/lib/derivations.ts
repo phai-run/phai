@@ -60,11 +60,11 @@ export const COMMITMENT_TIERS: readonly CommitmentTier[] = [
 	"variable",
 ];
 
-/** Short Portuguese labels for the planning/sheet/treemap surfaces. */
+/** Short labels for the planning/sheet/treemap surfaces (UI chrome is English). */
 export const COMMITMENT_TIER_LABELS: Record<CommitmentTier, string> = {
-	locked: "travado",
-	cancellable: "cancelável",
-	variable: "variável",
+	locked: "locked",
+	cancellable: "cancellable",
+	variable: "variable",
 };
 
 /** Filters that can be applied to a transaction list. */

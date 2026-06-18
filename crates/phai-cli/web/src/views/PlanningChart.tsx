@@ -358,14 +358,14 @@ const FullChart = ({
 				</span>
 				{!isExpensesMode && goal.shortfall && (
 					<span style={{ color: "var(--amber)" }}>
-						⚠ fecha no vermelho em {goal.label} ·{" "}
+						⚠ goes red in {goal.label} ·{" "}
 						{goal.solution.achievable ? (
 							<>
-								corte <CountMoney value={goal.solution.monthlySaving} />
-								/mês p/ ficar no azul
+								cut <CountMoney value={goal.solution.monthlySaving} />
+								/mo to stay in the black
 							</>
 						) : (
-							"fora de alcance só cortando"
+							"out of reach by cutting alone"
 						)}
 					</span>
 				)}
@@ -715,7 +715,7 @@ const FullChart = ({
 										fontSize={9}
 										fill="var(--amber)"
 									>
-										meta · saldo ≥ 0
+										goal · balance ≥ 0
 									</text>
 								</>
 							)}
