@@ -68,11 +68,24 @@ jobs:
           mv phai-cli-${{ matrix.target }}.tar.gz \
              phai-cli-${{ matrix.target }}.tar.gz.sha256 \
              "${GITHUB_WORKSPACE}/"
+      - name: Sign tarball (minisign)
+        run: |
+          brew install minisign
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          minisign -S -s minisign.key \
+            -m phai-cli-${{ matrix.target }}.tar.gz \
+            -x phai-cli-${{ matrix.target }}.tar.gz.minisig \
+            -c "phai release ${{ needs.release-please.outputs.phai-cli-tag }}"
+          rm -f minisign.key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
       - name: Upload to release
         run: |
           gh release upload "${{ needs.release-please.outputs.phai-cli-tag }}" \
             phai-cli-${{ matrix.target }}.tar.gz \
             phai-cli-${{ matrix.target }}.tar.gz.sha256 \
+            phai-cli-${{ matrix.target }}.tar.gz.minisig \
             --clobber
         env:
           GH_TOKEN: ${{ github.token }}
