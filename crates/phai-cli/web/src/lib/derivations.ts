@@ -44,6 +44,29 @@ export interface ReviewOverlay {
 	categoryId: string | null;
 }
 
+/**
+ * Controllability axis for planning (ADR-0030). The four `forecast_template`
+ * kinds collapse to three tiers by the question "can I cut this?":
+ *   - `locked`      — installments + fixed monthly bills; no short-term margin
+ *   - `cancellable` — subscriptions; cancel at will
+ *   - `variable`    — discretionary spend; where a budget bites
+ */
+export type CommitmentTier = "locked" | "cancellable" | "variable";
+
+/** Tiers in cut-margin order (least → most controllable). */
+export const COMMITMENT_TIERS: readonly CommitmentTier[] = [
+	"locked",
+	"cancellable",
+	"variable",
+];
+
+/** Short Portuguese labels for the planning/sheet/treemap surfaces. */
+export const COMMITMENT_TIER_LABELS: Record<CommitmentTier, string> = {
+	locked: "travado",
+	cancellable: "cancelável",
+	variable: "variável",
+};
+
 /** Filters that can be applied to a transaction list. */
 export interface TxFilters {
 	/** Filter by account id (exact match). */
@@ -60,6 +83,8 @@ export interface TxFilters {
 	subscriptionsOnly: boolean;
 	/** Show only unreviewed transactions. */
 	unreviewedOnly: boolean;
+	/** Show only one controllability tier (ADR-0030); null/undefined = all. */
+	tierFilter?: CommitmentTier | null;
 }
 
 /** Result of parsing a category id like "alimentacao:mercado". */
@@ -123,6 +148,44 @@ export const buildAccountMap = (
 	accounts: ReadonlyArray<AccountInfo>,
 ): Map<string, AccountInfo> => new Map(accounts.map((a) => [a.id, a]));
 
+// ── Commitment tier (ADR-0030) ─────────────────────────────────────────────
+
+const EMPTY_FIXED: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Build the set of parent categories the user treats as "fixed" — derived from
+ * seeded fixed-kind forecasts, which carry the category of every confirmed
+ * fixed monthly bill (rent, therapy, school…). The classification lives in
+ * runtime data (forecasts), never hardcoded in shared source (ADR-0008).
+ */
+export const fixedCategoriesFromForecasts = (
+	forecasts: ReadonlyArray<{ kind: string; categoryId: string | null }>,
+): Set<string> => {
+	const set = new Set<string>();
+	for (const f of forecasts) {
+		if (f.kind === "fixed" && f.categoryId) {
+			set.add(parseCategory(f.categoryId).parent);
+		}
+	}
+	return set;
+};
+
+/**
+ * Classify a transaction on the controllability axis (ADR-0030). The
+ * per-transaction installment/subscription flags decide first (a streaming
+ * subscription stays `cancellable` even inside a "fixed" category); otherwise
+ * the parent category is checked against the user's fixed-category set.
+ */
+export const commitmentTier = (
+	tx: TxView,
+	fixedCategories: ReadonlySet<string> = EMPTY_FIXED,
+): CommitmentTier => {
+	if (tx.isInstallment === 1) return "locked";
+	if (tx.isSubscription === 1) return "cancellable";
+	if (fixedCategories.has(parseCategory(tx.categoryId).parent)) return "locked";
+	return "variable";
+};
+
 // ── Filtering ──────────────────────────────────────────────────────────────
 
 /**
@@ -135,6 +198,7 @@ export const filterTransactions = (
 	filters: TxFilters,
 	overlayMap: Map<string, ReviewOverlay>,
 	accountMap: Map<string, AccountInfo>,
+	fixedCategories: ReadonlySet<string> = EMPTY_FIXED,
 ): TxView[] => {
 	const cat = filters.categoryFilter?.trim().toLowerCase() ?? null;
 	const text = filters.textFilter?.trim().toLowerCase() ?? null;
@@ -142,6 +206,11 @@ export const filterTransactions = (
 	return transactions.filter((tx) => {
 		if (filters.installmentsOnly && !tx.isInstallment) return false;
 		if (filters.subscriptionsOnly && !tx.isSubscription) return false;
+		if (
+			filters.tierFilter &&
+			commitmentTier(tx, fixedCategories) !== filters.tierFilter
+		)
+			return false;
 		if (filters.unreviewedOnly && tx.reviewed) return false;
 		if (filters.accountFilter && tx.accountId !== filters.accountFilter)
 			return false;
@@ -178,6 +247,7 @@ export const hasActiveFilters = (filters: TxFilters): boolean =>
 	filters.installmentsOnly ||
 	filters.subscriptionsOnly ||
 	filters.unreviewedOnly ||
+	!!filters.tierFilter ||
 	!!filters.accountFilter ||
 	!!filters.ownerFilter ||
 	!!filters.categoryFilter ||

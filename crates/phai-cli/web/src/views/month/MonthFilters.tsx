@@ -1,7 +1,19 @@
 import { useCallback } from "react";
+import {
+	COMMITMENT_TIER_LABELS,
+	COMMITMENT_TIERS,
+	type CommitmentTier,
+} from "../../lib/derivations";
 import { formatMoneyNumber } from "../../lib/format";
 
 // ── Filter bar ─────────────────────────────────────────────────────────────
+
+/** Tier accent colours (ADR-0030): locked=neutral, cancellable=amber, variable=green. */
+const TIER_COLOR: Record<CommitmentTier, string> = {
+	locked: "#9a9aae",
+	cancellable: "var(--amber)",
+	variable: "var(--green)",
+};
 
 const FilterDivider = () => (
 	<span
@@ -34,6 +46,7 @@ export const FilterBar = ({
 		subscriptionsOnly: boolean;
 		unreviewedOnly: boolean;
 		uncategorizedOnly: boolean;
+		tierFilter: string | null;
 	};
 	textInput: string;
 	setUi: (patch: Partial<typeof ui>) => void;
@@ -85,6 +98,12 @@ export const FilterBar = ({
 		[setUi, ui.uncategorizedOnly],
 	);
 
+	const setTier = useCallback(
+		(tier: CommitmentTier) =>
+			setUi({ tierFilter: ui.tierFilter === tier ? null : tier }),
+		[setUi, ui.tierFilter],
+	);
+
 	const clearFilters = useCallback(
 		() =>
 			setUi({
@@ -96,6 +115,7 @@ export const FilterBar = ({
 				subscriptionsOnly: false,
 				unreviewedOnly: false,
 				uncategorizedOnly: false,
+				tierFilter: null,
 			}),
 		[setUi],
 	);
@@ -215,6 +235,20 @@ export const FilterBar = ({
 			>
 				unreviewed
 			</ToggleBtn>
+
+			<FilterDivider />
+
+			{/* Controllability tiers (ADR-0030) — single-select */}
+			{COMMITMENT_TIERS.map((tier) => (
+				<ToggleBtn
+					key={tier}
+					active={ui.tierFilter === tier}
+					color={TIER_COLOR[tier]}
+					onClick={() => setTier(tier)}
+				>
+					{COMMITMENT_TIER_LABELS[tier]}
+				</ToggleBtn>
+			))}
 
 			{/* Clear filters */}
 			{hasFilters && (

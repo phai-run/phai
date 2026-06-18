@@ -38,7 +38,7 @@ import {
  * Enforced by __tests__/store-version.test.ts: change the schema and the
  * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
  */
-export const STORE_VERSION = 6;
+export const STORE_VERSION = 7;
 export const STORE_ID = `phai-s${STORE_VERSION}`;
 
 // Computes current month as "YYYY-MM" for the default selectedMonth.
@@ -191,6 +191,8 @@ export const tables = {
 			unreviewedOnly: Schema.Boolean,
 			uncategorizedOnly: Schema.Boolean,
 			forecastStatusFilter: Schema.NullOr(Schema.String),
+			// Controllability tier filter (ADR-0030): "locked"|"cancellable"|"variable".
+			tierFilter: Schema.NullOr(Schema.String),
 		}),
 		default: {
 			id: SessionIdSymbol,
@@ -206,6 +208,7 @@ export const tables = {
 				unreviewedOnly: false,
 				uncategorizedOnly: false,
 				forecastStatusFilter: null,
+				tierFilter: null,
 			},
 		},
 	}),

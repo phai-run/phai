@@ -118,6 +118,71 @@ export function applySimulationToModel(
 	});
 }
 
+// ── Goal solving (ADR-0031) ────────────────────────────────────────────────
+
+/** The first FUTURE month whose projected balance dips below `target`. */
+export function firstShortfallMonth(
+	model: ChartModel,
+	months: ReadonlyArray<ChartMonthView>,
+	target = 0,
+): string | null {
+	for (let i = 0; i < months.length; i++) {
+		if (months[i].isFuture && model.balances[i] < target) return months[i].month;
+	}
+	return null;
+}
+
+/** Result of the inverse solver: the cut needed to reach a balance goal. */
+export interface GoalSolution {
+	/** Minimal constant monthly saving that keeps every future balance ≥ target. */
+	monthlySaving: number;
+	/** False when even cutting all forecast outflows cannot reach the goal. */
+	achievable: boolean;
+}
+
+/**
+ * Inverse of {@link applySimulationToModel}: find the smallest constant monthly
+ * saving (a forecast-outflow cut from `fromMonth` on) that keeps every future
+ * month's balance at or above `target`. Binary-searches over the real clamped
+ * simulation, so the answer respects "you can't cut more than you spend".
+ * Returns `achievable: false` (with the maximal cut) when the goal is out of
+ * reach by cutting forecast alone.
+ */
+export function solveRequiredSaving(
+	model: ChartModel,
+	months: ReadonlyArray<ChartMonthView>,
+	opts: { target?: number; fromMonth?: string } = {},
+): GoalSolution {
+	const target = opts.target ?? 0;
+	const fromMonth =
+		opts.fromMonth ?? months.find((m) => m.isFuture)?.month ?? null;
+	if (fromMonth == null) return { monthlySaving: 0, achievable: true };
+
+	const futureIdx = months
+		.map((m, i) => (m.isFuture ? i : -1))
+		.filter((i) => i >= 0);
+	const meets = (s: number): boolean => {
+		const sim = applySimulationToModel(model, months, {
+			fromMonth,
+			monthlySaving: s,
+		});
+		return futureIdx.every((i) => sim.balances[i] >= target - 1e-6);
+	};
+
+	if (meets(0)) return { monthlySaving: 0, achievable: true };
+	const hi = Math.max(0, ...model.fcOuts);
+	if (!meets(hi)) return { monthlySaving: hi, achievable: false };
+
+	let lo = 0;
+	let high = hi;
+	for (let k = 0; k < 40; k++) {
+		const mid = (lo + high) / 2;
+		if (meets(mid)) high = mid;
+		else lo = mid;
+	}
+	return { monthlySaving: Math.ceil(high), achievable: true };
+}
+
 // Convert bar magnitude → SVG height
 export const bh = (v: number, maxBar: number) => (v / maxBar) * BAR_MAX;
 export const cashY = (v: number, min: number, span: number) =>

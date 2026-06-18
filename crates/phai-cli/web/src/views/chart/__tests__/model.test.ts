@@ -6,7 +6,12 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ChartMonthView } from "../../types";
-import { applySimulationToModel, buildModel } from "../model";
+import {
+	applySimulationToModel,
+	buildModel,
+	firstShortfallMonth,
+	solveRequiredSaving,
+} from "../model";
 
 const month = (over: Partial<ChartMonthView> & { month: string }): ChartMonthView => ({
 	label: over.month.slice(5),
@@ -107,5 +112,81 @@ describe("applySimulationToModel", () => {
 			monthlySaving: 0,
 		});
 		expect(sim).toEqual(base);
+	});
+});
+
+// A year that dips negative in the future — the case the planner exists for.
+const shortfallMonths: ChartMonthView[] = [
+	month({ month: "2026-05", closingBalance: "1000" }),
+	month({
+		month: "2026-06",
+		closingBalance: "500",
+		forecastOutflowsRemaining: "100",
+		projectedClosingBalance: "400",
+	}),
+	month({
+		month: "2026-07",
+		forecastInflowsRemaining: "1000",
+		forecastOutflowsRemaining: "1600",
+		projectedClosingBalance: "-200",
+		isFuture: 1,
+	}),
+	month({
+		month: "2026-08",
+		forecastInflowsRemaining: "1000",
+		forecastOutflowsRemaining: "1000",
+		projectedClosingBalance: "-200",
+		isFuture: 1,
+	}),
+];
+
+describe("firstShortfallMonth", () => {
+	it("returns the first future month below the target", () => {
+		const model = buildModel(shortfallMonths);
+		expect(firstShortfallMonth(model, shortfallMonths)).toBe("2026-07");
+	});
+
+	it("returns null when every future balance clears the target", () => {
+		const model = buildModel(months);
+		expect(firstShortfallMonth(model, months)).toBeNull();
+	});
+});
+
+describe("solveRequiredSaving", () => {
+	it("finds the minimal monthly cut that keeps every future balance ≥ 0", () => {
+		const model = buildModel(shortfallMonths);
+		const sol = solveRequiredSaving(model, shortfallMonths);
+		expect(sol.achievable).toBe(true);
+		expect(sol.monthlySaving).toBe(200);
+		// Applying that saving actually clears the shortfall.
+		const sim = applySimulationToModel(model, shortfallMonths, {
+			fromMonth: "2026-07",
+			monthlySaving: sol.monthlySaving,
+		});
+		expect(firstShortfallMonth(sim, shortfallMonths)).toBeNull();
+	});
+
+	it("needs no saving when the year already stays solvent", () => {
+		const model = buildModel(months);
+		expect(solveRequiredSaving(model, months)).toEqual({
+			monthlySaving: 0,
+			achievable: true,
+		});
+	});
+
+	it("flags goals unreachable by cutting forecast alone", () => {
+		const deep: ChartMonthView[] = [
+			month({ month: "2026-06", closingBalance: "0" }),
+			month({
+				month: "2026-07",
+				forecastOutflowsRemaining: "1000",
+				projectedClosingBalance: "-3000",
+				isFuture: 1,
+			}),
+		];
+		const model = buildModel(deep);
+		const sol = solveRequiredSaving(model, deep);
+		expect(sol.achievable).toBe(false);
+		expect(sol.monthlySaving).toBe(1000); // the maximal possible cut
 	});
 });
