@@ -56,10 +56,12 @@ const BINARY_NAME: &str = "phai";
 /// [ADR-0017](../../docs/adr/0017-release-signature-verification.md) for the
 /// rotation plan and the rationale for verifying signatures on top of SHA-256.
 ///
-/// Placeholder until the release CI starts signing. Verification stays
-/// best-effort while this is empty (or `REQUIRE_SIGNATURE` is `false`); once
-/// CI signs reliably for one cycle, flip `REQUIRE_SIGNATURE = true`.
-const SIGNING_PUBLIC_KEY: &str = "";
+/// The base64 key line from `phai.pub` (without the `untrusted comment:` line).
+/// Its matching secret key lives in the `MINISIGN_SECRET_KEY` GitHub secret and
+/// is used by the release workflow to sign each tarball. Verification stays
+/// best-effort while `REQUIRE_SIGNATURE` is `false`; flip it on after one fully
+/// signed release cycle.
+const SIGNING_PUBLIC_KEY: &str = "RWSuMfSaIXtOBvXZW0dwUnelSpCqEpy1iSoyRzzG0kdR//8zpRlOEU78";
 
 /// Once CI ships `.minisig` sidecars consistently, flip this to `true` so a
 /// missing signature is rejected instead of warning. Until then the updater
@@ -275,7 +277,7 @@ fn validate_tarball_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
 /// - `Err(_)` if the signature is present but invalid — callers MUST treat
 ///   this as a hard failure regardless of `REQUIRE_SIGNATURE`.
 fn verify_minisign_signature(tarball: &[u8], signature_text: &str) -> Result<()> {
-    let public_key = minisign_verify::PublicKey::decode(SIGNING_PUBLIC_KEY)
+    let public_key = minisign_verify::PublicKey::from_base64(SIGNING_PUBLIC_KEY)
         .context("embedded signing public key failed to parse")?;
     let signature = minisign_verify::Signature::decode(signature_text)
         .context("release signature failed to parse")?;
@@ -822,6 +824,15 @@ mod tests {
     fn is_newer_release_beats_pre_release() {
         // 1.0.0 is newer than 1.0.0-rc1
         assert!(is_newer(&ver("1.0.0"), &ver("1.0.0-rc1")));
+    }
+
+    #[test]
+    fn embedded_signing_public_key_parses() {
+        // Guards the embedded key format (ADR-0017): a wrong/empty value would
+        // break every update once releases ship a .minisig sidecar.
+        assert!(!SIGNING_PUBLIC_KEY.is_empty());
+        minisign_verify::PublicKey::from_base64(SIGNING_PUBLIC_KEY)
+            .expect("embedded SIGNING_PUBLIC_KEY must be a valid minisign public key");
     }
 
     #[test]

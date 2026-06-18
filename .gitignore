@@ -11,6 +11,9 @@
 pluggy.env
 service-account*.json
 *-service-account.json
+# minisign keys — the secret key must NEVER be committed (ADR-0017)
+*.key
+phai.pub
 
 # Personal finance data
 finance/pluggy-config.json
