@@ -319,6 +319,7 @@ async fn try_replicate_anatomy(
     transaction_id: &str,
     merchant_name: &str,
     category_id: &str,
+    category_source: &str,
     amount: rust_decimal::Decimal,
     actor_id: &str,
 ) {
@@ -338,6 +339,7 @@ async fn try_replicate_anatomy(
         None,
         None,
         Some(category_id),
+        Some(category_source),
         amount,
         &donors,
     );
@@ -351,12 +353,30 @@ async fn try_replicate_anatomy(
         purpose: rep.purpose.as_deref(),
         ..phai_core::storage::TransactionAnatomyPatch::default()
     };
-    if let Err(err) = store
-        .update_transaction_anatomy(transaction_id, patch, actor_id, &idempotency_key)
-        .await
-    {
-        eprintln!("aviso: replicação de anatomy falhou para {transaction_id}: {err:#}");
-        return;
+    if patch.description.is_some() || patch.purpose.is_some() {
+        if let Err(err) = store
+            .update_transaction_anatomy(transaction_id, patch, actor_id, &idempotency_key)
+            .await
+        {
+            eprintln!("aviso: replicação de anatomy falhou para {transaction_id}: {err:#}");
+            return;
+        }
+    }
+    if let Some(category_id) = rep.category_id.as_deref() {
+        if let Err(err) = store
+            .annotate_transaction(
+                transaction_id,
+                Some(category_id),
+                Some("replicated:human"),
+                None,
+                actor_id,
+                &idempotency_key,
+            )
+            .await
+        {
+            eprintln!("aviso: replicação de categoria falhou para {transaction_id}: {err:#}");
+            return;
+        }
     }
     let audit = AuditEvent::from_entity(
         "transaction",
@@ -368,6 +388,7 @@ async fn try_replicate_anatomy(
             "donor_id": rep.donor_id,
             "description_replicated": rep.description.is_some(),
             "purpose_replicated": rep.purpose.is_some(),
+            "category_id": rep.category_id,
         }),
     );
     if let Err(err) = store.insert_audit_events(&[audit]).await {
@@ -415,6 +436,7 @@ async fn apply_auto_decision(
         &tx.transaction_id,
         &result.merchant_name,
         &category_id,
+        "enriched:llm",
         tx.amount,
         &config.actor_id,
     )
@@ -807,6 +829,7 @@ async fn apply_decision(
         &tx.transaction_id,
         &result.merchant_name,
         &category_id,
+        source,
         tx.amount,
         &config.actor_id,
     )

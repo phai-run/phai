@@ -48,6 +48,64 @@ const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string }> = [
 	{ key: "amount", label: "amount", width: "110px" },
 ];
 
+const CSV_COLUMNS = [
+	"transaction_id",
+	"posted_at",
+	"description",
+	"merchant_name",
+	"purpose",
+	"account",
+	"category_id",
+	"amount",
+	"installment",
+] as const;
+
+const csvCell = (value: string | null | undefined): string => {
+	const text = value ?? "";
+	if (/[",\n\r]/.test(text)) {
+		return `"${text.replaceAll('"', '""')}"`;
+	}
+	return text;
+};
+
+export const sheetRowsCsv = (
+	rows: ReadonlyArray<TxView>,
+	accountMap: Map<string, { label: string }>,
+): string => {
+	const lines = [CSV_COLUMNS.join(",")];
+	for (const tx of rows) {
+		const account = accountMap.get(tx.accountId)?.label ?? tx.accountId;
+		lines.push(
+			[
+				tx.id,
+				tx.postedAt,
+				sheetLabel(tx),
+				tx.merchantName,
+				tx.purpose,
+				account,
+				tx.categoryId,
+				tx.amount,
+				tx.installmentMarker,
+			]
+				.map(csvCell)
+				.join(","),
+		);
+	}
+	return `${lines.join("\n")}\n`;
+};
+
+const downloadCsv = (filename: string, csv: string) => {
+	const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = filename;
+	document.body.append(link);
+	link.click();
+	link.remove();
+	URL.revokeObjectURL(url);
+};
+
 /**
  * Planilha — the spreadsheet view of a month. Every transaction is one flat
  * row: sortable columns, inline category editing (click the chip or press
@@ -140,6 +198,10 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 		for (const tx of rows) if (selectedIds.has(tx.id)) cents += toCents(tx.amount);
 		return cents / 100;
 	}, [rows, selectedIds]);
+
+	const handleExportCsv = useCallback(() => {
+		downloadCsv(`phai-planilha-${month}.csv`, sheetRowsCsv(rows, accountMap));
+	}, [month, rows, accountMap]);
 
 	const applyCategory = useCallback(
 		(categoryId: string, targetIds: string[]) => {
@@ -325,6 +387,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 				setUi={setUi}
 				accounts={accounts}
 				count={rowCount}
+				onExportCsv={handleExportCsv}
 			/>
 
 			<div
@@ -758,11 +821,13 @@ const SheetFilterBar = ({
 	setUi,
 	accounts,
 	count,
+	onExportCsv,
 }: {
 	ui: SheetFilterState;
 	setUi: (patch: Partial<SheetFilterState>) => void;
 	accounts: ReadonlyArray<{ id: string; label: string }>;
 	count: number;
+	onExportCsv: () => void;
 }) => {
 	const chip = (active: boolean): React.CSSProperties => ({
 		background: active ? "var(--purple)" : "transparent",
@@ -881,6 +946,14 @@ const SheetFilterBar = ({
 					{COMMITMENT_TIER_LABELS[tier]}
 				</button>
 			))}
+			<button
+				className="mono"
+				style={{ ...chip(false), marginLeft: "auto" }}
+				onClick={onExportCsv}
+				disabled={count === 0}
+			>
+				export CSV
+			</button>
 		</div>
 	);
 };

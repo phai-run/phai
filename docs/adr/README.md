@@ -66,7 +66,7 @@ proposed → active → superseded
 | [0012](0012-amount-cents-exact-aggregation.md) | Exact decimal aggregation via `amount_cents` companion column | active |
 | [0013](0013-auto-migrate-on-every-command.md) | Auto-apply pending migrations on every command invocation | active |
 | [0014](0014-transaction-anatomy.md) | Transaction anatomy separates raw, human, merchant, purpose, and trace fields | active |
-| [0015](0015-anatomy-replication.md) | Anatomy replication propagates human-curated description and purpose from prior same-merchant transactions | active |
+| [0015](0015-anatomy-replication.md) | Anatomy replication propagates human-curated description and purpose from prior same-merchant transactions | superseded by [0033](0033-recurring-human-review-replication.md) |
 | [0016](0016-forecast-automation.md) | Forecast automation: templates, detection layers and reconciliation | accepted |
 | [0017](0017-release-signature-verification.md) | Release signature verification (minisign) on top of SHA-256 | active |
 | [0018](0018-serve-local-dashboard.md) | `fin serve`: local HTTP+WebSocket dashboard for forecast review | superseded by [0019](0019-serve-loopback-only-localhost-alias.md) |
@@ -84,6 +84,7 @@ proposed → active → superseded
 | [0030](0030-commitment-tiers.md) | Commitment tiers: a derived controllability axis for planning | proposed |
 | [0031](0031-persisted-planning-overlay.md) | Persisted planning overlay: plan as a first-class layer on the chart | proposed |
 | [0032](0032-per-transaction-tier-override.md) | Per-transaction commitment-tier override via a sparse table | proposed |
+| [0033](0033-recurring-human-review-replication.md) | Recurring human review replication includes category | active |
 
 ---
 

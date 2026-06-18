@@ -94,7 +94,7 @@ export const TransactionModal = ({
 	);
 	const { store } = useStore();
 
-	const applyBulk = useCallback(
+	const applySelectedSimilar = useCallback(
 		(patch: ReviewPatch) => {
 			for (const id of selectedSimilar) {
 				store.commit(
@@ -128,16 +128,6 @@ export const TransactionModal = ({
 		setSelectedSimilar(new Set());
 	}, []);
 
-	const handleSave = useCallback(() => {
-		const patch = {
-			description: description.trim() || null,
-			merchantName: merchantName.trim() || null,
-			purpose: purpose.trim() || null,
-			categoryId: category.trim() || null,
-		};
-		onSubmit(patch);
-	}, [onSubmit, description, merchantName, purpose, category]);
-
 	const currentPatch = useMemo(
 		() => ({
 			description: description.trim() || null,
@@ -147,6 +137,19 @@ export const TransactionModal = ({
 		}),
 		[description, merchantName, purpose, category],
 	);
+
+	const selectedSimilarCount = selectedSimilar.size;
+
+	const handleSave = useCallback(() => {
+		const patch = currentPatch;
+		applySelectedSimilar(patch);
+		onSubmit(patch);
+	}, [applySelectedSimilar, currentPatch, onSubmit]);
+
+	const saveLabel =
+		selectedSimilarCount > 0
+			? `Salvar (também em ${selectedSimilarCount} selecionadas)`
+			: "Salvar";
 
 	return (
 		<>
@@ -295,8 +298,6 @@ export const TransactionModal = ({
 									setPurpose={setPurpose}
 									category={category}
 									setCategory={setCategory}
-									onSave={handleSave}
-									onCancel={onClose}
 									postedAt={tx.postedAt}
 									accountId={tx.accountId}
 								/>
@@ -365,12 +366,27 @@ export const TransactionModal = ({
 									onToggle={handleToggle}
 									onSelectAll={handleSelectAll}
 									onClearAll={handleClearAll}
-									onApplyBulk={applyBulk}
-									patch={currentPatch}
 								/>
 							</motion.div>
 						)}
 					</AnimatePresence>
+					<div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+						<button
+							onClick={handleSave}
+							className="mono"
+							style={{
+								...pillStyle,
+								background: "var(--purple)",
+								color: "#fff",
+								borderColor: "transparent",
+							}}
+						>
+							{saveLabel}
+						</button>
+						<button onClick={onClose} className="mono" style={pillStyle}>
+							cancel
+						</button>
+					</div>
 				</motion.div>
 			</motion.div>
 		</>
@@ -386,8 +402,6 @@ const EditForm = ({
 	setPurpose,
 	category,
 	setCategory,
-	onSave,
-	onCancel,
 	postedAt,
 	accountId,
 }: {
@@ -399,8 +413,6 @@ const EditForm = ({
 	setPurpose: (v: string) => void;
 	category: string;
 	setCategory: (v: string) => void;
-	onSave: () => void;
-	onCancel: () => void;
 	postedAt: string;
 	accountId: string;
 }) => (
@@ -449,24 +461,6 @@ const EditForm = ({
 				style={{ ...inputStyle, flex: 1 }}
 			/>
 		</FieldRow>
-
-		<div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-			<button
-				onClick={onSave}
-				className="mono"
-				style={{
-					...pillStyle,
-					background: "var(--purple)",
-					color: "#fff",
-					borderColor: "transparent",
-				}}
-			>
-				save →
-			</button>
-			<button onClick={onCancel} className="mono" style={pillStyle}>
-				cancel
-			</button>
-		</div>
 	</div>
 );
 
@@ -507,8 +501,6 @@ const SimilarPanel = ({
 	onToggle,
 	onSelectAll,
 	onClearAll,
-	onApplyBulk,
-	patch,
 }: {
 	similarTxs: ReadonlyArray<TxView>;
 	overlayById: Map<
@@ -524,19 +516,7 @@ const SimilarPanel = ({
 	onToggle: (id: string) => void;
 	onSelectAll: () => void;
 	onClearAll: () => void;
-	onApplyBulk: (patch: ReviewPatch) => void;
-	patch: ReviewPatch;
 }) => {
-	const handleApply = useCallback(() => {
-		onApplyBulk(patch);
-	}, [onApplyBulk, patch]);
-
-	const hasPatch =
-		patch.description != null ||
-		patch.merchantName != null ||
-		patch.purpose != null ||
-		patch.categoryId != null;
-
 	if (similarTxs.length === 0) {
 		return (
 			<p className="mono" style={{ color: "var(--muted)", fontSize: 13 }}>
@@ -563,23 +543,6 @@ const SimilarPanel = ({
 					<button onClick={onClearAll} className="mono" style={pillStyle}>
 						clear ({selected.size})
 					</button>
-				)}
-				{selected.size > 0 && (
-					<>
-						<button
-							onClick={handleApply}
-							disabled={!hasPatch}
-							className="mono"
-							style={{
-								...pillStyle,
-								background: "var(--purple)",
-								color: "#fff",
-								opacity: !hasPatch ? 0.4 : 1,
-							}}
-						>
-							apply fields to {selected.size} →
-						</button>
-					</>
 				)}
 			</div>
 
@@ -681,4 +644,3 @@ const SimilarPanel = ({
 		</div>
 	);
 };
-

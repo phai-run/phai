@@ -287,6 +287,10 @@ fn app_launcher_script(url: &str) -> String {
     format!("#!/bin/sh\nexec /usr/bin/open \"{url}\"\n")
 }
 
+fn launcher_url(port: u16, system_daemon_installed: bool) -> String {
+    app_url(if system_daemon_installed { 80 } else { port })
+}
+
 fn launchctl(args: &[&str]) -> Result<std::process::Output> {
     Command::new("launchctl")
         .args(args)
@@ -335,7 +339,10 @@ fn write_app_bundle(port: u16) -> Result<PathBuf> {
     std::fs::write(contents.join("Info.plist"), app_info_plist())?;
     std::fs::write(resources.join("Phai.icns"), ICON_BYTES)?;
     let launcher = macos.join("phai-open");
-    std::fs::write(&launcher, app_launcher_script(&app_url(port)))?;
+    std::fs::write(
+        &launcher,
+        app_launcher_script(&launcher_url(port, Path::new(SYSTEM_DAEMON_PLIST).exists())),
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -671,6 +678,12 @@ mod tests {
         let script = app_launcher_script(&app_url(4317));
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("exec /usr/bin/open \"http://localhost:4317/\""));
+    }
+
+    #[test]
+    fn launcher_prefers_friendly_host_when_system_daemon_exists() {
+        assert_eq!(launcher_url(4317, true), "http://phai.localhost/");
+        assert_eq!(launcher_url(4317, false), "http://localhost:4317/");
     }
 
     #[test]

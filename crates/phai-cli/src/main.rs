@@ -3064,7 +3064,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    match cli.command {
+    run_command(cli.command).await
+}
+
+async fn run_command(command: Option<Commands>) -> Result<()> {
+    match command {
         None => {
             // Bare `phai` is no longer an interactive surface — `phai serve`
             // is. Print the help so the user can discover the command set.
@@ -7242,7 +7246,7 @@ async fn tx_replicate_anatomy(args: ReplicateAnatomyArgs) -> Result<()> {
             ReplicationOutcome::Replicated(rep) => {
                 replicated += 1;
                 println!(
-                    "  replicate  {}  ←  {}{}{}",
+                    "  replicate  {}  ←  {}{}{}{}",
                     tx.transaction_id,
                     rep.donor_id,
                     rep.description
@@ -7253,25 +7257,46 @@ async fn tx_replicate_anatomy(args: ReplicateAnatomyArgs) -> Result<()> {
                         .as_deref()
                         .map(|p| format!("  purpose={p:?}"))
                         .unwrap_or_default(),
+                    rep.category_id
+                        .as_deref()
+                        .map(|c| format!("  category={c:?}"))
+                        .unwrap_or_default(),
                 );
                 if !args.dry_run {
                     let idempotency_key =
                         format!("anatomy_rep:{}:{}", tx.transaction_id, Uuid::now_v7());
-                    store
-                        .update_transaction_anatomy(
-                            &tx.transaction_id,
-                            TransactionAnatomyPatch {
-                                description: rep.description.as_deref(),
-                                purpose: rep.purpose.as_deref(),
-                                ..TransactionAnatomyPatch::default()
-                            },
-                            &config.actor_id,
-                            &idempotency_key,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("update_transaction_anatomy falhou: {}", tx.transaction_id)
-                        })?;
+                    if rep.description.is_some() || rep.purpose.is_some() {
+                        store
+                            .update_transaction_anatomy(
+                                &tx.transaction_id,
+                                TransactionAnatomyPatch {
+                                    description: rep.description.as_deref(),
+                                    purpose: rep.purpose.as_deref(),
+                                    ..TransactionAnatomyPatch::default()
+                                },
+                                &config.actor_id,
+                                &idempotency_key,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!("update_transaction_anatomy falhou: {}", tx.transaction_id)
+                            })?;
+                    }
+                    if let Some(category_id) = rep.category_id.as_deref() {
+                        store
+                            .annotate_transaction(
+                                &tx.transaction_id,
+                                Some(category_id),
+                                Some("replicated:human"),
+                                None,
+                                &config.actor_id,
+                                &idempotency_key,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!("annotate_transaction falhou: {}", tx.transaction_id)
+                            })?;
+                    }
                     let audit = AuditEvent::from_entity(
                         "transaction",
                         &tx.transaction_id,
@@ -7282,6 +7307,7 @@ async fn tx_replicate_anatomy(args: ReplicateAnatomyArgs) -> Result<()> {
                             "donor_id": rep.donor_id,
                             "description_replicated": rep.description.is_some(),
                             "purpose_replicated": rep.purpose.is_some(),
+                            "category_id": rep.category_id,
                         }),
                     );
                     store.insert_audit_events(&[audit]).await?;

@@ -1,10 +1,12 @@
-//! Anatomy replication: copy human-curated `description` and `purpose`
-//! from a prior transaction with the same merchant or raw description.
+//! Anatomy replication: copy human-curated `description`, `purpose`, and
+//! category from a prior transaction with the same merchant or raw description.
 //!
 //! When a new transaction arrives from Pluggy, `description` and `purpose`
-//! are always NULL. LLM enrichment sets `merchant_name` but not those
-//! fields. For recurring merchants, this module propagates the
-//! human-curated anatomy from the best-matching prior transaction.
+//! are always NULL, and `category_id` may be missing or weakly classified by
+//! Pluggy/fallback sources. LLM enrichment sets `merchant_name`, but recurring
+//! transactions often already have a stronger human-labelled prior month.
+//! This module propagates that human-curated anatomy from the best-matching
+//! prior transaction.
 //! When historical rows have not been enriched with `merchant_name`, the
 //! raw Pluggy description is used as a conservative fallback key.
 //!
@@ -13,10 +15,10 @@
 //!   2. Amount within ±20% of the target.
 //!   3. Most recent (donors are pre-ordered by `transaction_date DESC`).
 //!
-//! Only NULL fields in the target are filled — already-set values are
-//! never overwritten. The [`AnatomyReplication`] value carries exactly
-//! which fields will be written, so callers can apply them with a
-//! single `update_transaction_anatomy` patch and emit one audit event.
+//! Only missing fields in the target are filled. Category is copied only when
+//! the target category is absent or comes from a weak source
+//! (`unclassified`, `fallback`, `pluggy`). Human/manual target values are never
+//! overwritten.
 
 use crate::models::TransactionRecord;
 use crate::storage::FinanceStore;
@@ -32,6 +34,8 @@ pub struct AnatomyReplication {
     pub description: Option<String>,
     /// Purpose to write to the target (only when target had `None`).
     pub purpose: Option<String>,
+    /// Category to write to the target (only when target had no strong category).
+    pub category_id: Option<String>,
 }
 
 /// Outcome of a replication attempt.
@@ -44,8 +48,8 @@ pub enum ReplicationOutcome {
     /// No suitable donor was found (no prior transaction with that merchant
     /// carries a human-curated description or purpose).
     NoDonor,
-    /// Both `description` and `purpose` are already set on the target —
-    /// nothing to replicate.
+    /// Description, purpose, and category are already complete/trusted on the
+    /// target — nothing to replicate.
     AlreadyComplete,
 }
 
@@ -97,6 +101,7 @@ pub fn compute_replication(
     current_description: Option<&str>,
     current_purpose: Option<&str>,
     target_category_id: Option<&str>,
+    target_category_source: Option<&str>,
     target_amount: Decimal,
     candidates: &[TransactionRecord],
 ) -> ReplicationOutcome {
@@ -105,7 +110,8 @@ pub fn compute_replication(
     }
     let current_description = non_blank(current_description);
     let current_purpose = non_blank(current_purpose);
-    if current_description.is_some() && current_purpose.is_some() {
+    let category_replicable = category_is_replicable(target_category_id, target_category_source);
+    if current_description.is_some() && current_purpose.is_some() && !category_replicable {
         return ReplicationOutcome::AlreadyComplete;
     }
     let donor = match select_donor(candidates, target_category_id, target_amount) {
@@ -132,7 +138,16 @@ pub fn compute_replication(
                 .map(str::to_string)
         })
         .flatten();
-    if description.is_none() && purpose.is_none() {
+    let category_id = category_replicable
+        .then(|| {
+            donor
+                .category_id
+                .as_deref()
+                .and_then(|value| non_blank(Some(value)))
+                .map(str::to_string)
+        })
+        .flatten();
+    if description.is_none() && purpose.is_none() && category_id.is_none() {
         // Donor exists but has no anatomy we can use.
         return ReplicationOutcome::NoDonor;
     }
@@ -140,6 +155,7 @@ pub fn compute_replication(
         donor_id: donor.transaction_id.clone(),
         description,
         purpose,
+        category_id,
     })
 }
 
@@ -149,6 +165,16 @@ fn non_blank(value: Option<&str>) -> Option<&str> {
 
 fn anatomy_match_key(tx: &TransactionRecord) -> Option<&str> {
     non_blank(tx.merchant_name.as_deref()).or_else(|| non_blank(Some(&tx.raw_description)))
+}
+
+fn category_is_replicable(category_id: Option<&str>, category_source: Option<&str>) -> bool {
+    if non_blank(category_id).is_none() {
+        return true;
+    }
+    matches!(
+        category_source.unwrap_or("").trim(),
+        "" | "unclassified" | "fallback" | "pluggy"
+    )
 }
 
 /// Async entry point: fetch donor candidates from the store, then run
@@ -175,6 +201,7 @@ pub async fn find_and_replicate(
         tx.description.as_deref(),
         tx.purpose.as_deref(),
         tx.category_id.as_deref(),
+        Some(&tx.category_source),
         tx.amount,
         &candidates,
     ))
@@ -233,6 +260,7 @@ mod tests {
             Some("  "),
             Some(""),
             Some("alimentacao:restaurantes"),
+            Some("manual"),
             Decimal::new(-5000, 2),
             &candidates,
         );
@@ -317,10 +345,18 @@ mod tests {
     #[test]
     fn test_compute_replication_no_merchant() {
         let candidates = vec![record("a", "x", -100, Some("Almoço"), None)];
-        let out = compute_replication(None, None, None, None, Decimal::ZERO, &candidates);
+        let out = compute_replication(None, None, None, None, None, Decimal::ZERO, &candidates);
         assert_eq!(out, ReplicationOutcome::NoMerchant);
 
-        let out2 = compute_replication(Some("  "), None, None, None, Decimal::ZERO, &candidates);
+        let out2 = compute_replication(
+            Some("  "),
+            None,
+            None,
+            None,
+            None,
+            Decimal::ZERO,
+            &candidates,
+        );
         assert_eq!(out2, ReplicationOutcome::NoMerchant);
     }
 
@@ -331,7 +367,8 @@ mod tests {
             Some("Sapiens"),
             Some("já tem desc"),
             Some("já tem purpose"),
-            None,
+            Some("x"),
+            Some("manual"),
             Decimal::new(-100, 2),
             &candidates,
         );
@@ -345,6 +382,7 @@ mod tests {
             None,
             None,
             Some("alimentacao:restaurantes"),
+            Some("manual"),
             Decimal::new(-100, 2),
             &[],
         );
@@ -365,6 +403,7 @@ mod tests {
             None,
             None,
             Some("alimentacao:restaurantes"),
+            Some("manual"),
             Decimal::new(-5000, 2),
             &candidates,
         );
@@ -373,6 +412,7 @@ mod tests {
                 assert_eq!(rep.donor_id, "donor-1");
                 assert_eq!(rep.description.as_deref(), Some("Almoço"));
                 assert_eq!(rep.purpose.as_deref(), Some("lazer"));
+                assert!(rep.category_id.is_none());
             }
             other => panic!("expected Replicated, got {:?}", other),
         }
@@ -393,6 +433,7 @@ mod tests {
             None,
             Some("já tem purpose"),
             Some("alimentacao:restaurantes"),
+            Some("manual"),
             Decimal::new(-5000, 2),
             &candidates,
         );
@@ -423,10 +464,59 @@ mod tests {
             None,
             None,
             Some("alimentacao:restaurantes"),
+            Some("manual"),
             Decimal::new(-5000, 2),
             &candidates,
         );
         assert_eq!(out, ReplicationOutcome::NoDonor);
+    }
+
+    #[test]
+    fn test_compute_replication_copies_category_when_target_is_uncategorized() {
+        let candidates = vec![record(
+            "donor-1",
+            "moradia:aluguel",
+            -350_000,
+            Some("Aluguel"),
+            Some("Moradia"),
+        )];
+        let out = compute_replication(
+            Some("Imobiliaria"),
+            Some("Já tem descrição"),
+            Some("Já tem propósito"),
+            None,
+            Some("unclassified"),
+            Decimal::new(-360_000, 2),
+            &candidates,
+        );
+        match out {
+            ReplicationOutcome::Replicated(rep) => {
+                assert_eq!(rep.category_id.as_deref(), Some("moradia:aluguel"));
+                assert!(rep.description.is_none());
+                assert!(rep.purpose.is_none());
+            }
+            other => panic!("expected Replicated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_compute_replication_replaces_weak_pluggy_category_only() {
+        let candidates = vec![record("donor-1", "educacao:escola", -120_000, None, None)];
+        let out = compute_replication(
+            Some("Colegio"),
+            None,
+            None,
+            Some("outros:nao-categorizado"),
+            Some("pluggy"),
+            Decimal::new(-118_000, 2),
+            &candidates,
+        );
+        match out {
+            ReplicationOutcome::Replicated(rep) => {
+                assert_eq!(rep.category_id.as_deref(), Some("educacao:escola"));
+            }
+            other => panic!("expected Replicated, got {:?}", other),
+        }
     }
 
     #[test]

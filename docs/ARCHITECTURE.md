@@ -178,6 +178,8 @@ sequenceDiagram
 
 Reports read from views, not raw tables. Views encode the business logic (sign normalization for credit-card transactions, internal-transfer exclusion, effective categorization with overrides, and display labels that fall back from `description` to `merchant_name` to `raw_description`). See `schema/sqlite/033_transaction_anatomy.sql`.
 
+Recurring human-reviewed transactions can inherit `description`, `purpose`, and trusted human category from prior same-merchant or same-raw-description history. This is direct replication with amount-tolerant donor scoring, not automatic rule creation; see [ADR-0033](adr/0033-recurring-human-review-replication.md).
+
 #### Canonical reporting view chain (single source of truth)
 
 All cash-flow/spend reporting — the CLI, the cashflow chart, and the web UI — reads **one** view chain. Dedup and classification live *inside* it; no report or query method re-derives them. This is the rule that stops the cash-flow numbers from regressing (see [ADR-0026](adr/0026-single-view-chain-canonical-source.md) and [ADR-0025](adr/0025-cashflow-basis-bill-explosion.md)):
