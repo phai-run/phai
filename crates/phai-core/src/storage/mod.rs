@@ -136,6 +136,19 @@ pub trait FinanceStore {
         idempotency_key: &str,
     ) -> Result<()>;
 
+    /// Upsert the per-transaction commitment-tier override (ADR-0032). `tier`
+    /// is one of `locked` | `cancellable` | `variable`; `None` clears it.
+    async fn set_commitment_tier(
+        &self,
+        transaction_id: &str,
+        tier: Option<&str>,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()>;
+
+    /// Every per-transaction tier override as `(transaction_id, tier)` pairs.
+    async fn commitment_tier_overrides(&self) -> Result<Vec<(String, String)>>;
+
     async fn find_transactions_by_description(
         &self,
         query: &str,
