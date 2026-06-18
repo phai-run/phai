@@ -223,7 +223,7 @@ export const CategoryTreemap = ({
 							cursor: "pointer",
 						}}
 					>
-						{l === "category" ? "por categoria" : "por controlabilidade"}
+						{l === "category" ? "by category" : "by controllability"}
 					</button>
 				))}
 			</div>
