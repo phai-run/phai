@@ -38,7 +38,7 @@ import {
  * Enforced by __tests__/store-version.test.ts: change the schema and the
  * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
  */
-export const STORE_VERSION = 7;
+export const STORE_VERSION = 8;
 export const STORE_ID = `phai-s${STORE_VERSION}`;
 
 // Computes current month as "YYYY-MM" for the default selectedMonth.
@@ -67,6 +67,7 @@ export const tables = {
 			reviewed: State.SQLite.integer({ default: 0 }),
 			isInstallment: State.SQLite.integer({ default: 0 }),
 			isSubscription: State.SQLite.integer({ default: 0 }),
+			commitmentTier: State.SQLite.text({ nullable: true }),
 		},
 	}),
 
@@ -80,6 +81,7 @@ export const tables = {
 			merchantName: State.SQLite.text({ nullable: true }),
 			purpose: State.SQLite.text({ nullable: true }),
 			categoryId: State.SQLite.text({ nullable: true }),
+			commitmentTier: State.SQLite.text({ nullable: true }),
 		},
 	}),
 
@@ -230,6 +232,7 @@ const TxRow = Schema.Struct({
 	reviewed: Schema.Number,
 	isInstallment: Schema.Number,
 	isSubscription: Schema.Number,
+	commitmentTier: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 const ReviewPatch = Schema.Struct({
@@ -237,6 +240,8 @@ const ReviewPatch = Schema.Struct({
 	merchantName: Schema.NullOr(Schema.String),
 	purpose: Schema.NullOr(Schema.String),
 	categoryId: Schema.NullOr(Schema.String),
+	// Per-transaction tier override (ADR-0032); "" clears, omitted = no change.
+	commitmentTier: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 const ChartMonth = Schema.Struct({

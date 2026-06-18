@@ -21,8 +21,8 @@ import { describe, expect, it } from "vitest";
 import { STORE_ID, STORE_VERSION, schema } from "../schema";
 
 const EXPECTED = {
-	storeVersion: 7,
-	fingerprint: 927672751,
+	storeVersion: 8,
+	fingerprint: 2921989796,
 };
 
 const djb2 = (s: string): number => {

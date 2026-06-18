@@ -33,6 +33,8 @@ export interface TxView {
 	reviewed: number; // 0/1
 	isInstallment: number; // 0/1
 	isSubscription: number; // 0/1
+	/** Per-transaction tier override (ADR-0032); null/absent = derived. */
+	commitmentTier?: string | null;
 }
 
 /** An optimistic overlay applied on top of a seed transaction. */
@@ -42,6 +44,7 @@ export interface ReviewOverlay {
 	merchantName: string | null;
 	purpose: string | null;
 	categoryId: string | null;
+	commitmentTier?: string | null;
 }
 
 /**
@@ -60,11 +63,11 @@ export const COMMITMENT_TIERS: readonly CommitmentTier[] = [
 	"variable",
 ];
 
-/** Short Portuguese labels for the planning/sheet/treemap surfaces. */
+/** Short labels for the planning/sheet/treemap surfaces (UI chrome is English). */
 export const COMMITMENT_TIER_LABELS: Record<CommitmentTier, string> = {
-	locked: "travado",
-	cancellable: "cancelável",
-	variable: "variável",
+	locked: "locked",
+	cancellable: "cancellable",
+	variable: "variable",
 };
 
 /** Filters that can be applied to a transaction list. */
@@ -179,7 +182,18 @@ export const fixedCategoriesFromForecasts = (
 export const commitmentTier = (
 	tx: TxView,
 	fixedCategories: ReadonlySet<string> = EMPTY_FIXED,
+	overlayMap?: Map<string, ReviewOverlay>,
 ): CommitmentTier => {
+	// Manual per-transaction override wins over every derived signal (ADR-0032);
+	// the optimistic overlay (an unflushed edit) takes precedence over the seed.
+	const override = overlayMap?.get(tx.id)?.commitmentTier ?? tx.commitmentTier;
+	if (
+		override === "locked" ||
+		override === "cancellable" ||
+		override === "variable"
+	) {
+		return override;
+	}
 	if (tx.isInstallment === 1) return "locked";
 	if (tx.isSubscription === 1) return "cancellable";
 	if (fixedCategories.has(parseCategory(tx.categoryId).parent)) return "locked";
@@ -208,7 +222,7 @@ export const filterTransactions = (
 		if (filters.subscriptionsOnly && !tx.isSubscription) return false;
 		if (
 			filters.tierFilter &&
-			commitmentTier(tx, fixedCategories) !== filters.tierFilter
+			commitmentTier(tx, fixedCategories, overlayMap) !== filters.tierFilter
 		)
 			return false;
 		if (filters.unreviewedOnly && tx.reviewed) return false;

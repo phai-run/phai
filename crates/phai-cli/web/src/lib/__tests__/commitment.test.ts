@@ -94,6 +94,46 @@ describe("commitmentTier", () => {
 	it("treats an unprovided fixed set as no fixed categories", () => {
 		expect(commitmentTier(mk("a", { categoryId: "moradia" }))).toBe("variable");
 	});
+
+	it("lets a per-transaction override win over every derived signal", () => {
+		// An installment that the user pinned as variable reads as variable.
+		expect(
+			commitmentTier(mk("a", { isInstallment: 1, commitmentTier: "variable" }), fixed),
+		).toBe("variable");
+		// A plain tx pinned to locked.
+		expect(
+			commitmentTier(mk("b", { categoryId: "mercado", commitmentTier: "locked" }), fixed),
+		).toBe("locked");
+	});
+
+	it("ignores an invalid override value and falls back to derived", () => {
+		expect(
+			commitmentTier(mk("a", { isSubscription: 1, commitmentTier: "bogus" }), fixed),
+		).toBe("cancellable");
+	});
+
+	it("prefers the optimistic overlay tier over the seeded override", () => {
+		const overlay = new Map([
+			[
+				"a",
+				{
+					transactionId: "a",
+					description: null,
+					merchantName: null,
+					purpose: null,
+					categoryId: null,
+					commitmentTier: "cancellable",
+				},
+			],
+		]);
+		expect(
+			commitmentTier(
+				mk("a", { commitmentTier: "locked" }),
+				fixed,
+				overlay,
+			),
+		).toBe("cancellable");
+	});
 });
 
 describe("filterTransactions tierFilter", () => {

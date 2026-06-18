@@ -117,7 +117,7 @@ export const CategoryTreemap = ({
 	// categories; in the category lens it is parent category → subcategory.
 	const level1Key =
 		lens === "tier"
-			? (tx: TxView) => commitmentTier(tx, fixedCategories)
+			? (tx: TxView) => commitmentTier(tx, fixedCategories, overlayMap)
 			: (tx: TxView) => parseCategory(cat(tx)).parent;
 	const level2Key =
 		lens === "tier"
@@ -223,7 +223,7 @@ export const CategoryTreemap = ({
 							cursor: "pointer",
 						}}
 					>
-						{l === "category" ? "por categoria" : "por controlabilidade"}
+						{l === "category" ? "by category" : "by controllability"}
 					</button>
 				))}
 			</div>

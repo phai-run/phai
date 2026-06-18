@@ -609,6 +609,18 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn set_commitment_tier(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn commitment_tier_overrides(&self) -> Result<Vec<(String, String)>> {
+            Ok(Vec::new())
+        }
         async fn find_transactions_by_description(
             &self,
             _: &str,
