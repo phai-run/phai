@@ -13,8 +13,10 @@ import {
 	buildModel,
 	cashY,
 	currentMonthKey,
+	firstShortfallMonth,
 	innerH,
 	innerW,
+	solveRequiredSaving,
 	type ChartModel,
 	type ChartSimulation,
 } from "./chart/model";
@@ -309,6 +311,19 @@ const FullChart = ({
 		0,
 	);
 
+	// Goal readout (ADR-0031): does the projected year stay solvent, and if not
+	// what monthly cut would fix it?
+	const goal = useMemo(() => {
+		const shortfall = firstShortfallMonth(model, months);
+		return {
+			shortfall,
+			label: shortfall
+				? (months.find((m) => m.month === shortfall)?.label ?? shortfall)
+				: null,
+			solution: solveRequiredSaving(model, months),
+		};
+	}, [model, months]);
+
 	return (
 		<div>
 			{/* Year totals strip */}
@@ -341,6 +356,19 @@ const FullChart = ({
 					net {yearIn - yearOut >= 0 ? "+" : ""}
 					<CountMoney value={yearIn - yearOut} />
 				</span>
+				{!isExpensesMode && goal.shortfall && (
+					<span style={{ color: "var(--amber)" }}>
+						⚠ fecha no vermelho em {goal.label} ·{" "}
+						{goal.solution.achievable ? (
+							<>
+								corte <CountMoney value={goal.solution.monthlySaving} />
+								/mês p/ ficar no azul
+							</>
+						) : (
+							"fora de alcance só cortando"
+						)}
+					</span>
+				)}
 			</div>
 
 			{/* Category legend for the Despesas modes (D3) */}
@@ -667,6 +695,30 @@ const FullChart = ({
 					{/* Balance / resultado line — caixa mode only */}
 					{mode === "caixa" && (
 						<>
+							{/* Goal line: saldo ≥ 0 — drawn only when the year dips red (ADR-0031) */}
+							{goal.shortfall && (
+								<>
+									<line
+										x1={PAD.left}
+										x2={W - PAD.right}
+										y1={zeroY}
+										y2={zeroY}
+										stroke="var(--amber)"
+										strokeWidth={1}
+										strokeDasharray="5 4"
+										opacity={0.55}
+									/>
+									<text
+										x={W - PAD.right}
+										y={zeroY - 4}
+										textAnchor="end"
+										fontSize={9}
+										fill="var(--amber)"
+									>
+										meta · saldo ≥ 0
+									</text>
+								</>
+							)}
 							<path
 								d={linePath(realLine)}
 								fill="none"
