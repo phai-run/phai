@@ -403,6 +403,7 @@ pub(crate) async fn download_and_replace(
                 let sig_text =
                     download_checksum(&download_client, &asset.browser_download_url).await?;
                 verify_minisign_signature(&tarball, &sig_text)?;
+                eprintln!("Verified the release signature against the embedded minisign key.");
             }
             None if REQUIRE_SIGNATURE => {
                 bail!(
