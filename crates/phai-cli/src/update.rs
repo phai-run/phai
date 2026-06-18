@@ -58,15 +58,16 @@ const BINARY_NAME: &str = "phai";
 ///
 /// The base64 key line from `phai.pub` (without the `untrusted comment:` line).
 /// Its matching secret key lives in the `MINISIGN_SECRET_KEY` GitHub secret and
-/// is used by the release workflow to sign each tarball. Verification stays
-/// best-effort while `REQUIRE_SIGNATURE` is `false`; flip it on after one fully
-/// signed release cycle.
+/// is used by the release workflow to sign each tarball. Verification is
+/// mandatory (`REQUIRE_SIGNATURE = true`) as of v5.14.0.
 const SIGNING_PUBLIC_KEY: &str = "RWSuMfSaIXtOBvXZW0dwUnelSpCqEpy1iSoyRzzG0kdR//8zpRlOEU78";
 
-/// Once CI ships `.minisig` sidecars consistently, flip this to `true` so a
-/// missing signature is rejected instead of warning. Until then the updater
-/// stays in transition mode (warns once per run if the sidecar is absent).
-const REQUIRE_SIGNATURE: bool = false;
+/// Enforced as of v5.14.0, the first fully signed release (ADR-0017): a release
+/// that ships no `.minisig` sidecar is now rejected instead of warned. The
+/// release workflow signs every tarball, so a missing signature means something
+/// is wrong — fail closed. Set back to `false` only during a deliberate key
+/// rotation window (see docs/runbook-release-signing.md).
+const REQUIRE_SIGNATURE: bool = true;
 
 /// Release Please produces tags like `v3.2.3` (include-v-in-tag: true,
 /// include-component-in-tag: false). The updater strips the leading `v`.
