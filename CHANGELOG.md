@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.13.0](https://github.com/phai-run/phai/compare/v5.12.0...v5.13.0) (2026-06-18)
+
+
+### Features
+
+* per-transaction commitment-tier override + English labels (ADR-0032) ([#161](https://github.com/phai-run/phai/issues/161)) ([c947b5e](https://github.com/phai-run/phai/commit/c947b5ed126bb376e17009a17a043b0fa2ebc194))
+
 ## [5.12.0](https://github.com/phai-run/phai/compare/v5.11.0...v5.12.0) (2026-06-18)
 
 
