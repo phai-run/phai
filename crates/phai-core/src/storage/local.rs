@@ -1158,6 +1158,57 @@ impl FinanceStore for LocalStore {
         Ok(())
     }
 
+    async fn set_commitment_tier(
+        &self,
+        transaction_id: &str,
+        tier: Option<&str>,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        match tier {
+            Some(tier) => {
+                conn.execute(
+                    "
+                    INSERT INTO transaction_tier
+                        (transaction_id, tier, actor_id, idempotency_key, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(transaction_id) DO UPDATE SET
+                        tier = excluded.tier,
+                        actor_id = excluded.actor_id,
+                        idempotency_key = excluded.idempotency_key,
+                        updated_at = excluded.updated_at
+                    ",
+                    params![
+                        transaction_id,
+                        tier,
+                        actor_id,
+                        idempotency_key,
+                        Utc::now().to_rfc3339(),
+                    ],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM transaction_tier WHERE transaction_id = ?1",
+                    params![transaction_id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn commitment_tier_overrides(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare("SELECT transaction_id, tier FROM transaction_tier")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>> {
         if ids.is_empty() {
             return Ok(BTreeSet::new());
@@ -2839,6 +2890,41 @@ mod tests {
             .expect("may cashflow");
 
         assert_eq!(may.expenses, Decimal::new(16603, 2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn commitment_tier_override_upserts_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        // Set then read back.
+        store
+            .set_commitment_tier("t1", Some("locked"), "test", "idem-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.commitment_tier_overrides().await.unwrap(),
+            vec![("t1".to_string(), "locked".to_string())]
+        );
+
+        // Re-setting the same transaction overwrites in place (no duplicate row).
+        store
+            .set_commitment_tier("t1", Some("variable"), "test", "idem-2")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.commitment_tier_overrides().await.unwrap(),
+            vec![("t1".to_string(), "variable".to_string())]
+        );
+
+        // None clears the override.
+        store
+            .set_commitment_tier("t1", None, "test", "idem-3")
+            .await
+            .unwrap();
+        assert!(store.commitment_tier_overrides().await.unwrap().is_empty());
     }
 
     fn card_account(account_id: &str, closing_day: &str, due_day: &str) -> AccountRecord {

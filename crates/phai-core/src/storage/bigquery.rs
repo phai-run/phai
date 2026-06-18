@@ -2566,6 +2566,72 @@ impl FinanceStore for BigQueryStore {
         Ok(())
     }
 
+    async fn set_commitment_tier(
+        &self,
+        transaction_id: &str,
+        tier: Option<&str>,
+        actor_id: &str,
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let table = self.qualified_table("transaction_tier")?;
+        match tier {
+            Some(tier) => {
+                let sql = format!(
+                    "
+                    MERGE {table} T
+                    USING (SELECT @transaction_id AS transaction_id) S
+                    ON T.transaction_id = S.transaction_id
+                    WHEN MATCHED THEN UPDATE SET
+                        tier = @tier,
+                        actor_id = @actor_id,
+                        idempotency_key = @idempotency_key,
+                        updated_at = CURRENT_TIMESTAMP()
+                    WHEN NOT MATCHED THEN INSERT
+                        (transaction_id, tier, actor_id, idempotency_key, updated_at)
+                    VALUES
+                        (@transaction_id, @tier, @actor_id, @idempotency_key, CURRENT_TIMESTAMP())
+                    "
+                );
+                self.run_query_with_params(
+                    &sql,
+                    &[
+                        Param::string("transaction_id", transaction_id),
+                        Param::string("tier", tier),
+                        Param::string("actor_id", actor_id),
+                        Param::string("idempotency_key", idempotency_key),
+                    ],
+                )
+                .await?;
+            }
+            None => {
+                let sql = format!("DELETE FROM {table} WHERE transaction_id = @transaction_id");
+                self.run_query_with_params(
+                    &sql,
+                    &[Param::string("transaction_id", transaction_id)],
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn commitment_tier_overrides(&self) -> Result<Vec<(String, String)>> {
+        let sql = format!(
+            "SELECT transaction_id, tier FROM {}",
+            self.qualified_table("transaction_tier")?,
+        );
+        let response = self.run_query(&sql).await?;
+        let mut out = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            out.push((
+                required_string(&values, 0, "transaction_id")?,
+                required_string(&values, 1, "tier")?,
+            ));
+        }
+        Ok(out)
+    }
+
     async fn existing_transaction_ids(&self, ids: &[String]) -> Result<BTreeSet<String>> {
         if ids.is_empty() {
             return Ok(BTreeSet::new());

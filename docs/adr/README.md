@@ -83,6 +83,7 @@ proposed → active → superseded
 | [0029](0029-serve-system-daemon-admin-auth.md) | `phai serve install --system`: root LaunchDaemon on port 80 via one admin-auth prompt | active |
 | [0030](0030-commitment-tiers.md) | Commitment tiers: a derived controllability axis for planning | proposed |
 | [0031](0031-persisted-planning-overlay.md) | Persisted planning overlay: plan as a first-class layer on the chart | proposed |
+| [0032](0032-per-transaction-tier-override.md) | Per-transaction commitment-tier override via a sparse table | proposed |
 
 ---
 
