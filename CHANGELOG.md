@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.12.0](https://github.com/phai-run/phai/compare/v5.11.0...v5.12.0) (2026-06-18)
+
+
+### Features
+
+* **web:** commitment tiers + planning goal solver (ADR-0030/0031) ([#159](https://github.com/phai-run/phai/issues/159)) ([f9b72a4](https://github.com/phai-run/phai/commit/f9b72a42f8dee19d03c6abe3a7818619284a5320))
+
 ## [5.11.0](https://github.com/phai-run/phai/compare/v5.10.0...v5.11.0) (2026-06-15)
 
 
