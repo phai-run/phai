@@ -3,6 +3,11 @@ import { useStore, useQuery, useClientDocument } from "@livestore/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { events, tables } from "../livestore/schema";
+import {
+	commitmentTier,
+	fixedCategoriesFromForecasts,
+	type CommitmentTier,
+} from "../lib/derivations";
 import { formatMoneyNumber, isNegative, sumAmounts } from "../lib/format";
 import { useDebounce } from "../hooks/useDebounce";
 import { CategoryTreemap } from "./categorias/CategoryTreemap";
@@ -82,6 +87,11 @@ export const MonthDetail = ({
 		() => Array.from(new Set(accounts.map((a) => a.owner).filter(Boolean))),
 		[accounts],
 	);
+	// Fixed-category set drives the commitment tier (ADR-0030).
+	const fixedCategories = useMemo(
+		() => fixedCategoriesFromForecasts(forecasts),
+		[forecasts],
+	);
 
 	// Effective category (overlay first, then seed)
 	const effectiveCat = useCallback(
@@ -118,6 +128,12 @@ export const MonthDetail = ({
 		return monthTxs.filter((tx) => {
 			if (ui.installmentsOnly && !tx.isInstallment) return false;
 			if (ui.subscriptionsOnly && !tx.isSubscription) return false;
+			if (
+				ui.tierFilter &&
+				commitmentTier(tx, fixedCategories) !==
+					(ui.tierFilter as CommitmentTier)
+			)
+				return false;
 			if (ui.unreviewedOnly && tx.reviewed) return false;
 			if (ui.uncategorizedOnly && (effectiveCat(tx) ?? "") !== "") return false;
 			if (ui.accountFilter && tx.accountId !== ui.accountFilter) return false;
@@ -143,7 +159,15 @@ export const MonthDetail = ({
 			return true;
 		});
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [monthTxs, overlayById, accountById, ui, debouncedText, effectiveCat]);
+	}, [
+		monthTxs,
+		overlayById,
+		accountById,
+		ui,
+		debouncedText,
+		effectiveCat,
+		fixedCategories,
+	]);
 
 	// Filter sums
 	const sums = useMemo(() => {
@@ -188,6 +212,7 @@ export const MonthDetail = ({
 	const hasFilters =
 		ui.installmentsOnly ||
 		ui.subscriptionsOnly ||
+		!!ui.tierFilter ||
 		ui.unreviewedOnly ||
 		ui.uncategorizedOnly ||
 		!!ui.accountFilter ||
