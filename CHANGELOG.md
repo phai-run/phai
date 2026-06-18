@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.14.1](https://github.com/phai-run/phai/compare/v5.14.0...v5.14.1) (2026-06-18)
+
+
+### Bug Fixes
+
+* **update:** require a verified signature on update (ADR-0017) ([#167](https://github.com/phai-run/phai/issues/167)) ([e206019](https://github.com/phai-run/phai/commit/e20601998482e09e68085c5df328d1b26ba6b285))
+
 ## [5.14.0](https://github.com/phai-run/phai/compare/v5.13.0...v5.14.0) (2026-06-18)
 
 
