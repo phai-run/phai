@@ -287,6 +287,7 @@ export const MonthDetail = ({
 					txs={filtered}
 					overlayMap={overlayById}
 					onEditTx={onEdit}
+					fixedCategories={fixedCategories}
 				/>
 			</div>
 

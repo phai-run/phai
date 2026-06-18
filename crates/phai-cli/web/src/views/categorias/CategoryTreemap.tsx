@@ -2,9 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { squarify } from "../../lib/treemap";
 import { categoryEmoji } from "../../lib/categoryEmoji";
 import {
+	commitmentTier,
+	COMMITMENT_TIER_LABELS,
 	effectiveCategory,
 	parseCategory,
 	sheetLabel,
+	type CommitmentTier,
 	type ReviewOverlay,
 	type TxView,
 } from "../../lib/derivations";
@@ -27,6 +30,21 @@ type Drill =
 	| { level: 1 }
 	| { level: 2; parent: string }
 	| { level: 3; parent: string; sub: string };
+
+/** Grouping lens for level 1: by category (default) or by controllability. */
+type Lens = "category" | "tier";
+
+/** Tier tile colours + glyphs (ADR-0030). */
+const TIER_COLOR: Record<CommitmentTier, string> = {
+	locked: "#6b6b78",
+	cancellable: "#b45309",
+	variable: "#15803d",
+};
+const TIER_GLYPH: Record<CommitmentTier, string> = {
+	locked: "🔒",
+	cancellable: "✂️",
+	variable: "🎚️",
+};
 
 const TILE_COLORS = [
 	"#6d4aff",
@@ -75,13 +93,17 @@ export const CategoryTreemap = ({
 	txs,
 	overlayMap,
 	onEditTx,
+	fixedCategories,
 }: {
 	/** The month's transactions, already filtered by the caller. */
 	txs: ReadonlyArray<TxView>;
 	overlayMap: Map<string, ReviewOverlay>;
 	onEditTx: (tx: TxView) => void;
+	/** Fixed-category set for the controllability lens (ADR-0030). */
+	fixedCategories?: ReadonlySet<string>;
 }) => {
 	const [drill, setDrill] = useState<Drill>({ level: 1 });
+	const [lens, setLens] = useState<Lens>("category");
 
 	const expenses = useMemo(
 		() => txs.filter((t) => isNegative(t.amount)),
@@ -90,10 +112,22 @@ export const CategoryTreemap = ({
 	const income = useMemo(() => txs.filter((t) => !isNegative(t.amount)), [txs]);
 	const cat = (tx: TxView) => effectiveCategory(tx, overlayMap);
 
+	// Level-1 grouping key + the next-level key, both driven by the lens. In the
+	// tier lens level 1 is the controllability tier and level 2 is its
+	// categories; in the category lens it is parent category → subcategory.
+	const level1Key =
+		lens === "tier"
+			? (tx: TxView) => commitmentTier(tx, fixedCategories)
+			: (tx: TxView) => parseCategory(cat(tx)).parent;
+	const level2Key =
+		lens === "tier"
+			? (tx: TxView) => parseCategory(cat(tx)).parent
+			: (tx: TxView) => parseCategory(cat(tx)).sub ?? "—";
+
 	const parents = useMemo(
-		() => bucketBy(expenses, (tx) => parseCategory(cat(tx)).parent),
+		() => bucketBy(expenses, level1Key),
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[expenses, overlayMap],
+		[expenses, overlayMap, lens, fixedCategories],
 	);
 	const parentIndex = useMemo(
 		() => new Map(parents.map((p, i) => [p.key, i])),
@@ -125,12 +159,13 @@ export const CategoryTreemap = ({
 	const subs = useMemo(() => {
 		if (drill.level === 1) return [];
 		const parent = drill.parent;
-		const inParent = expenses.filter(
-			(tx) => parseCategory(cat(tx)).parent === parent,
-		);
-		return bucketBy(inParent, (tx) => parseCategory(cat(tx)).sub ?? "—");
+		const inParent = expenses.filter((tx) => level1Key(tx) === parent);
+		return bucketBy(inParent, level2Key);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [drill, expenses, overlayMap]);
+	}, [drill, expenses, overlayMap, lens, fixedCategories]);
+
+	// Switching the lens invalidates any category-keyed drill path.
+	useEffect(() => setDrill({ level: 1 }), [lens]);
 
 	const monthTotal = parents.reduce((s, p) => s + p.total, 0);
 	const incomeTotal = income.reduce(
@@ -158,8 +193,41 @@ export const CategoryTreemap = ({
 		</button>
 	);
 
+	// Lens-aware presentation helpers for level-1 root tiles.
+	const rootColor = (key: string): string =>
+		lens === "tier"
+			? TIER_COLOR[key as CommitmentTier]
+			: colorFor(parentIndex.get(key) ?? 0);
+	const rootGlyph = (key: string): string =>
+		lens === "tier" ? TIER_GLYPH[key as CommitmentTier] : categoryEmoji(key);
+	const rootLabel = (key: string): string =>
+		lens === "tier" ? COMMITMENT_TIER_LABELS[key as CommitmentTier] : key;
+
 	return (
 		<section aria-label="month categories (treemap)">
+			{/* Lens toggle — category vs controllability (ADR-0030) */}
+			<div style={{ display: "flex", gap: 6, padding: "4px 0" }}>
+				{(["category", "tier"] as const).map((l) => (
+					<button
+						key={l}
+						onClick={() => setLens(l)}
+						className="mono"
+						aria-pressed={lens === l}
+						style={{
+							background: lens === l ? "var(--purple)" : "transparent",
+							color: lens === l ? "#fff" : "var(--muted)",
+							border: `1px solid ${lens === l ? "var(--purple)" : "var(--border)"}`,
+							borderRadius: "var(--radius-full)",
+							padding: "3px 12px",
+							fontSize: 11,
+							cursor: "pointer",
+						}}
+					>
+						{l === "category" ? "por categoria" : "por controlabilidade"}
+					</button>
+				))}
+			</div>
+
 			{/* Breadcrumb */}
 			<div
 				style={{
@@ -179,7 +247,7 @@ export const CategoryTreemap = ({
 					<>
 						<span style={{ color: "var(--muted)" }}>›</span>
 						{crumb(
-							drill.parent,
+							rootLabel(drill.parent),
 							{ level: 2, parent: drill.parent },
 							drill.level === 2,
 						)}
@@ -205,8 +273,9 @@ export const CategoryTreemap = ({
 				<TreemapBoard
 					buckets={parents}
 					total={monthTotal}
-					colorOf={(key) => colorFor(parentIndex.get(key) ?? 0)}
-					emojiOf={(key) => categoryEmoji(key)}
+					colorOf={(key) => rootColor(key)}
+					emojiOf={(key) => rootGlyph(key)}
+					labelOf={(key) => rootLabel(key)}
 					onOpen={(key) => setDrill({ level: 2, parent: key })}
 				/>
 			)}
@@ -215,8 +284,10 @@ export const CategoryTreemap = ({
 				<TreemapBoard
 					buckets={subs}
 					total={subs.reduce((s, b) => s + b.total, 0)}
-					colorOf={() => colorFor(parentIndex.get(drill.parent) ?? 0)}
-					emojiOf={() => categoryEmoji(drill.parent)}
+					colorOf={() => rootColor(drill.parent)}
+					emojiOf={(key) =>
+						lens === "tier" ? categoryEmoji(key) : categoryEmoji(drill.parent)
+					}
 					shade
 					onOpen={(key) =>
 						setDrill({ level: 3, parent: drill.parent, sub: key })
@@ -230,8 +301,12 @@ export const CategoryTreemap = ({
 						subs.find((b) => b.key === drill.sub)?.txs ??
 						([] as ReadonlyArray<TxView>)
 					}
-					color={colorFor(parentIndex.get(drill.parent) ?? 0)}
-					emoji={categoryEmoji(drill.parent)}
+					color={rootColor(drill.parent)}
+					emoji={
+						lens === "tier"
+							? categoryEmoji(drill.sub)
+							: categoryEmoji(drill.parent)
+					}
 					onEditTx={onEditTx}
 				/>
 			)}
@@ -305,6 +380,7 @@ const TreemapBoard = ({
 	total,
 	colorOf,
 	emojiOf,
+	labelOf,
 	onOpen,
 	shade,
 }: {
@@ -312,6 +388,8 @@ const TreemapBoard = ({
 	total: number;
 	colorOf: (key: string) => string;
 	emojiOf?: (key: string) => string;
+	/** Display label for a tile; defaults to the bucket key. */
+	labelOf?: (key: string) => string;
 	onOpen: (key: string) => void;
 	/** Level 2: same hue family, opacity scaled by share. */
 	shade?: boolean;
@@ -366,7 +444,7 @@ const TreemapBoard = ({
 					<button
 						key={r.id}
 						onClick={() => onOpen(r.id)}
-						title={`${r.id} · ${formatMoneyNumber(b.total)} (${pct}%) · ${b.count} tx`}
+						title={`${labelOf ? labelOf(r.id) : r.id} · ${formatMoneyNumber(b.total)} (${pct}%) · ${b.count} tx`}
 						style={{
 							position: "absolute",
 							left: `${r.x}%`,
@@ -406,7 +484,7 @@ const TreemapBoard = ({
 							}}
 						>
 							{emojiOf ? `${emojiOf(r.id)} ` : ""}
-							{r.id}
+							{labelOf ? labelOf(r.id) : r.id}
 						</span>
 						{big && (
 							<span
