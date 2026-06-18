@@ -162,6 +162,31 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 		[store],
 	);
 
+	// Bulk-set the commitment-tier override on the selection (ADR-0032);
+	// `tier === ""` clears the override back to the derived tier.
+	const applyTier = useCallback(
+		(tier: CommitmentTier | "") => {
+			for (const transactionId of selectedIds) {
+				store.commit(
+					events.reviewSubmitted({
+						writeId: crypto.randomUUID(),
+						transactionId,
+						patch: {
+							description: null,
+							merchantName: null,
+							purpose: null,
+							categoryId: null,
+							commitmentTier: tier,
+						},
+						submittedAt: Date.now(),
+					}),
+				);
+			}
+			setSelectedIds(new Set());
+		},
+		[store, selectedIds],
+	);
+
 	const openPickerFor = useCallback(
 		(tx: TxView, anchor: HTMLElement) => {
 			const ids =
@@ -480,6 +505,51 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 						}}
 					>
 						categorize
+					</button>
+					<span
+						aria-hidden
+						style={{
+							width: 1,
+							alignSelf: "stretch",
+							background: "rgba(255,255,255,0.25)",
+						}}
+					/>
+					<span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>
+						tier:
+					</span>
+					{COMMITMENT_TIERS.map((tier) => (
+						<button
+							key={tier}
+							onClick={() => applyTier(tier)}
+							className="mono"
+							style={{
+								background: "rgba(255,255,255,0.12)",
+								color: "#fff",
+								border: "1px solid rgba(255,255,255,0.35)",
+								borderRadius: "var(--radius-full)",
+								padding: "6px 12px",
+								cursor: "pointer",
+								fontSize: 12,
+							}}
+						>
+							{COMMITMENT_TIER_LABELS[tier]}
+						</button>
+					))}
+					<button
+						onClick={() => applyTier("")}
+						className="mono"
+						title="clear tier override"
+						style={{
+							background: "transparent",
+							color: "#fff",
+							border: "1px solid rgba(255,255,255,0.35)",
+							borderRadius: "var(--radius-full)",
+							padding: "6px 10px",
+							cursor: "pointer",
+							fontSize: 12,
+						}}
+					>
+						× tier
 					</button>
 					<button
 						onClick={() => setSelectedIds(new Set())}
