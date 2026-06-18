@@ -4272,9 +4272,13 @@ impl FinanceStore for BigQueryStore {
               AND (
                 NULLIF(TRIM(COALESCE(description, '')), '') IS NOT NULL
                 OR NULLIF(TRIM(COALESCE(purpose, '')), '') IS NOT NULL
+                OR (
+                  NULLIF(TRIM(COALESCE(category_id, '')), '') IS NOT NULL
+                  AND category_source IN ('manual', 'enriched:user')
+                )
               )
             ORDER BY transaction_date DESC
-            LIMIT 5
+            LIMIT 20
             ",
             self.qualified_table("transactions")?,
         );
@@ -4311,8 +4315,9 @@ impl FinanceStore for BigQueryStore {
               AND (
                 description IS NULL OR TRIM(description) = ''
                 OR purpose IS NULL OR TRIM(purpose) = ''
+                OR category_id IS NULL OR TRIM(category_id) = ''
+                OR category_source IN ('unclassified', 'fallback', 'pluggy')
               )
-              AND category_id IS NOT NULL
             ORDER BY transaction_date DESC, ABS(amount) DESC, transaction_id ASC
             LIMIT @lim
             ",

@@ -2706,9 +2706,13 @@ impl FinanceStore for LocalStore {
               AND (
                 NULLIF(TRIM(COALESCE(description, '')), '') IS NOT NULL
                 OR NULLIF(TRIM(COALESCE(purpose, '')), '') IS NOT NULL
+                OR (
+                  NULLIF(TRIM(COALESCE(category_id, '')), '') IS NOT NULL
+                  AND category_source IN ('manual', 'enriched:user')
+                )
               )
             ORDER BY transaction_date DESC
-            LIMIT 5
+            LIMIT 20
             ",
         )?;
         let rows = stmt
@@ -2732,8 +2736,9 @@ impl FinanceStore for LocalStore {
               AND (
                 description IS NULL OR TRIM(description) = ''
                 OR purpose IS NULL OR TRIM(purpose) = ''
+                OR category_id IS NULL OR TRIM(category_id) = ''
+                OR category_source IN ('unclassified', 'fallback', 'pluggy')
               )
-              AND category_id IS NOT NULL
             ORDER BY transaction_date DESC, ABS(amount_cents) DESC, transaction_id ASC
             LIMIT ?1
             ",
@@ -2925,6 +2930,54 @@ mod tests {
             .await
             .unwrap();
         assert!(store.commitment_tier_overrides().await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anatomy_replication_candidates_include_weak_or_missing_categories() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        let mut donor = tx(
+            "donor",
+            "pluggy",
+            "Condominio Exemplo",
+            Decimal::new(-120_000, 2),
+        );
+        donor.merchant_name = Some("Condominio Exemplo".to_string());
+        donor.description = None;
+        donor.purpose = None;
+        donor.category_id = Some("moradia:condominio".to_string());
+        donor.category_source = "manual".to_string();
+
+        let mut target = tx(
+            "target",
+            "pluggy",
+            "Condominio Exemplo",
+            Decimal::new(-121_000, 2),
+        );
+        target.merchant_name = Some("Condominio Exemplo".to_string());
+        target.description = Some("Condominio Exemplo".to_string());
+        target.purpose = Some("Moradia".to_string());
+        target.category_id = None;
+        target.category_source = "unclassified".to_string();
+
+        store
+            .upsert_transactions(&[donor, target.clone()])
+            .await
+            .unwrap();
+
+        let candidates = store.replicable_anatomy_candidates(10).await.unwrap();
+        assert!(candidates
+            .iter()
+            .any(|row| row.transaction_id == target.transaction_id));
+
+        let donors = store
+            .find_anatomy_donors("Condominio Exemplo", &target.transaction_id)
+            .await
+            .unwrap();
+        assert!(donors.iter().any(|row| row.transaction_id == "donor"));
     }
 
     fn card_account(account_id: &str, closing_day: &str, due_day: &str) -> AccountRecord {

@@ -314,13 +314,13 @@ pub trait FinanceStore {
     ) -> Result<()>;
 
     /// Prior transactions from the same merchant, or the same raw description
-    /// when merchant enrichment is not available, that carry a human-curated
-    /// `description` or `purpose`. Used by the replication engine to
-    /// propagate anatomy from recurring history.
+    /// when merchant enrichment is not available, that carry human-curated
+    /// `description`, `purpose`, or category. Used by the replication engine
+    /// to propagate anatomy from recurring history.
     ///
     /// Any transaction with `description IS NOT NULL` or `purpose IS NOT NULL`
-    /// qualifies — both fields are exclusively set by humans (via `set-anatomy`
-    /// or `review-human`), so no `category_source` filter is needed.
+    /// qualifies — both fields are exclusively set by humans. Category-only
+    /// donors must have a human category source (`manual` or `enriched:user`).
     ///
     /// Results are ordered by `transaction_date DESC` (most recent first)
     /// and capped at 5 so callers can pick the best match without fetching
@@ -333,13 +333,9 @@ pub trait FinanceStore {
     ) -> Result<Vec<TransactionRecord>>;
 
     /// Transactions that have a merchant/raw-description match key but are
-    /// missing at least one of `description` or `purpose`. Used by the batch
-    /// replication command to find candidates that may benefit from
-    /// [`find_anatomy_donors`].
-    ///
-    /// Only categorized transactions (`category_id IS NOT NULL`) are
-    /// included — uncategorized ones are still in-flight and not ready
-    /// for anatomy propagation.
+    /// missing at least one of `description`, `purpose`, or a trusted category.
+    /// Used by the batch replication command to find candidates that may
+    /// benefit from [`find_anatomy_donors`].
     async fn replicable_anatomy_candidates(&self, limit: usize) -> Result<Vec<TransactionRecord>>;
 }
 

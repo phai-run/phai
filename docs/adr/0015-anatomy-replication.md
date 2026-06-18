@@ -2,8 +2,9 @@
 type: ADR
 id: "0015"
 title: "Anatomy replication propagates human-curated description and purpose from prior same-merchant transactions"
-status: active
+status: superseded
 date: 2026-05-21
+superseded_by: "0033"
 ---
 
 ## Context
