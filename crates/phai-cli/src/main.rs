@@ -7746,6 +7746,8 @@ pub(crate) struct HumanReviewPatch {
     pub(crate) merchant_name: Option<String>,
     pub(crate) purpose: Option<String>,
     pub(crate) category_id: Option<String>,
+    /// Commitment-tier override (ADR-0032). `Some("")` clears it.
+    pub(crate) commitment_tier: Option<String>,
 }
 
 impl HumanReviewPatch {
@@ -7754,6 +7756,7 @@ impl HumanReviewPatch {
             || self.merchant_name.is_some()
             || self.purpose.is_some()
             || self.category_id.is_some()
+            || self.commitment_tier.is_some()
     }
 }
 
@@ -7806,6 +7809,14 @@ pub(crate) async fn apply_human_review(
             .await?;
     }
 
+    // Commitment-tier override (ADR-0032): an empty string clears it.
+    if let Some(tier) = patch.commitment_tier.as_deref() {
+        let tier = if tier.is_empty() { None } else { Some(tier) };
+        store
+            .set_commitment_tier(transaction_id, tier, &config.actor_id, &idempotency_key)
+            .await?;
+    }
+
     let audit = AuditEvent::from_entity(
         "transaction",
         transaction_id,
@@ -7824,6 +7835,7 @@ pub(crate) async fn apply_human_review(
                 "merchant_name": patch.merchant_name.clone(),
                 "purpose": patch.purpose.clone(),
                 "category_id": patch.category_id.clone(),
+                "commitment_tier": patch.commitment_tier.clone(),
             },
         }),
     );
@@ -7941,6 +7953,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
                 merchant_name: args.merchant_name,
                 purpose: args.purpose,
                 category_id,
+                commitment_tier: None,
             },
         )
         .await?;
@@ -7988,6 +8001,7 @@ async fn tx_review_human(args: ReviewHumanArgs) -> Result<()> {
             merchant_name: None,
             purpose: None,
             category_id: None,
+            commitment_tier: None,
         };
 
         let ask_merchant = matches!(args.kind, ReviewHumanKind::Merchant)
@@ -9803,6 +9817,7 @@ mod tests {
                 merchant_name: Some("Zenilda".to_string()),
                 purpose: Some("Faxina mensal".to_string()),
                 category_id: Some("moradia:servicos".to_string()),
+                commitment_tier: None,
             },
         )
         .await
@@ -9866,6 +9881,7 @@ mod tests {
             merchant_name: Some("Merchant E2E".to_string()),
             purpose: None,
             category_id: Some("alimentacao:restaurantes".to_string()),
+            commitment_tier: None,
         };
 
         // Step 1: apply to local (fast, synchronous from TUI perspective)
@@ -9949,6 +9965,7 @@ mod tests {
             merchant_name: None,
             purpose: None,
             category_id: Some("transporte:aplicativo".to_string()),
+            commitment_tier: None,
         };
 
         // Apply to all 5 locally

@@ -553,13 +553,23 @@ async fn load_transactions_window(
     }
     let accounts = store.get_accounts().await.context("get_accounts")?;
     let lookup = cash_month_lookup(&accounts);
-    let tx_rows: Vec<TxRow> = tx_rows_with_cash_month(&rows, &lookup)
+    // Per-transaction tier overrides (ADR-0032) merged onto the seed rows.
+    let tier_overrides: std::collections::HashMap<String, String> = store
+        .commitment_tier_overrides()
+        .await
+        .context("commitment_tier_overrides")?
+        .into_iter()
+        .collect();
+    let mut tx_rows: Vec<TxRow> = tx_rows_with_cash_month(&rows, &lookup)
         .into_iter()
         .filter(|row| {
             row.month.as_str() >= cash_from_ref.as_str()
                 && row.month.as_str() <= cash_until_ref.as_str()
         })
         .collect();
+    for row in &mut tx_rows {
+        row.commitment_tier = tier_overrides.get(&row.id).cloned();
+    }
     let total = tx_rows.len();
     let offset = params.offset.min(total);
     let end = (offset + params.limit).min(total);
@@ -979,6 +989,8 @@ struct TxRow {
     reviewed: bool,
     is_installment: bool,
     is_subscription: bool,
+    /// Per-transaction commitment-tier override (ADR-0032); `None` = derived.
+    commitment_tier: Option<String>,
 }
 
 impl TxRow {
@@ -1029,6 +1041,7 @@ impl TxRow {
             is_installment: row.payment_status == PAYMENT_STATUS_INSTALLMENT
                 || installment_marker.is_some(),
             is_subscription,
+            commitment_tier: None,
         }
     }
 }
@@ -1524,6 +1537,9 @@ struct ReviewPatchBody {
     merchant_name: Option<String>,
     purpose: Option<String>,
     category_id: Option<String>,
+    /// Commitment-tier override (ADR-0032): "locked"|"cancellable"|"variable";
+    /// an empty string clears the override back to the derived tier.
+    commitment_tier: Option<String>,
 }
 
 impl ReviewPatchBody {
@@ -1533,6 +1549,7 @@ impl ReviewPatchBody {
             merchant_name: self.merchant_name,
             purpose: self.purpose,
             category_id: self.category_id,
+            commitment_tier: self.commitment_tier,
         }
     }
 }
@@ -3195,6 +3212,7 @@ mod tests {
                     merchant_name: Some("Bistrô".into()),
                     purpose: None,
                     category_id: None,
+                    commitment_tier: None,
                 },
             },
             ReviewWrite {
@@ -3206,6 +3224,7 @@ mod tests {
                     merchant_name: None,
                     purpose: None,
                     category_id: None,
+                    commitment_tier: None,
                 },
             },
         ];
