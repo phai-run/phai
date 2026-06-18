@@ -81,6 +81,8 @@ proposed → active → superseded
 | [0027](0027-mcp-server-read-only-self-exec.md) | MCP server: read-only v1, hand-rolled stdio loop, self-exec tools | active |
 | [0028](0028-launchd-agent-and-launcher-app.md) | `phai serve install`: launchd agent + launcher app, not a daemon | active |
 | [0029](0029-serve-system-daemon-admin-auth.md) | `phai serve install --system`: root LaunchDaemon on port 80 via one admin-auth prompt | active |
+| [0030](0030-commitment-tiers.md) | Commitment tiers: a derived controllability axis for planning | proposed |
+| [0031](0031-persisted-planning-overlay.md) | Persisted planning overlay: plan as a first-class layer on the chart | proposed |
 
 ---
 
