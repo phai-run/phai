@@ -45,7 +45,7 @@ const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string }> = [
 	{ key: "description", label: "description" },
 	{ key: "account", label: "account", width: "120px" },
 	{ key: "category", label: "category", width: "220px" },
-	{ key: "amount", label: "amount", width: "110px" },
+	{ key: "amount", label: "amount", width: "136px" },
 ];
 
 const CSV_COLUMNS = [
@@ -68,6 +68,15 @@ const csvCell = (value: string | null | undefined): string => {
 	return text;
 };
 
+export const csvAmountCell = (amount: string): string => {
+	const cents = toCents(amount);
+	const sign = cents < 0 ? "-" : "";
+	const absolute = Math.abs(cents);
+	const whole = Math.trunc(absolute / 100);
+	const fraction = String(absolute % 100).padStart(2, "0");
+	return `${sign}${whole},${fraction}`;
+};
+
 export const sheetRowsCsv = (
 	rows: ReadonlyArray<TxView>,
 	accountMap: Map<string, { label: string }>,
@@ -84,7 +93,7 @@ export const sheetRowsCsv = (
 				tx.purpose,
 				account,
 				tx.categoryId,
-				tx.amount,
+				csvAmountCell(tx.amount),
 				tx.installmentMarker,
 			]
 				.map(csvCell)
@@ -92,6 +101,13 @@ export const sheetRowsCsv = (
 		);
 	}
 	return `${lines.join("\n")}\n`;
+};
+
+export const sheetAmountLabel = (amount: string): string => {
+	const cents = toCents(amount);
+	const value = Math.abs(cents) / 100;
+	const formatted = formatMoneyNumber(value);
+	return cents < 0 ? `(${formatted})` : formatted;
 };
 
 const downloadCsv = (filename: string, csv: string) => {
@@ -785,11 +801,12 @@ const SheetRow = ({
 				style={{
 					...tdStyle,
 					textAlign: "right",
-					color: negative ? "var(--text)" : "var(--green)",
+					color: negative ? "var(--rose)" : "var(--green)",
 					fontVariantNumeric: "tabular-nums",
+					whiteSpace: "nowrap",
 				}}
 			>
-				{formatMoneyNumber(toCents(tx.amount) / 100)}
+				{sheetAmountLabel(tx.amount)}
 			</td>
 			<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
 				{tx.installmentMarker ?? ""}
