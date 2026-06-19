@@ -1365,6 +1365,8 @@ enum TxCommand {
     Pending(TxPendingArgs),
     PendingHuman(PendingHumanArgs),
     ReviewHuman(ReviewHumanArgs),
+    /// Merge a duplicate manual transaction into its canonical Pluggy row.
+    Merge(MergeTransactionsArgs),
     SetContextByDesc(SetContextByDescArgs),
     Split {
         #[command(subcommand)]
@@ -1418,6 +1420,31 @@ struct CategorizeTransactionArgs {
     subcategory: Option<String>,
     #[arg(long)]
     context: Option<String>,
+}
+
+#[derive(Args)]
+struct MergeTransactionsArgs {
+    /// Duplicate transaction to remove after copying human fields.
+    #[arg(long)]
+    from: String,
+    /// Canonical transaction to keep, usually the Pluggy row.
+    #[arg(long = "into")]
+    into_transaction_id: String,
+    /// Maximum allowed absolute amount difference.
+    #[arg(long, default_value = "1.00")]
+    max_amount_diff: String,
+    /// Maximum allowed date distance between the two rows.
+    #[arg(long, default_value_t = 7)]
+    max_days: i64,
+    /// Allow deleting a duplicate whose source is not manual/legacy.
+    #[arg(long)]
+    allow_any_source: bool,
+    /// Allow keeping a canonical row whose source is not pluggy.
+    #[arg(long)]
+    allow_non_pluggy_target: bool,
+    /// Validate and print the merge plan without writing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 pub(crate) fn category_key_from_input(category: &str, subcategory: Option<&str>) -> String {
@@ -3176,6 +3203,7 @@ async fn run_command(command: Option<Commands>) -> Result<()> {
             TxCommand::Pending(args) => tx_pending(args).await,
             TxCommand::PendingHuman(args) => tx_pending_human(args).await,
             TxCommand::ReviewHuman(args) => tx_review_human(args).await,
+            TxCommand::Merge(args) => tx_merge(args).await,
             TxCommand::SetContextByDesc(args) => tx_set_context_by_desc(args).await,
             TxCommand::Split { command } => match command {
                 TxSplitCommand::Preview(args) => tx_split_preview(args).await,
@@ -7357,6 +7385,282 @@ async fn tx_categorize(args: CategorizeTransactionArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransactionMergeCopied {
+    description: Option<String>,
+    merchant_name: Option<String>,
+    purpose: Option<String>,
+    category_id: Option<String>,
+    classifier_trace: Option<String>,
+    context: Option<String>,
+}
+
+impl TransactionMergeCopied {
+    fn has_anatomy(&self) -> bool {
+        self.description.is_some()
+            || self.merchant_name.is_some()
+            || self.purpose.is_some()
+            || self.classifier_trace.is_some()
+            || self.context.is_some()
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransactionMergePlan {
+    from: String,
+    into_transaction_id: String,
+    from_source: String,
+    into_source: String,
+    amount_diff: Decimal,
+    date_diff_days: i64,
+    copied: TransactionMergeCopied,
+    dry_run: bool,
+}
+
+async fn tx_merge(args: MergeTransactionsArgs) -> Result<()> {
+    let (_, config) = load_config().await?;
+    let store = open_store(&config).await?;
+    run_migrations(store.as_ref(), &config).await?;
+
+    let plan = merge_transactions(store.as_ref(), &config, &args).await?;
+    if args.dry_run {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!(
+            "Transações mescladas: {} -> {} (diferença {})",
+            plan.from,
+            plan.into_transaction_id,
+            brl(plan.amount_diff)
+        );
+    }
+    Ok(())
+}
+
+async fn merge_transactions(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    args: &MergeTransactionsArgs,
+) -> Result<TransactionMergePlan> {
+    if args.from == args.into_transaction_id {
+        bail!("--from e --into precisam ser transações diferentes");
+    }
+    if args.max_days < 0 {
+        bail!("--max-days não pode ser negativo");
+    }
+    let max_amount_diff = decimal_from_str(&args.max_amount_diff).with_context(|| {
+        format!(
+            "valor inválido em --max-amount-diff: {}",
+            args.max_amount_diff
+        )
+    })?;
+    if max_amount_diff < Decimal::ZERO {
+        bail!("--max-amount-diff não pode ser negativo");
+    }
+
+    let duplicate = store
+        .transaction_by_id(&args.from)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Transação duplicada {} não encontrada", args.from))?;
+    let canonical = store
+        .transaction_by_id(&args.into_transaction_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Transação canônica {} não encontrada",
+                args.into_transaction_id
+            )
+        })?;
+
+    validate_transaction_merge(&duplicate, &canonical, args, max_amount_diff)?;
+    let copied = merge_copied_fields(&duplicate, &canonical);
+    let amount_diff = decimal_abs(duplicate.amount - canonical.amount);
+    let date_diff_days = duplicate
+        .transaction_date
+        .signed_duration_since(canonical.transaction_date)
+        .num_days()
+        .abs();
+    let plan = TransactionMergePlan {
+        from: duplicate.transaction_id.clone(),
+        into_transaction_id: canonical.transaction_id.clone(),
+        from_source: duplicate.source.clone(),
+        into_source: canonical.source.clone(),
+        amount_diff,
+        date_diff_days,
+        copied,
+        dry_run: args.dry_run,
+    };
+
+    if args.dry_run {
+        return Ok(plan);
+    }
+
+    let idempotency_key = format!(
+        "merge:{}:{}:{}",
+        duplicate.transaction_id,
+        canonical.transaction_id,
+        Uuid::now_v7()
+    );
+    if plan.copied.has_anatomy() {
+        store
+            .update_transaction_anatomy(
+                &canonical.transaction_id,
+                TransactionAnatomyPatch {
+                    description: plan.copied.description.as_deref(),
+                    merchant_name: plan.copied.merchant_name.as_deref(),
+                    purpose: plan.copied.purpose.as_deref(),
+                    classifier_trace: plan.copied.classifier_trace.as_deref(),
+                    context: plan.copied.context.as_deref(),
+                },
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await?;
+    }
+    if let Some(category_id) = plan.copied.category_id.as_deref() {
+        store
+            .annotate_transaction(
+                &canonical.transaction_id,
+                Some(category_id),
+                Some("manual"),
+                plan.copied.classifier_trace.as_deref(),
+                &config.actor_id,
+                &idempotency_key,
+            )
+            .await?;
+    }
+    store.delete_transaction(&duplicate.transaction_id).await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "transaction",
+            &canonical.transaction_id,
+            "merge_duplicate",
+            &config.actor_id,
+            &idempotency_key,
+            json!({
+                "from": duplicate,
+                "into_before": canonical,
+                "copied": &plan.copied,
+                "amount_diff": amount_diff,
+                "date_diff_days": date_diff_days,
+            }),
+        )])
+        .await?;
+
+    Ok(plan)
+}
+
+fn validate_transaction_merge(
+    duplicate: &TransactionRecord,
+    canonical: &TransactionRecord,
+    args: &MergeTransactionsArgs,
+    max_amount_diff: Decimal,
+) -> Result<()> {
+    if !args.allow_any_source && !is_merge_duplicate_source(duplicate) {
+        bail!(
+            "A transação --from tem source='{}'; use --allow-any-source para mesclar mesmo assim",
+            duplicate.source
+        );
+    }
+    if !args.allow_non_pluggy_target && canonical.source != "pluggy" {
+        bail!(
+            "A transação --into tem source='{}'; use --allow-non-pluggy-target para manter essa linha",
+            canonical.source
+        );
+    }
+    if duplicate.account_id != canonical.account_id {
+        bail!(
+            "As transações têm contas diferentes: {:?} vs {:?}",
+            duplicate.account_id,
+            canonical.account_id
+        );
+    }
+    let date_diff_days = duplicate
+        .transaction_date
+        .signed_duration_since(canonical.transaction_date)
+        .num_days()
+        .abs();
+    if date_diff_days > args.max_days {
+        bail!(
+            "As datas diferem em {date_diff_days} dias, acima de --max-days {}",
+            args.max_days
+        );
+    }
+    if amount_sign(duplicate.amount) != amount_sign(canonical.amount) {
+        bail!(
+            "As transações têm sinais diferentes: {} vs {}",
+            duplicate.amount,
+            canonical.amount
+        );
+    }
+    let amount_diff = decimal_abs(duplicate.amount - canonical.amount);
+    if amount_diff > max_amount_diff {
+        bail!(
+            "A diferença de valor ({}) excede --max-amount-diff {}",
+            amount_diff,
+            max_amount_diff
+        );
+    }
+    Ok(())
+}
+
+fn merge_copied_fields(
+    duplicate: &TransactionRecord,
+    canonical: &TransactionRecord,
+) -> TransactionMergeCopied {
+    TransactionMergeCopied {
+        description: clean_merge_text(duplicate.description.as_deref()),
+        merchant_name: clean_merge_text(duplicate.merchant_name.as_deref()),
+        purpose: clean_merge_text(duplicate.purpose.as_deref()),
+        category_id: human_category(duplicate, canonical),
+        classifier_trace: clean_merge_text(duplicate.classifier_trace.as_deref()),
+        context: clean_merge_text(duplicate.context.as_deref()),
+    }
+}
+
+fn human_category(duplicate: &TransactionRecord, canonical: &TransactionRecord) -> Option<String> {
+    if canonical.category_source == "manual" {
+        return None;
+    }
+    matches!(
+        duplicate.category_source.as_str(),
+        "manual" | "enriched:user"
+    )
+    .then(|| duplicate.category_id.as_deref())
+    .flatten()
+    .and_then(|category| clean_merge_text(Some(category)))
+}
+
+fn clean_merge_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn is_merge_duplicate_source(row: &TransactionRecord) -> bool {
+    matches!(row.source.as_str(), "manual" | "legacy") || row.transaction_id.starts_with("manual_")
+}
+
+fn amount_sign(value: Decimal) -> i8 {
+    if value > Decimal::ZERO {
+        1
+    } else if value < Decimal::ZERO {
+        -1
+    } else {
+        0
+    }
+}
+
+fn decimal_abs(value: Decimal) -> Decimal {
+    if value < Decimal::ZERO {
+        -value
+    } else {
+        value
+    }
+}
+
 async fn tx_set_anatomy(args: SetAnatomyArgs) -> Result<()> {
     if args.description.is_none()
         && args.merchant_name.is_none()
@@ -9626,9 +9930,9 @@ impl NaiveDateSat for NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_human_review, effective_review_human_limit, parse_closing_day, report_output_format,
-        resolve_sync_from, write_csv_from_value, Cli, Commands, HumanReviewPatch, ReportCommand,
-        ReportOutputFormat,
+        apply_human_review, effective_review_human_limit, merge_transactions, parse_closing_day,
+        report_output_format, resolve_sync_from, write_csv_from_value, Cli, Commands,
+        HumanReviewPatch, MergeTransactionsArgs, ReportCommand, ReportOutputFormat,
     };
     use chrono::NaiveDate;
     use clap::Parser;
@@ -9859,6 +10163,148 @@ mod tests {
         assert_eq!(got.merchant_name.as_deref(), Some("Zenilda"));
         assert_eq!(got.purpose.as_deref(), Some("Faxina mensal"));
         assert_eq!(got.category_id.as_deref(), Some("moradia:servicos"));
+    }
+
+    #[tokio::test]
+    async fn merge_transactions_keeps_pluggy_amount_and_copies_manual_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let config = phai_core::AppConfig {
+            local_db_path: Some(db_path.clone()),
+            actor_id: "test-actor".to_string(),
+            ..Default::default()
+        };
+        let store = phai_core::storage::local::LocalStore::new(config.clone()).unwrap();
+        phai_core::migrations::run_migrations(&store, &config)
+            .await
+            .unwrap();
+
+        let mut manual = sample_review_row("eletronicos:reparo");
+        manual.transaction_id = "manual_watch_fix".to_string();
+        manual.idempotency_key = "manual-watch".to_string();
+        manual.account_id = Some("felipe_cartao".to_string());
+        manual.transaction_date = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        manual.raw_description = "Conserto Apple Watch - Bluefix OS49281 (1/3)".to_string();
+        manual.description = Some("Conserto Apple Watch - Bluefix OS49281 (1/3)".to_string());
+        manual.merchant_name = Some("Bluefix".to_string());
+        manual.purpose = Some("Reparo Apple Watch".to_string());
+        manual.classifier_trace = Some("lançado manualmente antes da conciliação".to_string());
+        manual.amount = Decimal::new(-39267, 2);
+        manual.source = "manual".to_string();
+        manual.category_source = "manual".to_string();
+
+        let mut pluggy = sample_review_row("electronics");
+        pluggy.transaction_id = "pluggy_watch_fix".to_string();
+        pluggy.idempotency_key = "pluggy-watch".to_string();
+        pluggy.account_id = Some("felipe_cartao".to_string());
+        pluggy.transaction_date = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        pluggy.raw_description = "Vsstore".to_string();
+        pluggy.description = Some("Vsstore".to_string());
+        pluggy.amount = Decimal::new(-39268, 2);
+        pluggy.source = "pluggy".to_string();
+        pluggy.category_source = "pluggy".to_string();
+
+        store
+            .upsert_transactions(&[manual.clone(), pluggy.clone()])
+            .await
+            .unwrap();
+
+        let plan = merge_transactions(
+            &store,
+            &config,
+            &MergeTransactionsArgs {
+                from: manual.transaction_id.clone(),
+                into_transaction_id: pluggy.transaction_id.clone(),
+                max_amount_diff: "0.01".to_string(),
+                max_days: 0,
+                allow_any_source: false,
+                allow_non_pluggy_target: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(plan.amount_diff, Decimal::new(1, 2));
+        assert_eq!(
+            plan.copied.category_id.as_deref(),
+            Some("eletronicos:reparo")
+        );
+        assert!(store
+            .transaction_by_id(&manual.transaction_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let merged = store
+            .transaction_by_id(&pluggy.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.amount, Decimal::new(-39268, 2));
+        assert_eq!(merged.source, "pluggy");
+        assert_eq!(
+            merged.description.as_deref(),
+            Some("Conserto Apple Watch - Bluefix OS49281 (1/3)")
+        );
+        assert_eq!(merged.merchant_name.as_deref(), Some("Bluefix"));
+        assert_eq!(merged.purpose.as_deref(), Some("Reparo Apple Watch"));
+        assert_eq!(merged.category_id.as_deref(), Some("eletronicos:reparo"));
+        assert_eq!(merged.category_source, "manual");
+        assert_eq!(store.count_rows("audit_log").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn merge_transactions_rejects_amount_diff_above_tolerance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let config = phai_core::AppConfig {
+            local_db_path: Some(db_path.clone()),
+            ..Default::default()
+        };
+        let store = phai_core::storage::local::LocalStore::new(config.clone()).unwrap();
+        phai_core::migrations::run_migrations(&store, &config)
+            .await
+            .unwrap();
+
+        let mut manual = sample_review_row("eletronicos:reparo");
+        manual.transaction_id = "manual-watch".to_string();
+        manual.idempotency_key = "manual-watch".to_string();
+        manual.account_id = Some("card".to_string());
+        manual.amount = Decimal::new(-39267, 2);
+        manual.source = "manual".to_string();
+
+        let mut pluggy = sample_review_row("electronics");
+        pluggy.transaction_id = "pluggy-watch".to_string();
+        pluggy.idempotency_key = "pluggy-watch".to_string();
+        pluggy.account_id = Some("card".to_string());
+        pluggy.amount = Decimal::new(-39268, 2);
+        pluggy.source = "pluggy".to_string();
+
+        store.upsert_transactions(&[manual, pluggy]).await.unwrap();
+
+        let err = merge_transactions(
+            &store,
+            &config,
+            &MergeTransactionsArgs {
+                from: "manual-watch".to_string(),
+                into_transaction_id: "pluggy-watch".to_string(),
+                max_amount_diff: "0.00".to_string(),
+                max_days: 7,
+                allow_any_source: false,
+                allow_non_pluggy_target: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("excede --max-amount-diff"));
+        assert!(store
+            .transaction_by_id("manual-watch")
+            .await
+            .unwrap()
+            .is_some());
     }
 
     // ── E2E: Consistency between Local (SQLite) and Remote (BigQuery) ──

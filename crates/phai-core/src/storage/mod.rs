@@ -118,6 +118,8 @@ pub trait FinanceStore {
     ) -> Result<()>;
     async fn insert_audit_events(&self, rows: &[AuditEvent]) -> Result<usize>;
 
+    async fn delete_transaction(&self, transaction_id: &str) -> Result<()>;
+
     async fn annotate_transaction(
         &self,
         transaction_id: &str,
