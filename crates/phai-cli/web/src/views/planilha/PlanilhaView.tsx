@@ -68,6 +68,15 @@ const csvCell = (value: string | null | undefined): string => {
 	return text;
 };
 
+export const csvAmountCell = (amount: string): string => {
+	const cents = toCents(amount);
+	const sign = cents < 0 ? "-" : "";
+	const absolute = Math.abs(cents);
+	const whole = Math.trunc(absolute / 100);
+	const fraction = String(absolute % 100).padStart(2, "0");
+	return `${sign}${whole},${fraction}`;
+};
+
 export const sheetRowsCsv = (
 	rows: ReadonlyArray<TxView>,
 	accountMap: Map<string, { label: string }>,
@@ -84,7 +93,7 @@ export const sheetRowsCsv = (
 				tx.purpose,
 				account,
 				tx.categoryId,
-				tx.amount,
+				csvAmountCell(tx.amount),
 				tx.installmentMarker,
 			]
 				.map(csvCell)

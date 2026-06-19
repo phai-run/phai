@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TxView } from "../../../lib/derivations";
-import { sheetAmountLabel, sheetRowsCsv } from "../PlanilhaView";
+import { csvAmountCell, sheetAmountLabel, sheetRowsCsv } from "../PlanilhaView";
 
 const tx = (overrides: Partial<TxView> = {}): TxView => ({
 	id: "tx-1",
@@ -29,8 +29,18 @@ describe("sheetRowsCsv", () => {
 
 		expect(csv).toBe(
 			'transaction_id,posted_at,description,merchant_name,purpose,account,category_id,amount,installment\n' +
-				'tx-1,2026-06-10,"Store, monthly","Store ""A""","school\nfees",Conta Principal,educacao:escola,-123.45,\n',
+				'tx-1,2026-06-10,"Store, monthly","Store ""A""","school\nfees",Conta Principal,educacao:escola,"-123,45",\n',
 		);
+	});
+});
+
+describe("csvAmountCell", () => {
+	it("formats decimal amounts with a Brazilian decimal comma", () => {
+		expect(csvAmountCell("589.89")).toBe("589,89");
+	});
+
+	it("preserves negative expense signs", () => {
+		expect(csvAmountCell("-123.45")).toBe("-123,45");
 	});
 });
 
