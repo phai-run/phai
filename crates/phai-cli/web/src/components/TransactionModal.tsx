@@ -23,6 +23,7 @@ export interface ReviewPatch {
 	merchantName: string | null;
 	purpose: string | null;
 	categoryId: string | null;
+	commitmentTier?: string | null;
 }
 
 const inputStyle: CSSProperties = {
@@ -96,12 +97,15 @@ export const TransactionModal = ({
 
 	const applySelectedSimilar = useCallback(
 		(patch: ReviewPatch) => {
+			// Replicate the human anatomy edit only — never force the source's
+			// commitment tier onto the similar rows; each keeps its own override.
+			const { commitmentTier: _omitTier, ...bulkPatch } = patch;
 			for (const id of selectedSimilar) {
 				store.commit(
 					events.reviewSubmitted({
 						writeId: crypto.randomUUID(),
 						transactionId: id,
-						patch,
+						patch: bulkPatch,
 						submittedAt: Date.now(),
 					}),
 				);
@@ -129,13 +133,17 @@ export const TransactionModal = ({
 	}, []);
 
 	const currentPatch = useMemo(
-		() => ({
+		(): ReviewPatch => ({
 			description: description.trim() || null,
 			merchantName: merchantName.trim() || null,
 			purpose: purpose.trim() || null,
 			categoryId: category.trim() || null,
+			// Carry the existing commitment-tier override so an anatomy edit
+			// doesn't drop it: the overlay row is replaced wholesale on submit
+			// (schema onConflict "replace"), so any omitted column is lost.
+			commitmentTier: overlay?.commitmentTier ?? tx.commitmentTier ?? null,
 		}),
-		[description, merchantName, purpose, category],
+		[description, merchantName, purpose, category, overlay, tx.commitmentTier],
 	);
 
 	const selectedSimilarCount = selectedSimilar.size;

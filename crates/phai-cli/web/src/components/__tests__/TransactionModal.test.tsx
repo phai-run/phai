@@ -76,7 +76,12 @@ describe("TransactionModal", () => {
 			}),
 		);
 
-		expect(onSubmit).toHaveBeenCalledWith(expectedPatch);
+		// The source tx carries its commitment tier (here none → null); the bulk
+		// writes to similar txs strip it so each row keeps its own tier.
+		expect(onSubmit).toHaveBeenCalledWith({
+			...expectedPatch,
+			commitmentTier: null,
+		});
 		expect(commitMock).toHaveBeenCalledTimes(2);
 		expect(
 			commitMock.mock.calls.map(([event]) => event.args.transactionId),
@@ -85,5 +90,41 @@ describe("TransactionModal", () => {
 			expectedPatch,
 			expectedPatch,
 		]);
+	});
+
+	it("preserves the locked tier on the edited tx but does not force it onto similar (regression)", async () => {
+		const onSubmit = vi.fn();
+		const locked = { ...tx("current", "2026-01-10"), commitmentTier: "locked" };
+
+		render(
+			<TransactionModal
+				tx={locked}
+				overlay={undefined}
+				similarTxs={[tx("similar-1", "2026-02-10")]}
+				overlayById={new Map()}
+				categories={["moradia"]}
+				onSubmit={onSubmit}
+				onClose={vi.fn()}
+			/>,
+		);
+
+		fireEvent.change(screen.getByPlaceholderText("description"), {
+			target: { value: "Aluguel do apê" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Similar (1)" }));
+		fireEvent.click(
+			await screen.findByRole("button", { name: "select all (1)" }),
+		);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Salvar (também em 1 selecionadas)" }),
+		);
+
+		// Source keeps locked …
+		expect(onSubmit).toHaveBeenCalledWith(
+			expect.objectContaining({ commitmentTier: "locked" }),
+		);
+		// … similar row's write carries no tier (keeps its own).
+		const bulkPatch = commitMock.mock.calls[0][0].args.patch;
+		expect(bulkPatch.commitmentTier).toBeUndefined();
 	});
 });
