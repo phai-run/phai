@@ -61,6 +61,37 @@ Other paths: [build from source](#build-from-source) · [cargo install](#cargo-i
 
 After install, the binary self-updates: it checks GitHub Releases at most **once every 24h**, downloads, validates SHA-256, atomically replaces itself, and re-execs the command you ran. Zero ceremony.
 
+### Activate on another machine (no terminal) — ADR-0034
+
+To put phai on a household member's Mac so they can read, recategorize and
+simulate against the **shared BigQuery dataset** — without ever touching the
+terminal, GCP, or Pluggy:
+
+1. **Owner — mint an invite** (one terminal command, on a machine that already
+   has BigQuery configured). Use a *dedicated* service account scoped to
+   **BigQuery Data Editor + Job User** so the invitee can't migrate or drop:
+
+   ```bash
+   phai invite create \
+     --service-account-path ./phai-family.json \
+     --actor-id esposa --label "MacBook da Esposa"
+   # prompts for a passphrase → prints a PHAI1E-… key
+   ```
+
+   Save the key to a file and send it plus the passphrase over **separate**
+   channels (the key is a credential).
+
+2. **Family member — graphical install.** Double-click **`Instalar Phai.command`**
+   (or run `curl -fsSL …/install.sh | bash -s -- --app`). It installs phai, starts
+   the background app, and opens the **activation screen** in the browser.
+
+3. **Activate in the browser.** Attach the key file, type the passphrase, click
+   *Ativar*. phai connects to the shared dataset and the dashboard loads. Done —
+   the invitee never syncs and never sees a terminal again.
+
+The encrypted invite embeds the service-account key (Argon2id + XChaCha20-Poly1305);
+nothing leaves the machine except its own database traffic.
+
 ## Quickstart
 
 ```bash
@@ -150,6 +181,7 @@ Add `--raw` or `--csv` to data reports for structured output, e.g. `phai report 
 
 ```text
 phai auth setup              Configure backend and credentials
+phai invite create           Mint an encrypted activation invite for another machine (ADR-0034)
 phai admin migrate           Apply pending database migrations
 phai admin import-legacy     Import from legacy CSV files
 phai sync pluggy             Sync transactions from Pluggy
