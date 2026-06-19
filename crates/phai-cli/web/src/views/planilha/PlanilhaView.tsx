@@ -14,11 +14,13 @@ import {
 	TransactionModal,
 	type ReviewPatch,
 } from "../../components/TransactionModal";
+import { TierBadge } from "../../components/TierBadge";
 import { categoryEmoji } from "../../lib/categoryEmoji";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 import {
 	buildAccountMap,
 	buildOverlayMap,
+	commitmentTier,
 	COMMITMENT_TIER_LABELS,
 	COMMITMENT_TIERS,
 	effectiveCategory,
@@ -530,6 +532,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 								accountLabel={
 									accountMap.get(tx.accountId)?.label ?? tx.accountId
 								}
+								tier={commitmentTier(tx, fixedCategories, overlayMap)}
 								onClick={handleRowClick}
 								onCategoryClick={openPickerFor}
 							/>
@@ -736,6 +739,7 @@ const SheetRow = ({
 	focused,
 	category,
 	accountLabel,
+	tier,
 	onClick,
 	onCategoryClick,
 }: {
@@ -745,6 +749,7 @@ const SheetRow = ({
 	focused: boolean;
 	category: string | null;
 	accountLabel: string;
+	tier: CommitmentTier;
 	onClick: (tx: TxView, idx: number, e: React.MouseEvent) => void;
 	onCategoryClick: (tx: TxView, anchor: HTMLElement) => void;
 }) => {
@@ -784,12 +789,22 @@ const SheetRow = ({
 			<td style={{ ...tdStyle, maxWidth: 380 }} title={tx.rawDescription}>
 				<div
 					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 6,
 						overflow: "hidden",
-						textOverflow: "ellipsis",
-						whiteSpace: "nowrap",
 					}}
 				>
-					{sheetLabel(tx)}
+					<TierBadge tier={tier} compact />
+					<span
+						style={{
+							overflow: "hidden",
+							textOverflow: "ellipsis",
+							whiteSpace: "nowrap",
+						}}
+					>
+						{sheetLabel(tx)}
+					</span>
 				</div>
 				{tx.purpose && (
 					<div
