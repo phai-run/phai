@@ -88,6 +88,11 @@ enum Commands {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Generate an encrypted activation invite for another device (owner-only).
+    Invite {
+        #[command(subcommand)]
+        command: InviteCommand,
+    },
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
@@ -188,6 +193,38 @@ struct NotifyWhatsappArgs {
 #[derive(Subcommand)]
 enum AuthCommand {
     Setup(AuthSetupArgs),
+}
+
+#[derive(Subcommand)]
+enum InviteCommand {
+    /// Seal a BigQuery service account + coordinates into an encrypted invite.
+    Create(InviteCreateArgs),
+}
+
+#[derive(Args)]
+struct InviteCreateArgs {
+    /// Dedicated service-account JSON to embed (Data Editor + Job User only).
+    #[arg(long)]
+    service_account_path: PathBuf,
+    /// Audit actor for the target device.
+    #[arg(long)]
+    actor_id: String,
+    /// Friendly label for the target device, shown during activation.
+    #[arg(long)]
+    label: String,
+    /// Capability hint surfaced in the UI. The real grant is the SA's GCP role.
+    #[arg(long, default_value = "rw")]
+    role: String,
+    /// GCP project id. Defaults to the owner's configured project.
+    #[arg(long)]
+    project_id: Option<String>,
+    /// BigQuery dataset id. Defaults to the owner's configured dataset.
+    #[arg(long)]
+    dataset_id: Option<String>,
+    /// Read the passphrase from the first line of stdin instead of prompting
+    /// (for scripting). Otherwise phai prompts twice with hidden input.
+    #[arg(long)]
+    passphrase_stdin: bool,
 }
 
 #[derive(Args)]
@@ -3109,14 +3146,9 @@ async fn run_command(command: Option<Commands>) -> Result<()> {
         Some(Commands::Auth { command }) => match command {
             AuthCommand::Setup(args) => auth_setup(args).await,
         },
-        Some(Commands::Admin { command }) => match command {
-            AdminCommand::Migrate => admin_migrate().await,
-            AdminCommand::ImportLegacy(args) => admin_import_legacy(args).await,
-            AdminCommand::Reclassify(args) => admin_reclassify(args).await,
-        },
-        Some(Commands::Sync { command }) => match command {
-            SyncCommand::Pluggy(args) => sync_pluggy_command(args).await,
-        },
+        Some(Commands::Invite { command }) => run_invite(command).await,
+        Some(Commands::Admin { command }) => run_admin(command).await,
+        Some(Commands::Sync { command }) => run_sync(command).await,
         Some(Commands::Report { csv, command }) => match command {
             ReportCommand::DailyPulse(args) => {
                 let format = report_output_format(csv, args.structured_output())?;
@@ -3342,6 +3374,98 @@ async fn auth_setup(args: AuthSetupArgs) -> Result<()> {
         println!("local_db: {}", db_path.display());
     }
     Ok(())
+}
+
+async fn run_invite(command: InviteCommand) -> Result<()> {
+    match command {
+        InviteCommand::Create(args) => invite_create(args).await,
+    }
+}
+
+async fn run_admin(command: AdminCommand) -> Result<()> {
+    match command {
+        AdminCommand::Migrate => admin_migrate().await,
+        AdminCommand::ImportLegacy(args) => admin_import_legacy(args).await,
+        AdminCommand::Reclassify(args) => admin_reclassify(args).await,
+    }
+}
+
+async fn run_sync(command: SyncCommand) -> Result<()> {
+    match command {
+        SyncCommand::Pluggy(args) => sync_pluggy_command(args).await,
+    }
+}
+
+async fn invite_create(args: InviteCreateArgs) -> Result<()> {
+    let paths = ConfigPaths::discover()?;
+    let owner_config = AppConfig::load(&paths).ok();
+
+    let project_id = args
+        .project_id
+        .or_else(|| owner_config.as_ref().and_then(|c| c.project_id.clone()))
+        .context("--project-id não informado e nenhum project configurado")?;
+    let dataset_id = args
+        .dataset_id
+        .or_else(|| owner_config.as_ref().and_then(|c| c.dataset_id.clone()))
+        .context("--dataset-id não informado e nenhum dataset configurado")?;
+
+    let raw = fs::read_to_string(&args.service_account_path).with_context(|| {
+        format!(
+            "Falha ao ler service account em {}",
+            args.service_account_path.display()
+        )
+    })?;
+    let service_account: Value =
+        serde_json::from_str(&raw).context("service account não é um JSON válido")?;
+    if service_account.get("private_key").is_none() || service_account.get("client_email").is_none()
+    {
+        bail!("JSON não parece uma chave de service account (faltam private_key/client_email)");
+    }
+
+    let passphrase = read_invite_passphrase(args.passphrase_stdin)?;
+    let invite = phai_core::Invite::new(
+        project_id,
+        dataset_id,
+        args.actor_id,
+        args.role,
+        service_account,
+        args.label,
+    );
+    let token = phai_core::seal_invite(&invite, &passphrase)?;
+
+    // Token to stdout so it can be piped/saved; guidance to stderr.
+    println!("{token}");
+    eprintln!();
+    eprintln!("Convite cifrado gerado. Envie a chave acima e a senha por canais separados.");
+    eprintln!(
+        "Quem tiver a chave + a senha tem acesso de escrita ao dataset — trate como segredo."
+    );
+    Ok(())
+}
+
+/// Collect the invite passphrase, either from the first line of stdin (for
+/// scripting) or via a hidden double-entry prompt.
+fn read_invite_passphrase(from_stdin: bool) -> Result<String> {
+    if from_stdin {
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .context("ler senha do stdin")?;
+        let pass = line.trim_end_matches(['\n', '\r']).to_string();
+        if pass.is_empty() {
+            bail!("senha vazia recebida no stdin");
+        }
+        return Ok(pass);
+    }
+    let pass = rpassword::prompt_password("Senha do convite: ").context("ler senha")?;
+    if pass.is_empty() {
+        bail!("a senha não pode ser vazia");
+    }
+    let confirm = rpassword::prompt_password("Confirme a senha: ").context("ler confirmação")?;
+    if pass != confirm {
+        bail!("as senhas não conferem");
+    }
+    Ok(pass)
 }
 
 async fn admin_migrate() -> Result<()> {

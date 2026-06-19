@@ -5929,3 +5929,111 @@ fn mcp_serves_reports_over_stdio() {
     let status = child.wait().expect("wait");
     assert!(status.success());
 }
+
+/// `phai invite create` reads a passphrase off stdin, seals the service account
+/// into a `PHAI1E-` token, and prints only the token on stdout (guidance goes to
+/// stderr). The owner's configured project/dataset can be overridden by flags.
+#[test]
+fn invite_create_emits_sealed_token() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    let sa_path = temp.path().join("phai-family.json");
+    write_file(
+        &sa_path,
+        r#"{"type":"service_account","project_id":"demo","private_key":"-----FAKE-----","client_email":"phai-family@demo.iam.gserviceaccount.com"}"#,
+    );
+
+    let mut cmd = cargo_bin();
+    let mut child = envs(&mut cmd, &config_dir, &data_dir)
+        .arg("invite")
+        .arg("create")
+        .arg("--service-account-path")
+        .arg(&sa_path)
+        .arg("--actor-id")
+        .arg("esposa")
+        .arg("--label")
+        .arg("MacBook Esposa")
+        .arg("--project-id")
+        .arg("demo")
+        .arg("--dataset-id")
+        .arg("phai")
+        .arg("--passphrase-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn phai invite create");
+
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"hunter2pass\n")
+        .expect("write passphrase");
+
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "invite create should succeed");
+    let token = String::from_utf8(out.stdout)
+        .expect("utf8")
+        .trim()
+        .to_string();
+    assert!(
+        token.starts_with("PHAI1E-"),
+        "stdout must be just the token, got: {token}"
+    );
+
+    // The emitted token decrypts back to the same coordinates with the passphrase.
+    let invite = phai_core::open_invite(&token, "hunter2pass").expect("open invite");
+    assert_eq!(invite.project_id, "demo");
+    assert_eq!(invite.dataset_id, "phai");
+    assert_eq!(invite.actor_id, "esposa");
+    assert_eq!(invite.role, "rw");
+    assert!(phai_core::open_invite(&token, "wrong").is_err());
+}
+
+/// A JSON file that is not a service-account key is rejected before any sealing.
+#[test]
+fn invite_create_rejects_non_service_account_json() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    let sa_path = temp.path().join("not-a-key.json");
+    write_file(&sa_path, r#"{"hello":"world"}"#);
+
+    let mut cmd = cargo_bin();
+    let mut child = envs(&mut cmd, &config_dir, &data_dir)
+        .arg("invite")
+        .arg("create")
+        .arg("--service-account-path")
+        .arg(&sa_path)
+        .arg("--actor-id")
+        .arg("esposa")
+        .arg("--label")
+        .arg("Test")
+        .arg("--project-id")
+        .arg("demo")
+        .arg("--dataset-id")
+        .arg("phai")
+        .arg("--passphrase-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"pw\n")
+        .expect("write");
+
+    let out = child.wait_with_output().expect("wait");
+    assert!(!out.status.success(), "non-SA JSON must be rejected");
+}

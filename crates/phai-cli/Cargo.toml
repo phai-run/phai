@@ -16,6 +16,7 @@ axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 phai-core = { path = "../phai-core" }
+rpassword.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
