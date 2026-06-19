@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.17.0](https://github.com/phai-run/phai/compare/v5.16.0...v5.17.0) (2026-06-19)
+
+
+### Features
+
+* zero-CLI multi-device activation (invite → install → onboard) ([#177](https://github.com/phai-run/phai/issues/177)) ([119eced](https://github.com/phai-run/phai/commit/119ecede92ce027b1a710f0df6d779953492323a))
+
 ## [5.16.0](https://github.com/phai-run/phai/compare/v5.15.0...v5.16.0) (2026-06-19)
 
 
