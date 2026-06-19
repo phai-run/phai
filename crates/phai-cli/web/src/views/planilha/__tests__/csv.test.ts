@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { TxView } from "../../../lib/derivations";
-import { csvAmountCell, sheetAmountLabel, sheetRowsCsv } from "../PlanilhaView";
+import {
+	csvAmountCell,
+	sheetAmountLabel,
+	sheetRowsCsv,
+	sheetSignedTotal,
+} from "../PlanilhaView";
 
 const tx = (overrides: Partial<TxView> = {}): TxView => ({
 	id: "tx-1",
@@ -55,5 +60,17 @@ describe("sheetAmountLabel", () => {
 		expect(sheetAmountLabel("8723.14").replace(/\s/g, " ")).toBe(
 			"R$ 8.723,14",
 		);
+	});
+});
+
+describe("sheetSignedTotal", () => {
+	it("sums the visible sheet rows as a signed total", () => {
+		expect(
+			sheetSignedTotal([
+				tx({ id: "tx-expense-1", amount: "-123.45" }),
+				tx({ id: "tx-expense-2", amount: "-0.55" }),
+				tx({ id: "tx-income", amount: "50.00" }),
+			]),
+		).toBe(-74);
 	});
 });
