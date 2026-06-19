@@ -2349,6 +2349,29 @@ impl FinanceStore for BigQueryStore {
         Ok(rows.len())
     }
 
+    async fn delete_transaction(&self, transaction_id: &str) -> Result<()> {
+        let sql = format!(
+            "
+            DELETE FROM {}
+            WHERE transaction_id = @transaction_id
+            ",
+            self.qualified_table("transactions")?,
+        );
+        let resp = self
+            .run_query_with_params(&sql, &[Param::string("transaction_id", transaction_id)])
+            .await?;
+        let affected: i64 = resp
+            .num_dml_affected_rows
+            .as_deref()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        if affected == 0 {
+            anyhow::bail!("Transação {transaction_id} não encontrada");
+        }
+        Ok(())
+    }
+
     async fn annotate_transaction(
         &self,
         transaction_id: &str,

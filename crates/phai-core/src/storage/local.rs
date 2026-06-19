@@ -1082,6 +1082,18 @@ impl FinanceStore for LocalStore {
         Ok(rows.len())
     }
 
+    async fn delete_transaction(&self, transaction_id: &str) -> Result<()> {
+        let conn = self.connection()?;
+        let affected = conn.execute(
+            "DELETE FROM transactions WHERE transaction_id = ?1",
+            params![transaction_id],
+        )?;
+        if affected == 0 {
+            bail!("Transação {transaction_id} não encontrada");
+        }
+        Ok(())
+    }
+
     async fn annotate_transaction(
         &self,
         transaction_id: &str,

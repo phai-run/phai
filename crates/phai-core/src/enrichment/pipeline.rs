@@ -584,6 +584,9 @@ mod tests {
         async fn insert_audit_events(&self, _: &[AuditEvent]) -> Result<usize> {
             Ok(0)
         }
+        async fn delete_transaction(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn annotate_transaction(
             &self,
             transaction_id: &str,

@@ -166,6 +166,7 @@ phai tx find                 Search transactions by description
 phai tx pending              List uncategorized transactions
 phai tx pending-human        List missing description, merchant, or purpose fields
 phai tx review-human         Headless review of human fields and category (--json/--summary/--transaction-id), with queue filters
+phai tx merge                Merge a duplicate manual transaction into its canonical Pluggy row
 phai tx set-context-by-desc  Deprecated alias for setting descriptions by raw match
 phai tx split <subcommand>   Split a transaction into multiple lines
 phai forecast upsert         Create or update a forecast entry
@@ -181,6 +182,15 @@ phai account upsert          Create or update an account
 phai budget upsert/list      Category budget management
 phai self check              Check for available updates
 phai self update             Force-update to the latest release
+```
+
+When a manual transaction later appears via Pluggy with a small value drift,
+merge the manual row into the Pluggy row. The Pluggy amount/date/source remain
+canonical; human description, merchant, purpose and category are copied over,
+then the duplicate is removed:
+
+```bash
+phai tx merge --from manual_tx_id --into pluggy_tx_id --max-amount-diff 0.01
 ```
 
 </details>
