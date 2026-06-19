@@ -200,6 +200,41 @@ describe("buildWarPlan", () => {
 		expect(housing.projecao).toBe(0);
 		expect(plan.rows.find((r) => r.parent === "lazer")!.realizado).toBe(1000);
 	});
+
+	it("excludes locked spend so only cancellable/variable is simulatable (ADR-0030)", () => {
+		const txs = [
+			// variable — counts toward the plan.
+			tx({ id: "v", categoryId: "lazer:bar", amount: "-200.00" }),
+			// installment — locked, excluded.
+			tx({
+				id: "i",
+				categoryId: "lazer:bar",
+				amount: "-300.00",
+				isInstallment: 1,
+			}),
+			// fixed-category bill — locked via the fixed envelope below, excluded.
+			tx({ id: "f", categoryId: "moradia:aluguel", amount: "-1000.00" }),
+			// manual lock override — excluded even though it's discretionary.
+			tx({
+				id: "o",
+				categoryId: "lazer:show",
+				amount: "-150.00",
+				commitmentTier: "locked",
+			}),
+		];
+		const fcs = [
+			forecast({ categoryId: "moradia", amount: "-1000.00", kind: "fixed" }),
+		];
+		const plan = buildWarPlan(txs, "2026-06", fcs, noOverlay);
+
+		// Only the R$200 variable bar spend survives (installment + manual lock
+		// in lazer are excluded).
+		expect(plan.totalRealizado).toBe(200);
+		expect(plan.rows.find((r) => r.parent === "lazer")!.realizado).toBe(200);
+		// moradia still shows as a budget row (its fixed envelope), but the
+		// fixed-category transaction is excluded from realized spend.
+		expect(plan.rows.find((r) => r.parent === "moradia")!.realizado).toBe(0);
+	});
 });
 
 // ── simulateWarPlan ─────────────────────────────────────────────────────────

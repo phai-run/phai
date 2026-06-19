@@ -248,6 +248,69 @@ describe("Review write persistence (web C5)", () => {
 		store.commit(events.writeAcked({ writeId: "w1" }));
 		expect(store.query(tables.pendingWrites.select()).length).toBe(0);
 	});
+
+	it("an anatomy edit that carries the tier keeps the locked override (regression)", () => {
+		// 1. user marks the transaction as locked.
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "wt1",
+				transactionId: "tx-tier",
+				patch: {
+					description: "Aluguel",
+					merchantName: null,
+					purpose: null,
+					categoryId: "moradia:aluguel",
+					commitmentTier: "locked",
+				},
+				submittedAt: 1,
+			}),
+		);
+		const tier = () =>
+			store.query(
+				tables.reviewOverlay.select().where({ transactionId: "tx-tier" }),
+			)[0]?.commitmentTier ?? null;
+		expect(tier()).toBe("locked");
+
+		// 2. later edits only the description. The fixed modal re-asserts the
+		// existing tier in the patch, so the wholesale overlay replace
+		// (onConflict "replace") does NOT drop it.
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "wt2",
+				transactionId: "tx-tier",
+				patch: {
+					description: "Aluguel do apê",
+					merchantName: null,
+					purpose: null,
+					categoryId: "moradia:aluguel",
+					commitmentTier: "locked",
+				},
+				submittedAt: 2,
+			}),
+		);
+		const after = store.query(
+			tables.reviewOverlay.select().where({ transactionId: "tx-tier" }),
+		);
+		expect(after[0].description).toBe("Aluguel do apê");
+		expect(after[0].commitmentTier).toBe("locked");
+
+		// Contrast: a patch WITHOUT the tier (the old buggy modal) wipes it via
+		// the wholesale replace — this is exactly the reported data loss.
+		store.commit(
+			events.reviewSubmitted({
+				writeId: "wt3",
+				transactionId: "tx-tier",
+				patch: {
+					description: "x",
+					merchantName: null,
+					purpose: null,
+					categoryId: "moradia:aluguel",
+				},
+				submittedAt: 3,
+			}),
+		);
+		expect(tier()).toBeNull();
+	});
 });
 
 describe("Pending write failures", () => {

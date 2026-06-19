@@ -167,7 +167,7 @@ export const Onboarding = ({ onActivated }: { onActivated: () => void }) => {
 						borderRadius: "var(--radius-md)",
 						border: "none",
 						background: canActivate ? "var(--green)" : "var(--border)",
-						color: canActivate ? "var(--white)" : "var(--muted)",
+						color: canActivate ? "var(--bg)" : "var(--muted)",
 						fontWeight: 700,
 						fontSize: 15,
 						cursor: canActivate ? "pointer" : "not-allowed",
