@@ -1,5 +1,19 @@
 # Changelog
 
+## [5.16.0](https://github.com/phai-run/phai/compare/v5.15.0...v5.16.0) (2026-06-19)
+
+
+### Features
+
+* merge duplicate manual transactions ([#173](https://github.com/phai-run/phai/issues/173)) ([b51c3f1](https://github.com/phai-run/phai/commit/b51c3f1a8d331711afd6e4416e120549db589519))
+* **web:** show filtered sheet totals ([#175](https://github.com/phai-run/phai/issues/175)) ([140d29f](https://github.com/phai-run/phai/commit/140d29fc815f2a4267e5c9d5688370d80bda7f65))
+
+
+### Bug Fixes
+
+* **web:** persist commitment tier overrides after reload ([#174](https://github.com/phai-run/phai/issues/174)) ([510f386](https://github.com/phai-run/phai/commit/510f386a82960209026be661d9cc9270f760a474))
+* **web:** prevent sheet amount sign wrapping ([#172](https://github.com/phai-run/phai/issues/172)) ([8bb97fc](https://github.com/phai-run/phai/commit/8bb97fceed90eadd3f7d5455dad5e73ada514f5c))
+
 ## [5.15.0](https://github.com/phai-run/phai/compare/v5.14.1...v5.15.0) (2026-06-18)
 
 
