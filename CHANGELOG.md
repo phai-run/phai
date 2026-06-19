@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.18.0](https://github.com/phai-run/phai/compare/v5.17.0...v5.18.0) (2026-06-19)
+
+
+### Features
+
+* **web:** commitment-tier UX — badges, edit-preserves-tier, planning excludes locked ([#180](https://github.com/phai-run/phai/issues/180)) ([3d4d42b](https://github.com/phai-run/phai/commit/3d4d42b0f2373332808e3bcd6ce4480876daf1c5))
+
 ## [5.17.0](https://github.com/phai-run/phai/compare/v5.16.0...v5.17.0) (2026-06-19)
 
 
