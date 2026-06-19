@@ -12,6 +12,7 @@ import { makeInMemoryAdapter } from "@livestore/adapter-web";
 import { createStorePromise } from "@livestore/livestore";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { schema, events, tables } from "../../livestore/schema";
+import { normalizeTransactions } from "../sync";
 
 const bool = (v: unknown): number => (v ? 1 : 0);
 
@@ -34,6 +35,7 @@ const makeTx = (
 	reviewed: bool(overrides.reviewed ?? false),
 	isInstallment: bool(overrides.isInstallment ?? false),
 	isSubscription: bool(overrides.isSubscription ?? false),
+	commitmentTier: (overrides.commitmentTier as string | null) ?? null,
 });
 
 describe("Incremental transaction seeding", () => {
@@ -138,6 +140,19 @@ describe("Incremental transaction seeding", () => {
 		expect(after[0].id).toBe("orphan");
 	});
 
+	it("normalization preserves commitment-tier overrides from the bridge", () => {
+		const rows = normalizeTransactions([
+			makeTx("tx-tier", { commitmentTier: "locked" }),
+		]);
+		store.commit(events.transactionsSeeded({ rows }));
+
+		const after = store.query(
+			tables.transactions.select().where({ id: "tx-tier" }),
+		);
+		expect(after.length).toBe(1);
+		expect(after[0].commitmentTier).toBe("locked");
+	});
+
 	it("bridgeIdentityChanged clears stale local write state", () => {
 		store.commit(
 			events.reviewSubmitted({
@@ -204,6 +219,7 @@ describe("Review write persistence (web C5)", () => {
 					merchantName: "Zenilda",
 					purpose: "Faxina mensal",
 					categoryId: "moradia:servicos",
+					commitmentTier: "locked",
 				},
 				submittedAt: 1,
 			}),
@@ -220,11 +236,13 @@ describe("Review write persistence (web C5)", () => {
 		expect(pending[0].payload.merchantName).toBe("Zenilda");
 		expect(pending[0].payload.purpose).toBe("Faxina mensal");
 		expect(pending[0].payload.categoryId).toBe("moradia:servicos");
+		expect(pending[0].payload.commitmentTier).toBe("locked");
 
 		// Optimistic overlay surfaces the edit immediately.
 		const overlay = store.query(tables.reviewOverlay.select());
 		expect(overlay.length).toBe(1);
 		expect(overlay[0].description).toBe("Zenilda Faxina");
+		expect(overlay[0].commitmentTier).toBe("locked");
 
 		// On bridge ack the queued write is removed (flush succeeded).
 		store.commit(events.writeAcked({ writeId: "w1" }));

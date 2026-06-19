@@ -25,6 +25,7 @@ export interface TxRow {
 	reviewed: boolean;
 	isInstallment: boolean;
 	isSubscription: boolean;
+	commitmentTier: string | null;
 }
 
 export interface AccountRow {
@@ -68,6 +69,7 @@ export interface ReviewPatch {
 	merchantName: string | null;
 	purpose: string | null;
 	categoryId: string | null;
+	commitmentTier?: string | null;
 }
 
 export interface ReviewFlushItem {
