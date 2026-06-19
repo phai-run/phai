@@ -795,7 +795,8 @@ const SheetRow = ({
 						overflow: "hidden",
 					}}
 				>
-					<TierBadge tier={tier} compact />
+					{/* Tiers describe controllability of spending — income has none. */}
+					{negative && <TierBadge tier={tier} compact />}
 					<span
 						style={{
 							overflow: "hidden",
