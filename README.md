@@ -85,6 +85,11 @@ terminal, GCP, or Pluggy:
    (or run `curl -fsSL …/install.sh | bash -s -- --app`). It installs phai, starts
    the background app, and opens the **activation screen** in the browser.
 
+   > First run only: macOS may say it "can't verify the developer" because the
+   > installer isn't notarized yet. **Right-click the file → Open → Open** to
+   > proceed (once). A signed installer that skips this is planned — see
+   > [docs/notarization.md](docs/notarization.md).
+
 3. **Activate in the browser.** Attach the key file, type the passphrase, click
    *Ativar*. phai connects to the shared dataset and the dashboard loads. Done —
    the invitee never syncs and never sees a terminal again.
