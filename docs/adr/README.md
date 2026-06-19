@@ -86,6 +86,7 @@ proposed → active → superseded
 | [0032](0032-per-transaction-tier-override.md) | Per-transaction commitment-tier override via a sparse table | proposed |
 | [0033](0033-recurring-human-review-replication.md) | Recurring human review replication includes category | active |
 | [0034](0034-self-contained-encrypted-invite.md) | Self-contained encrypted invite for multi-device activation | active |
+| [0035](0035-google-sheets-export.md) | Open in Google Sheets via the Sheets API (OAuth) | proposed |
 
 ---
 
