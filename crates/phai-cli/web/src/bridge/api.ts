@@ -263,4 +263,42 @@ export const api = {
 	/** Apply a batch of committed review writes; returns the writeIds that succeeded. */
 	flushReviews: (items: ReviewFlushItem[]): Promise<FlushResult> =>
 		postJson<FlushResult>("/api/events", { writes: items }),
+
+	/** Whether this machine has an activated backend yet (onboarding gate). */
+	status: (): Promise<ActivationStatus> =>
+		fetch("/api/status").then((r) => json<ActivationStatus>(r)),
+
+	/**
+	 * Activate this machine from an encrypted invite. Surfaces the bridge's
+	 * own error message (e.g. wrong passphrase) so onboarding can show it.
+	 */
+	activate: async (
+		token: string,
+		passphrase: string,
+	): Promise<ActivateResult> => {
+		const res = await fetch("/api/activate", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ token, passphrase }),
+		});
+		if (!res.ok) {
+			const detail = (await res.json().catch(() => null)) as {
+				error?: string;
+			} | null;
+			throw new Error(detail?.error ?? `${res.status} ${res.statusText}`);
+		}
+		return (await res.json()) as ActivateResult;
+	},
 };
+
+export interface ActivationStatus {
+	activated: boolean;
+	label: string | null;
+	projectId: string | null;
+	datasetId: string | null;
+}
+
+export interface ActivateResult {
+	ok: boolean;
+	label: string;
+}
