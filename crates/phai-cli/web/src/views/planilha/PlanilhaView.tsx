@@ -25,6 +25,7 @@ import {
 	effectiveTx,
 	filterTransactions,
 	fixedCategoriesFromForecasts,
+	hasActiveFilters,
 	sheetLabel,
 	sortForSheet,
 	transactionsForMonth,
@@ -110,6 +111,9 @@ export const sheetAmountLabel = (amount: string): string => {
 	return cents < 0 ? `(${formatted})` : formatted;
 };
 
+export const sheetSignedTotal = (rows: ReadonlyArray<TxView>): number =>
+	rows.reduce((total, tx) => total + toCents(tx.amount), 0) / 100;
+
 const downloadCsv = (filename: string, csv: string) => {
 	const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
 	const url = URL.createObjectURL(blob);
@@ -158,6 +162,29 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
 	const tableRef = useRef<HTMLDivElement>(null);
 
+	const filters = useMemo(
+		() => ({
+			accountFilter: ui.accountFilter,
+			ownerFilter: ui.ownerFilter,
+			categoryFilter: ui.categoryFilter,
+			textFilter: ui.textFilter,
+			installmentsOnly: ui.installmentsOnly,
+			subscriptionsOnly: ui.subscriptionsOnly,
+			unreviewedOnly: ui.unreviewedOnly,
+			tierFilter: (ui.tierFilter as CommitmentTier | null) ?? null,
+		}),
+		[
+			ui.accountFilter,
+			ui.ownerFilter,
+			ui.categoryFilter,
+			ui.textFilter,
+			ui.installmentsOnly,
+			ui.subscriptionsOnly,
+			ui.unreviewedOnly,
+			ui.tierFilter,
+		],
+	);
+
 	const rows = useMemo(() => {
 		// Bake the optimistic overlay in first so edited description/merchant/
 		// category reflect everywhere (sheet, sums, sort), not just the modal.
@@ -166,16 +193,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 		);
 		const filtered = filterTransactions(
 			monthTxs,
-			{
-				accountFilter: ui.accountFilter,
-				ownerFilter: ui.ownerFilter,
-				categoryFilter: ui.categoryFilter,
-				textFilter: ui.textFilter,
-				installmentsOnly: ui.installmentsOnly,
-				subscriptionsOnly: ui.subscriptionsOnly,
-				unreviewedOnly: ui.unreviewedOnly,
-				tierFilter: (ui.tierFilter as CommitmentTier | null) ?? null,
-			},
+			filters,
 			overlayMap,
 			accountMap,
 			fixedCategories,
@@ -184,7 +202,21 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 				!ui.uncategorizedOnly || (effectiveCategory(tx, overlayMap) ?? "") === "",
 		);
 		return sortForSheet(filtered, sort, overlayMap, accountMap);
-	}, [txRows, month, ui, overlayMap, accountMap, fixedCategories, sort]);
+	}, [
+		txRows,
+		month,
+		filters,
+		ui.uncategorizedOnly,
+		overlayMap,
+		accountMap,
+		fixedCategories,
+		sort,
+	]);
+
+	const hasSheetFilters = useMemo(
+		() => hasActiveFilters(filters) || ui.uncategorizedOnly,
+		[filters, ui.uncategorizedOnly],
+	);
 
 	// Reset selection when the month or the visible set changes size.
 	const rowCount = rows.length;
@@ -205,7 +237,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 		return {
 			entradas: inCents / 100,
 			saidas: outCents / 100,
-			net: (inCents - outCents) / 100,
+			net: sheetSignedTotal(rows),
 		};
 	}, [rows]);
 
@@ -403,6 +435,8 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 				setUi={setUi}
 				accounts={accounts}
 				count={rowCount}
+				hasActiveFilters={hasSheetFilters}
+				filteredTotal={totals.net}
 				onExportCsv={handleExportCsv}
 			/>
 
@@ -826,9 +860,12 @@ const tdStyle: React.CSSProperties = {
 interface SheetFilterState {
 	textFilter: string | null;
 	accountFilter: string | null;
+	ownerFilter: string | null;
+	categoryFilter: string | null;
 	uncategorizedOnly: boolean;
 	unreviewedOnly: boolean;
 	installmentsOnly: boolean;
+	subscriptionsOnly: boolean;
 	tierFilter: string | null;
 }
 
@@ -838,12 +875,16 @@ const SheetFilterBar = ({
 	setUi,
 	accounts,
 	count,
+	hasActiveFilters,
+	filteredTotal,
 	onExportCsv,
 }: {
 	ui: SheetFilterState;
 	setUi: (patch: Partial<SheetFilterState>) => void;
 	accounts: ReadonlyArray<{ id: string; label: string }>;
 	count: number;
+	hasActiveFilters: boolean;
+	filteredTotal: number;
 	onExportCsv: () => void;
 }) => {
 	const chip = (active: boolean): React.CSSProperties => ({
@@ -963,9 +1004,38 @@ const SheetFilterBar = ({
 					{COMMITMENT_TIER_LABELS[tier]}
 				</button>
 			))}
+			{hasActiveFilters && (
+				<div
+					className="mono"
+					aria-live="polite"
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 8,
+						border: "1px solid var(--border)",
+						borderRadius: "var(--radius-full)",
+						padding: "5px 12px",
+						background: "var(--card)",
+						fontSize: 12,
+						color: "var(--muted)",
+						marginLeft: "auto",
+					}}
+				>
+					<span>filtered sum</span>
+					<strong
+						style={{
+							color: filteredTotal >= 0 ? "var(--green)" : "var(--rose)",
+							fontWeight: 700,
+							fontVariantNumeric: "tabular-nums",
+						}}
+					>
+						{formatMoneyNumber(filteredTotal)}
+					</strong>
+				</div>
+			)}
 			<button
 				className="mono"
-				style={{ ...chip(false), marginLeft: "auto" }}
+				style={{ ...chip(false), marginLeft: hasActiveFilters ? 0 : "auto" }}
 				onClick={onExportCsv}
 				disabled={count === 0}
 			>
