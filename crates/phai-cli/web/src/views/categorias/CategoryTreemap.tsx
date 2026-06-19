@@ -12,6 +12,7 @@ import {
 	type TxView,
 } from "../../lib/derivations";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
+import { TierBadge, TIER_ICON } from "../../components/TierBadge";
 
 /**
  * Categorias as a drillable treemap. Level 1 tiles the month's expense
@@ -307,6 +308,7 @@ export const CategoryTreemap = ({
 							? categoryEmoji(drill.sub)
 							: categoryEmoji(drill.parent)
 					}
+					tierOf={(tx) => commitmentTier(tx, fixedCategories, overlayMap)}
 					onEditTx={onEditTx}
 				/>
 			)}
@@ -522,11 +524,13 @@ const TxBoard = ({
 	txs,
 	color,
 	emoji,
+	tierOf,
 	onEditTx,
 }: {
 	txs: ReadonlyArray<TxView>;
 	color: string;
 	emoji: string;
+	tierOf: (tx: TxView) => CommitmentTier;
 	onEditTx: (tx: TxView) => void;
 }) => {
 	const sorted = useMemo(
@@ -603,6 +607,7 @@ const TxBoard = ({
 							color={color}
 							emoji={emoji}
 							maxMag={maxMag}
+							tier={tierOf(byId.get(r.id)!)}
 							onEditTx={onEditTx}
 						/>
 					))}
@@ -640,6 +645,7 @@ const TxBoard = ({
 							tx={tx}
 							emoji={emoji}
 							maxMag={maxMag}
+							tier={tierOf(tx)}
 							onEditTx={onEditTx}
 						/>
 					))}
@@ -673,6 +679,7 @@ const TxTile = ({
 	color,
 	emoji,
 	maxMag,
+	tier,
 	onEditTx,
 }: {
 	tx: TxView;
@@ -680,6 +687,7 @@ const TxTile = ({
 	color: string;
 	emoji: string;
 	maxMag: number;
+	tier: CommitmentTier;
 	onEditTx: (tx: TxView) => void;
 }) => {
 	const mag = txMagnitude(tx);
@@ -729,6 +737,7 @@ const TxTile = ({
 						textShadow: "0 1px 2px rgba(0,0,0,0.25)",
 					}}
 				>
+					<span aria-hidden title={`tier: ${tier}`}>{TIER_ICON[tier]}</span>{" "}
 					{emoji} {label}
 				</span>
 			)}
@@ -757,11 +766,13 @@ const RestRow = ({
 	tx,
 	emoji,
 	maxMag,
+	tier,
 	onEditTx,
 }: {
 	tx: TxView;
 	emoji: string;
 	maxMag: number;
+	tier: CommitmentTier;
 	onEditTx: (tx: TxView) => void;
 }) => {
 	const mag = txMagnitude(tx);
@@ -817,6 +828,7 @@ const RestRow = ({
 					</span>
 				) : null}
 			</span>
+			<TierBadge tier={tier} compact />
 			<span className="mono" style={{ fontWeight: 600, whiteSpace: "nowrap" }}>
 				{formatMoneyNumber(mag)}
 			</span>

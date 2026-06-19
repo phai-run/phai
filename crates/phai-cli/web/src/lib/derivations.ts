@@ -698,11 +698,16 @@ const accumulateSpend = (
 	transactions: ReadonlyArray<TxView>,
 	month: string,
 	overlayMap: Map<string, ReviewOverlay>,
+	fixedCategories: ReadonlySet<string>,
 ): Map<string, Map<string, SubSpend>> => {
 	const spendBy = new Map<string, Map<string, SubSpend>>();
 	const history = new Set(previousMonths(month, 3));
 	for (const tx of transactions) {
 		if (!isNegative(tx.amount)) continue;
+		// Planning only simulates what can be cut. Locked spend (installments,
+		// fixed bills, or a manual lock) is committed — exclude it so the war
+		// plan shows only cancellable / variable rows (ADR-0030).
+		if (commitmentTier(tx, fixedCategories, overlayMap) === "locked") continue;
 		const inMonth = tx.month === month;
 		if (!inMonth && !history.has(tx.month)) continue;
 		const { parent, sub } = parseCategory(effectiveCategory(tx, overlayMap));
@@ -750,7 +755,13 @@ export const buildWarPlan = (
 	overlayMap: Map<string, ReviewOverlay>,
 	mode: "open" | "past" = "open",
 ): WarPlan => {
-	const spendBy = accumulateSpend(transactions, month, overlayMap);
+	const fixedCategories = fixedCategoriesFromForecasts(monthForecasts);
+	const spendBy = accumulateSpend(
+		transactions,
+		month,
+		overlayMap,
+		fixedCategories,
+	);
 	const { orcamentoBy, parcelasComprometidas } = accumulateEnvelopes(
 		monthForecasts,
 		month,
