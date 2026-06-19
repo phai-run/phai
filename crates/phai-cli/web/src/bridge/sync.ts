@@ -523,7 +523,7 @@ const useSeed = (
 	return { loading, error, reload };
 };
 
-const normalizeTransactions = (rows: TxRow[]) =>
+export const normalizeTransactions = (rows: TxRow[]) =>
 	rows.map((r) => ({
 		id: r.id,
 		accountId: r.accountId ?? "",
@@ -540,6 +540,7 @@ const normalizeTransactions = (rows: TxRow[]) =>
 		reviewed: bool(r.reviewed),
 		isInstallment: bool(r.isInstallment),
 		isSubscription: bool(r.isSubscription),
+		commitmentTier: r.commitmentTier ?? null,
 	}));
 
 const TRANSACTIONS_PAGE_SIZE = 1000;
