@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.18.1](https://github.com/phai-run/phai/compare/v5.18.0...v5.18.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **web:** hide commitment-tier badge on income rows ([#183](https://github.com/phai-run/phai/issues/183)) ([88bb6d9](https://github.com/phai-run/phai/commit/88bb6d95fb07726bfac4fb911e5e86345b0ff8a9))
+
 ## [5.18.0](https://github.com/phai-run/phai/compare/v5.17.0...v5.18.0) (2026-06-19)
 
 
