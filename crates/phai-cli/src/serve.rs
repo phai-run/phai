@@ -25,7 +25,7 @@ use phai_core::models::{
     TransactionRecord,
 };
 use phai_core::storage::{open_store, FinanceStore};
-use phai_core::{parse_installment_description, AppConfig, BackendKind};
+use phai_core::{parse_installment_description, AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,7 +34,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task::LocalSet;
 use uuid::Uuid;
 
@@ -1620,6 +1620,32 @@ struct DismissTemplateBody {
 struct BridgeState {
     tx: Arc<RwLock<mpsc::Sender<StoreRequest>>>,
     cache: ReadCache,
+    /// Pushes a freshly activated config to the store actor, which restarts
+    /// against the new backend without restarting the process.
+    config_tx: Arc<watch::Sender<AppConfig>>,
+    /// On-disk config location, for persisting the activated config + key.
+    paths: Arc<ConfigPaths>,
+    /// Current activation state, surfaced by `/api/status` and updated by
+    /// `/api/activate`.
+    activation: Arc<RwLock<ActivationStatus>>,
+}
+
+/// What `/api/status` reports to the web app so it can choose between the
+/// onboarding screen and the dashboard.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivationStatus {
+    activated: bool,
+    label: Option<String>,
+    project_id: Option<String>,
+    dataset_id: Option<String>,
+}
+
+/// Body of `POST /api/activate`: the pasted/attached invite plus its passphrase.
+#[derive(Deserialize)]
+struct ActivateRequest {
+    token: String,
+    passphrase: String,
 }
 
 type Store = State<BridgeState>;
@@ -1979,6 +2005,77 @@ async fn get_forecast_templates(
 /// batch would stall every other request. The UI flushes far fewer than this.
 const MAX_EVENT_WRITES: usize = 1000;
 
+/// `GET /api/status` — does this machine have an activated backend yet? The web
+/// app uses this to choose between the onboarding screen and the dashboard.
+async fn get_status(State(state): Store) -> impl IntoResponse {
+    let status = state.activation.read().await.clone();
+    Json(status)
+}
+
+/// `POST /api/activate` — decrypt an invite with its passphrase, persist the
+/// embedded BigQuery service account + config, and hot-swap the store actor so
+/// the running process serves the shared dataset without a restart.
+async fn post_activate(
+    State(state): Store,
+    Json(req): Json<ActivateRequest>,
+) -> axum::response::Response {
+    let invite = match phai_core::open_invite(req.token.trim(), &req.passphrase) {
+        Ok(invite) => invite,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    };
+
+    let config = match persist_activation(&state.paths, &invite) {
+        Ok(config) => config,
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+
+    // Point the store actor at the new backend and drop stale (empty/local) reads.
+    let _ = state.config_tx.send(config.clone());
+    state.cache.bust();
+
+    *state.activation.write().await = ActivationStatus {
+        activated: true,
+        label: Some(invite.label.clone()),
+        project_id: config.project_id.clone(),
+        dataset_id: config.dataset_id.clone(),
+    };
+
+    Json(serde_json::json!({ "ok": true, "label": invite.label })).into_response()
+}
+
+/// Persist a decrypted invite: write the embedded service-account key (0600),
+/// then save a BigQuery [`AppConfig`] pointing at it. Returns the saved config.
+fn persist_activation(paths: &ConfigPaths, invite: &phai_core::Invite) -> Result<AppConfig> {
+    paths.ensure()?;
+    let sa_path = paths.config_dir.join("service-account.json");
+    let sa_bytes =
+        serde_json::to_vec_pretty(&invite.service_account).context("serializar service account")?;
+    write_secret_file(&sa_path, &sa_bytes)?;
+
+    let mut config = AppConfig::load(paths).unwrap_or_default();
+    config.backend = BackendKind::Bigquery;
+    config.project_id = Some(invite.project_id.clone());
+    config.dataset_id = Some(invite.dataset_id.clone());
+    config.actor_id = invite.actor_id.clone();
+    config.service_account_path = Some(sa_path);
+    config.local_db_path = None;
+    config.save(paths)?;
+    Ok(config)
+}
+
+/// Write `bytes` to `path`, restricting it to the owner (0600) on Unix — used
+/// for the activated service-account key and config.
+fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    std::fs::write(path, bytes).with_context(|| format!("Falha ao gravar {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Falha ao definir permissões em {}", path.display()))?;
+    }
+    Ok(())
+}
+
 async fn post_events(State(state): Store, Json(body): Json<EventsBody>) -> impl IntoResponse {
     if body.writes.len() > MAX_EVENT_WRITES {
         return error_response(
@@ -2286,10 +2383,25 @@ fn parse_opt_date(value: Option<&str>) -> Result<Option<NaiveDate>, String> {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 pub async fn run(port: u16) -> Result<()> {
-    let (_, config) = load_config().await?;
+    let (paths, config) = load_config().await?;
+    let paths = Arc::new(paths);
     let config: AppConfig = config;
     let bridge_identity = Arc::new(bridge_identity_response(&config));
-    let actor_config = config.clone();
+
+    // A machine is "activated" once a config file has been written — either by
+    // the owner's CLI `auth setup` or by `/api/activate`. A fresh install has no
+    // config file yet, so the web app shows onboarding instead of the dashboard.
+    let activation = Arc::new(RwLock::new(ActivationStatus {
+        activated: paths.config_file.exists(),
+        label: None,
+        project_id: config.project_id.clone(),
+        dataset_id: config.dataset_id.clone(),
+    }));
+
+    // The store actor watches this for config changes. `/api/activate` sends a
+    // new (BigQuery) config here, and the actor restarts against it in place.
+    let (config_tx, config_rx) = watch::channel(config.clone());
+    let config_tx = Arc::new(config_tx);
 
     // Shared sender: the store actor replaces the inner sender on each restart
     // so handlers always reach the live actor. Initialised with a dummy channel
@@ -2304,28 +2416,39 @@ pub async fn run(port: u16) -> Result<()> {
     // If open_store / run_migrations fails (e.g. transient disk full), the
     // actor sleeps 1 s and retries with a fresh channel. Handlers that were
     // mid-flight with the old sender get "actor unavailable" and the client
-    // retries — the window is ~1 s.
+    // retries — the window is ~1 s. When `/api/activate` publishes a new config,
+    // the actor cancels the running store and reopens against the new backend.
     let actor_tx = store_tx.clone();
+    let mut config_rx = config_rx;
     local.spawn_local(async move {
         loop {
+            let actor_config = config_rx.borrow().clone();
             let (tx, rx) = mpsc::channel::<StoreRequest>(STORE_CHANNEL_CAP);
             *actor_tx.write().await = tx;
 
-            match async {
+            let run_store = async {
                 let store = open_store(&actor_config).await?;
                 run_migrations(store.as_ref(), &actor_config).await?;
                 store_actor_loop(store, actor_config.clone(), rx).await;
                 Ok::<_, anyhow::Error>(())
-            }
-            .await
-            {
-                Ok(()) => break, // clean shutdown
-                Err(e) => {
-                    eprintln!(
-                        "[phai serve] store actor caiu: {e:#}\n\
-                         [phai serve] reiniciando em 1s..."
-                    );
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+            };
+
+            tokio::select! {
+                result = run_store => match result {
+                    Ok(()) => break, // clean shutdown (all senders dropped)
+                    Err(e) => {
+                        eprintln!(
+                            "[phai serve] store actor caiu: {e:#}\n\
+                             [phai serve] reiniciando em 1s..."
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                },
+                changed = config_rx.changed() => {
+                    if changed.is_err() {
+                        break; // config sender dropped → process shutting down
+                    }
+                    // New config activated: fall through to reopen the store.
                 }
             }
         }
@@ -2334,6 +2457,9 @@ pub async fn run(port: u16) -> Result<()> {
     let app_state = BridgeState {
         tx: store_tx,
         cache: ReadCache::default(),
+        config_tx,
+        paths,
+        activation,
     };
 
     // All `/api` routes are guarded by the same-origin check so a malicious
@@ -2341,6 +2467,8 @@ pub async fn run(port: u16) -> Result<()> {
     // without an Origin header (curl, direct integration) are allowed.
     let api = Router::new()
         .route("/api", get(api_status))
+        .route("/api/status", get(get_status))
+        .route("/api/activate", post(post_activate))
         .route(
             "/api/identity",
             get({
@@ -2613,6 +2741,73 @@ fn is_origin_allowed(headers: &HeaderMap) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    // ── activation persistence ─────────────────────────────────────────────
+
+    fn temp_paths(dir: &std::path::Path) -> ConfigPaths {
+        ConfigPaths {
+            config_dir: dir.to_path_buf(),
+            data_dir: dir.to_path_buf(),
+            config_file: dir.join("config.toml"),
+            local_db_file: dir.join("phai.local.db"),
+        }
+    }
+
+    #[test]
+    fn persist_activation_writes_bigquery_config_and_locked_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = temp_paths(tmp.path());
+        let invite = phai_core::Invite::new(
+            "demo-proj",
+            "phai",
+            "esposa",
+            "rw",
+            serde_json::json!({"type": "service_account", "private_key": "FAKE"}),
+            "MacBook Esposa",
+        );
+
+        let config = persist_activation(&paths, &invite).unwrap();
+
+        assert!(matches!(config.backend, BackendKind::Bigquery));
+        assert_eq!(config.project_id.as_deref(), Some("demo-proj"));
+        assert_eq!(config.dataset_id.as_deref(), Some("phai"));
+        assert_eq!(config.actor_id, "esposa");
+        assert!(config.local_db_path.is_none());
+
+        let sa_path = tmp.path().join("service-account.json");
+        assert!(sa_path.exists(), "service account key must be written");
+        // Config is reloadable and stays BigQuery on the next boot.
+        let reloaded = AppConfig::load(&paths).unwrap();
+        assert!(matches!(reloaded.backend, BackendKind::Bigquery));
+        assert_eq!(reloaded.actor_id, "esposa");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&sa_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "key must be owner-only");
+        }
+    }
+
+    #[test]
+    fn activation_round_trips_from_a_sealed_invite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = temp_paths(tmp.path());
+        let invite = phai_core::Invite::new(
+            "p",
+            "phai",
+            "esposa",
+            "rw",
+            serde_json::json!({"type": "service_account"}),
+            "Device",
+        );
+        let token = phai_core::seal_invite(&invite, "s3nha").unwrap();
+
+        // The bridge opens the token exactly as `/api/activate` does.
+        let opened = phai_core::open_invite(&token, "s3nha").unwrap();
+        let config = persist_activation(&paths, &opened).unwrap();
+        assert_eq!(config.project_id.as_deref(), Some("p"));
+    }
 
     // ── bridge_identity_response ───────────────────────────────────────────
 

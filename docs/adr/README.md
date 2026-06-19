@@ -85,6 +85,7 @@ proposed → active → superseded
 | [0031](0031-persisted-planning-overlay.md) | Persisted planning overlay: plan as a first-class layer on the chart | proposed |
 | [0032](0032-per-transaction-tier-override.md) | Per-transaction commitment-tier override via a sparse table | proposed |
 | [0033](0033-recurring-human-review-replication.md) | Recurring human review replication includes category | active |
+| [0034](0034-self-contained-encrypted-invite.md) | Self-contained encrypted invite for multi-device activation | active |
 
 ---
 

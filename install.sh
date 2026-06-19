@@ -14,12 +14,16 @@ BINARY_NAME="phai"           # actual binary name inside the tarball and on disk
 DEFAULT_PREFIX="${HOME}/.local"
 PREFIX="${DEFAULT_PREFIX}"
 VERSION="latest"
+APP_MODE=0
+APP_PORT=4317                # high port → no admin prompt for the user agent
 
 # ─── Parse args ─────────────────────────────────────────────────────────────
 for arg in "$@"; do
   case "$arg" in
     --prefix=*) PREFIX="${arg#*=}" ;;
     --version=*) VERSION="${arg#*=}" ;;
+    --app) APP_MODE=1 ;;
+    --app-port=*) APP_PORT="${arg#*=}" ;;
     --help|-h)
       cat <<EOF
 phai installer
@@ -27,6 +31,10 @@ phai installer
 Options:
   --prefix=PATH    Install directory (default: \$HOME/.local). Binary goes to PREFIX/bin/${BINARY_NAME}.
   --version=TAG    Specific release tag (e.g. v0.5.1). Defaults to latest.
+  --app            Consumer install: also set up the Phai background app + launcher
+                   and open the activation screen in the browser (no terminal needed
+                   afterwards). Uses a user-level service on a high port (no sudo).
+  --app-port=PORT  Port for the --app service (default: ${APP_PORT}).
   -h, --help       Show this help.
 EOF
       exit 0
@@ -121,6 +129,29 @@ esac
 
 # ─── Done ───────────────────────────────────────────────────────────────────
 INSTALLED_VERSION="$("${INSTALL_DIR}/${BINARY_NAME}" --version 2>/dev/null || echo "?")"
+
+if [ "$APP_MODE" = "1" ]; then
+  # Consumer flow: install the background service + Phai.app launcher and open
+  # the activation screen. From here the user never needs the terminal again —
+  # they attach their key file and type the passphrase in the browser.
+  echo "→ Setting up the Phai app..."
+  "${INSTALL_DIR}/${BINARY_NAME}" serve install --port "${APP_PORT}"
+  # Give the launchd agent a moment to bind the port, then open the browser.
+  sleep 1
+  open "http://localhost:${APP_PORT}/" >/dev/null 2>&1 || true
+  cat <<EOF
+
+✓ Phai is installed: ${INSTALLED_VERSION}
+
+  The activation screen should now be open in your browser. If not, open:
+    http://localhost:${APP_PORT}/
+
+  Phai also lives in your ~/Applications folder — open it any time from there.
+
+EOF
+  exit 0
+fi
+
 cat <<EOF
 
 ✓ Installed: ${INSTALLED_VERSION}
