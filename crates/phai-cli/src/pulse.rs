@@ -15,8 +15,8 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, NaiveDate};
 use phai_core::models::{
-    AccountRecord, AccountSnapshotRecord, BudgetStatusRow, CardSummaryRow, CashflowRow,
-    ForecastRecord,
+    is_checking_account_type, AccountRecord, AccountSnapshotRecord, BudgetStatusRow,
+    CardSummaryRow, CashflowRow, ForecastRecord,
 };
 use phai_core::storage::FinanceStore;
 use rust_decimal::Decimal;
@@ -530,7 +530,7 @@ pub fn render_pulse(data: &PulseData, plan: &ClosingPlan, days: i64) -> String {
     let checking_ids: BTreeSet<String> = data
         .accounts
         .iter()
-        .filter(|a| a.account_type == "checking" && !a.account_id.is_empty())
+        .filter(|a| is_checking_account_type(&a.account_type) && !a.account_id.is_empty())
         .map(|a| a.account_id.clone())
         .collect();
     let balances: Vec<(&AccountSnapshotRecord, &AccountRecord)> = data
