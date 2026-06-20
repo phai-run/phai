@@ -32,6 +32,7 @@ const DETAIL_MODES = [
 	{ id: "planilha", label: "sheet" },
 	{ id: "categorias", label: "categories" },
 	{ id: "plano", label: "planning" },
+	{ id: "cartoes", label: "cards" },
 ] as const;
 
 // Seeding window: the 12 months of the current calendar year.
@@ -297,23 +298,7 @@ export const Dashboard = () => {
 				)}
 			</div>
 
-			{/* ── Cards (open/settled, cycle total, limit usage) ── */}
-			<div
-				style={{
-					maxWidth: "var(--container)",
-					margin: "0 auto",
-					padding: "0 clamp(24px,3vw,32px)",
-				}}
-			>
-				<CardsPanel
-					month={selected}
-					onViewCardTx={(accountId) =>
-						setUi({ accountFilter: accountId })
-					}
-				/>
-			</div>
-
-			{/* ── Month detail (categorias | planilha | plano de guerra) ── */}
+			{/* ── Month detail (sheet | categories | planning | cards) ── */}
 			<div
 				style={{
 					maxWidth: "var(--container)",
@@ -407,6 +392,15 @@ export const Dashboard = () => {
 							chartSeed.reload();
 						}}
 					/>
+				) : (ui.detailMode || "planilha") === "cartoes" ? (
+					<div style={{ marginTop: 12 }}>
+						<CardsPanel
+							month={selected}
+							onViewCardTx={(accountId) =>
+								setUi({ accountFilter: accountId, detailMode: "planilha" })
+							}
+						/>
+					</div>
 				) : (
 					<MonthDetail
 						month={selected}
