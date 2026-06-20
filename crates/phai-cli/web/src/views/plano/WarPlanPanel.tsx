@@ -168,14 +168,33 @@ export const WarPlanPanel = ({
 				>
 					<thead>
 						<tr className="mono">
-							<th style={thStyle}>category</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>budget</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>spent</th>
-							<th style={{ ...thStyle, width: "24%" }}>usage · goal</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>3-mo avg</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>projection</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>goal</th>
-							<th style={{ ...thStyle, textAlign: "right" }}>Δ month</th>
+							<Th hint="Categoria-pai e suas subcategorias ajustáveis. Gasto fixo (aluguel, parcelas) aparece como nota 🔒, não como linha.">
+								category
+							</Th>
+							<Th align hint="Orçamento mensal definido para a categoria (envelope).">
+								budget
+							</Th>
+							<Th align hint="Já gasto neste mês — só o que dá para cortar; o fixo fica fora.">
+								spent
+							</Th>
+							<Th
+								width="24%"
+								hint="Barra de uso (gasto vs orçamento) e o slider de meta por subcategoria — arraste para simular um corte; o gráfico anual atualiza na hora."
+							>
+								usage · goal
+							</Th>
+							<Th align hint="Média gasta nos 3 meses anteriores.">
+								3-mo avg
+							</Th>
+							<Th align hint="Quanto o mês deve custar: o maior entre o já gasto e o orçamento.">
+								projection
+							</Th>
+							<Th align hint="Meta mensal simulada (soma das metas das subcategorias).">
+								goal
+							</Th>
+							<Th align hint="Economia no mês com as metas vs. a projeção.">
+								Δ month
+							</Th>
 						</tr>
 					</thead>
 					<tbody>
@@ -601,6 +620,42 @@ const SubGoalRow = ({
 		</tr>
 	);
 };
+
+/** A war-plan column header with an info tooltip explaining the concept. */
+const Th = ({
+	children,
+	hint,
+	align = false,
+	width,
+}: {
+	children: React.ReactNode;
+	hint: string;
+	align?: boolean;
+	width?: string;
+}) => (
+	<th
+		style={{
+			...thStyle,
+			...(align ? { textAlign: "right" as const } : {}),
+			...(width ? { width } : {}),
+		}}
+	>
+		<span
+			title={hint}
+			style={{
+				display: "inline-flex",
+				alignItems: "center",
+				gap: 4,
+				cursor: "help",
+			}}
+		>
+			{children}
+			<span aria-hidden style={{ opacity: 0.5 }}>
+				ⓘ
+			</span>
+		</span>
+	</th>
+);
 
 const thStyle: React.CSSProperties = {
 	padding: "8px 12px",

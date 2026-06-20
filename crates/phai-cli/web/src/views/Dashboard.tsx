@@ -284,6 +284,19 @@ export const Dashboard = () => {
 					maxWidth: "var(--container)",
 					margin: "0 auto",
 					padding: "12px clamp(24px,3vw,32px) 0",
+					// In planning mode the chart sticks to the top (compact) so the
+					// annual balance line stays in view while you drag the sliders
+					// below and watch the simulation update live.
+					...((ui.detailMode || "planilha") === "plano"
+						? {
+								position: "sticky" as const,
+								top: 0,
+								zIndex: 40,
+								background: "var(--bg)",
+								borderBottom: "1px solid var(--border)",
+								paddingBottom: 8,
+							}
+						: {}),
 				}}
 			>
 				{loading ? (
@@ -298,6 +311,7 @@ export const Dashboard = () => {
 						selectedMonth={selected}
 						onSelectMonth={(m) => setUi({ selectedMonth: m })}
 						onDropForecast={moveForecast}
+						compact={(ui.detailMode || "planilha") === "plano"}
 						simulation={
 							(ui.detailMode || "planilha") === "plano" ? warSim : null
 						}

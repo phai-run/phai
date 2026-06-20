@@ -54,6 +54,7 @@ export const PlanningChart = ({
 	onSelectMonth,
 	onDropForecast,
 	simulation,
+	compact = false,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
@@ -65,6 +66,8 @@ export const PlanningChart = ({
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
 	/** Live war-plan goal overlay: shifts forecast outflows + future balances. */
 	simulation?: ChartSimulation | null;
+	/** Planning mode: shrink the chart so it can stay pinned above the sliders. */
+	compact?: boolean;
 }) => {
 	const model = useMemo(() => {
 		const base = buildModel(months);
@@ -123,6 +126,7 @@ export const PlanningChart = ({
 				selectedMonth={selectedMonth}
 				onSelectMonth={onSelectMonth}
 				onDropForecast={onDropForecast}
+				compact={compact}
 			/>
 		</div>
 	);
@@ -207,6 +211,7 @@ const FullChart = ({
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
+	compact,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	model: ChartModel;
@@ -217,6 +222,7 @@ const FullChart = ({
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
+	compact: boolean;
 }) => {
 	const [hover, setHover] = useState<number | null>(null);
 	// Per-segment hover in the expenses-bars mode: which (month, category) slice.
@@ -449,12 +455,16 @@ const FullChart = ({
 					viewBox={`0 0 ${W} ${H}`}
 					width="100%"
 					role="img"
+					preserveAspectRatio={compact ? "xMidYMid meet" : undefined}
 					aria-label={
 						mode === "caixa"
 							? "monthly cash chart — income and expense bars, balance line"
 							: "monthly expenses chart"
 					}
-					style={{ display: "block" }}
+					style={{
+						display: "block",
+						...(compact ? { maxHeight: "32vh", margin: "0 auto" } : {}),
+					}}
 				>
 					<defs>
 						{/* Forecast expense — lighter solid (no hatch) */}
@@ -1027,7 +1037,7 @@ const FullChart = ({
 			</div>
 
 			{/* Legend */}
-			<ChartLegend mode={mode} months={months} />
+			{!compact && <ChartLegend mode={mode} months={months} />}
 		</div>
 	);
 };
