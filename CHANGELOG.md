@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.22.0](https://github.com/phai-run/phai/compare/v5.21.0...v5.22.0) (2026-06-20)
+
+
+### Features
+
+* **web:** per-segment hover on the expenses chart ([#191](https://github.com/phai-run/phai/issues/191)) ([c43aadc](https://github.com/phai-run/phai/commit/c43aadc79db4fc3c2287397411d41ef6cab77963))
+
 ## [5.21.0](https://github.com/phai-run/phai/compare/v5.20.0...v5.21.0) (2026-06-20)
 
 
