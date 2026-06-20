@@ -428,11 +428,20 @@ const ParentRows = ({
 
 	return (
 		<>
-			<tr>
+			<tr style={{ background: "var(--card)" }}>
 				<td style={tdStyle}>
-					<span style={{ fontWeight: 500 }}>
+					<span style={{ fontWeight: 600 }}>
 						{categoryEmoji(row.parent)} {row.parent}
 					</span>
+					{row.lockedRealizado > 0 && (
+						<span
+							className="mono"
+							title="committed spend (rent, installments, fixed bills) — not simulatable here; it's in the annual chart"
+							style={{ marginLeft: 8, fontSize: 11, color: "var(--muted)" }}
+						>
+							🔒 {formatMoneyNumber(row.lockedRealizado)} fixo
+						</span>
+					)}
 				</td>
 				<td className="mono" style={{ ...tdStyle, textAlign: "right" }}>
 					{row.orcamento != null ? formatMoneyNumber(row.orcamento) : "—"}
@@ -536,7 +545,6 @@ const SubGoalRow = ({
 	const value = goal ?? sub.goalBase;
 	const floored = value < sub.realizado;
 	const saving = goal != null ? sub.goalBase - goal : 0;
-	const locked = sub.locked;
 
 	return (
 		<tr style={{ background: "var(--bg)" }}>
@@ -551,37 +559,21 @@ const SubGoalRow = ({
 				{sub.realizado > 0 ? formatMoneyNumber(sub.realizado) : "—"}
 			</td>
 			<td style={tdStyle}>
-				{locked ? (
-					<span
-						className="mono"
-						title="locked — committed spend, can't be simulated (ADR-0030)"
-						style={{
-							display: "inline-flex",
-							alignItems: "center",
-							gap: 5,
-							fontSize: 11,
-							color: "var(--muted)",
-						}}
-					>
-						🔒 fixo
-					</span>
-				) : (
-					<input
-						type="range"
-						min={0}
-						max={sliderMax(sub)}
-						step={10}
-						value={value}
-						aria-label={`monthly goal for ${sub.categoryId}`}
-						onChange={(e) => onGoal(sub.categoryId, Number(e.target.value))}
-						style={{ width: "100%", accentColor: floored ? "var(--amber)" : "var(--purple)" }}
-						title={
-							floored
-								? "below what is already spent — spent is the floor"
-								: "drag to set the monthly goal"
-						}
-					/>
-				)}
+				<input
+					type="range"
+					min={0}
+					max={sliderMax(sub)}
+					step={10}
+					value={value}
+					aria-label={`monthly goal for ${sub.categoryId}`}
+					onChange={(e) => onGoal(sub.categoryId, Number(e.target.value))}
+					style={{ width: "100%", accentColor: floored ? "var(--amber)" : "var(--purple)" }}
+					title={
+						floored
+							? "below what is already spent — spent is the floor"
+							: "drag to set the monthly goal"
+					}
+				/>
 			</td>
 			<td
 				className="mono"
@@ -596,18 +588,16 @@ const SubGoalRow = ({
 					...tdStyle,
 					textAlign: "right",
 					fontSize: 12,
-					color: locked
-						? "var(--muted)"
-						: floored
-							? "var(--amber)"
-							: goal != null
-								? "var(--purple)"
-								: "var(--muted)",
+					color: floored
+						? "var(--amber)"
+						: goal != null
+							? "var(--purple)"
+							: "var(--muted)",
 				}}
 			>
-				{locked ? "—" : formatMoneyNumber(value)}
+				{formatMoneyNumber(value)}
 			</td>
-			<DeltaCell active={!locked && goal != null} delta={locked ? 0 : saving} small />
+			<DeltaCell active={goal != null} delta={saving} small />
 		</tr>
 	);
 };

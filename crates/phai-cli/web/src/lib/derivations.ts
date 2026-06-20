@@ -576,11 +576,6 @@ export interface WarPlanSubRow {
 	 * parents (no transactions at all) open at the envelope itself.
 	 */
 	goalBase: number;
-	/**
-	 * The spend here is majority locked-tier (rent, installments, fixed bills):
-	 * shown read-only in planning, never simulated (ADR-0030).
-	 */
-	locked: boolean;
 }
 
 export interface WarPlanRow {
@@ -599,6 +594,13 @@ export interface WarPlanRow {
 	projecao: number;
 	/** Subcategory slider rows, heaviest (realized or average) first. */
 	subs: WarPlanSubRow[];
+	/**
+	 * This month's locked-tier spend in this parent (rent, installments, fixed
+	 * bills). Excluded from `realizado`/`subs`/`projecao` — planning only
+	 * simulates what can be cut — but surfaced as a "🔒 fixo" note so the
+	 * committed amount is acknowledged (ADR-0030).
+	 */
+	lockedRealizado: number;
 }
 
 export interface WarPlan {
@@ -665,40 +667,51 @@ interface SubSpend {
 	locked: number;
 }
 
-/** Slider rows for one parent; envelope-only parents get a pseudo-sub. */
+/**
+ * Slider rows for one parent — only the *simulatable* (non-locked) subs;
+ * envelope-only parents get a pseudo-sub. Majority-locked subs (rent,
+ * installments, fixed bills) are dropped from the list and their realized
+ * spend is summed into `lockedRealizado` for the "🔒 fixo" note (ADR-0030).
+ */
 const buildSubRows = (
 	parent: string,
 	subCells: ReadonlyMap<string, SubSpend> | undefined,
 	orcamento: number | null,
-): WarPlanSubRow[] => {
-	const subs: WarPlanSubRow[] = Array.from(subCells?.entries() ?? [])
-		.map(([subKey, cell]) => ({
+	allowEnvelopeSub: boolean,
+): { subs: WarPlanSubRow[]; lockedRealizado: number } => {
+	let lockedRealizado = 0;
+	const subs: WarPlanSubRow[] = [];
+	for (const [subKey, cell] of subCells?.entries() ?? []) {
+		const total = cell.realizado + cell.historico;
+		const isLocked = total > 0 && cell.locked >= total / 2;
+		if (isLocked) {
+			lockedRealizado += cell.realizado;
+			continue;
+		}
+		subs.push({
 			sub: subKey,
 			categoryId: subKey === "—" ? parent : `${parent}:${subKey}`,
 			realizado: cell.realizado,
 			media3m: cell.historico / 3,
 			goalBase: Math.max(cell.historico / 3, cell.realizado),
-			// Majority-locked spend → read-only in planning, never simulated.
-			locked:
-				cell.realizado + cell.historico > 0 &&
-				cell.locked >= (cell.realizado + cell.historico) / 2,
-		}))
-		.sort(
-			(a, b) =>
-				Math.max(b.realizado, b.media3m) - Math.max(a.realizado, a.media3m),
-		);
-	if (subs.length === 0 && orcamento != null) {
+		});
+	}
+	subs.sort(
+		(a, b) =>
+			Math.max(b.realizado, b.media3m) - Math.max(a.realizado, a.media3m),
+	);
+	if (subs.length === 0 && orcamento != null && allowEnvelopeSub) {
 		// Envelope-only parent: a pseudo-sub so the envelope itself is sliddable.
+		// Suppressed for fixed (locked) categories — their envelope is committed.
 		subs.push({
 			sub: "—",
 			categoryId: parent,
 			realizado: 0,
 			media3m: 0,
 			goalBase: orcamento,
-			locked: false,
 		});
 	}
-	return subs;
+	return { subs, lockedRealizado };
 };
 
 /**
@@ -783,12 +796,29 @@ export const buildWarPlan = (
 	const rows: WarPlanRow[] = [];
 	for (const parent of parents) {
 		const orcamento = orcamentoBy.get(parent) ?? null;
-		const subs = buildSubRows(parent, spendBy.get(parent), orcamento);
+		const { subs, lockedRealizado } = buildSubRows(
+			parent,
+			spendBy.get(parent),
+			orcamento,
+			!fixedCategories.has(parent),
+		);
+		// A parent with nothing simulatable (all spend locked, no envelope) drops
+		// out of the war plan entirely — only its "🔒 fixo" weight lives on in the
+		// annual chart, not here.
+		if (subs.length === 0) continue;
 		const realizado = subs.reduce((s, x) => s + x.realizado, 0);
 		const media3m = subs.reduce((s, x) => s + x.media3m, 0);
 		const projecao =
 			mode === "past" ? realizado : Math.max(realizado, orcamento ?? 0);
-		rows.push({ parent, realizado, orcamento, media3m, projecao, subs });
+		rows.push({
+			parent,
+			realizado,
+			orcamento,
+			media3m,
+			projecao,
+			subs,
+			lockedRealizado,
+		});
 	}
 	rows.sort(
 		(a, b) =>
