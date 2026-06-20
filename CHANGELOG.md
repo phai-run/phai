@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.27.0](https://github.com/phai-run/phai/compare/v5.26.0...v5.27.0) (2026-06-20)
+
+
+### Features
+
+* **serve:** config-driven friendly account labels ([#201](https://github.com/phai-run/phai/issues/201)) ([d553676](https://github.com/phai-run/phai/commit/d5536760ebee1927bbbdf1dce70a3905a6d702a3))
+
 ## [5.26.0](https://github.com/phai-run/phai/compare/v5.25.0...v5.26.0) (2026-06-20)
 
 
