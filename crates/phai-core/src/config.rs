@@ -23,6 +23,15 @@ pub struct AppConfig {
     pub service_account_path: Option<PathBuf>,
     pub local_db_path: Option<PathBuf>,
     pub pluggy_start_date: Option<String>,
+    /// Path to the Pluggy account/item config (`pluggy-config.json`). Set when
+    /// the user wants the web app's "sync" button to pull from Pluggy.
+    #[serde(default)]
+    pub pluggy_config_path: Option<PathBuf>,
+    /// Path to a dotenv file holding `PLUGGY_CLIENT_ID` / `PLUGGY_CLIENT_SECRET`,
+    /// loaded into the sync subprocess at request time so the creds stay off the
+    /// daemon plist.
+    #[serde(default)]
+    pub pluggy_env_path: Option<PathBuf>,
     /// LLM provider for enrichment (Phase 2+): "anthropic", "openai",
     /// "deepseek", "ollama". Defaults read at runtime — no logic in
     /// Phase 1.
@@ -44,6 +53,8 @@ impl Default for AppConfig {
             service_account_path: None,
             local_db_path: None,
             pluggy_start_date: None,
+            pluggy_config_path: None,
+            pluggy_env_path: None,
             llm_provider: None,
             llm_model: None,
         }
