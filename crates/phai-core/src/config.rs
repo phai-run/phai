@@ -32,6 +32,12 @@ pub struct AppConfig {
     /// daemon plist.
     #[serde(default)]
     pub pluggy_env_path: Option<PathBuf>,
+    /// Category ids (`parent` or `parent:sub`) that are committed/fixed (rent,
+    /// school, fixed bills): the web serves them with a `locked` tier so they
+    /// drop out of planning — for past *and* future transactions, without a
+    /// per-transaction override. An explicit override still wins (ADR-0030/0032).
+    #[serde(default)]
+    pub locked_categories: Vec<String>,
     /// LLM provider for enrichment (Phase 2+): "anthropic", "openai",
     /// "deepseek", "ollama". Defaults read at runtime — no logic in
     /// Phase 1.
@@ -55,6 +61,7 @@ impl Default for AppConfig {
             pluggy_start_date: None,
             pluggy_config_path: None,
             pluggy_env_path: None,
+            locked_categories: Vec::new(),
             llm_provider: None,
             llm_model: None,
         }
