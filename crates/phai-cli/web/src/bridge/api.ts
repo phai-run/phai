@@ -123,6 +123,10 @@ export interface ForecastRecord {
 	status: string;
 	kind?: string;
 	draggable?: boolean;
+	template_id?: string | null;
+	realized_transaction_id?: string | null;
+	realized_at?: string | null;
+	metadata_json?: Record<string, unknown>;
 }
 
 /** Forecast template domain record (snake_case). */
@@ -142,6 +146,7 @@ export interface NewForecast {
 	due_date?: string;
 	category_id?: string;
 	account_id?: string;
+	ui_role?: string;
 }
 
 /** A war-plan envelope write: update in place (forecast_id) or create (null). */
@@ -251,6 +256,15 @@ export const api = {
 	/** Re-date a forecast (drag-and-drop in Planejamento). */
 	moveForecast: (forecastId: string, dueDate: string): Promise<unknown> =>
 		postJson("/api/forecast/move", { forecastId, dueDate }),
+
+	deleteForecast: (forecastId: string): Promise<unknown> =>
+		postJson("/api/forecast/delete", { forecastId }),
+
+	settleForecast: (
+		forecastId: string,
+		transactionId: string,
+	): Promise<unknown> =>
+		postJson("/api/forecast/settle", { forecastId, transactionId }),
 
 	acceptForecastTemplate: (
 		templateId: string,

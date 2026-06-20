@@ -12,7 +12,7 @@ use phai_core::migrations::run_migrations;
 use phai_core::storage::{open_store, FinanceStore};
 use phai_core::{
     group_into_chains, AccountRecord, AppConfig, AuditEvent, ForecastRecord,
-    ForecastTemplateRecord, InstallmentChain,
+    ForecastTemplateRecord, InstallmentChain, TransactionRecord,
 };
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -599,7 +599,6 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 // Layer 2/3 — subscriptions + fixed bills
 // ---------------------------------------------------------------------------
 
-use phai_core::TransactionRecord;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::MathematicalOps;
 
@@ -1611,6 +1610,9 @@ pub async fn reconcile_forecasts(
             1 => {
                 let tx = matches[0];
                 let mut updated = forecast.clone();
+                preserve_predicted_amount(&mut updated);
+                stamp_realized_amount_metadata(&mut updated, tx, "auto");
+                updated.amount = tx.amount;
                 updated.status = "realizado".to_string();
                 updated.realized_transaction_id = Some(tx.transaction_id.clone());
                 updated.realized_at = Some(now);
@@ -1642,7 +1644,7 @@ pub async fn reconcile_forecasts(
 /// True when `tx_amount` matches `forecast_amount` in sign and magnitude
 /// (within [`RECONCILE_AMOUNT_TOLERANCE`]). Returns false when the forecast
 /// amount is zero — we never auto-realise a zero forecast.
-fn amount_matches(forecast_amount: Decimal, tx_amount: Decimal) -> bool {
+pub(crate) fn amount_matches(forecast_amount: Decimal, tx_amount: Decimal) -> bool {
     if forecast_amount.is_zero() {
         return false;
     }
@@ -1657,6 +1659,46 @@ fn amount_matches(forecast_amount: Decimal, tx_amount: Decimal) -> bool {
     }
     let rel = (actual - expected).abs() / expected;
     rel <= RECONCILE_AMOUNT_TOLERANCE
+}
+
+fn preserve_predicted_amount(record: &mut ForecastRecord) {
+    if !record.metadata_json.is_object() {
+        record.metadata_json = json!({});
+    }
+    if let Some(obj) = record.metadata_json.as_object_mut() {
+        obj.entry("predicted_amount".to_string())
+            .or_insert_with(|| json!(record.amount.to_string()));
+    }
+}
+
+fn stamp_realized_amount_metadata(
+    record: &mut ForecastRecord,
+    tx: &TransactionRecord,
+    source: &str,
+) {
+    preserve_predicted_amount(record);
+    if let Some(obj) = record.metadata_json.as_object_mut() {
+        let predicted = obj
+            .get("predicted_amount")
+            .and_then(|value| value.as_str())
+            .and_then(|value| Decimal::from_str(value).ok())
+            .unwrap_or(record.amount);
+        obj.insert("ui_role".to_string(), json!("planned_transaction"));
+        obj.insert("realized_amount".to_string(), json!(tx.amount.to_string()));
+        obj.insert(
+            "realized_transaction_date".to_string(),
+            json!(tx.transaction_date.to_string()),
+        );
+        obj.insert(
+            "realized_transaction_description".to_string(),
+            json!(tx.display_description()),
+        );
+        obj.insert("realization_source".to_string(), json!(source));
+        obj.insert(
+            "amount_variance".to_string(),
+            json!((tx.amount - predicted).to_string()),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2260,6 +2302,57 @@ mod tests {
         assert!(!amount_matches(forecast, Decimal::from(100)));
         // Zero forecast never matches (defensive).
         assert!(!amount_matches(Decimal::ZERO, Decimal::ZERO));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_forecasts_preserves_predicted_amount_and_updates_actual() {
+        let (_dir, config, store) = temp_store().await;
+        let today = Utc::now().date_naive();
+        let tx = installment_tx("tx-real", today, "Academia", "-95.00");
+        let forecast = ForecastRecord {
+            forecast_id: "f-manual".into(),
+            due_date: Some(today),
+            description: "Academia".into(),
+            amount: Decimal::from_str("-100.00").unwrap(),
+            category_id: Some("saude:academia".into()),
+            account_id: Some("card-1".into()),
+            status: "ativo".into(),
+            recurrence: None,
+            actor_id: "test-actor".into(),
+            idempotency_key: "forecast-test".into(),
+            metadata_json: json!({ "ui_role": "planned_transaction" }),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            template_id: None,
+            realized_transaction_id: None,
+            realized_at: None,
+        };
+        store.upsert_transactions(&[tx]).await.unwrap();
+        store.upsert_forecasts(&[forecast]).await.unwrap();
+
+        let report = reconcile_forecasts(store.as_ref(), &config, 7)
+            .await
+            .unwrap();
+        assert_eq!(report.matched, 1);
+
+        let stored = store.get_forecast("f-manual").await.unwrap().unwrap();
+        assert_eq!(stored.status, "realizado");
+        assert_eq!(stored.amount, Decimal::from_str("-95.00").unwrap());
+        assert_eq!(stored.realized_transaction_id.as_deref(), Some("tx-real"));
+        assert_eq!(
+            stored
+                .metadata_json
+                .get("predicted_amount")
+                .and_then(|value| value.as_str()),
+            Some("-100.00")
+        );
+        assert_eq!(
+            stored
+                .metadata_json
+                .get("realized_amount")
+                .and_then(|value| value.as_str()),
+            Some("-95.00")
+        );
     }
 
     #[test]
