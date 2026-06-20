@@ -348,7 +348,7 @@ async fn store_actor_loop(
     while let Some(req) = rx.recv().await {
         // Two-stage dispatch: read-only requests first; anything it hands
         // back is a write and goes through the mutation handler.
-        if let Some(req) = try_handle_store_query(store.as_ref(), req).await {
+        if let Some(req) = try_handle_store_query(store.as_ref(), &config, req).await {
             handle_store_mutation(store.as_ref(), &config, req).await;
         }
     }
@@ -357,6 +357,7 @@ async fn store_actor_loop(
 /// Serve the read-only store requests; hands back writes untouched.
 async fn try_handle_store_query(
     store: &dyn FinanceStore,
+    config: &AppConfig,
     req: StoreRequest,
 ) -> Option<StoreRequest> {
     match req {
@@ -391,7 +392,7 @@ async fn try_handle_store_query(
             let _ = resp.send(result);
         }
         StoreRequest::TransactionsWindow { params, resp } => {
-            let result = load_transactions_window(store, params).await;
+            let result = load_transactions_window(store, params, &config.locked_categories).await;
             let _ = resp.send(result);
         }
         StoreRequest::ListForecastsEnriched {
@@ -516,6 +517,17 @@ struct TransactionsWindowResult {
     has_more: bool,
 }
 
+/// Whether a transaction's category is on the configured fixed/locked list.
+/// A list entry matches the exact `parent:sub` id or the `parent` (locking the
+/// whole parent category).
+fn category_is_locked(category_id: Option<&str>, locked: &[String]) -> bool {
+    let Some(cat) = category_id else {
+        return false;
+    };
+    let parent = cat.split(':').next().unwrap_or(cat);
+    locked.iter().any(|e| e == cat || e == parent)
+}
+
 /// Load transactions whose cash month is within
 /// `[now - months_back, now + months_ahead]`, optionally restricted to rows
 /// still pending review. Returns a page of up to `limit` rows starting at
@@ -523,6 +535,7 @@ struct TransactionsWindowResult {
 async fn load_transactions_window(
     store: &dyn FinanceStore,
     params: TransactionsWindowParams,
+    locked_categories: &[String],
 ) -> Result<TransactionsWindowResult> {
     let today = Utc::now().date_naive();
     let cash_from = first_of_month(shift_months(today, -(params.months_back as i64)));
@@ -568,7 +581,13 @@ async fn load_transactions_window(
         })
         .collect();
     for row in &mut tx_rows {
-        row.commitment_tier = tier_overrides.get(&row.id).cloned();
+        // An explicit per-transaction override wins; otherwise a category on the
+        // configured fixed list is served as `locked` so it drops out of planning
+        // for past and future rows alike (ADR-0030/0032).
+        row.commitment_tier = tier_overrides.get(&row.id).cloned().or_else(|| {
+            category_is_locked(row.category_id.as_deref(), locked_categories)
+                .then(|| "locked".to_string())
+        });
     }
     let total = tx_rows.len();
     let offset = params.offset.min(total);
@@ -2857,6 +2876,20 @@ mod tests {
     }
 
     #[test]
+    fn category_is_locked_matches_exact_sub_or_whole_parent() {
+        let locked = vec!["moradia:aluguel".to_string(), "educacao".to_string()];
+        // exact sub match
+        assert!(category_is_locked(Some("moradia:aluguel"), &locked));
+        // whole-parent match locks every sub
+        assert!(category_is_locked(Some("educacao:escola"), &locked));
+        assert!(category_is_locked(Some("educacao"), &locked));
+        // siblings of a sub-only entry stay unlocked
+        assert!(!category_is_locked(Some("moradia:servicos"), &locked));
+        assert!(!category_is_locked(Some("alimentacao:mercado"), &locked));
+        assert!(!category_is_locked(None, &locked));
+    }
+
+    #[test]
     fn parse_dotenv_reads_keys_skips_comments_and_strips_quotes() {
         let body = "# pluggy creds\nPLUGGY_CLIENT_ID=abc123\n\nPLUGGY_CLIENT_SECRET=\"s3cr3t\"\n  TRAILING = 'x' \n";
         let parsed = parse_dotenv(body);
@@ -3626,6 +3659,7 @@ mod tests {
                 limit: 50,
                 offset: 0,
             },
+            &[],
         )
         .await
         .unwrap();
@@ -3671,6 +3705,7 @@ mod tests {
                 limit: 50,
                 offset: 0,
             },
+            &[],
         )
         .await
         .unwrap();
@@ -3723,6 +3758,7 @@ mod tests {
                 limit: 50,
                 offset: 0,
             },
+            &[],
         )
         .await
         .unwrap();
