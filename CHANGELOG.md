@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.25.0](https://github.com/phai-run/phai/compare/v5.24.0...v5.25.0) (2026-06-20)
+
+
+### Features
+
+* **serve:** config-driven locked categories ([#197](https://github.com/phai-run/phai/issues/197)) ([184dc22](https://github.com/phai-run/phai/commit/184dc223578417a0a5d52feb03eada87f66a27ef))
+
 ## [5.24.0](https://github.com/phai-run/phai/compare/v5.23.0...v5.24.0) (2026-06-20)
 
 
