@@ -304,6 +304,37 @@ const FullChart = ({
 		});
 	}, [months, model, committedMag, categorySeries, isExpensesMode]);
 
+	// Structured per-month detail for the floating hover balloon: the column
+	// total plus the category breakdown (with each category's bar colour), so
+	// hovering the chart shows "how much, and on what".
+	const hoverData = useMemo(
+		() =>
+			months.map((m, i) => {
+				const catMap = categorySeries.byMonth.get(m.month);
+				const cats = catMap
+					? Array.from(catMap.entries())
+							.map(([name, mag]) => ({
+								name,
+								mag,
+								color: catColor(
+									categorySeries.categories.indexOf(name),
+									categorySeries.categories.length,
+								),
+							}))
+							.sort((a, b) => b.mag - a.mag)
+					: [];
+				return {
+					label: m.label,
+					isFuture: m.isFuture,
+					income: model.realIns[i] + model.fcIns[i],
+					expenses: model.realOuts[i] + model.fcOuts[i],
+					balance: model.balances[i],
+					cats,
+				};
+			}),
+		[months, model, categorySeries],
+	);
+
 	// Year totals
 	const yearIn = model.realIns.reduce((s, v, i) => s + v + model.fcIns[i], 0);
 	const yearOut = model.realOuts.reduce(
@@ -758,6 +789,119 @@ const FullChart = ({
 					onHover={setHover}
 					onDropForecast={onDropForecast}
 				/>
+
+				{/* Floating hover balloon: value + which expense, on top of the chart. */}
+				{hover != null && hoverData[hover] && (
+					<div
+						style={{
+							position: "absolute",
+							top: 6,
+							left: `${((hover + 0.5) / months.length) * 100}%`,
+							transform:
+								hover < months.length / 2
+									? "translateX(10px)"
+									: "translateX(calc(-100% - 10px))",
+							pointerEvents: "none",
+							zIndex: 30,
+							background: "var(--card)",
+							border: "1px solid var(--border)",
+							borderRadius: "var(--radius-md)",
+							boxShadow: "0 8px 28px rgba(0,0,0,0.16)",
+							padding: "10px 12px",
+							minWidth: 190,
+							maxWidth: 280,
+						}}
+					>
+						<div
+							className="mono"
+							style={{ fontWeight: 700, marginBottom: 6, fontSize: 12 }}
+						>
+							{hoverData[hover].label}
+						</div>
+						{isExpensesMode ? (
+							<div style={{ display: "grid", gap: 4 }}>
+								<div
+									className="mono"
+									style={{
+										display: "flex",
+										justifyContent: "space-between",
+										fontSize: 12,
+										color: "var(--rose)",
+										fontWeight: 600,
+									}}
+								>
+									<span>despesas</span>
+									<span>{formatMoneyNumber(hoverData[hover].expenses)}</span>
+								</div>
+								{hoverData[hover].cats.slice(0, 8).map((c) => {
+									const pct =
+										hoverData[hover].expenses > 0
+											? Math.round((c.mag / hoverData[hover].expenses) * 100)
+											: 0;
+									return (
+										<div
+											key={c.name}
+											className="mono"
+											style={{
+												display: "flex",
+												alignItems: "center",
+												gap: 6,
+												fontSize: 11,
+												color: "var(--muted)",
+											}}
+										>
+											<span
+												aria-hidden
+												style={{
+													width: 8,
+													height: 8,
+													borderRadius: 2,
+													background: c.color,
+													flexShrink: 0,
+												}}
+											/>
+											<span
+												style={{
+													flex: 1,
+													overflow: "hidden",
+													textOverflow: "ellipsis",
+													whiteSpace: "nowrap",
+												}}
+											>
+												{c.name}
+											</span>
+											<span style={{ color: "var(--text)" }}>
+												{formatMoneyNumber(c.mag)}
+											</span>
+											<span style={{ width: 34, textAlign: "right" }}>{pct}%</span>
+										</div>
+									);
+								})}
+							</div>
+						) : (
+							<div style={{ display: "grid", gap: 4 }}>
+								<HoverLine
+									label="entradas"
+									value={hoverData[hover].income}
+									color="var(--green)"
+								/>
+								<HoverLine
+									label="saídas"
+									value={hoverData[hover].expenses}
+									color="var(--rose)"
+								/>
+								<HoverLine
+									label={
+										hoverData[hover].isFuture ? "saldo projetado" : "saldo"
+									}
+									value={hoverData[hover].balance}
+									color="var(--text)"
+									strong
+								/>
+							</div>
+						)}
+					</div>
+				)}
 			</div>
 
 			{/* Legend */}
@@ -765,6 +909,34 @@ const FullChart = ({
 		</div>
 	);
 };
+
+/** One labelled money line in the cash-mode hover balloon. */
+const HoverLine = ({
+	label,
+	value,
+	color,
+	strong = false,
+}: {
+	label: string;
+	value: number;
+	color: string;
+	strong?: boolean;
+}) => (
+	<div
+		className="mono"
+		style={{
+			display: "flex",
+			justifyContent: "space-between",
+			gap: 16,
+			fontSize: 12,
+			color,
+			fontWeight: strong ? 700 : 400,
+		}}
+	>
+		<span>{label}</span>
+		<span>{formatMoneyNumber(value)}</span>
+	</div>
+);
 
 // ── Shared interaction overlay ─────────────────────────────────────────────
 
