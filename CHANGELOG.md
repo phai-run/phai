@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.27.1](https://github.com/phai-run/phai/compare/v5.27.0...v5.27.1) (2026-06-20)
+
+
+### Bug Fixes
+
+* **storage:** count bank-typed accounts in the cash balance ([#204](https://github.com/phai-run/phai/issues/204)) ([12e9feb](https://github.com/phai-run/phai/commit/12e9feb68af94953ebc589cf49575465f23ce329))
+
 ## [5.27.0](https://github.com/phai-run/phai/compare/v5.26.0...v5.27.0) (2026-06-20)
 
 
