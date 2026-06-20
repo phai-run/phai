@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.21.0](https://github.com/phai-run/phai/compare/v5.20.0...v5.21.0) (2026-06-20)
+
+
+### Features
+
+* **web:** floating hover balloon on the cash chart ([#189](https://github.com/phai-run/phai/issues/189)) ([013ce5d](https://github.com/phai-run/phai/commit/013ce5d8731829ccdf36a913a3cc8d566c171fae))
+
 ## [5.20.0](https://github.com/phai-run/phai/compare/v5.19.0...v5.20.0) (2026-06-20)
 
 
