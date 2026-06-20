@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.19.0](https://github.com/phai-run/phai/compare/v5.18.1...v5.19.0) (2026-06-20)
+
+
+### Features
+
+* **web:** show locked categories read-only in planning ([#185](https://github.com/phai-run/phai/issues/185)) ([2b0b1d1](https://github.com/phai-run/phai/commit/2b0b1d147463514227eb32f762911151365de040))
+
 ## [5.18.1](https://github.com/phai-run/phai/compare/v5.18.0...v5.18.1) (2026-06-19)
 
 
