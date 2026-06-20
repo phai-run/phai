@@ -388,7 +388,7 @@ async fn try_handle_store_query(
             let _ = resp.send(result);
         }
         StoreRequest::AccountsWithBalance { resp } => {
-            let result = build_accounts_api(store).await;
+            let result = build_accounts_api(store, &config.account_labels).await;
             let _ = resp.send(result);
         }
         StoreRequest::Cards { month, resp } => {
@@ -1514,7 +1514,10 @@ struct AccountsResponse {
 
 /// Accounts joined with their latest balance snapshot (per-account checking
 /// balance), so the UI can show each account, not just the consolidated total.
-async fn build_accounts_api(store: &dyn FinanceStore) -> Result<Vec<AccountRow>> {
+async fn build_accounts_api(
+    store: &dyn FinanceStore,
+    account_labels: &std::collections::HashMap<String, String>,
+) -> Result<Vec<AccountRow>> {
     let accounts = store.get_accounts().await.context("get_accounts")?;
     let balances: std::collections::HashMap<String, Decimal> = store
         .latest_account_snapshots()
@@ -1525,7 +1528,15 @@ async fn build_accounts_api(store: &dyn FinanceStore) -> Result<Vec<AccountRow>>
         .collect();
     Ok(accounts
         .iter()
-        .map(|a| AccountRow::from_record(a, balances.get(&a.account_id)))
+        .map(|a| {
+            let mut row = AccountRow::from_record(a, balances.get(&a.account_id));
+            // A configured friendly name overrides Pluggy's raw (often duplicate)
+            // bank label so household accounts are distinguishable.
+            if let Some(custom) = account_labels.get(&a.account_id) {
+                row.label = custom.clone();
+            }
+            row
+        })
         .collect())
 }
 
@@ -3202,13 +3213,20 @@ mod tests {
             .await
             .unwrap();
 
-        let rows = build_accounts_api(store.as_ref()).await.unwrap();
+        // A configured label override wins over Pluggy's raw label.
+        let labels = std::collections::HashMap::from([(
+            "acc-checking".to_string(),
+            "Nubank Felipe".to_string(),
+        )]);
+        let rows = build_accounts_api(store.as_ref(), &labels).await.unwrap();
         let checking = rows.iter().find(|r| r.id == "acc-checking").unwrap();
         assert_eq!(checking.account_type, "checking");
         assert_eq!(checking.balance.as_deref(), Some("2947.42"));
+        assert_eq!(checking.label, "Nubank Felipe");
         let card = rows.iter().find(|r| r.id == "acc-card").unwrap();
         assert_eq!(card.account_type, "credit");
         assert_eq!(card.balance.as_deref(), Some("7000.00"));
+        assert_eq!(card.label, "Card"); // no override → raw label
     }
 
     fn sample_forecast(forecast_id: &str, template_id: Option<&str>) -> ForecastRecord {
