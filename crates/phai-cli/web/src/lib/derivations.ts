@@ -1069,3 +1069,53 @@ export const expensesByMonthCategory = (
 
 	return { categories, byMonth };
 };
+
+/** A subcategory slice of a parent's monthly spend, for the chart hover. */
+export interface SubSlice {
+	sub: string;
+	mag: number;
+}
+
+/**
+ * Per month → parent category → its subcategories (sorted by magnitude desc),
+ * for the chart's per-segment hover ("hover a colour → that category + its top
+ * subcategories"). The `outros` bucket of [`expensesByMonthCategory`] is not
+ * modelled here — only real parents have subcategory detail.
+ */
+export const subExpensesByMonthCategory = (
+	transactions: ReadonlyArray<TxView>,
+	overlayMap: Map<string, ReviewOverlay>,
+): Map<string, Map<string, SubSlice[]>> => {
+	// month -> parent -> sub -> mag
+	const raw = new Map<string, Map<string, Map<string, number>>>();
+	for (const tx of transactions) {
+		if (!isNegative(tx.amount)) continue;
+		const { parent, sub } = parseCategory(effectiveCategory(tx, overlayMap));
+		const subKey = sub ?? "(geral)";
+		const mag = Math.abs(toCents(tx.amount)) / 100;
+		let byParent = raw.get(tx.month);
+		if (!byParent) {
+			byParent = new Map();
+			raw.set(tx.month, byParent);
+		}
+		let bySub = byParent.get(parent);
+		if (!bySub) {
+			bySub = new Map();
+			byParent.set(parent, bySub);
+		}
+		bySub.set(subKey, (bySub.get(subKey) ?? 0) + mag);
+	}
+
+	const out = new Map<string, Map<string, SubSlice[]>>();
+	for (const [month, byParent] of raw) {
+		const parentMap = new Map<string, SubSlice[]>();
+		for (const [parent, bySub] of byParent) {
+			const slices = Array.from(bySub.entries())
+				.map(([sub, mag]) => ({ sub, mag }))
+				.sort((a, b) => b.mag - a.mag);
+			parentMap.set(parent, slices);
+		}
+		out.set(month, parentMap);
+	}
+	return out;
+};

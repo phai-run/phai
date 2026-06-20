@@ -11,6 +11,7 @@ import {
 import {
 	buildOverlayMap,
 	expensesByMonthCategory,
+	subExpensesByMonthCategory,
 	type TxView as TxViewD,
 } from "../lib/derivations";
 import {
@@ -98,6 +99,12 @@ export const Dashboard = () => {
 	// the already-seeded transactions (D3).
 	const categorySeries = useMemo(
 		() => expensesByMonthCategory(txRows, buildOverlayMap(rOverlay as never)),
+		[txRows, rOverlay],
+	);
+	// Subcategory detail per month/parent for the chart's per-segment hover.
+	const subSeries = useMemo(
+		() =>
+			subExpensesByMonthCategory(txRows, buildOverlayMap(rOverlay as never)),
 		[txRows, rOverlay],
 	);
 
@@ -287,6 +294,7 @@ export const Dashboard = () => {
 						months={months}
 						forecastsByMonth={forecastsByMonth}
 						categorySeries={categorySeries}
+						subSeries={subSeries}
 						selectedMonth={selected}
 						onSelectMonth={(m) => setUi({ selectedMonth: m })}
 						onDropForecast={moveForecast}

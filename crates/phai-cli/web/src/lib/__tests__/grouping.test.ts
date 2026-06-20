@@ -12,6 +12,7 @@ import {
 	computeMonthSums,
 	effectiveCategory,
 	expensesByMonthCategory,
+	subExpensesByMonthCategory,
 	filterTransactions,
 	groupByCategory,
 	groupHierarchical,
@@ -416,6 +417,52 @@ describe("computeMonthSums", () => {
 		// net = entradas - saidas
 		// entradas - saidas = net
 		expect(Math.abs(sums.entradas - sums.saidas - net)).toBeLessThan(0.01);
+	});
+});
+
+// ── subExpensesByMonthCategory (chart per-segment hover) ────────────────────
+
+describe("subExpensesByMonthCategory", () => {
+	const mk = (id: string, categoryId: string, amount: string): TxView => ({
+		id,
+		accountId: "acc-1",
+		postedAt: "2026-06-01",
+		amount,
+		rawDescription: "x",
+		description: null,
+		merchantName: null,
+		purpose: null,
+		categoryId,
+		month: "2026-06",
+		paymentStatus: "posted",
+		reviewed: 1,
+		isInstallment: 0,
+		isSubscription: 0,
+	});
+
+	it("breaks a parent down into subcategories sorted by magnitude desc", () => {
+		const rows = [
+			mk("a", "alimentacao:restaurantes", "-800.00"),
+			mk("b", "alimentacao:mercado", "-250.00"),
+			mk("c", "alimentacao:restaurantes", "-100.00"), // merges into restaurantes
+			mk("d", "alimentacao:delivery", "-40.00"),
+			mk("e", "moradia:aluguel", "-1000.00"),
+			mk("f", "receitas:salario", "5000.00"), // income ignored
+		];
+		const out = subExpensesByMonthCategory(rows, new Map());
+		const alim = out.get("2026-06")?.get("alimentacao");
+		expect(alim?.map((s) => s.sub)).toEqual([
+			"restaurantes",
+			"mercado",
+			"delivery",
+		]);
+		expect(alim?.[0].mag).toBe(900); // 800 + 100 merged
+		// other parents tracked independently; income excluded.
+		expect(out.get("2026-06")?.get("moradia")?.[0]).toEqual({
+			sub: "aluguel",
+			mag: 1000,
+		});
+		expect(out.get("2026-06")?.has("receitas")).toBe(false);
 	});
 });
 
