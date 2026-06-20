@@ -1639,6 +1639,8 @@ struct ActivationStatus {
     label: Option<String>,
     project_id: Option<String>,
     dataset_id: Option<String>,
+    /// Whether the Pluggy "sync" button is available (a pluggy config is set).
+    sync_available: bool,
 }
 
 /// Body of `POST /api/activate`: the pasted/attached invite plus its passphrase.
@@ -2038,6 +2040,7 @@ async fn post_activate(
         label: Some(invite.label.clone()),
         project_id: config.project_id.clone(),
         dataset_id: config.dataset_id.clone(),
+        sync_available: config.pluggy_config_path.is_some(),
     };
 
     Json(serde_json::json!({ "ok": true, "label": invite.label })).into_response()
@@ -2074,6 +2077,104 @@ fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("Falha ao definir permissões em {}", path.display()))?;
     }
     Ok(())
+}
+
+/// `POST /api/sync` — pull fresh transactions from Pluggy by running the same
+/// `phai sync pluggy --json-summary` the CLI/cron uses, as a subprocess. Pluggy
+/// credentials are loaded from the configured dotenv at request time (kept off
+/// the daemon plist); the JSON summary (new-transaction count + list) is
+/// returned to the web app.
+async fn post_sync(State(state): Store) -> axum::response::Response {
+    let config = state.config_tx.borrow().clone();
+    let Some(pluggy_config) = config.pluggy_config_path.clone() else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "sync Pluggy não configurado (defina pluggy_config_path)",
+        );
+    };
+
+    let mut creds: Vec<(String, String)> = Vec::new();
+    if let Some(env_path) = &config.pluggy_env_path {
+        match std::fs::read_to_string(env_path) {
+            Ok(body) => creds = parse_dotenv(&body),
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("falha ao ler pluggy env: {e}"),
+                )
+            }
+        }
+    }
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| "phai".into());
+    let output = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("sync")
+            .arg("pluggy")
+            .arg("--json-summary")
+            .arg("--pluggy-config")
+            .arg(&pluggy_config)
+            // Never let the long-running sync trigger a self-update mid-request.
+            .env("PHAI_NO_AUTO_UPDATE", "1");
+        for (k, v) in creds {
+            cmd.env(k, v);
+        }
+        cmd.output()
+    })
+    .await;
+
+    let output = match output {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("falha ao executar sync: {e}"),
+            )
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("sync interrompido: {e}"),
+            )
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = stderr.lines().rev().take(4).collect::<Vec<_>>();
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "sync falhou: {}",
+                tail.into_iter().rev().collect::<Vec<_>>().join(" ")
+            ),
+        );
+    }
+
+    // Fresh data landed in the store — drop the read cache so the next reads
+    // (and the web reseed) reflect it.
+    state.cache.bust();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        Ok(json) => Json(json).into_response(),
+        Err(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+    }
+}
+
+/// Parse a minimal dotenv (`KEY=VALUE` lines, `#` comments, optional quotes).
+fn parse_dotenv(body: &str) -> Vec<(String, String)> {
+    body.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (k, v) = line.split_once('=')?;
+            let v = v.trim().trim_matches('"').trim_matches('\'');
+            Some((k.trim().to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 async fn post_events(State(state): Store, Json(body): Json<EventsBody>) -> impl IntoResponse {
@@ -2396,6 +2497,7 @@ pub async fn run(port: u16) -> Result<()> {
         label: None,
         project_id: config.project_id.clone(),
         dataset_id: config.dataset_id.clone(),
+        sync_available: config.pluggy_config_path.is_some(),
     }));
 
     // The store actor watches this for config changes. `/api/activate` sends a
@@ -2469,6 +2571,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api", get(api_status))
         .route("/api/status", get(get_status))
         .route("/api/activate", post(post_activate))
+        .route("/api/sync", post(post_sync))
         .route(
             "/api/identity",
             get({
@@ -2751,6 +2854,20 @@ mod tests {
             config_file: dir.join("config.toml"),
             local_db_file: dir.join("phai.local.db"),
         }
+    }
+
+    #[test]
+    fn parse_dotenv_reads_keys_skips_comments_and_strips_quotes() {
+        let body = "# pluggy creds\nPLUGGY_CLIENT_ID=abc123\n\nPLUGGY_CLIENT_SECRET=\"s3cr3t\"\n  TRAILING = 'x' \n";
+        let parsed = parse_dotenv(body);
+        assert_eq!(
+            parsed,
+            vec![
+                ("PLUGGY_CLIENT_ID".to_string(), "abc123".to_string()),
+                ("PLUGGY_CLIENT_SECRET".to_string(), "s3cr3t".to_string()),
+                ("TRAILING".to_string(), "x".to_string()),
+            ]
+        );
     }
 
     #[test]

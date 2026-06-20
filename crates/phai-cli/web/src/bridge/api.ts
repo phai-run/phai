@@ -269,6 +269,21 @@ export const api = {
 		fetch("/api/status").then((r) => json<ActivationStatus>(r)),
 
 	/**
+	 * Pull fresh transactions from Pluggy (runs the CLI sync under the hood).
+	 * Long-running; surfaces the bridge's error message on failure.
+	 */
+	sync: async (): Promise<SyncResult> => {
+		const res = await fetch("/api/sync", { method: "POST" });
+		if (!res.ok) {
+			const detail = (await res.json().catch(() => null)) as {
+				error?: string;
+			} | null;
+			throw new Error(detail?.error ?? `${res.status} ${res.statusText}`);
+		}
+		return (await res.json()) as SyncResult;
+	},
+
+	/**
 	 * Activate this machine from an encrypted invite. Surfaces the bridge's
 	 * own error message (e.g. wrong passphrase) so onboarding can show it.
 	 */
@@ -296,6 +311,17 @@ export interface ActivationStatus {
 	label: string | null;
 	projectId: string | null;
 	datasetId: string | null;
+	syncAvailable: boolean;
+}
+
+export interface SyncResult {
+	new_transactions_count?: number;
+	new_transactions?: Array<{
+		description?: string | null;
+		amount?: string;
+		posted_at?: string | null;
+		account?: string | null;
+	}>;
 }
 
 export interface ActivateResult {

@@ -6,6 +6,7 @@ import { useUnsyncedGuard } from "./hooks/useUnsyncedGuard";
 import { DndProvider } from "./lib/dnd";
 import { Dashboard } from "./views/Dashboard";
 import { ViewErrorBoundary } from "./components/ErrorBoundary";
+import { PluggySyncButton } from "./components/PluggySyncButton";
 
 /**
  * App shell — unified full-width workspace. A single Dashboard view replaces
@@ -45,6 +46,7 @@ export const App = () => {
 					boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
 				}}
 			>
+				<PluggySyncButton />
 				<SyncChip
 					pending={sync.pending}
 					error={sync.error}
