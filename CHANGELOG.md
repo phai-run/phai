@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.20.0](https://github.com/phai-run/phai/compare/v5.19.0...v5.20.0) (2026-06-20)
+
+
+### Features
+
+* **web:** cards as a tab, declutter planning (hide locked), export fix ([#187](https://github.com/phai-run/phai/issues/187)) ([0c7e284](https://github.com/phai-run/phai/commit/0c7e284e7ca38f6ad82d94f1cdcbd968f834f8fd))
+
 ## [5.19.0](https://github.com/phai-run/phai/compare/v5.18.1...v5.19.0) (2026-06-20)
 
 
