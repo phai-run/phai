@@ -21,8 +21,12 @@ export const AccountBalances = () => {
 		};
 	}, []);
 
+	// Pluggy types checking/savings as "bank"; legacy/local data may use
+	// "checking". Match both (mirrors phai_core::models::is_checking_account_type).
 	const checking = accounts.filter(
-		(a) => a.accountType === "bank" && a.balance != null,
+		(a) =>
+			(a.accountType === "bank" || a.accountType === "checking") &&
+			a.balance != null,
 	);
 	if (checking.length === 0) return null;
 
