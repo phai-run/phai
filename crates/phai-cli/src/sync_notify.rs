@@ -697,7 +697,7 @@ fn detect_card_payment_pairs(
 ) -> Vec<(String, String, Decimal)> {
     let checking_ids: BTreeSet<&str> = accounts
         .iter()
-        .filter(|a| a.account_type == "checking")
+        .filter(|a| phai_core::models::is_checking_account_type(&a.account_type))
         .map(|a| a.account_id.as_str())
         .collect();
     let credit_ids: BTreeSet<&str> = accounts

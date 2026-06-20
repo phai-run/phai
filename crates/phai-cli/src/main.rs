@@ -10,9 +10,9 @@ use phai_core::installments::{group_into_chains, InstallmentChain};
 use phai_core::legacy::load_legacy_bundle;
 use phai_core::migrations::run_migrations;
 use phai_core::models::{
-    decimal_from_str, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
-    CardClosedTransactionRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, ForecastRecord,
-    ForecastVsActualRow, RuleRecord, TransactionRecord,
+    decimal_from_str, is_checking_account_type, AccountRecord, AccountSnapshotRecord, AuditEvent,
+    BudgetStatusRow, CardClosedTransactionRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
+    ForecastRecord, ForecastVsActualRow, RuleRecord, TransactionRecord,
 };
 use phai_core::pluggy::{sync_pluggy, SyncPluggyParams};
 use phai_core::rules::{apply_rules_with_facts, compile_rules};
@@ -2258,7 +2258,7 @@ fn render_sync_notify_summary(
     // Compute total checking balance from snapshots.
     let checking_ids: BTreeSet<String> = accounts
         .iter()
-        .filter(|a| a.account_type == "checking" && !a.account_id.is_empty())
+        .filter(|a| is_checking_account_type(&a.account_type) && !a.account_id.is_empty())
         .map(|a| a.account_id.clone())
         .collect();
     let balance: Option<Decimal> = {
@@ -4022,7 +4022,7 @@ async fn report_balances(_args: BalancesArgs, format: ReportOutputFormat) -> Res
         .filter_map(|s| {
             account_by_id
                 .get(s.account_id.as_str())
-                .filter(|a| a.account_type == "checking")
+                .filter(|a| is_checking_account_type(&a.account_type))
                 .map(|a| (*a, s))
         })
         .collect();
@@ -4855,7 +4855,7 @@ fn cashflow_account_balances(
 ) -> Vec<CashflowAccountBalance> {
     let account_by_id: BTreeMap<&str, &AccountRecord> = accounts
         .iter()
-        .filter(|account| account.account_type == "checking")
+        .filter(|account| is_checking_account_type(&account.account_type))
         .map(|account| (account.account_id.as_str(), account))
         .collect();
     let mut balances = snapshots

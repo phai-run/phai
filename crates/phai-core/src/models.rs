@@ -43,6 +43,14 @@ pub struct AccountRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Whether an `account_type` is a cash/checking account (vs a credit card).
+/// Pluggy types checking/savings accounts as `bank`; legacy/local data may use
+/// `checking`. Both count toward the cash balance and pulse. Keep in sync with
+/// the SQL `account_type IN ('checking', 'bank')` filters in `storage`.
+pub fn is_checking_account_type(account_type: &str) -> bool {
+    matches!(account_type, "checking" | "bank")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionRecord {
     pub transaction_id: String,
@@ -554,6 +562,14 @@ pub fn json_object_or_empty(value: Option<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checking_account_type_covers_bank_and_checking() {
+        assert!(is_checking_account_type("checking"));
+        assert!(is_checking_account_type("bank")); // Pluggy's name for checking
+        assert!(!is_checking_account_type("credit"));
+        assert!(!is_checking_account_type("unknown"));
+    }
 
     #[test]
     fn parse_datetime_rfc3339_millis() {
