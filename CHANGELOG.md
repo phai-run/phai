@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.24.0](https://github.com/phai-run/phai/compare/v5.23.0...v5.24.0) (2026-06-20)
+
+
+### Features
+
+* **web:** planning keeps the annual chart pinned + column tooltips ([#195](https://github.com/phai-run/phai/issues/195)) ([8945416](https://github.com/phai-run/phai/commit/8945416731b7a1aae99d1d5aadbe89389d0b84f0))
+
 ## [5.23.0](https://github.com/phai-run/phai/compare/v5.22.0...v5.23.0) (2026-06-20)
 
 
