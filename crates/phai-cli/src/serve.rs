@@ -297,6 +297,10 @@ enum StoreRequest {
     GetAccounts {
         resp: oneshot::Sender<Result<Vec<AccountRecord>>>,
     },
+    /// Accounts joined with their latest balance snapshot, for `/api/accounts`.
+    AccountsWithBalance {
+        resp: oneshot::Sender<Result<Vec<AccountRow>>>,
+    },
     /// Per-credit-card cycle state (open/paid), total and credit-limit usage,
     /// for the dashboard card panel (`GET /api/cards`).
     Cards {
@@ -381,6 +385,10 @@ async fn try_handle_store_query(
         }
         StoreRequest::GetAccounts { resp } => {
             let result = store.get_accounts().await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::AccountsWithBalance { resp } => {
+            let result = build_accounts_api(store).await;
             let _ = resp.send(result);
         }
         StoreRequest::Cards { month, resp } => {
@@ -1468,16 +1476,22 @@ struct TransactionsResponse {
     has_more: bool,
 }
 
-/// Account summary for the accounts picker.
+/// Account summary for the accounts picker + per-account balance display.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AccountRow {
     id: String,
     label: String,
     owner: String,
+    /// `checking`, `card`, … — lets the UI show only checking-account balances.
+    account_type: String,
+    /// Latest known balance (decimal string) from the most recent snapshot;
+    /// null when no snapshot exists yet.
+    balance: Option<String>,
 }
 
 impl AccountRow {
-    fn from_record(account: &AccountRecord) -> Self {
+    fn from_record(account: &AccountRecord, balance: Option<&Decimal>) -> Self {
         let label = if account.label.trim().is_empty() {
             account.account_id.clone()
         } else {
@@ -1487,6 +1501,8 @@ impl AccountRow {
             id: account.account_id.clone(),
             label,
             owner: account.owner.clone(),
+            account_type: account.account_type.clone(),
+            balance: balance.map(|b| b.to_string()),
         }
     }
 }
@@ -1494,6 +1510,23 @@ impl AccountRow {
 #[derive(Serialize)]
 struct AccountsResponse {
     rows: Vec<AccountRow>,
+}
+
+/// Accounts joined with their latest balance snapshot (per-account checking
+/// balance), so the UI can show each account, not just the consolidated total.
+async fn build_accounts_api(store: &dyn FinanceStore) -> Result<Vec<AccountRow>> {
+    let accounts = store.get_accounts().await.context("get_accounts")?;
+    let balances: std::collections::HashMap<String, Decimal> = store
+        .latest_account_snapshots()
+        .await
+        .context("latest_account_snapshots")?
+        .into_iter()
+        .filter_map(|s| s.balance.map(|b| (s.account_id, b)))
+        .collect();
+    Ok(accounts
+        .iter()
+        .map(|a| AccountRow::from_record(a, balances.get(&a.account_id)))
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -1902,16 +1935,14 @@ async fn get_accounts(State(state): Store) -> impl IntoResponse {
         let (resp_tx, resp_rx) = oneshot::channel();
         let tx = clone_actor_tx(&state.tx).await;
         if tx
-            .send(StoreRequest::GetAccounts { resp: resp_tx })
+            .send(StoreRequest::AccountsWithBalance { resp: resp_tx })
             .await
             .is_err()
         {
             return Err(actor_unavailable());
         }
         match resp_rx.await {
-            Ok(Ok(accounts)) => Ok(AccountsResponse {
-                rows: accounts.iter().map(AccountRow::from_record).collect(),
-            }),
+            Ok(Ok(rows)) => Ok(AccountsResponse { rows }),
             Ok(Err(e)) => Err(internal_error(e)),
             Err(_) => Err(actor_silent()),
         }
@@ -3144,6 +3175,42 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_accounts_api_joins_latest_balance_snapshot() {
+        let (_dir, _config, store) = temp_store().await;
+        let checking = sample_account("acc-checking", "Nubank", "felipe");
+        let mut card = sample_account("acc-card", "Card", "felipe");
+        card.account_type = "credit".into();
+        store.upsert_accounts(&[checking, card]).await.unwrap();
+
+        use phai_core::models::AccountSnapshotRecord;
+        let snap = |id: &str, bal: i64| AccountSnapshotRecord {
+            snapshot_id: format!("snap-{id}"),
+            account_id: id.into(),
+            snapshot_date: NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+            balance: Some(Decimal::new(bal, 2)),
+            credit_limit: None,
+            currency_code: Some("BRL".into()),
+            source: "pluggy".into(),
+            actor_id: "test".into(),
+            idempotency_key: format!("idem-{id}"),
+            metadata_json: serde_json::Value::Object(Default::default()),
+            created_at: Utc::now(),
+        };
+        store
+            .insert_account_snapshots(&[snap("acc-checking", 294742), snap("acc-card", 700000)])
+            .await
+            .unwrap();
+
+        let rows = build_accounts_api(store.as_ref()).await.unwrap();
+        let checking = rows.iter().find(|r| r.id == "acc-checking").unwrap();
+        assert_eq!(checking.account_type, "checking");
+        assert_eq!(checking.balance.as_deref(), Some("2947.42"));
+        let card = rows.iter().find(|r| r.id == "acc-card").unwrap();
+        assert_eq!(card.account_type, "credit");
+        assert_eq!(card.balance.as_deref(), Some("7000.00"));
+    }
+
     fn sample_forecast(forecast_id: &str, template_id: Option<&str>) -> ForecastRecord {
         ForecastRecord {
             forecast_id: forecast_id.into(),
@@ -3337,16 +3404,20 @@ mod tests {
     #[test]
     fn account_row_serialises_fields() {
         let acc = sample_account("acc-1", "Conta Corrente", "alice");
-        let value = serde_json::to_value(AccountRow::from_record(&acc)).unwrap();
+        let value =
+            serde_json::to_value(AccountRow::from_record(&acc, Some(&Decimal::new(12345, 2))))
+                .unwrap();
         assert_eq!(value["id"], "acc-1");
         assert_eq!(value["label"], "Conta Corrente");
         assert_eq!(value["owner"], "alice");
+        assert_eq!(value["accountType"], "checking");
+        assert_eq!(value["balance"], "123.45");
     }
 
     #[test]
     fn account_row_falls_back_to_id_when_label_blank() {
         let acc = sample_account("acc-9", "   ", "bob");
-        let row = AccountRow::from_record(&acc);
+        let row = AccountRow::from_record(&acc, None);
         assert_eq!(row.label, "acc-9");
     }
 

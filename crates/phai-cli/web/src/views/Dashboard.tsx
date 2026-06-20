@@ -24,6 +24,7 @@ import { PlanningChart } from "./PlanningChart";
 import { MonthDetail } from "./MonthDetail";
 import { CardsPanel } from "./CardsPanel";
 import { CashDecisionPanel, type CashWhen } from "./cash/CashDecisionPanel";
+import { AccountBalances } from "./cash/AccountBalances";
 import { PlanilhaView } from "./planilha/PlanilhaView";
 import { WarPlanPanel } from "./plano/WarPlanPanel";
 import type { ChartSimulation } from "./chart/model";
@@ -242,6 +243,7 @@ export const Dashboard = () => {
 				) : heroRow ? (
 					<div className="fade-in-soft">
 						<CashDecisionPanel row={heroRow} when={heroWhen} compact={false} />
+						<AccountBalances />
 					</div>
 				) : null}
 			</div>
