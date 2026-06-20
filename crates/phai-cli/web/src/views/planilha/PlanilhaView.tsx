@@ -911,6 +911,8 @@ const SheetFilterBar = ({
 		padding: "4px 12px",
 		cursor: "pointer",
 		fontSize: 12,
+		whiteSpace: "nowrap",
+		flexShrink: 0,
 	});
 	// Controllability tiers (ADR-0030): single-select, distinct colours.
 	const tierColor: Record<CommitmentTier, string> = {
