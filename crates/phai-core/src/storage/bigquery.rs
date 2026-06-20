@@ -3398,7 +3398,7 @@ impl FinanceStore for BigQueryStore {
                 COALESCE(t.category_id, '') AS category_id
               FROM {tx} t
               JOIN {accounts} a ON a.account_id = t.account_id
-              WHERE a.account_type = 'checking'
+              WHERE a.account_type IN ('checking', 'bank')
                 AND COALESCE(t.category_id, '') != 'transfer-internal'
             )
             SELECT month_ref,
@@ -3441,7 +3441,7 @@ impl FinanceStore for BigQueryStore {
                 COALESCE(t.category_id, '') AS category_id
               FROM {tx} t
               JOIN {accounts} a ON a.account_id = t.account_id
-              WHERE a.account_type = 'checking'
+              WHERE a.account_type IN ('checking', 'bank')
                 AND COALESCE(t.category_id, '') != 'transfer-internal'
                 AND FORMAT_DATE('%Y-%m', t.transaction_date) = @month_ref
             )
@@ -3537,7 +3537,7 @@ impl FinanceStore for BigQueryStore {
             WITH checking AS (
               SELECT account_id
               FROM {accounts}
-              WHERE account_type = 'checking'
+              WHERE account_type IN ('checking', 'bank')
             ),
             anchors AS (
               SELECT

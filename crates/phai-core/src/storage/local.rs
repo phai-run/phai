@@ -1811,7 +1811,7 @@ impl FinanceStore for LocalStore {
                    COALESCE(t.category_id, '') AS category_id
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
-            WHERE a.account_type = 'checking'
+            WHERE a.account_type IN ('checking', 'bank')
               AND COALESCE(t.category_id, '') != 'transfer-internal'
             ",
         )?;
@@ -1861,7 +1861,7 @@ impl FinanceStore for LocalStore {
                    COALESCE(t.category_id, '') AS category_id
             FROM v_transactions_reportable t
             JOIN accounts a ON a.account_id = t.account_id
-            WHERE a.account_type = 'checking'
+            WHERE a.account_type IN ('checking', 'bank')
               AND COALESCE(t.category_id, '') != 'transfer-internal'
               AND strftime('%Y-%m', t.transaction_date) = ?1
             ",
@@ -1957,8 +1957,9 @@ impl FinanceStore for LocalStore {
         // would silently report a wrong saldo, so we prefer "unknown".
         let conn = self.connection()?;
 
-        let mut accounts_stmt =
-            conn.prepare("SELECT account_id FROM accounts WHERE account_type = 'checking'")?;
+        let mut accounts_stmt = conn.prepare(
+            "SELECT account_id FROM accounts WHERE account_type IN ('checking', 'bank')",
+        )?;
         let account_ids: Vec<String> = accounts_stmt
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2990,6 +2991,44 @@ mod tests {
             .await
             .unwrap();
         assert!(donors.iter().any(|row| row.transaction_id == "donor"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checking_balance_counts_bank_typed_accounts() {
+        // Regression: Pluggy types checking/savings accounts as `bank`, not
+        // `checking`. The cash-balance query must count them or the consolidated
+        // balance reads 0 even with real snapshots.
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        let mut acc = card_account("nubank-cc", "0", "0");
+        acc.account_type = "bank".to_string();
+        store.upsert_accounts(&[acc]).await.unwrap();
+        use crate::models::AccountSnapshotRecord;
+        store
+            .insert_account_snapshots(&[AccountSnapshotRecord {
+                snapshot_id: "snap-1".into(),
+                account_id: "nubank-cc".into(),
+                snapshot_date: NaiveDate::from_ymd_opt(2026, 6, 18).unwrap(),
+                balance: Some(Decimal::new(736075, 2)),
+                credit_limit: None,
+                currency_code: Some("BRL".into()),
+                source: "pluggy".into(),
+                actor_id: "test".into(),
+                idempotency_key: "snap-1".into(),
+                metadata_json: serde_json::Value::Object(Default::default()),
+                created_at: Utc::now(),
+            }])
+            .await
+            .unwrap();
+
+        let bal = store
+            .checking_balance_at(NaiveDate::from_ymd_opt(2026, 6, 20).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(bal.map(|b| b.balance), Some(Decimal::new(736075, 2)));
     }
 
     fn card_account(account_id: &str, closing_day: &str, due_day: &str) -> AccountRecord {
