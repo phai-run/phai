@@ -576,6 +576,11 @@ export interface WarPlanSubRow {
 	 * parents (no transactions at all) open at the envelope itself.
 	 */
 	goalBase: number;
+	/**
+	 * The spend here is majority locked-tier (rent, installments, fixed bills):
+	 * shown read-only in planning, never simulated (ADR-0030).
+	 */
+	locked: boolean;
 }
 
 export interface WarPlanRow {
@@ -656,6 +661,8 @@ export const previousMonths = (month: string, n: number): string[] => {
 interface SubSpend {
 	realizado: number;
 	historico: number;
+	/** Of `realizado + historico`, how much is locked-tier (ADR-0030). */
+	locked: number;
 }
 
 /** Slider rows for one parent; envelope-only parents get a pseudo-sub. */
@@ -671,6 +678,10 @@ const buildSubRows = (
 			realizado: cell.realizado,
 			media3m: cell.historico / 3,
 			goalBase: Math.max(cell.historico / 3, cell.realizado),
+			// Majority-locked spend → read-only in planning, never simulated.
+			locked:
+				cell.realizado + cell.historico > 0 &&
+				cell.locked >= (cell.realizado + cell.historico) / 2,
 		}))
 		.sort(
 			(a, b) =>
@@ -684,6 +695,7 @@ const buildSubRows = (
 			realizado: 0,
 			media3m: 0,
 			goalBase: orcamento,
+			locked: false,
 		});
 	}
 	return subs;
@@ -704,23 +716,24 @@ const accumulateSpend = (
 	const history = new Set(previousMonths(month, 3));
 	for (const tx of transactions) {
 		if (!isNegative(tx.amount)) continue;
-		// Planning only simulates what can be cut. Locked spend (installments,
-		// fixed bills, or a manual lock) is committed — exclude it so the war
-		// plan shows only cancellable / variable rows (ADR-0030).
-		if (commitmentTier(tx, fixedCategories, overlayMap) === "locked") continue;
 		const inMonth = tx.month === month;
 		if (!inMonth && !history.has(tx.month)) continue;
 		const { parent, sub } = parseCategory(effectiveCategory(tx, overlayMap));
 		const subKey = sub ?? "—";
 		const mag = Math.abs(toCents(tx.amount)) / 100;
+		// Locked spend (installments, fixed bills, a manual lock) is committed —
+		// it stays visible but is marked non-simulatable, not cut (ADR-0030).
+		const isLocked =
+			commitmentTier(tx, fixedCategories, overlayMap) === "locked";
 		let subs = spendBy.get(parent);
 		if (!subs) {
 			subs = new Map();
 			spendBy.set(parent, subs);
 		}
-		const cell = subs.get(subKey) ?? { realizado: 0, historico: 0 };
+		const cell = subs.get(subKey) ?? { realizado: 0, historico: 0, locked: 0 };
 		if (inMonth) cell.realizado += mag;
 		else cell.historico += mag;
+		if (isLocked) cell.locked += mag;
 		subs.set(subKey, cell);
 	}
 	return spendBy;

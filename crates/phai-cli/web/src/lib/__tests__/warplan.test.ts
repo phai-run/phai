@@ -201,20 +201,20 @@ describe("buildWarPlan", () => {
 		expect(plan.rows.find((r) => r.parent === "lazer")!.realizado).toBe(1000);
 	});
 
-	it("excludes locked spend so only cancellable/variable is simulatable (ADR-0030)", () => {
+	it("flags locked subs read-only while keeping their spend visible (ADR-0030)", () => {
 		const txs = [
-			// variable — counts toward the plan.
+			// variable — simulatable.
 			tx({ id: "v", categoryId: "lazer:bar", amount: "-200.00" }),
-			// installment — locked, excluded.
+			// installment — locked.
 			tx({
 				id: "i",
-				categoryId: "lazer:bar",
+				categoryId: "lazer:parcelado",
 				amount: "-300.00",
 				isInstallment: 1,
 			}),
-			// fixed-category bill — locked via the fixed envelope below, excluded.
+			// fixed-category bill — locked via the fixed envelope below.
 			tx({ id: "f", categoryId: "moradia:aluguel", amount: "-1000.00" }),
-			// manual lock override — excluded even though it's discretionary.
+			// manual lock override.
 			tx({
 				id: "o",
 				categoryId: "lazer:show",
@@ -227,13 +227,21 @@ describe("buildWarPlan", () => {
 		];
 		const plan = buildWarPlan(txs, "2026-06", fcs, noOverlay);
 
-		// Only the R$200 variable bar spend survives (installment + manual lock
-		// in lazer are excluded).
-		expect(plan.totalRealizado).toBe(200);
-		expect(plan.rows.find((r) => r.parent === "lazer")!.realizado).toBe(200);
-		// moradia still shows as a budget row (its fixed envelope), but the
-		// fixed-category transaction is excluded from realized spend.
-		expect(plan.rows.find((r) => r.parent === "moradia")!.realizado).toBe(0);
+		// All spend stays visible — locked is shown, not hidden.
+		expect(plan.totalRealizado).toBe(1650);
+
+		const lazer = plan.rows.find((r) => r.parent === "lazer")!;
+		const subLocked = (sub: string) =>
+			lazer.subs.find((s) => s.sub === sub)!.locked;
+		expect(subLocked("bar")).toBe(false); // variable → simulatable
+		expect(subLocked("parcelado")).toBe(true); // installment → read-only
+		expect(subLocked("show")).toBe(true); // manual lock → read-only
+
+		const aluguel = plan.rows
+			.find((r) => r.parent === "moradia")!
+			.subs.find((s) => s.sub === "aluguel")!;
+		expect(aluguel.realizado).toBe(1000); // visible
+		expect(aluguel.locked).toBe(true); // but read-only
 	});
 });
 
