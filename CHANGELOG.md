@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.23.0](https://github.com/phai-run/phai/compare/v5.22.0...v5.23.0) (2026-06-20)
+
+
+### Features
+
+* **serve:** Pluggy sync button in the web app ([#193](https://github.com/phai-run/phai/issues/193)) ([2b406ab](https://github.com/phai-run/phai/commit/2b406abb4a639e9a587d23128f440f0dcdbec4f8))
+
 ## [5.22.0](https://github.com/phai-run/phai/compare/v5.21.0...v5.22.0) (2026-06-20)
 
 
