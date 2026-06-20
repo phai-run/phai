@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.27.2](https://github.com/phai-run/phai/compare/v5.27.1...v5.27.2) (2026-06-20)
+
+
+### Bug Fixes
+
+* **cli:** count bank-typed accounts in pulse, sync notify, and reports ([#206](https://github.com/phai-run/phai/issues/206)) ([c24eef4](https://github.com/phai-run/phai/commit/c24eef49bea8e84f4f7bd8cef3898352ae7f3ca1))
+
 ## [5.27.1](https://github.com/phai-run/phai/compare/v5.27.0...v5.27.1) (2026-06-20)
 
 
