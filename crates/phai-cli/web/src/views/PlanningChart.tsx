@@ -23,7 +23,7 @@ import {
 import { ChartLegend } from "./chart/ChartLegend";
 
 export { buildModel } from "./chart/model";
-import type { CategoryMonthSeries } from "../lib/derivations";
+import type { CategoryMonthSeries, SubSlice } from "../lib/derivations";
 
 // Qualitative palette for the per-category "Despesas" stacked bars. Kept
 // distinct from the semantic income (cyan/green) and expense (rose) hues so a
@@ -49,6 +49,7 @@ export const PlanningChart = ({
 	months,
 	forecastsByMonth,
 	categorySeries,
+	subSeries,
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
@@ -57,6 +58,8 @@ export const PlanningChart = ({
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
 	categorySeries: CategoryMonthSeries;
+	/** month → parent → subcategory slices, for the per-segment hover. */
+	subSeries: Map<string, Map<string, SubSlice[]>>;
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
@@ -116,6 +119,7 @@ export const PlanningChart = ({
 				mode={mode}
 				forecastsByMonth={forecastsByMonth}
 				categorySeries={categorySeries}
+				subSeries={subSeries}
 				selectedMonth={selectedMonth}
 				onSelectMonth={onSelectMonth}
 				onDropForecast={onDropForecast}
@@ -199,6 +203,7 @@ const FullChart = ({
 	mode,
 	forecastsByMonth,
 	categorySeries,
+	subSeries,
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
@@ -208,11 +213,16 @@ const FullChart = ({
 	mode: ChartMode;
 	forecastsByMonth: Map<string, ForecastView[]>;
 	categorySeries: CategoryMonthSeries;
+	subSeries: Map<string, Map<string, SubSlice[]>>;
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
 }) => {
 	const [hover, setHover] = useState<number | null>(null);
+	// Per-segment hover in the expenses-bars mode: which (month, category) slice.
+	const [hoverSeg, setHoverSeg] = useState<{ i: number; cat: string } | null>(
+		null,
+	);
 	const n = months.length;
 	const slot = innerW / n;
 	const barW = Math.min(14, slot * 0.27);
@@ -679,6 +689,8 @@ const FullChart = ({
 												catTotal > 0
 													? Math.round((mag / catTotal) * 100)
 													: 0;
+											const segHov =
+												hoverSeg?.i === i && hoverSeg.cat === cat;
 											return (
 												<rect
 													key={cat}
@@ -687,7 +699,13 @@ const FullChart = ({
 													width={expBarW}
 													height={h}
 													fill={catColor(ci, nCats)}
-													opacity={isSel || isHov ? 1 : 0.85}
+													opacity={isSel || isHov || segHov ? 1 : 0.85}
+													stroke={segHov ? "var(--text)" : "none"}
+													strokeWidth={segHov ? 1.5 : 0}
+													style={{ cursor: "pointer" }}
+													onMouseEnter={() => setHoverSeg({ i, cat })}
+													onMouseLeave={() => setHoverSeg(null)}
+													onClick={() => onSelectMonth(m.month)}
 												>
 													<title>{`${cat}: ${formatMoneyNumber(mag)} (${pct}%)`}</title>
 												</rect>
@@ -788,6 +806,7 @@ const FullChart = ({
 					onSelectMonth={onSelectMonth}
 					onHover={setHover}
 					onDropForecast={onDropForecast}
+					interactive={!isExpensesMode}
 				/>
 
 				{/* Floating hover balloon: value + which expense, on top of the chart. */}
@@ -902,6 +921,109 @@ const FullChart = ({
 						)}
 					</div>
 				)}
+
+				{/* Per-segment balloon (expenses mode): one category + its top subs. */}
+				{isExpensesMode &&
+					hoverSeg &&
+					(() => {
+						const m = months[hoverSeg.i];
+						const value =
+							categorySeries.byMonth.get(m.month)?.get(hoverSeg.cat) ?? 0;
+						const subs = (
+							subSeries.get(m.month)?.get(hoverSeg.cat) ?? []
+						).slice(0, 3);
+						const color = catColor(
+							categorySeries.categories.indexOf(hoverSeg.cat),
+							categorySeries.categories.length,
+						);
+						return (
+							<div
+								style={{
+									position: "absolute",
+									top: 6,
+									left: `${((hoverSeg.i + 0.5) / months.length) * 100}%`,
+									transform:
+										hoverSeg.i < months.length / 2
+											? "translateX(10px)"
+											: "translateX(calc(-100% - 10px))",
+									pointerEvents: "none",
+									zIndex: 30,
+									background: "var(--card)",
+									border: "1px solid var(--border)",
+									borderRadius: "var(--radius-md)",
+									boxShadow: "0 8px 28px rgba(0,0,0,0.16)",
+									padding: "10px 12px",
+									minWidth: 180,
+									maxWidth: 260,
+								}}
+							>
+								<div
+									className="mono"
+									style={{
+										display: "flex",
+										alignItems: "center",
+										gap: 6,
+										fontWeight: 700,
+										fontSize: 12,
+										marginBottom: 2,
+									}}
+								>
+									<span
+										aria-hidden
+										style={{
+											width: 9,
+											height: 9,
+											borderRadius: 2,
+											background: color,
+											flexShrink: 0,
+										}}
+									/>
+									<span style={{ flex: 1 }}>{hoverSeg.cat}</span>
+									<span>{formatMoneyNumber(value)}</span>
+								</div>
+								<div
+									className="mono"
+									style={{
+										fontSize: 10,
+										color: "var(--muted)",
+										marginBottom: 6,
+									}}
+								>
+									{m.label}
+								</div>
+								{subs.length > 0 ? (
+									<div style={{ display: "grid", gap: 3 }}>
+										{subs.map((s) => (
+											<div
+												key={s.sub}
+												className="mono"
+												style={{
+													display: "flex",
+													justifyContent: "space-between",
+													gap: 12,
+													fontSize: 11,
+													color: "var(--muted)",
+												}}
+											>
+												<span
+													style={{
+														overflow: "hidden",
+														textOverflow: "ellipsis",
+														whiteSpace: "nowrap",
+													}}
+												>
+													↳ {s.sub}
+												</span>
+												<span style={{ color: "var(--text)" }}>
+													{formatMoneyNumber(s.mag)}
+												</span>
+											</div>
+										))}
+									</div>
+								) : null}
+							</div>
+						);
+					})()}
 			</div>
 
 			{/* Legend */}
@@ -947,6 +1069,7 @@ const ColumnOverlay = ({
 	onSelectMonth,
 	onHover,
 	onDropForecast,
+	interactive,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	titles: ReadonlyArray<{ left: string; right: string }>;
@@ -954,6 +1077,8 @@ const ColumnOverlay = ({
 	onSelectMonth: (month: string) => void;
 	onHover: (i: number | null) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
+	/** When false (expenses-bars mode) the SVG segments own hover/click instead. */
+	interactive: boolean;
 }) => (
 	<div
 		style={{
@@ -961,6 +1086,7 @@ const ColumnOverlay = ({
 			inset: 0,
 			display: "grid",
 			gridTemplateColumns: `repeat(${months.length}, 1fr)`,
+			pointerEvents: interactive ? "auto" : "none",
 		}}
 	>
 		{months.map((m, i) => (
