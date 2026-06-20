@@ -32,6 +32,10 @@ export interface AccountRow {
 	id: string;
 	label: string;
 	owner: string;
+	/** "bank" = checking account, "credit" = card, … */
+	accountType?: string;
+	/** Latest known balance (decimal string); null when no snapshot yet. */
+	balance?: string | null;
 }
 
 export interface CardRow {
