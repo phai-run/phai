@@ -131,7 +131,15 @@ export const Dashboard = () => {
 				const dueDate = overlayById.has(f.forecastId)
 					? (overlayById.get(f.forecastId) ?? f.dueDate)
 					: f.dueDate;
-				return { ...f, dueDate, month: monthOf(dueDate) };
+				return {
+					...f,
+					dueDate,
+					month: monthOf(dueDate),
+					metadataJson:
+						f.metadataJson && typeof f.metadataJson === "object"
+							? (f.metadataJson as Record<string, unknown>)
+							: {},
+				};
 			}),
 		[forecastsRaw, overlayById],
 	);

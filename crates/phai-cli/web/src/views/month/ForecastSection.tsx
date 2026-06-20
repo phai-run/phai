@@ -110,6 +110,9 @@ export const ForecastSection = ({
 				description: desc,
 				amount: outflow ? `-${mag}` : mag,
 				dueDate: `${month}-01`,
+				categoryId: null,
+				accountId: null,
+				uiRole: null,
 				createdAt: Date.now(),
 			}),
 		);
@@ -472,4 +475,3 @@ const addBtnStyle: React.CSSProperties = {
 	borderStyle: "dashed",
 	color: "var(--muted)",
 };
-
