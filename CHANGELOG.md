@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.26.0](https://github.com/phai-run/phai/compare/v5.25.0...v5.26.0) (2026-06-20)
+
+
+### Features
+
+* **serve:** per-account checking balance under the cash hero ([#199](https://github.com/phai-run/phai/issues/199)) ([0dd6af3](https://github.com/phai-run/phai/commit/0dd6af3984c52b2a530058a255d3be8647cb5c96))
+
 ## [5.25.0](https://github.com/phai-run/phai/compare/v5.24.0...v5.25.0) (2026-06-20)
 
 
