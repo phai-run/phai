@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.27.3](https://github.com/phai-run/phai/compare/v5.27.2...v5.27.3) (2026-06-20)
+
+
+### Bug Fixes
+
+* **web:** include checking-typed accounts in per-account balances ([#208](https://github.com/phai-run/phai/issues/208)) ([2140dfc](https://github.com/phai-run/phai/commit/2140dfc57a9132a77e6385af7556c81269d7d14d))
+
 ## [5.27.2](https://github.com/phai-run/phai/compare/v5.27.1...v5.27.2) (2026-06-20)
 
 
