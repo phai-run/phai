@@ -536,6 +536,7 @@ const SubGoalRow = ({
 	const value = goal ?? sub.goalBase;
 	const floored = value < sub.realizado;
 	const saving = goal != null ? sub.goalBase - goal : 0;
+	const locked = sub.locked;
 
 	return (
 		<tr style={{ background: "var(--bg)" }}>
@@ -550,21 +551,37 @@ const SubGoalRow = ({
 				{sub.realizado > 0 ? formatMoneyNumber(sub.realizado) : "—"}
 			</td>
 			<td style={tdStyle}>
-				<input
-					type="range"
-					min={0}
-					max={sliderMax(sub)}
-					step={10}
-					value={value}
-					aria-label={`monthly goal for ${sub.categoryId}`}
-					onChange={(e) => onGoal(sub.categoryId, Number(e.target.value))}
-					style={{ width: "100%", accentColor: floored ? "var(--amber)" : "var(--purple)" }}
-					title={
-						floored
-							? "below what is already spent — spent is the floor"
-							: "drag to set the monthly goal"
-					}
-				/>
+				{locked ? (
+					<span
+						className="mono"
+						title="locked — committed spend, can't be simulated (ADR-0030)"
+						style={{
+							display: "inline-flex",
+							alignItems: "center",
+							gap: 5,
+							fontSize: 11,
+							color: "var(--muted)",
+						}}
+					>
+						🔒 fixo
+					</span>
+				) : (
+					<input
+						type="range"
+						min={0}
+						max={sliderMax(sub)}
+						step={10}
+						value={value}
+						aria-label={`monthly goal for ${sub.categoryId}`}
+						onChange={(e) => onGoal(sub.categoryId, Number(e.target.value))}
+						style={{ width: "100%", accentColor: floored ? "var(--amber)" : "var(--purple)" }}
+						title={
+							floored
+								? "below what is already spent — spent is the floor"
+								: "drag to set the monthly goal"
+						}
+					/>
+				)}
 			</td>
 			<td
 				className="mono"
@@ -579,16 +596,18 @@ const SubGoalRow = ({
 					...tdStyle,
 					textAlign: "right",
 					fontSize: 12,
-					color: floored
-						? "var(--amber)"
-						: goal != null
-							? "var(--purple)"
-							: "var(--muted)",
+					color: locked
+						? "var(--muted)"
+						: floored
+							? "var(--amber)"
+							: goal != null
+								? "var(--purple)"
+								: "var(--muted)",
 				}}
 			>
-				{formatMoneyNumber(value)}
+				{locked ? "—" : formatMoneyNumber(value)}
 			</td>
-			<DeltaCell active={goal != null} delta={saving} small />
+			<DeltaCell active={!locked && goal != null} delta={locked ? 0 : saving} small />
 		</tr>
 	);
 };
