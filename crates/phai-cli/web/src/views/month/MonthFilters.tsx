@@ -368,7 +368,10 @@ export const ToggleBtn = ({
 			...pillStyle,
 			color: active ? color : "var(--muted)",
 			border: `1px solid ${active ? color : "var(--border)"}`,
-			background: active ? `${color}14` : "transparent",
+			// color is a CSS var → hex-alpha concat is invalid; tint with color-mix.
+			background: active
+				? `color-mix(in srgb, ${color} 14%, transparent)`
+				: "transparent",
 		}}
 	>
 		{children}

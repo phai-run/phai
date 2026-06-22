@@ -1334,13 +1334,17 @@ const tdStyle: React.CSSProperties = {
 };
 
 const inlineActionBtn = (color: string): React.CSSProperties => ({
-	background: `${color}12`,
+	// color is a CSS var (e.g. var(--rose)) — concatenating a hex alpha
+	// (`${color}12`) yields invalid CSS, so use color-mix to tint it.
+	background: `color-mix(in srgb, ${color} 10%, transparent)`,
 	color,
-	border: `1px solid ${color}35`,
+	border: `1px solid color-mix(in srgb, ${color} 38%, transparent)`,
 	borderRadius: "var(--radius-full)",
 	padding: "6px 12px",
 	cursor: "pointer",
 	fontSize: 12,
+	fontWeight: 600,
+	whiteSpace: "nowrap",
 });
 
 const sheetInputStyle: React.CSSProperties = {
