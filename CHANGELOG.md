@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.28.0](https://github.com/phai-run/phai/compare/v5.27.4...v5.28.0) (2026-06-22)
+
+
+### Features
+
+* **web:** manual forecast UX (integrate [#210](https://github.com/phai-run/phai/issues/210)) + UI style fixes ([#213](https://github.com/phai-run/phai/issues/213)) ([b14a4db](https://github.com/phai-run/phai/commit/b14a4db014ecfcc0feec642a66dc588a0009a681))
+
 ## [5.27.4](https://github.com/phai-run/phai/compare/v5.27.3...v5.27.4) (2026-06-22)
 
 
