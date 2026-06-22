@@ -25,8 +25,10 @@ export interface CashSummary {
 	saldo: number;
 	/** Projected end-of-month balance (always projectedClosingBalance). */
 	projetado: number;
-	/** resultado >= 0 — the month is in the black. */
+	/** resultado >= 0 — the month's net is in the black (drives the result KPI). */
 	positive: boolean;
+	/** saldo >= 0 — the headline balance is positive (drives the header badge). */
+	balancePositive: boolean;
 }
 
 /**
@@ -51,6 +53,10 @@ export function cashSummary(row: ChartMonthView, when: CashWhen): CashSummary {
 		saldo: saldoCents / 100,
 		projetado: toCents(row.projectedClosingBalance) / 100,
 		positive: resultadoCents >= 0,
+		// The header badge describes the headline balance it sits next to — not
+		// the month's net result (which has its own KPI). A positive balance with
+		// a deficit month should read "positive", not "negative".
+		balancePositive: saldoCents >= 0,
 	};
 }
 
@@ -141,13 +147,13 @@ export const CashDecisionPanel = ({
 						fontWeight: 600,
 						padding: "2px 10px",
 						borderRadius: "var(--radius-full)",
-						color: resultColor,
-						background: s.positive
+						color: s.balancePositive ? "var(--green)" : "var(--rose)",
+						background: s.balancePositive
 							? "rgba(21,128,61,0.10)"
 							: "rgba(225,29,72,0.10)",
 					}}
 				>
-					{s.positive ? "positive" : "negative"}
+					{s.balancePositive ? "positive" : "negative"}
 				</span>
 			</div>
 

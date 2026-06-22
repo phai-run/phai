@@ -75,6 +75,21 @@ describe("cashSummary", () => {
 		expect(s.positive).toBe(false);
 	});
 
+	it("the header badge tracks the balance, not the month result", () => {
+		// Deficit month (saídas > entradas) but a positive cash balance: the
+		// badge must read positive (it sits next to the balance), while the
+		// result KPI stays negative.
+		const row = makeMonth({
+			month: "2026-06",
+			inflows: "17353.29",
+			outflows: "-35903.54",
+			closingBalance: "7360.75",
+		});
+		const s = cashSummary(row, "current");
+		expect(s.positive).toBe(false); // month net is in the red
+		expect(s.balancePositive).toBe(true); // but the balance is positive
+	});
+
 	it("computes sums in exact cents (no float drift)", () => {
 		const row = makeMonth({
 			month: "2026-06",
