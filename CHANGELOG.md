@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.28.1](https://github.com/phai-run/phai/compare/v5.28.0...v5.28.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* **serve:** dedup duplicate forecast creates by idempotency key ([#215](https://github.com/phai-run/phai/issues/215)) ([0acc0bb](https://github.com/phai-run/phai/commit/0acc0bbbd5f14cde31fbf1df21c06465af824dc2))
+
 ## [5.28.0](https://github.com/phai-run/phai/compare/v5.27.4...v5.28.0) (2026-06-22)
 
 
