@@ -15,6 +15,7 @@ import { CategoryTreemap } from "./categorias/CategoryTreemap";
 import { TransactionModal } from "../components/TransactionModal";
 import type { ChartMonthView, ForecastView } from "./types";
 import { ForecastSection } from "./month/ForecastSection";
+import { ManualPlannedTransactions } from "./month/ManualPlannedTransactions";
 import { FilterBar, FilterSummary } from "./month/MonthFilters";
 
 // ── LiveStore queries (module-level for stable refs) ──────────────────────
@@ -243,6 +244,7 @@ export const MonthDetail = ({
 			/>
 
 			{/* ── Forecasts section ── */}
+			<ManualPlannedTransactions month={month} />
 			{forecasts.length > 0 || true ? (
 				<ForecastSection
 					month={month}

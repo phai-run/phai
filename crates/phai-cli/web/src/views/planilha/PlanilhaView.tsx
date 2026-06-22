@@ -36,6 +36,7 @@ import {
 	type SheetSortKey,
 	type TxView,
 } from "../../lib/derivations";
+import type { ForecastView } from "../types";
 
 const txAll$ = queryDb(tables.transactions.orderBy("postedAt", "desc"));
 const overlay$ = queryDb(tables.reviewOverlay);
@@ -62,6 +63,68 @@ const CSV_COLUMNS = [
 	"amount",
 	"installment",
 ] as const;
+
+const STATUS_LABEL: Record<string, string> = {
+	ativo: "Previsto",
+	active: "Previsto",
+	realizado: "Efetivado",
+	descartado: "Excluido",
+};
+
+const metaString = (meta: Record<string, unknown>, key: string): string | null => {
+	const value = meta[key];
+	return typeof value === "string" && value.trim() ? value : null;
+};
+
+const monthOf = (date: string | null): string | null =>
+	date && date.length >= 7 ? date.slice(0, 7) : null;
+
+const isManualSheetForecast = (forecast: ForecastView): boolean =>
+	forecast.kind === "manual" &&
+	forecast.metadataJson.ui_role === "planned_transaction" &&
+	!["descartado", "inativo"].includes(forecast.status);
+
+const predictedAmount = (forecast: ForecastView): string =>
+	metaString(forecast.metadataJson, "predicted_amount") ?? forecast.amount;
+
+const realizedAmount = (forecast: ForecastView): string | null =>
+	metaString(forecast.metadataJson, "realized_amount") ??
+	(forecast.status === "realizado" ? forecast.amount : null);
+
+const scoreCandidate = (forecast: ForecastView, tx: TxView): number => {
+	const amountGap = Math.abs(
+		Math.abs(toCents(tx.amount)) - Math.abs(toCents(predictedAmount(forecast))),
+	);
+	const due = Date.parse(forecast.dueDate ?? `${forecast.month ?? tx.month}-01`);
+	const posted = Date.parse(tx.postedAt);
+	const dateGap =
+		Number.isFinite(due) && Number.isFinite(posted) ? Math.abs(due - posted) : 0;
+	return amountGap + dateGap / 86400000;
+};
+
+type SheetDataRow =
+	| {
+			kind: "transaction";
+			id: string;
+			date: string;
+			description: string;
+			account: string;
+			category: string | null;
+			amount: string;
+			tx: TxView;
+			tier: CommitmentTier;
+	  }
+	| {
+			kind: "forecast";
+			id: string;
+			date: string;
+			description: string;
+			account: string;
+			category: string | null;
+			amount: string;
+			forecast: ForecastView;
+			candidates: ReadonlyArray<TxView>;
+	  };
 
 const csvCell = (value: string | null | undefined): string => {
 	const text = value ?? "";
@@ -162,6 +225,14 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 	} | null>(null);
 	const [recentCats, setRecentCats] = useState<string[]>([]);
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
+	const [composerOpen, setComposerOpen] = useState<"expense" | "income" | null>(
+		null,
+	);
+	const [forecastDescription, setForecastDescription] = useState("");
+	const [forecastAmount, setForecastAmount] = useState("");
+	const [forecastAccountId, setForecastAccountId] = useState("");
+	const [forecastCategoryId, setForecastCategoryId] = useState("");
+	const [settlingId, setSettlingId] = useState<string | null>(null);
 	const tableRef = useRef<HTMLDivElement>(null);
 
 	const filters = useMemo(
@@ -215,13 +286,113 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 		sort,
 	]);
 
+	const sheetRows = useMemo(() => {
+		const txSheetRows: SheetDataRow[] = rows.map((tx) => ({
+			kind: "transaction",
+			id: tx.id,
+			date: tx.postedAt,
+			description: sheetLabel(tx),
+			account: accountMap.get(tx.accountId)?.label ?? tx.accountId,
+			category: effectiveCategory(tx, overlayMap),
+			amount: tx.amount,
+			tx,
+			tier: commitmentTier(tx, fixedCategories, overlayMap),
+		}));
+		const forecastRows = (forecasts as ReadonlyArray<Omit<ForecastView, "month">>)
+			.map((forecast) => ({
+				...forecast,
+				month: monthOf(forecast.dueDate),
+				metadataJson:
+					forecast.metadataJson && typeof forecast.metadataJson === "object"
+						? (forecast.metadataJson as Record<string, unknown>)
+						: {},
+			}))
+			.filter((forecast) => forecast.month === month && isManualSheetForecast(forecast))
+			.filter((forecast) => {
+				if (
+					filters.accountFilter &&
+					forecast.accountId !== filters.accountFilter
+				) {
+					return false;
+				}
+				if (
+					filters.categoryFilter &&
+					forecast.categoryId !== filters.categoryFilter
+				) {
+					return false;
+				}
+				if (ui.textFilter) {
+					const haystack = [
+						forecast.description,
+						forecast.categoryId ?? "",
+						accountMap.get(forecast.accountId ?? "") ?? "",
+					]
+						.join(" ")
+						.toLowerCase();
+					if (!haystack.includes(ui.textFilter.toLowerCase())) return false;
+				}
+				return true;
+			})
+			.map((forecast): SheetDataRow => ({
+				kind: "forecast",
+				id: forecast.forecastId,
+					date: forecast.dueDate ?? `${month}-01`,
+					description: forecast.description,
+					account: forecast.accountId
+						? (accountMap.get(forecast.accountId)?.label ?? forecast.accountId)
+						: "sem conta",
+				category: forecast.categoryId,
+				amount: forecast.amount,
+				forecast,
+				candidates: rows
+					.filter(
+						(tx) =>
+							isNegative(tx.amount) === isNegative(forecast.amount) &&
+							(!forecast.accountId || tx.accountId === forecast.accountId),
+					)
+					.sort(
+						(left, right) =>
+							scoreCandidate(forecast, left) - scoreCandidate(forecast, right),
+					)
+					.slice(0, 6),
+			}));
+		const allRows = [...txSheetRows, ...forecastRows];
+		return allRows.sort((left, right) => {
+			const dir = sort.dir;
+			switch (sort.key) {
+				case "amount":
+					return (toCents(left.amount) - toCents(right.amount)) * dir;
+				case "account":
+					return left.account.localeCompare(right.account) * dir;
+				case "category":
+					return (left.category ?? "").localeCompare(right.category ?? "") * dir;
+				case "description":
+					return left.description.localeCompare(right.description) * dir;
+				case "date":
+				default:
+					return left.date.localeCompare(right.date) * dir;
+			}
+		});
+	}, [
+		rows,
+		forecasts,
+		month,
+		filters.accountFilter,
+		filters.categoryFilter,
+		ui.textFilter,
+		accountMap,
+		overlayMap,
+		fixedCategories,
+		sort,
+	]);
+
 	const hasSheetFilters = useMemo(
 		() => hasActiveFilters(filters) || ui.uncategorizedOnly,
 		[filters, ui.uncategorizedOnly],
 	);
 
 	// Reset selection when the month or the visible set changes size.
-	const rowCount = rows.length;
+	const rowCount = sheetRows.length;
 	useEffect(() => {
 		setSelectedIds(new Set());
 		setFocusedIdx(-1);
@@ -231,27 +402,62 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 	const totals = useMemo(() => {
 		let inCents = 0;
 		let outCents = 0;
-		for (const tx of rows) {
-			const c = toCents(tx.amount);
+		for (const row of sheetRows) {
+			const c = toCents(row.amount);
 			if (c < 0) outCents += -c;
 			else inCents += c;
 		}
 		return {
 			entradas: inCents / 100,
 			saidas: outCents / 100,
-			net: sheetSignedTotal(rows),
+			net: sheetRows.reduce((total, row) => total + toCents(row.amount), 0) / 100,
 		};
-	}, [rows]);
+	}, [sheetRows]);
 
 	const selectionTotal = useMemo(() => {
 		let cents = 0;
-		for (const tx of rows) if (selectedIds.has(tx.id)) cents += toCents(tx.amount);
+		for (const row of sheetRows) {
+			if (row.kind === "transaction" && selectedIds.has(row.id)) {
+				cents += toCents(row.amount);
+			}
+		}
 		return cents / 100;
-	}, [rows, selectedIds]);
+	}, [sheetRows, selectedIds]);
 
 	const handleExportCsv = useCallback(() => {
 		downloadCsv(`phai-planilha-${month}.csv`, sheetRowsCsv(rows, accountMap));
 	}, [month, rows, accountMap]);
+
+	const submitForecast = useCallback(() => {
+		const desc = forecastDescription.trim();
+		const mag = forecastAmount.replace(/^-/, "").trim();
+		if (!desc || !mag || !composerOpen) return;
+		store.commit(
+			events.forecastCreated({
+				writeId: crypto.randomUUID(),
+				description: desc,
+				amount: composerOpen === "expense" ? `-${mag}` : mag,
+				dueDate: `${month}-01`,
+				categoryId: forecastCategoryId || null,
+				accountId: forecastAccountId || null,
+				uiRole: "planned_transaction",
+				createdAt: Date.now(),
+			}),
+		);
+		setForecastDescription("");
+		setForecastAmount("");
+		setForecastAccountId("");
+		setForecastCategoryId("");
+		setComposerOpen(null);
+	}, [
+		store,
+		forecastDescription,
+		forecastAmount,
+		composerOpen,
+		month,
+		forecastCategoryId,
+		forecastAccountId,
+	]);
 
 	const applyCategory = useCallback(
 		(categoryId: string, targetIds: string[]) => {
@@ -377,7 +583,10 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					e.preventDefault();
 					const delta = e.key === "ArrowDown" ? 1 : -1;
 					setFocusedIdx((i) => {
-						const next = Math.min(Math.max(i + delta, 0), rows.length - 1);
+						const next = Math.min(
+							Math.max(i + delta, 0),
+							sheetRows.length - 1,
+						);
 						tableRef.current
 							?.querySelector(`[data-row-idx="${next}"]`)
 							?.scrollIntoView({ block: "nearest" });
@@ -387,32 +596,32 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 				}
 				case " ": {
 					e.preventDefault();
-					const tx = rows[focusedIdx];
-					if (!tx) break;
+					const row = sheetRows[focusedIdx];
+					if (!row || row.kind !== "transaction") break;
 					setSelectedIds((prev) => {
 						const next = new Set(prev);
-						if (next.has(tx.id)) next.delete(tx.id);
-						else next.add(tx.id);
+						if (next.has(row.id)) next.delete(row.id);
+						else next.add(row.id);
 						return next;
 					});
 					break;
 				}
 				case "Enter": {
 					// Mirrors the plain click: open the full edit modal.
-					const tx = rows[focusedIdx];
-					if (!tx) break;
+					const row = sheetRows[focusedIdx];
+					if (!row || row.kind !== "transaction") break;
 					e.preventDefault();
-					setModalTx(tx);
+					setModalTx(row.tx);
 					break;
 				}
 				case "k": {
-					const tx = rows[focusedIdx];
-					if (!tx) break;
+					const row = sheetRows[focusedIdx];
+					if (!row || row.kind !== "transaction") break;
 					e.preventDefault();
 					const el = tableRef.current?.querySelector(
 						`[data-row-idx="${focusedIdx}"] [data-cat-chip]`,
 					);
-					if (el) openPickerFor(tx, el as HTMLElement);
+					if (el) openPickerFor(row.tx, el as HTMLElement);
 					break;
 				}
 				case "Escape":
@@ -420,7 +629,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					break;
 			}
 		},
-		[picker, modalTx, rows, focusedIdx, openPickerFor],
+		[picker, modalTx, sheetRows, focusedIdx, openPickerFor],
 	);
 
 	const toggleSort = (key: SheetSortKey) =>
@@ -428,7 +637,16 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 			s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: key === "date" || key === "amount" ? -1 : 1 },
 		);
 
-	const allVisibleSelected = rowCount > 0 && selectedIds.size === rowCount;
+	const selectableRowIds = useMemo(
+		() =>
+			sheetRows
+				.filter((row) => row.kind === "transaction")
+				.map((row) => row.id),
+		[sheetRows],
+	);
+	const allVisibleSelected =
+		selectableRowIds.length > 0 &&
+		selectableRowIds.every((id) => selectedIds.has(id));
 
 	return (
 		<section aria-label={`Sheet for ${month}`}>
@@ -457,6 +675,100 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 					background: "var(--card)",
 				}}
 			>
+				<div
+					style={{
+						display: "flex",
+						flexWrap: "wrap",
+						gap: 8,
+						padding: 12,
+						borderBottom: "1px solid var(--border)",
+						background: "rgba(148,163,184,0.04)",
+					}}
+				>
+					<button
+						onClick={() =>
+							setComposerOpen((value) =>
+								value === "expense" ? null : "expense",
+							)
+						}
+						className="mono"
+						style={inlineActionBtn("var(--rose)")}
+					>
+						+ despesa no mes
+					</button>
+					<button
+						onClick={() =>
+							setComposerOpen((value) =>
+								value === "income" ? null : "income",
+							)
+						}
+						className="mono"
+						style={inlineActionBtn("var(--green)")}
+					>
+						+ receita no mes
+					</button>
+					<span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+						previsoes manuais aparecem na mesma grade e podem ser efetivadas ou excluidas
+					</span>
+				</div>
+				{composerOpen ? (
+					<div
+						style={{
+							display: "grid",
+							gridTemplateColumns: "minmax(220px,2fr) repeat(4,minmax(140px,1fr)) auto",
+							gap: 8,
+							padding: 12,
+							borderBottom: "1px solid var(--border)",
+							background:
+								composerOpen === "expense"
+									? "rgba(244,63,94,0.05)"
+									: "rgba(22,163,74,0.05)",
+						}}
+					>
+						<input
+							value={forecastDescription}
+							onChange={(e) => setForecastDescription(e.target.value)}
+							placeholder="descricao"
+							style={sheetInputStyle}
+						/>
+						<input
+							value={forecastAmount}
+							onChange={(e) => setForecastAmount(e.target.value)}
+							placeholder={composerOpen === "expense" ? "120.00" : "2500.00"}
+							style={sheetInputStyle}
+						/>
+						<select
+							value={forecastAccountId}
+							onChange={(e) => setForecastAccountId(e.target.value)}
+							style={sheetInputStyle}
+						>
+							<option value="">conta opcional</option>
+							{accounts.map((account) => (
+								<option key={account.id} value={account.id}>
+									{account.label}
+								</option>
+							))}
+						</select>
+						<input
+							value={forecastCategoryId}
+							onChange={(e) => setForecastCategoryId(e.target.value)}
+							list="sheet-forecast-categories"
+							placeholder="categoria opcional"
+							style={sheetInputStyle}
+						/>
+						<div className="mono" style={{ ...sheetInputStyle, opacity: 0.7 }}>
+							{month}
+						</div>
+						<button onClick={submitForecast} className="mono" style={saveBtnStyle}>
+							salvar previsao
+						</button>
+					</div>
+				) : null}
+				<datalist id="sheet-forecast-categories">
+					{categories.map((category) => (
+						<option key={category.id} value={category.id} />
+					))}
+				</datalist>
 				<table
 					style={{
 						width: "100%",
@@ -478,7 +790,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 										setSelectedIds(
 											allVisibleSelected
 												? new Set()
-												: new Set(rows.map((t) => t.id)),
+												: new Set(selectableRowIds),
 										)
 									}
 								/>
@@ -521,20 +833,50 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 						</tr>
 					</thead>
 					<tbody>
-						{rows.map((tx, idx) => (
+						{sheetRows.map((row, idx) => (
 							<SheetRow
-								key={tx.id}
-								tx={tx}
+								key={`${row.kind}:${row.id}`}
+								row={row}
 								idx={idx}
-								selected={selectedIds.has(tx.id)}
-								focused={focusedIdx === idx}
-								category={effectiveCategory(tx, overlayMap)}
-								accountLabel={
-									accountMap.get(tx.accountId)?.label ?? tx.accountId
+								selected={
+									row.kind === "transaction" && selectedIds.has(row.id)
 								}
-								tier={commitmentTier(tx, fixedCategories, overlayMap)}
+								focused={focusedIdx === idx}
 								onClick={handleRowClick}
 								onCategoryClick={openPickerFor}
+								onSettle={(forecast, transactionId) =>
+									store.commit(
+										events.forecastSettled({
+											writeId: crypto.randomUUID(),
+											forecastId: forecast.forecastId,
+											transactionId,
+											predictedAmount: predictedAmount(forecast),
+											actualAmount:
+												rows.find((tx) => tx.id === transactionId)?.amount ??
+												forecast.amount,
+											actualDate:
+												rows.find((tx) => tx.id === transactionId)?.postedAt ??
+												forecast.dueDate ??
+												`${month}-01`,
+											actualDescription:
+												rows.find((tx) => tx.id === transactionId)?.rawDescription ??
+												forecast.description,
+											settledAt: new Date().toISOString(),
+											settledAtMs: Date.now(),
+										}),
+									)
+								}
+								onDelete={(forecast) =>
+									store.commit(
+										events.forecastDeleted({
+											writeId: crypto.randomUUID(),
+											forecastId: forecast.forecastId,
+											deletedAt: Date.now(),
+										}),
+									)
+								}
+								settlingId={settlingId}
+								onToggleSettling={setSettlingId}
 							/>
 						))}
 					</tbody>
@@ -733,26 +1075,144 @@ const thStyle: React.CSSProperties = {
 };
 
 const SheetRow = ({
-	tx,
+	row,
 	idx,
 	selected,
 	focused,
-	category,
-	accountLabel,
-	tier,
 	onClick,
 	onCategoryClick,
+	onSettle,
+	onDelete,
+	settlingId,
+	onToggleSettling,
 }: {
-	tx: TxView;
+	row: SheetDataRow;
 	idx: number;
 	selected: boolean;
 	focused: boolean;
-	category: string | null;
-	accountLabel: string;
-	tier: CommitmentTier;
 	onClick: (tx: TxView, idx: number, e: React.MouseEvent) => void;
 	onCategoryClick: (tx: TxView, anchor: HTMLElement) => void;
+	onSettle: (forecast: ForecastView, transactionId: string) => void;
+	onDelete: (forecast: ForecastView) => void;
+	settlingId: string | null;
+	onToggleSettling: (id: string | null) => void;
 }) => {
+	if (row.kind === "forecast") {
+		const forecast = row.forecast;
+		const negative = isNegative(forecast.amount);
+		const linkedAmount = realizedAmount(forecast);
+		return (
+			<tr
+				data-row-idx={idx}
+				style={{
+					background:
+						forecast.status === "realizado"
+							? "rgba(22,163,74,0.05)"
+							: "rgba(124,93,250,0.04)",
+					boxShadow: focused ? "inset 2px 0 0 var(--purple)" : undefined,
+				}}
+			>
+				<td style={tdStyle} />
+				<td className="mono" style={{ ...tdStyle, color: "var(--muted)" }}>
+					{row.date.slice(8, 10)}/{row.date.slice(5, 7)}
+				</td>
+				<td style={{ ...tdStyle, maxWidth: 380 }}>
+					<div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+						<span>{forecast.description}</span>
+						<span style={forecastPillStyle(forecast.status === "realizado" ? "done" : "pending")}>
+							{STATUS_LABEL[forecast.status] ?? forecast.status}
+						</span>
+						<span style={forecastPillStyle("pending")}>manual</span>
+					</div>
+					<div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+						{forecast.status === "realizado"
+							? "forecast manual efetivado"
+							: "forecast manual pendente"}
+					</div>
+						{linkedAmount && linkedAmount !== predictedAmount(forecast) ? (
+							<div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+								prev. {formatMoneyNumber(Math.abs(toCents(predictedAmount(forecast))) / 100)} {"->"} real{" "}
+								{formatMoneyNumber(Math.abs(toCents(linkedAmount)) / 100)}
+							</div>
+						) : null}
+					<div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+						{forecast.status !== "realizado" ? (
+							<button
+								onClick={() =>
+									onToggleSettling(
+										settlingId === forecast.forecastId ? null : forecast.forecastId,
+									)
+								}
+								className="mono"
+								style={forecastRowBtnStyle}
+							>
+								marcar como pago
+							</button>
+						) : null}
+						<button
+							onClick={() => onDelete(forecast)}
+							className="mono"
+							style={forecastRowBtnStyle}
+						>
+							excluir
+						</button>
+					</div>
+					{settlingId === forecast.forecastId && row.candidates.length > 0 ? (
+						<div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+							{row.candidates.map((candidate) => (
+								<button
+									key={candidate.id}
+									onClick={() => onSettle(forecast, candidate.id)}
+									className="mono"
+									style={forecastCandidateBtnStyle}
+								>
+									{candidate.postedAt.slice(8, 10)}/{candidate.postedAt.slice(5, 7)} · {sheetLabel(candidate)} · {sheetAmountLabel(candidate.amount)}
+								</button>
+							))}
+						</div>
+					) : null}
+				</td>
+				<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
+					{row.account}
+				</td>
+				<td style={tdStyle}>
+					<span
+						className="mono"
+						style={{
+							background: row.category ? "var(--chip, #f1eefc)" : "transparent",
+							color: row.category ? "var(--purple)" : "var(--amber)",
+							border: row.category
+								? "1px solid transparent"
+								: "1px dashed var(--amber)",
+							borderRadius: "var(--radius-full)",
+							padding: "3px 10px",
+							fontSize: 12,
+						}}
+					>
+						{row.category
+							? `${categoryEmoji(row.category, !negative)} ${row.category}`
+							: "❓ uncategorized"}
+					</span>
+				</td>
+				<td
+					className="mono"
+					style={{
+						...tdStyle,
+						textAlign: "right",
+						color: negative ? "var(--rose)" : "var(--green)",
+						fontVariantNumeric: "tabular-nums",
+						whiteSpace: "nowrap",
+					}}
+				>
+					{sheetAmountLabel(forecast.amount)}
+				</td>
+				<td className="mono" style={{ ...tdStyle, fontSize: 11, color: "var(--muted)" }}>
+					{forecast.status === "realizado" ? "efetivado" : "previsto"}
+				</td>
+			</tr>
+		);
+	}
+	const tx = row.tx;
 	const negative = isNegative(tx.amount);
 	return (
 		<tr
@@ -796,7 +1256,7 @@ const SheetRow = ({
 					}}
 				>
 					{/* Tiers describe controllability of spending — income has none. */}
-					{negative && <TierBadge tier={tier} compact />}
+					{negative && <TierBadge tier={row.tier} compact />}
 					<span
 						style={{
 							overflow: "hidden",
@@ -817,7 +1277,7 @@ const SheetRow = ({
 				)}
 			</td>
 			<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
-				{accountLabel}
+				{row.account}
 			</td>
 			<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
 				<button
@@ -826,9 +1286,9 @@ const SheetRow = ({
 					className="mono"
 					title="change category (Enter)"
 					style={{
-						background: category ? "var(--chip, #f1eefc)" : "transparent",
-						color: category ? "var(--purple)" : "var(--amber)",
-						border: category
+						background: row.category ? "var(--chip, #f1eefc)" : "transparent",
+						color: row.category ? "var(--purple)" : "var(--amber)",
+						border: row.category
 							? "1px solid transparent"
 							: "1px dashed var(--amber)",
 						borderRadius: "var(--radius-full)",
@@ -841,8 +1301,8 @@ const SheetRow = ({
 						whiteSpace: "nowrap",
 					}}
 				>
-					{category
-						? `${categoryEmoji(category, !negative)} ${category}`
+					{row.category
+						? `${categoryEmoji(row.category, !negative)} ${row.category}`
 						: "❓ uncategorized"}
 				</button>
 			</td>
@@ -871,6 +1331,74 @@ const tdStyle: React.CSSProperties = {
 	// Row separator lives on the td: tr borders don't render with
 	// border-collapse: separate (which the sticky header requires).
 	borderBottom: "1px solid var(--border)",
+};
+
+const inlineActionBtn = (color: string): React.CSSProperties => ({
+	// color is a CSS var (e.g. var(--rose)) — concatenating a hex alpha
+	// (`${color}12`) yields invalid CSS, so use color-mix to tint it.
+	background: `color-mix(in srgb, ${color} 10%, transparent)`,
+	color,
+	border: `1px solid color-mix(in srgb, ${color} 38%, transparent)`,
+	borderRadius: "var(--radius-full)",
+	padding: "6px 12px",
+	cursor: "pointer",
+	fontSize: 12,
+	fontWeight: 600,
+	whiteSpace: "nowrap",
+});
+
+const sheetInputStyle: React.CSSProperties = {
+	border: "1px solid var(--border)",
+	borderRadius: "var(--radius-sm)",
+	padding: "8px 10px",
+	fontSize: 12,
+	background: "var(--card)",
+	minHeight: 36,
+};
+
+const saveBtnStyle: React.CSSProperties = {
+	background: "var(--purple)",
+	color: "#fff",
+	border: "none",
+	borderRadius: "var(--radius-sm)",
+	padding: "8px 12px",
+	cursor: "pointer",
+	fontSize: 12,
+};
+
+const forecastPillStyle = (
+	tone: "pending" | "done",
+): React.CSSProperties => ({
+	borderRadius: "var(--radius-full)",
+	padding: "2px 8px",
+	fontSize: 10,
+	fontFamily: "var(--font-mono, monospace)",
+	textTransform: "uppercase",
+	letterSpacing: "0.06em",
+	background:
+		tone === "done" ? "rgba(22,163,74,0.12)" : "rgba(124,93,250,0.1)",
+	color: tone === "done" ? "var(--green)" : "var(--purple)",
+});
+
+const forecastRowBtnStyle: React.CSSProperties = {
+	background: "transparent",
+	color: "var(--muted)",
+	border: "1px solid var(--border)",
+	borderRadius: "var(--radius-full)",
+	padding: "4px 10px",
+	cursor: "pointer",
+	fontSize: 11,
+};
+
+const forecastCandidateBtnStyle: React.CSSProperties = {
+	background: "rgba(148,163,184,0.08)",
+	color: "var(--text)",
+	border: "1px solid var(--border)",
+	borderRadius: "var(--radius-full)",
+	padding: "4px 10px",
+	cursor: "pointer",
+	fontSize: 11,
+	maxWidth: "100%",
 };
 
 interface SheetFilterState {

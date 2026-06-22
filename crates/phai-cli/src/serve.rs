@@ -28,7 +28,7 @@ use phai_core::storage::{open_store, FinanceStore};
 use phai_core::{parse_installment_description, AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
@@ -59,7 +59,7 @@ const DEFAULT_TRANSACTIONS_MONTHS_BACK: u32 = 12;
 const DEFAULT_TRANSACTIONS_LIMIT: usize = 5000;
 
 use crate::cashflow_chart::{build_chart_data, ChartData};
-use crate::forecast_cmd::materialise_template_forecasts;
+use crate::forecast_cmd::{amount_matches, materialise_template_forecasts};
 use crate::serve_cache::ReadCache;
 use crate::{
     all_transactions_for_review, apply_human_review, load_config, parse_month_ref,
@@ -338,6 +338,18 @@ enum StoreRequest {
         patch: ForecastPatch,
         resp: oneshot::Sender<Result<Option<String>>>,
     },
+    /// Soft-delete a manual forecast (`POST /api/forecast/delete`).
+    DeleteForecast {
+        forecast_id: String,
+        resp: oneshot::Sender<Result<DeleteForecastResult>>,
+    },
+    /// Manually mark a manual forecast as realized by linking a real synced
+    /// transaction (`POST /api/forecast/settle`).
+    SettleForecast {
+        forecast_id: String,
+        transaction_id: String,
+        resp: oneshot::Sender<Result<SettleForecastResult>>,
+    },
     ApplyHumanReview {
         writes: Vec<ReviewWrite>,
         resp: oneshot::Sender<Vec<ReviewWriteOutcome>>,
@@ -452,6 +464,18 @@ async fn handle_store_mutation(store: &dyn FinanceStore, config: &AppConfig, req
             resp,
         } => {
             let result = patch_forecast(store, &forecast_id, patch).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::DeleteForecast { forecast_id, resp } => {
+            let result = delete_forecast(store, &forecast_id).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::SettleForecast {
+            forecast_id,
+            transaction_id,
+            resp,
+        } => {
+            let result = settle_forecast(store, &forecast_id, &transaction_id).await;
             let _ = resp.send(result);
         }
         StoreRequest::ApplyHumanReview { writes, resp } => {
@@ -737,6 +761,72 @@ enum MoveForecastResult {
     PastMonth,
 }
 
+enum DeleteForecastResult {
+    Deleted { forecast_id: String, status: String },
+    NotFound,
+    NotManual,
+}
+
+enum SettleForecastResult {
+    Settled { forecast_id: String, status: String },
+    NotFound,
+    NotManual,
+    TransactionNotFound,
+    AmountMismatch,
+    SignMismatch,
+}
+
+fn manual_forecast_mut(record: &mut ForecastRecord) -> Option<&mut ForecastRecord> {
+    (record.template_id.is_none()).then_some(record)
+}
+
+fn forecast_metadata_obj(record: &mut ForecastRecord) -> &mut serde_json::Map<String, Value> {
+    if !record.metadata_json.is_object() {
+        record.metadata_json = json!({});
+    }
+    record
+        .metadata_json
+        .as_object_mut()
+        .expect("forecast metadata_json must be an object")
+}
+
+fn preserve_predicted_amount(record: &mut ForecastRecord) {
+    let predicted = record.amount.to_string();
+    let meta = forecast_metadata_obj(record);
+    meta.entry("predicted_amount".to_string())
+        .or_insert(Value::String(predicted));
+}
+
+fn stamp_realization_metadata(record: &mut ForecastRecord, tx: &TransactionRecord, source: &str) {
+    preserve_predicted_amount(record);
+    let actual = tx.amount.to_string();
+    let predicted = forecast_metadata_obj(record)
+        .get("predicted_amount")
+        .and_then(Value::as_str)
+        .unwrap_or(actual.as_str())
+        .to_string();
+    let variance = (tx.amount - Decimal::from_str(&predicted).unwrap_or(record.amount)).to_string();
+    let meta = forecast_metadata_obj(record);
+    meta.insert(
+        "ui_role".to_string(),
+        Value::String("planned_transaction".to_string()),
+    );
+    meta.insert("realized_amount".to_string(), Value::String(actual));
+    meta.insert(
+        "realized_transaction_date".to_string(),
+        Value::String(tx.transaction_date.to_string()),
+    );
+    meta.insert(
+        "realized_transaction_description".to_string(),
+        Value::String(tx.display_description().to_string()),
+    );
+    meta.insert(
+        "realization_source".to_string(),
+        Value::String(source.to_string()),
+    );
+    meta.insert("amount_variance".to_string(), Value::String(variance));
+}
+
 /// Reschedule a forecast in place. Installments and subscriptions are pinned to
 /// their template schedule and are rejected. The target month must be the
 /// current month or a future month — past months are rejected. The idempotency
@@ -886,6 +976,116 @@ async fn patch_forecast(
         .await
         .context("audit patch_forecast")?;
     Ok(Some(forecast_id.to_string()))
+}
+
+async fn delete_forecast(
+    store: &dyn FinanceStore,
+    forecast_id: &str,
+) -> Result<DeleteForecastResult> {
+    let Some(mut record) = store
+        .get_forecast(forecast_id)
+        .await
+        .context("get_forecast")?
+    else {
+        return Ok(DeleteForecastResult::NotFound);
+    };
+    if manual_forecast_mut(&mut record).is_none() {
+        return Ok(DeleteForecastResult::NotManual);
+    }
+    record.status = "descartado".to_string();
+    record.updated_at = Utc::now();
+    let discarded_at = record.updated_at.to_rfc3339();
+    let meta = forecast_metadata_obj(&mut record);
+    meta.insert("discarded_at".to_string(), Value::String(discarded_at));
+    let status = record.status.clone();
+    let diff =
+        serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
+    store
+        .upsert_forecasts(&[record])
+        .await
+        .context("upsert_forecasts")?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "forecast".into(),
+        entity_id: forecast_id.to_string(),
+        action: "discard".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: diff,
+    };
+    store
+        .insert_audit_events(&[event])
+        .await
+        .context("audit delete_forecast")?;
+    Ok(DeleteForecastResult::Deleted {
+        forecast_id: forecast_id.to_string(),
+        status,
+    })
+}
+
+async fn settle_forecast(
+    store: &dyn FinanceStore,
+    forecast_id: &str,
+    transaction_id: &str,
+) -> Result<SettleForecastResult> {
+    let Some(mut record) = store
+        .get_forecast(forecast_id)
+        .await
+        .context("get_forecast")?
+    else {
+        return Ok(SettleForecastResult::NotFound);
+    };
+    if manual_forecast_mut(&mut record).is_none() {
+        return Ok(SettleForecastResult::NotManual);
+    }
+    let Some(tx) = store
+        .transaction_by_id(transaction_id)
+        .await
+        .context("transaction_by_id")?
+    else {
+        return Ok(SettleForecastResult::TransactionNotFound);
+    };
+    if (record.amount > Decimal::ZERO) != (tx.amount > Decimal::ZERO) {
+        return Ok(SettleForecastResult::SignMismatch);
+    }
+    if !amount_matches(record.amount, tx.amount) {
+        return Ok(SettleForecastResult::AmountMismatch);
+    }
+    if record.account_id.is_none() {
+        record.account_id = tx.account_id.clone();
+    }
+    stamp_realization_metadata(&mut record, &tx, "manual");
+    record.amount = tx.amount;
+    record.status = "realizado".to_string();
+    record.realized_transaction_id = Some(tx.transaction_id.clone());
+    record.realized_at = Some(Utc::now());
+    record.updated_at = Utc::now();
+    let status = record.status.clone();
+    let diff =
+        serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
+    store
+        .upsert_forecasts(&[record])
+        .await
+        .context("upsert_forecasts")?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "forecast".into(),
+        entity_id: forecast_id.to_string(),
+        action: "settle".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: diff,
+    };
+    store
+        .insert_audit_events(&[event])
+        .await
+        .context("audit settle_forecast")?;
+    Ok(SettleForecastResult::Settled {
+        forecast_id: forecast_id.to_string(),
+        status,
+    })
 }
 
 async fn upsert_forecast(store: &dyn FinanceStore, mut record: ForecastRecord) -> Result<String> {
@@ -1655,6 +1855,7 @@ struct ForecastBody {
     due_date: Option<String>,
     category_id: Option<String>,
     account_id: Option<String>,
+    ui_role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1662,6 +1863,19 @@ struct ForecastBody {
 struct MoveForecastBody {
     forecast_id: String,
     due_date: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteForecastBody {
+    forecast_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettleForecastBody {
+    forecast_id: String,
+    transaction_id: String,
 }
 
 #[derive(Deserialize)]
@@ -2393,7 +2607,11 @@ async fn post_forecast(State(state): Store, Json(body): Json<ForecastBody>) -> i
         recurrence: None,
         actor_id: SERVE_ACTOR_ID.into(),
         idempotency_key: String::new(),
-        metadata_json: Value::Object(Default::default()),
+        metadata_json: body
+            .ui_role
+            .filter(|role| !role.trim().is_empty())
+            .map(|role| json!({ "ui_role": role }))
+            .unwrap_or_else(|| Value::Object(Default::default())),
         created_at: Utc::now(),
         updated_at: Utc::now(),
         template_id: None,
@@ -2471,6 +2689,90 @@ async fn post_forecast_move(
         Ok(Ok(MoveForecastResult::PastMonth)) => error_response(
             StatusCode::BAD_REQUEST,
             "não é possível mover forecast para um mês passado",
+        ),
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn post_forecast_delete(
+    State(state): Store,
+    Json(body): Json<DeleteForecastBody>,
+) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::DeleteForecast {
+            forecast_id: body.forecast_id,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(DeleteForecastResult::Deleted {
+            forecast_id,
+            status,
+        })) => {
+            state.cache.bust();
+            Json(json!({ "forecastId": forecast_id, "status": status })).into_response()
+        }
+        Ok(Ok(DeleteForecastResult::NotFound)) => {
+            error_response(StatusCode::NOT_FOUND, "forecast não encontrado")
+        }
+        Ok(Ok(DeleteForecastResult::NotManual)) => error_response(
+            StatusCode::CONFLICT,
+            "apenas forecasts manuais podem ser excluídos pela web",
+        ),
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn post_forecast_settle(
+    State(state): Store,
+    Json(body): Json<SettleForecastBody>,
+) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::SettleForecast {
+            forecast_id: body.forecast_id,
+            transaction_id: body.transaction_id,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(SettleForecastResult::Settled {
+            forecast_id,
+            status,
+        })) => {
+            state.cache.bust();
+            Json(json!({ "forecastId": forecast_id, "status": status })).into_response()
+        }
+        Ok(Ok(SettleForecastResult::NotFound)) => {
+            error_response(StatusCode::NOT_FOUND, "forecast não encontrado")
+        }
+        Ok(Ok(SettleForecastResult::NotManual)) => error_response(
+            StatusCode::CONFLICT,
+            "apenas forecasts manuais podem ser efetivados manualmente pela web",
+        ),
+        Ok(Ok(SettleForecastResult::TransactionNotFound)) => {
+            error_response(StatusCode::NOT_FOUND, "transação não encontrada")
+        }
+        Ok(Ok(SettleForecastResult::AmountMismatch)) => error_response(
+            StatusCode::CONFLICT,
+            "transação fora da tolerância de valor para este forecast",
+        ),
+        Ok(Ok(SettleForecastResult::SignMismatch)) => error_response(
+            StatusCode::CONFLICT,
+            "transação com sinal incompatível com o forecast",
         ),
         Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
@@ -2653,7 +2955,9 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/forecast-templates", get(get_forecast_templates))
         .route("/api/events", post(post_events))
         .route("/api/forecast", post(post_forecast))
+        .route("/api/forecast/delete", post(post_forecast_delete))
         .route("/api/forecast/move", post(post_forecast_move))
+        .route("/api/forecast/settle", post(post_forecast_settle))
         .route("/api/forecast-template/accept", post(post_accept_template))
         .route(
             "/api/forecast-template/dismiss",
@@ -4081,6 +4385,75 @@ mod tests {
         assert!(by_id("f-manual").draggable);
         assert_eq!(by_id("f-inst").kind, "installment");
         assert!(!by_id("f-inst").draggable);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_forecast_discards_manual_row() {
+        let (_dir, _config, store) = temp_store().await;
+        let mut forecast = sample_forecast("f-manual", None);
+        ensure_forecast_idempotency(&mut forecast).unwrap();
+        store.upsert_forecasts(&[forecast]).await.unwrap();
+
+        let outcome = delete_forecast(store.as_ref(), "f-manual").await.unwrap();
+        assert!(matches!(
+            outcome,
+            DeleteForecastResult::Deleted {
+                ref forecast_id, ..
+            } if forecast_id == "f-manual"
+        ));
+
+        let stored = store.get_forecast("f-manual").await.unwrap().unwrap();
+        assert_eq!(stored.status, "descartado");
+        assert_eq!(
+            stored
+                .metadata_json
+                .get("discarded_at")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.is_empty()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn settle_forecast_links_real_transaction_and_keeps_predicted_amount() {
+        let (_dir, _config, store) = temp_store().await;
+        let record = sample_record();
+        let mut forecast = sample_forecast("f-manual", None);
+        forecast.amount = Decimal::from_str("-12.00").unwrap();
+        forecast.description = "Almoço".into();
+        forecast.due_date = Some(record.transaction_date);
+        ensure_forecast_idempotency(&mut forecast).unwrap();
+        store.upsert_transactions(&[record]).await.unwrap();
+        store.upsert_forecasts(&[forecast]).await.unwrap();
+
+        let outcome = settle_forecast(store.as_ref(), "f-manual", "tx-1")
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            SettleForecastResult::Settled {
+                ref forecast_id, ..
+            } if forecast_id == "f-manual"
+        ));
+
+        let stored = store.get_forecast("f-manual").await.unwrap().unwrap();
+        assert_eq!(stored.status, "realizado");
+        assert_eq!(stored.realized_transaction_id.as_deref(), Some("tx-1"));
+        assert_eq!(stored.amount, Decimal::from_str("-12.50").unwrap());
+        assert_eq!(
+            stored
+                .metadata_json
+                .get("predicted_amount")
+                .and_then(|value| value.as_str()),
+            Some("-12.00")
+        );
+        assert_eq!(
+            stored
+                .metadata_json
+                .get("realized_amount")
+                .and_then(|value| value.as_str()),
+            Some("-12.5")
+        );
     }
 
     // ── cached_read get-or-compute wiring ──────────────────────────────────

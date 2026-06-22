@@ -25,4 +25,8 @@ export interface ForecastView {
 	kind: string;
 	draggable: number; // 0/1
 	month: string | null;
+	templateId: string | null;
+	realizedTransactionId: string | null;
+	realizedAt: string | null;
+	metadataJson: Record<string, unknown>;
 }

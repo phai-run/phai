@@ -38,7 +38,7 @@ import {
  * Enforced by __tests__/store-version.test.ts: change the schema and the
  * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
  */
-export const STORE_VERSION = 8;
+export const STORE_VERSION = 10;
 export const STORE_ID = `phai-s${STORE_VERSION}`;
 
 // Computes current month as "YYYY-MM" for the default selectedMonth.
@@ -146,6 +146,10 @@ export const tables = {
 			status: State.SQLite.text({ default: "" }),
 			kind: State.SQLite.text({ default: "manual" }),
 			draggable: State.SQLite.integer({ default: 0 }),
+			templateId: State.SQLite.text({ nullable: true }),
+			realizedTransactionId: State.SQLite.text({ nullable: true }),
+			realizedAt: State.SQLite.text({ nullable: true }),
+			metadataJson: State.SQLite.json({ default: {} }),
 		},
 	}),
 
@@ -267,6 +271,10 @@ const ForecastRow = Schema.Struct({
 	status: Schema.String,
 	kind: Schema.String,
 	draggable: Schema.Number,
+	templateId: Schema.NullOr(Schema.String),
+	realizedTransactionId: Schema.NullOr(Schema.String),
+	realizedAt: Schema.NullOr(Schema.String),
+	metadataJson: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
 });
 
 const ForecastTemplateRow = Schema.Struct({
@@ -351,6 +359,9 @@ export const events = {
 			description: Schema.String,
 			amount: Schema.String,
 			dueDate: Schema.String,
+			categoryId: Schema.NullOr(Schema.String),
+			accountId: Schema.NullOr(Schema.String),
+			uiRole: Schema.NullOr(Schema.String),
 			createdAt: Schema.Number,
 		}),
 	}),
@@ -366,6 +377,51 @@ export const events = {
 			dueDate: Schema.String,
 			categoryId: Schema.String,
 			upsertedAt: Schema.Number,
+		}),
+	}),
+	forecastDeleted: Events.synced({
+		name: "v1.ForecastDeleted",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			forecastId: Schema.String,
+			deletedAt: Schema.Number,
+		}),
+	}),
+	forecastSettled: Events.synced({
+		name: "v1.ForecastSettled",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			forecastId: Schema.String,
+			transactionId: Schema.String,
+			predictedAmount: Schema.String,
+			actualAmount: Schema.String,
+			actualDate: Schema.String,
+			actualDescription: Schema.String,
+			settledAt: Schema.String,
+			settledAtMs: Schema.Number,
+		}),
+	}),
+	forecastCreateAcked: Events.synced({
+		name: "v1.ForecastCreateAcked",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			localForecastId: Schema.String,
+			serverForecastId: Schema.String,
+			description: Schema.String,
+			amount: Schema.String,
+			dueDate: Schema.NullOr(Schema.String),
+			categoryId: Schema.NullOr(Schema.String),
+			accountId: Schema.NullOr(Schema.String),
+			status: Schema.String,
+			kind: Schema.String,
+			draggable: Schema.Number,
+			templateId: Schema.NullOr(Schema.String),
+			realizedTransactionId: Schema.NullOr(Schema.String),
+			realizedAt: Schema.NullOr(Schema.String),
+			metadataJson: Schema.Record({
+				key: Schema.String,
+				value: Schema.Unknown,
+			}),
 		}),
 	}),
 	writeAcked: Events.synced({
@@ -463,12 +519,22 @@ const materializers = State.SQLite.materializers(events, {
 		description,
 		amount,
 		dueDate,
+		categoryId,
+		accountId,
+		uiRole,
 		createdAt,
 	}) => [
 		tables.pendingWrites.insert({
 			writeId,
 			type: "forecastCreate",
-			payload: { description, amount, due_date: dueDate },
+			payload: {
+				description,
+				amount,
+				due_date: dueDate,
+				category_id: categoryId,
+				account_id: accountId,
+				ui_role: uiRole,
+			},
 			createdAt,
 			attempts: 0,
 		}),
@@ -477,9 +543,12 @@ const materializers = State.SQLite.materializers(events, {
 			description,
 			amount,
 			dueDate,
+			categoryId,
+			accountId,
 			status: "active",
 			kind: "manual",
 			draggable: 1,
+			metadataJson: uiRole ? { ui_role: uiRole } : {},
 		}),
 	],
 	"v1.ForecastEnvelopeUpserted": ({
@@ -517,7 +586,98 @@ const materializers = State.SQLite.materializers(events, {
 					status: "ativo",
 					kind: "manual",
 					draggable: 1,
+					metadataJson: {},
 				}),
+	],
+	"v1.ForecastDeleted": ({ writeId, forecastId, deletedAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "forecastDelete",
+			forecastId,
+			payload: {},
+			createdAt: deletedAt,
+			attempts: 0,
+		}),
+		tables.forecasts
+			.update({ status: "descartado" })
+			.where({ forecastId }),
+	],
+	"v1.ForecastSettled": ({
+		writeId,
+		forecastId,
+		transactionId,
+		predictedAmount,
+		actualAmount,
+		actualDate,
+		actualDescription,
+		settledAt,
+		settledAtMs,
+	}) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "forecastSettle",
+			forecastId,
+			payload: { transactionId },
+			createdAt: settledAtMs,
+			attempts: 0,
+		}),
+		tables.forecasts
+			.update({
+				amount: actualAmount,
+				status: "realizado",
+				realizedTransactionId: transactionId,
+				realizedAt: settledAt,
+				metadataJson: {
+					ui_role: "planned_transaction",
+					predicted_amount: predictedAmount,
+					realized_amount: actualAmount,
+					realized_transaction_date: actualDate,
+					realized_transaction_description: actualDescription,
+					realization_source: "manual",
+				},
+			})
+			.where({ forecastId }),
+	],
+	"v1.ForecastCreateAcked": ({
+		writeId,
+		localForecastId,
+		serverForecastId,
+		description,
+		amount,
+		dueDate,
+		categoryId,
+		accountId,
+		status,
+		kind,
+		draggable,
+		templateId,
+		realizedTransactionId,
+		realizedAt,
+		metadataJson,
+	}) => [
+		tables.pendingWrites.delete().where({ writeId }),
+		tables.forecasts.delete().where({ forecastId: localForecastId }),
+		tables.forecasts.insert({
+			forecastId: serverForecastId,
+			description,
+			amount,
+			dueDate,
+			categoryId,
+			accountId,
+			status,
+			kind,
+			draggable,
+			templateId,
+			realizedTransactionId,
+			realizedAt,
+			metadataJson,
+		}),
+		tables.pendingWrites
+			.update({ forecastId: serverForecastId })
+			.where({ forecastId: localForecastId }),
+		tables.forecastOverlay
+			.update({ forecastId: serverForecastId })
+			.where({ forecastId: localForecastId }),
 	],
 	"v1.WriteAcked": ({ writeId }) =>
 		tables.pendingWrites.delete().where({ writeId }),

@@ -15,6 +15,7 @@ import {
 } from "../../lib/derivations";
 import type { ChartSimulation } from "../chart/model";
 import type { ForecastView } from "../types";
+import { ManualPlannedTransactions } from "../month/ManualPlannedTransactions";
 
 const txAll$ = queryDb(tables.transactions);
 const overlay$ = queryDb(tables.reviewOverlay);
@@ -141,6 +142,7 @@ export const WarPlanPanel = ({
 
 	return (
 		<section aria-label={`Planning for ${month}`}>
+			<ManualPlannedTransactions month={month} />
 			<PlanSummary
 				plan={plan}
 				sim={sim}

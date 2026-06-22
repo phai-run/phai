@@ -7,6 +7,7 @@ import {
 	type BridgeIdentity,
 	type ChartData,
 	type EnvelopeUpsert,
+	type NewForecast,
 	type ForecastRecord,
 	type ForecastTemplateRecord,
 	type ReviewFlushItem,
@@ -52,6 +53,22 @@ interface PendingRow {
 	forecastId: string;
 	payload: unknown;
 	attempts: number;
+}
+
+interface ForecastStoreRow {
+	forecastId: string;
+	description: string;
+	amount: string;
+	dueDate: string | null;
+	categoryId: string | null;
+	accountId: string | null;
+	status: string;
+	kind: string;
+	draggable: number;
+	templateId: string | null;
+	realizedTransactionId: string | null;
+	realizedAt: string | null;
+	metadataJson: Record<string, unknown>;
 }
 
 type StoreApi = ReturnType<typeof useStore>["store"];
@@ -284,20 +301,32 @@ const drainQueue = async (
 	}
 
 	for (const r of rows) {
-		if (r.type === "forecastMove") {
-			await flushOne(store, r, errors, () =>
-				api.moveForecast(r.forecastId, (r.payload as { dueDate: string }).dueDate),
-			);
-		} else if (r.type === "forecastCreate") {
-			await flushOne(store, r, errors, () =>
-				api.createForecast(
-					r.payload as { description: string; amount: string; dueDate: string },
+		const row = currentPendingRow(store, r.writeId);
+		if (!row) continue;
+		if (row.type === "forecastMove") {
+			await flushOne(store, row, errors, async () =>
+				api.moveForecast(
+					await resolveForecastId(store, row.forecastId),
+					(row.payload as { dueDate: string }).dueDate,
 				),
 			);
-		} else if (r.type === "forecastEnvelope") {
+		} else if (row.type === "forecastCreate") {
+			await flushForecastCreate(store, row, errors);
+		} else if (row.type === "forecastEnvelope") {
 			// The materializer queued the snake_case /api/forecast body verbatim.
-			await flushOne(store, r, errors, () =>
-				api.upsertForecast(r.payload as EnvelopeUpsert),
+			await flushOne(store, row, errors, () =>
+				api.upsertForecast(row.payload as EnvelopeUpsert),
+			);
+		} else if (row.type === "forecastDelete") {
+			await flushOne(store, row, errors, async () =>
+				api.deleteForecast(await resolveForecastId(store, row.forecastId)),
+			);
+		} else if (row.type === "forecastSettle") {
+			await flushOne(store, row, errors, async () =>
+				api.settleForecast(
+					await resolveForecastId(store, row.forecastId),
+					(row.payload as { transactionId: string }).transactionId,
+				),
 			);
 		}
 	}
@@ -338,6 +367,57 @@ const flushOne = async (
 	}
 };
 
+const flushForecastCreate = async (
+	store: StoreApi,
+	row: PendingRow,
+	errors: string[],
+): Promise<void> => {
+	if (row.attempts >= MAX_RETRIES) {
+		store.commit(
+			events.writeAbandoned({
+				writeId: row.writeId,
+				type: row.type,
+				transactionId: row.transactionId,
+				forecastId: row.forecastId,
+				error: "max retries exceeded",
+			}),
+		);
+		errors.push("max retries exceeded");
+		return;
+	}
+	try {
+		const response = await api.createForecast(row.payload as NewForecast);
+		const forecast = currentForecastRow(store, row.writeId);
+		if (!forecast) {
+			store.commit(events.writeAcked({ writeId: row.writeId }));
+			return;
+		}
+		store.commit(
+			events.forecastCreateAcked({
+				writeId: row.writeId,
+				localForecastId: row.writeId,
+				serverForecastId: response.forecast_id,
+				description: forecast.description,
+				amount: forecast.amount,
+				dueDate: forecast.dueDate,
+				categoryId: forecast.categoryId,
+				accountId: forecast.accountId,
+				status: forecast.status,
+				kind: forecast.kind,
+				draggable: forecast.draggable,
+				templateId: forecast.templateId,
+				realizedTransactionId: forecast.realizedTransactionId,
+				realizedAt: forecast.realizedAt,
+				metadataJson: forecast.metadataJson,
+			}),
+		);
+	} catch (e: unknown) {
+		const msg = String(e);
+		store.commit(retryOrAbandonEvent(row, row.writeId, msg));
+		errors.push(msg);
+	}
+};
+
 const retryOrAbandonEvent = (
 	row: PendingRow | undefined,
 	writeId: string,
@@ -354,6 +434,47 @@ const retryOrAbandonEvent = (
 		});
 	}
 	return events.writeFailed({ writeId, error, attempts });
+};
+
+const currentPendingRow = (
+	store: StoreApi,
+	writeId: string,
+): PendingRow | undefined =>
+	(store.query(pendingWrites$) as ReadonlyArray<PendingRow>).find(
+		(row) => row.writeId === writeId,
+	);
+
+const currentForecastRow = (
+	store: StoreApi,
+	forecastId: string,
+): ForecastStoreRow | undefined =>
+	(store.query(queryDb(tables.forecasts)) as ReadonlyArray<ForecastStoreRow>).find(
+		(row) => row.forecastId === forecastId,
+	);
+
+const resolveForecastId = async (
+	store: StoreApi,
+	forecastId: string,
+): Promise<string> => {
+	const local = currentForecastRow(store, forecastId);
+	if (!local) return forecastId;
+	const { forecasts } = await api.forecasts({});
+	const match = forecasts.find((candidate) => {
+		const candidateMeta =
+			candidate.metadata_json && typeof candidate.metadata_json === "object"
+				? (candidate.metadata_json as Record<string, unknown>)
+				: {};
+		return (
+			candidate.description === local.description &&
+			(candidate.due_date ?? null) === local.dueDate &&
+			(candidate.amount ?? "0") === local.amount &&
+			(candidate.category_id ?? null) === local.categoryId &&
+			(candidate.account_id ?? null) === local.accountId &&
+			String(candidateMeta.ui_role ?? "") ===
+				String(local.metadataJson.ui_role ?? "")
+		);
+	});
+	return match?.forecast_id ?? forecastId;
 };
 
 export interface SeedState {
@@ -640,6 +761,13 @@ const normalizeForecasts = (forecasts: ForecastRecord[]) =>
 		status: f.status ?? "",
 		kind: f.kind ?? "manual",
 		draggable: bool(f.draggable),
+		templateId: f.template_id ?? null,
+		realizedTransactionId: f.realized_transaction_id ?? null,
+		realizedAt: f.realized_at ?? null,
+		metadataJson:
+			f.metadata_json && typeof f.metadata_json === "object"
+				? (f.metadata_json as Record<string, unknown>)
+				: {},
 	}));
 
 const normalizeTemplates = (templates: ForecastTemplateRecord[]) =>
