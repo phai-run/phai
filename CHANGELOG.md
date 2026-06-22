@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.27.4](https://github.com/phai-run/phai/compare/v5.27.3...v5.27.4) (2026-06-22)
+
+
+### Bug Fixes
+
+* **web:** cash-balance badge reflects the balance, not the month net ([#211](https://github.com/phai-run/phai/issues/211)) ([0b68b12](https://github.com/phai-run/phai/commit/0b68b12864ff06ea2c7ab5d27b9eb696e4c32749))
+
 ## [5.27.3](https://github.com/phai-run/phai/compare/v5.27.2...v5.27.3) (2026-06-20)
 
 
