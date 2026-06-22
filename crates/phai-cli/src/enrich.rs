@@ -1750,6 +1750,12 @@ mod test_support {
         async fn get_forecast(&self, _forecast_id: &str) -> Result<Option<ForecastRecord>> {
             Ok(None)
         }
+        async fn find_forecast_by_idempotency_key(
+            &self,
+            _idempotency_key: &str,
+        ) -> Result<Option<ForecastRecord>> {
+            Ok(None)
+        }
         async fn get_categories(&self) -> Result<Vec<CategoryRecord>> {
             Ok(vec![])
         }

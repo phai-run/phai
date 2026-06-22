@@ -458,6 +458,16 @@ const resolveForecastId = async (
 ): Promise<string> => {
 	const local = currentForecastRow(store, forecastId);
 	if (!local) return forecastId;
+	// Once the create has acked, the create's pending row is gone and any
+	// dependent delete/settle has been remapped to the real server id. In that
+	// (common) case `forecastId` is already the backend id — use it directly
+	// instead of a content fuzzy-match, which could otherwise pick a different
+	// forecast that happens to share the same description/amount/date.
+	const pending = store.query(pendingWrites$) as ReadonlyArray<PendingRow>;
+	const stillCreating = pending.some(
+		(p) => p.type === "forecastCreate" && p.writeId === forecastId,
+	);
+	if (!stillCreating) return forecastId;
 	const { forecasts } = await api.forecasts({});
 	const match = forecasts.find((candidate) => {
 		const candidateMeta =
