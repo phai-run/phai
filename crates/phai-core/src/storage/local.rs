@@ -1007,6 +1007,27 @@ impl FinanceStore for LocalStore {
         }
     }
 
+    async fn find_forecast_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ForecastRecord>> {
+        let id: Option<String> = {
+            let conn = self.connection()?;
+            conn.query_row(
+                "SELECT forecast_id FROM forecast \
+                 WHERE idempotency_key = ?1 AND status != 'descartado' \
+                 ORDER BY created_at ASC LIMIT 1",
+                [idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        match id {
+            Some(id) => self.get_forecast(&id).await,
+            None => Ok(None),
+        }
+    }
+
     async fn get_categories(&self) -> Result<Vec<CategoryRecord>> {
         let conn = self.connection()?;
         let exists = Self::table_exists(&conn, "categories")?;

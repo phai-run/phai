@@ -1090,10 +1090,22 @@ async fn settle_forecast(
 
 async fn upsert_forecast(store: &dyn FinanceStore, mut record: ForecastRecord) -> Result<String> {
     let actor_id = record.actor_id.clone();
-    if record.forecast_id.is_empty() {
+    let is_create = record.forecast_id.is_empty();
+    ensure_forecast_idempotency(&mut record).context("idempotency")?;
+    // Dedup creates: the web sync queue's flush guard is per-mount, so two
+    // tabs/mounts (or a retry) can fire the same create twice. Without this the
+    // MERGE keys on forecast_id (freshly generated each call) and stacks a
+    // duplicate row. Return the existing forecast instead.
+    if is_create {
+        if let Some(existing) = store
+            .find_forecast_by_idempotency_key(&record.idempotency_key)
+            .await
+            .context("find_forecast_by_idempotency_key")?
+        {
+            return Ok(existing.forecast_id);
+        }
         record.forecast_id = Uuid::now_v7().to_string();
     }
-    ensure_forecast_idempotency(&mut record).context("idempotency")?;
     let forecast_id = record.forecast_id.clone();
     let diff =
         serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
@@ -3930,6 +3942,45 @@ mod tests {
         let store = open_store(&config).await.unwrap();
         run_migrations(store.as_ref(), &config).await.unwrap();
         (dir, config, store)
+    }
+
+    fn dedup_sample_forecast() -> ForecastRecord {
+        ForecastRecord {
+            forecast_id: String::new(),
+            due_date: Some(chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()),
+            description: "Aluguel".into(),
+            amount: Decimal::from_str("-2500.00").unwrap(),
+            category_id: Some("moradia:aluguel".into()),
+            account_id: Some("acc-1".into()),
+            status: "ativo".into(),
+            recurrence: None,
+            actor_id: "test-actor".into(),
+            idempotency_key: String::new(),
+            metadata_json: serde_json::Value::Object(Default::default()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            template_id: None,
+            realized_transaction_id: None,
+            realized_at: None,
+        }
+    }
+
+    // Regression: a retried/duplicated create POST (same logical forecast, empty
+    // forecast_id) must not stack a second row. The web sync queue's flush guard
+    // is per-mount, so two tabs/mounts can fire the same create twice; dedup must
+    // happen server-side on the idempotency key.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_forecast_dedups_duplicate_creates_by_idempotency_key() {
+        let (_dir, _config, store) = temp_store().await;
+        let id1 = upsert_forecast(store.as_ref(), dedup_sample_forecast())
+            .await
+            .unwrap();
+        let id2 = upsert_forecast(store.as_ref(), dedup_sample_forecast())
+            .await
+            .unwrap();
+        assert_eq!(id1, id2, "duplicate create must return the existing id");
+        let all = store.list_forecasts(None, None, None).await.unwrap();
+        assert_eq!(all.len(), 1, "duplicate create must not stack a second row");
     }
 
     #[tokio::test(flavor = "current_thread")]

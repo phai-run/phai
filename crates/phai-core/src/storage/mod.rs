@@ -106,6 +106,13 @@ pub trait FinanceStore {
     ) -> Result<Vec<ForecastRecord>>;
     /// Look up a single forecast by its primary key. `Ok(None)` when missing.
     async fn get_forecast(&self, forecast_id: &str) -> Result<Option<ForecastRecord>>;
+    /// Look up an existing, non-discarded forecast by its idempotency key.
+    /// Used to dedup duplicate create requests (the web sync queue's flush guard
+    /// is per-mount, so the same create can fire twice). `Ok(None)` when none.
+    async fn find_forecast_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ForecastRecord>>;
     /// Return every category record from the `categories` table with its name
     /// and parent. Unlike `list_all_category_ids` (which returns a flat set),
     /// this returns the full records suitable for dropdown rendering.

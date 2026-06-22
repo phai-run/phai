@@ -2008,6 +2008,31 @@ impl FinanceStore for BigQueryStore {
         }))
     }
 
+    async fn find_forecast_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ForecastRecord>> {
+        let sql = format!(
+            "
+            SELECT forecast_id
+            FROM {}
+            WHERE idempotency_key = @idempotency_key AND status != 'descartado'
+            ORDER BY created_at ASC
+            LIMIT 1
+            ",
+            self.qualified_table("forecast")?,
+        );
+        let response = self
+            .run_query_with_params(&sql, &[Param::string("idempotency_key", idempotency_key)])
+            .await?;
+        if response.rows.is_empty() {
+            return Ok(None);
+        }
+        let values = row_values(&response.rows[0]);
+        let forecast_id = required_string(&values, 0, "forecast_id")?;
+        self.get_forecast(&forecast_id).await
+    }
+
     async fn get_categories(&self) -> Result<Vec<CategoryRecord>> {
         let sql = format!(
             "
