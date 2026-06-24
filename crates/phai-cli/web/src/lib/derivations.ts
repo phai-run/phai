@@ -86,6 +86,8 @@ export interface TxFilters {
 	subscriptionsOnly: boolean;
 	/** Show only unreviewed transactions. */
 	unreviewedOnly: boolean;
+	/** Show only transactions with no effective category. */
+	uncategorizedOnly?: boolean;
 	/** Show only one controllability tier (ADR-0030); null/undefined = all. */
 	tierFilter?: CommitmentTier | null;
 }
@@ -250,6 +252,11 @@ export const filterTransactions = (
 		)
 			return false;
 		if (filters.unreviewedOnly && tx.reviewed) return false;
+		if (
+			filters.uncategorizedOnly &&
+			(effectiveCategory(tx, overlayMap) ?? "") !== ""
+		)
+			return false;
 		if (filters.accountFilter && tx.accountId !== filters.accountFilter)
 			return false;
 		if (filters.ownerFilter) {
@@ -285,6 +292,7 @@ export const hasActiveFilters = (filters: TxFilters): boolean =>
 	filters.installmentsOnly ||
 	filters.subscriptionsOnly ||
 	filters.unreviewedOnly ||
+	!!filters.uncategorizedOnly ||
 	!!filters.tierFilter ||
 	!!filters.accountFilter ||
 	!!filters.ownerFilter ||

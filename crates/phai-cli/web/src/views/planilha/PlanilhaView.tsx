@@ -244,6 +244,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 			installmentsOnly: ui.installmentsOnly,
 			subscriptionsOnly: ui.subscriptionsOnly,
 			unreviewedOnly: ui.unreviewedOnly,
+			uncategorizedOnly: ui.uncategorizedOnly,
 			tierFilter: (ui.tierFilter as CommitmentTier | null) ?? null,
 		}),
 		[
@@ -254,6 +255,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 			ui.installmentsOnly,
 			ui.subscriptionsOnly,
 			ui.unreviewedOnly,
+			ui.uncategorizedOnly,
 			ui.tierFilter,
 		],
 	);
@@ -270,21 +272,9 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 			overlayMap,
 			accountMap,
 			fixedCategories,
-		).filter(
-			(tx) =>
-				!ui.uncategorizedOnly || (effectiveCategory(tx, overlayMap) ?? "") === "",
 		);
 		return sortForSheet(filtered, sort, overlayMap, accountMap);
-	}, [
-		txRows,
-		month,
-		filters,
-		ui.uncategorizedOnly,
-		overlayMap,
-		accountMap,
-		fixedCategories,
-		sort,
-	]);
+	}, [txRows, month, filters, overlayMap, accountMap, fixedCategories, sort]);
 
 	const sheetRows = useMemo(() => {
 		const txSheetRows: SheetDataRow[] = rows.map((tx) => ({
@@ -387,8 +377,8 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 	]);
 
 	const hasSheetFilters = useMemo(
-		() => hasActiveFilters(filters) || ui.uncategorizedOnly,
-		[filters, ui.uncategorizedOnly],
+		() => hasActiveFilters(filters),
+		[filters],
 	);
 
 	// Reset selection when the month or the visible set changes size.
