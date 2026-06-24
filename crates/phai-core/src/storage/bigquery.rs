@@ -29,6 +29,21 @@ use yup_oauth2::{read_service_account_key, ServiceAccountAuthenticator};
 const BIGQUERY_SCOPE: &str = "https://www.googleapis.com/auth/bigquery";
 const BIGQUERY_SCOPES: &[&str] = &[BIGQUERY_SCOPE];
 
+/// Default cost guard: the maximum number of bytes BigQuery is allowed to bill
+/// for a single query job. BigQuery rejects (does not run) any job whose scan
+/// would exceed this, which converts a runaway full-table scan from an
+/// unbounded GCP bill into an immediate, cheap error.
+///
+/// 20 GiB is chosen to comfortably cover phai's real working set — the largest
+/// tables (transactions, snapshots) are well under a gigabyte even after years
+/// of history, and every query is column-pruned and (where partitioned)
+/// date-filtered — while still blocking the pathological case of an accidental
+/// cross join or an unfiltered scan of a future, much larger dataset. On-demand
+/// BigQuery pricing is ~$6.25/TiB scanned, so this cap bounds a single bad
+/// query to roughly $0.12. Override per-environment via
+/// `PHAI_BQ_MAX_BYTES_BILLED` (legacy `FINANCE_OS_BQ_MAX_BYTES_BILLED`).
+const MAX_BYTES_BILLED: i64 = 20 * 1024 * 1024 * 1024;
+
 pub struct BigQueryStore {
     config: AppConfig,
     client: Client,
@@ -73,10 +88,26 @@ struct QueryRequest<'a> {
     query: &'a str,
     use_legacy_sql: bool,
     timeout_ms: u64,
+    /// Cost guard. BigQuery's REST API expects this as a stringified int64 and
+    /// will refuse to run any job whose scan would exceed it. See
+    /// [`MAX_BYTES_BILLED`].
+    maximum_bytes_billed: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     parameter_mode: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     query_parameters: Vec<Value>,
+}
+
+/// Resolve the configured `maximumBytesBilled` cost guard. Honors the
+/// `PHAI_BQ_MAX_BYTES_BILLED` env var (legacy `FINANCE_OS_BQ_MAX_BYTES_BILLED`),
+/// falling back to [`MAX_BYTES_BILLED`]. A non-numeric or non-positive override
+/// is ignored in favor of the safe default — the guard must never be silently
+/// disabled by a malformed value.
+fn resolve_max_bytes_billed() -> i64 {
+    crate::compat::env_var("PHAI_BQ_MAX_BYTES_BILLED", "FINANCE_OS_BQ_MAX_BYTES_BILLED")
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|&bytes| bytes > 0)
+        .unwrap_or(MAX_BYTES_BILLED)
 }
 
 /// BigQuery query parameter type declaration, mirroring the REST schema at
@@ -436,6 +467,7 @@ impl BigQueryStore {
                 query: sql,
                 use_legacy_sql: false,
                 timeout_ms: 30_000,
+                maximum_bytes_billed: resolve_max_bytes_billed().to_string(),
                 parameter_mode,
                 query_parameters,
             })
@@ -444,6 +476,21 @@ impl BigQueryStore {
             .context("Falha ao chamar BigQuery")?;
         if !response.status().is_success() {
             let body = response.text().await.unwrap_or_default();
+            // BigQuery refuses (rather than runs) any job whose scan would
+            // exceed `maximumBytesBilled`, reporting it as
+            // "exceeds limit" / "maximumBytesBilled" in the error body. Surface
+            // it as a cost guard so the user knows the query was blocked to
+            // protect their GCP bill, not that it generically failed.
+            if body.contains("maximumBytesBilled") || body.contains("bytes billed") {
+                return Err(anyhow!("BigQuery query falhou: {body}")).with_context(|| {
+                    format!(
+                        "Consulta bloqueada pelo limite de custo (maximumBytesBilled = {} bytes). \
+                         A query escanearia mais dados que o teto configurado. Ajuste via \
+                         PHAI_BQ_MAX_BYTES_BILLED se o aumento for intencional.",
+                        resolve_max_bytes_billed()
+                    )
+                });
+            }
             return Err(anyhow!("BigQuery query falhou: {body}"));
         }
         let mut parsed: QueryResponse =
@@ -4593,5 +4640,101 @@ mod like_escape {
         assert_eq!(escape_like_term("50%"), "50\\%");
         assert_eq!(escape_like_term("a_b"), "a\\_b");
         assert_eq!(escape_like_term("c:\\d"), "c:\\\\d");
+    }
+}
+
+#[cfg(test)]
+mod max_bytes_billed {
+    use super::{resolve_max_bytes_billed, QueryRequest, MAX_BYTES_BILLED};
+    use serde_json::Value;
+    use serial_test::serial;
+
+    const NEW_VAR: &str = "PHAI_BQ_MAX_BYTES_BILLED";
+    const LEGACY_VAR: &str = "FINANCE_OS_BQ_MAX_BYTES_BILLED";
+
+    fn clear() {
+        unsafe {
+            std::env::remove_var(NEW_VAR);
+            std::env::remove_var(LEGACY_VAR);
+        }
+    }
+
+    fn request_body() -> Value {
+        let request = QueryRequest {
+            query: "SELECT 1",
+            use_legacy_sql: false,
+            timeout_ms: 30_000,
+            maximum_bytes_billed: resolve_max_bytes_billed().to_string(),
+            parameter_mode: None,
+            query_parameters: Vec::new(),
+        };
+        serde_json::to_value(&request).expect("QueryRequest serializes")
+    }
+
+    #[test]
+    #[serial]
+    fn job_body_includes_cost_cap_as_camel_case_string() {
+        clear();
+        // BigQuery's REST API expects `maximumBytesBilled` as a stringified
+        // int64 in the job config. Assert the cap is present, camelCased, and
+        // string-typed — never a JSON number and never absent.
+        let body = request_body();
+        let cap = body
+            .get("maximumBytesBilled")
+            .expect("job config must include maximumBytesBilled cost guard");
+        assert_eq!(cap, &Value::String(MAX_BYTES_BILLED.to_string()));
+        clear();
+    }
+
+    #[test]
+    #[serial]
+    fn default_is_used_when_env_unset() {
+        clear();
+        assert_eq!(resolve_max_bytes_billed(), MAX_BYTES_BILLED);
+        clear();
+    }
+
+    #[test]
+    #[serial]
+    fn env_override_is_honored() {
+        clear();
+        unsafe {
+            std::env::set_var(NEW_VAR, "5000000000");
+        }
+        assert_eq!(resolve_max_bytes_billed(), 5_000_000_000);
+        assert_eq!(
+            request_body().get("maximumBytesBilled"),
+            Some(&Value::String("5000000000".to_string()))
+        );
+        clear();
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_env_override_is_honored() {
+        clear();
+        unsafe {
+            std::env::set_var(LEGACY_VAR, "7000000000");
+        }
+        assert_eq!(resolve_max_bytes_billed(), 7_000_000_000);
+        clear();
+    }
+
+    #[test]
+    #[serial]
+    fn malformed_or_nonpositive_override_falls_back_to_default() {
+        // A bad value must never silently disable the guard.
+        for bad in ["not-a-number", "0", "-1", ""] {
+            clear();
+            unsafe {
+                std::env::set_var(NEW_VAR, bad);
+            }
+            assert_eq!(
+                resolve_max_bytes_billed(),
+                MAX_BYTES_BILLED,
+                "override {bad:?} should fall back to the safe default"
+            );
+        }
+        clear();
     }
 }

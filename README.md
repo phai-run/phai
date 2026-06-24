@@ -256,6 +256,7 @@ phai admin migrate
 | `FINANCE_OS_CONFIG_DIR` | Config directory. Default: `~/Library/Application Support/finance-os` (macOS) or `~/.config/finance-os` (Linux). |
 | `FINANCE_OS_DATA_DIR` | Data directory (holds `finance-os.db` and `update-state.json`). Same defaults as above. |
 | `FINANCE_OS_NO_AUTO_UPDATE` | Set to `1` to disable automatic update checks. |
+| `PHAI_BQ_MAX_BYTES_BILLED` | BigQuery cost guard: max bytes a single query may bill before BigQuery refuses to run it. Default `21474836480` (20 GiB). A non-numeric or non-positive value is ignored in favor of the default. Legacy alias: `FINANCE_OS_BQ_MAX_BYTES_BILLED`. |
 | `PLUGGY_CLIENT_ID` / `PLUGGY_CLIENT_SECRET` | Pluggy API credentials. |
 
 > The on-disk config/data paths and `FINANCE_OS_*` environment variables retain their current names so existing installs keep working. A migration to phai-named paths is tracked separately.
