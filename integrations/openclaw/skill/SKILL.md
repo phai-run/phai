@@ -237,6 +237,45 @@ Listar preços por item (BigQuery-only):
 bash skills/phai/finance.sh report item-prices --query "item"
 ```
 
+## Formatação de mensagens (WhatsApp / mobile)
+
+Todas as mensagens enviadas ao usuário passam por WhatsApp ou apps mobile que **não renderizam markdown**. Siga estas regras sem exceção:
+
+- **NUNCA usar tabelas markdown** (`| col | col |`). Tabelas viram lixo visual no celular.
+- **NUNCA usar blocos de código** (` ``` `) para dados que não são código.
+- **NUNCA usar headers** (`#`, `##`) — WhatsApp não os renderiza.
+- Formatos permitidos: `*negrito*`, `_itálico_`, listas com `•` ou `1.`, quebras de linha simples.
+- Dados estruturados devem virar linhas `Rótulo: *valor*`, nunca colunas lado a lado.
+- Mensagens curtas. Se passar de 15 linhas, resumir e oferecer "quer mais detalhes?".
+- Para sync horário: usar a saída do `--notify-summary` **como está** — não remontar, não reformatar, não adicionar tabela-resumo. Se precisar acrescentar contexto (ex: alerta de erro), colocar **depois** da mensagem do CLI, como parágrafo separado.
+- Para reports ad-hoc: formatar em linhas simples com emoji + rótulo + valor.
+
+**Formato correto (sync):**
+```
+💰 *4 novas transações* · ter 24/jun 06:00
+
+🏦 Saldo em conta: *R$ 12.430,18*
+🧾 Despesa real nova: *R$ 7,76*
+
+🍽️ *Alimentação*
+• PIX Elisabete Becker · *R$ 6,00*
+
+💸 *Transferências*
+• PIX Thomas P. Machado · *R$ 0,66*
+• PIX Thomas P. Machado · *R$ 1,00*
+• PIX Thomas P. Machado · *R$ 0,10*
+
+_v5.28.2 · felipe-mac · Pluggy sincronizado_
+```
+
+**Formato ERRADO (nunca fazer):**
+```
+| Item | Resultado |
+| --- | --- |
+| Status | ✅ Complete |
+| Novas transações | 4 |
+```
+
 ## Regras operacionais
 
 - Sempre preferir o `transaction_id` explícito quando o usuário responder descrição, estabelecimento ou propósito.
@@ -263,7 +302,7 @@ bash skills/phai/finance.sh report item-prices --query "item"
   - se `newTransactionsCount = 0` e `needsContextCount = 0`, ficar em silêncio
   - se `summaryStatus != "complete"`, tratar como resumo parcial: confiar apenas em `newTransactions*`, expor `warnings` e não inferir pendências a partir de `needsContextCount = -1`
   - se houver novidade, usar apenas o JSON do `--json-summary` como base factual
-  - para repasse 1:1 em texto (sem remontar mensagem na Ford), usar `--notify-summary`
+  - para repasse 1:1 em texto, usar `--notify-summary` e enviar a saída **literalmente** — não remontar, não adicionar tabela, não reformatar. Se precisar comentar algo (ex: erro no forecast), adicionar como parágrafo separado após a mensagem do CLI
   - **depois de listar as transações novas, perguntar a anatomia (descrição/estabelecimento/propósito) de cada uma, uma por vez** — não esperar o usuário iniciar (ver "Trigger proativo no sync horário" acima). Use `tx review-human --transaction-id ID --description … --merchant-name … --purpose … --owner <pessoa> --json` para gravar a resposta.
 - Para interações com usuário:
   - sempre priorizar labels efetivos da CLI (description/merchant_name/raw_description e categoria já aplicados no phai)

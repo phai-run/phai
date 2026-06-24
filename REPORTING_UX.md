@@ -38,6 +38,17 @@ For card-bill requests, disambiguate intent before answering:
 - In closed-bill answers, report `total fechado = total_charges - open_amount` first; mention `open_amount` only as secondary context.
 - If user asks a custom closed-bill view (categories, recorrentes, assinaturas, parcelados), provide the custom view over CLI-backed data and clearly label any unavailable slice.
 
+## Message Delivery (WhatsApp / mobile)
+
+All user-facing messages are delivered via WhatsApp or mobile apps that do not render markdown.
+
+- **No markdown tables.** Use `Label: *value*` lines instead of columnar data.
+- **No code blocks** for non-code data. No headers (`#`).
+- Allowed formatting: `*bold*`, `_italic_`, `•` bullet lists, numbered lists, line breaks.
+- For sync notifications: pass through `--notify-summary` output verbatim. Do not reformat it.
+- For ad-hoc reports: keep under 15 lines. Offer detail expansion on request.
+- Structured data → one line per field: `emoji Label: *value*`.
+
 ## Privacy and Portability
 
 - Do not hardcode personal counterparties or user-specific heuristics in shared code.
