@@ -1,5 +1,21 @@
 # Changelog
 
+## [5.28.2](https://github.com/phai-run/phai/compare/v5.28.1...v5.28.2) (2026-06-24)
+
+
+### Bug Fixes
+
+* **cli:** guard card_open_bill_due_date against malformed month_ref ([#218](https://github.com/phai-run/phai/issues/218)) ([7facb3f](https://github.com/phai-run/phai/commit/7facb3f635866f7f2002592d6446b72420dd395c))
+* **invite:** cap Argon2 KDF params from untrusted envelope to prevent memory-bomb ([#224](https://github.com/phai-run/phai/issues/224)) ([a7bb692](https://github.com/phai-run/phai/commit/a7bb69271ff877b0277005d57e6cb408ce4648aa))
+* **serve:** set explicit request body size limit on /api router ([#219](https://github.com/phai-run/phai/issues/219)) ([a9ed493](https://github.com/phai-run/phai/commit/a9ed4934d4f154906c026e4884b114c977c994c0))
+* **storage:** cap BigQuery maximum_bytes_billed to prevent runaway cost ([#220](https://github.com/phai-run/phai/issues/220)) ([8c7e7d5](https://github.com/phai-run/phai/commit/8c7e7d5fef6b83ebc0297503152fd9fab16bf8b5))
+* **web:** unify uncategorized filter + usability audit 2026-06-24 ([#222](https://github.com/phai-run/phai/issues/222)) ([6ce9dbf](https://github.com/phai-run/phai/commit/6ce9dbfb009ee1c46252843b0f8413cb552ea6b1))
+
+
+### Performance Improvements
+
+* **serve:** bound read cache with moka and make invalidation granular ([#223](https://github.com/phai-run/phai/issues/223)) ([94a4ab8](https://github.com/phai-run/phai/commit/94a4ab8e74d89fb18d06857826733eefc41a1b08))
+
 ## [5.28.1](https://github.com/phai-run/phai/compare/v5.28.0...v5.28.1) (2026-06-22)
 
 
