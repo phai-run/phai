@@ -57,6 +57,16 @@ const PAYMENT_STATUS_INSTALLMENT: &str = "installment";
 const DEFAULT_TRANSACTIONS_MONTHS_BACK: u32 = 12;
 /// Hard cap on rows returned by `GET /api/transactions`.
 const DEFAULT_TRANSACTIONS_LIMIT: usize = 5000;
+/// Explicit maximum request body size accepted by the `/api` router, in bytes.
+///
+/// DoS hardening: cap how much memory a single request can force the bridge to
+/// buffer. This is set intentionally rather than relying on axum's implicit
+/// 2 MB `DefaultBodyLimit`, which a future axum change or a route override could
+/// silently alter. 512 KB comfortably fits every JSON payload these endpoints
+/// accept — the largest are `POST /api/activate` (encrypted invite + base64
+/// service-account key, low tens of KB) and `POST /api/events` (a batch of
+/// LiveStore mutation events) — while still bounding worst-case buffering.
+const MAX_API_BODY_BYTES: usize = 512 * 1024;
 
 use crate::cashflow_chart::{build_chart_data, ChartData};
 use crate::forecast_cmd::{amount_matches, materialise_template_forecasts};
@@ -1946,6 +1956,58 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> axum::respo
     (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
 }
 
+/// Assemble the `/api` router with its middleware stack.
+///
+/// All `/api` routes are guarded by the same-origin check so a malicious page
+/// cannot drive the bridge via the user's browser (CSRF). Requests without an
+/// Origin header (curl, direct integration) are allowed.
+fn build_api_router(state: BridgeState, bridge_identity: Arc<BridgeIdentityResponse>) -> Router {
+    Router::new()
+        .route("/api", get(api_status))
+        .route("/api/status", get(get_status))
+        .route("/api/activate", post(post_activate))
+        .route("/api/sync", post(post_sync))
+        .route(
+            "/api/identity",
+            get({
+                let bridge_identity = bridge_identity.clone();
+                move || {
+                    let bridge_identity = bridge_identity.clone();
+                    async move { Json((*bridge_identity).clone()) }
+                }
+            }),
+        )
+        .route("/api/review-queue", get(get_review_queue))
+        .route("/api/transactions", get(get_transactions))
+        .route("/api/categories", get(get_categories))
+        .route("/api/accounts", get(get_accounts))
+        .route("/api/cards", get(get_cards))
+        .route("/api/chart", get(get_chart))
+        .route("/api/forecasts", get(get_forecasts))
+        .route("/api/forecast-templates", get(get_forecast_templates))
+        .route("/api/events", post(post_events))
+        .route("/api/forecast", post(post_forecast))
+        .route("/api/forecast/delete", post(post_forecast_delete))
+        .route("/api/forecast/move", post(post_forecast_move))
+        .route("/api/forecast/settle", post(post_forecast_settle))
+        .route("/api/forecast-template/accept", post(post_accept_template))
+        .route(
+            "/api/forecast-template/dismiss",
+            post(post_dismiss_template),
+        )
+        // Explicit DoS-hardening cap on request body size — set intentionally
+        // rather than relying on axum's implicit 2 MB `DefaultBodyLimit`, which
+        // a future axum change or a route override could silently remove.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_API_BODY_BYTES))
+        .layer(axum::middleware::from_fn(guard_origin))
+        // Operation log (debug builds only): method, path, status, latency.
+        .layer(axum::middleware::from_fn(log_ops))
+        // Security headers on every response — outermost so they are never
+        // skipped even if an inner layer short-circuits.
+        .layer(axum::middleware::from_fn(security_headers))
+        .with_state(state)
+}
+
 /// A cached `200 application/json` response built from raw bytes.
 fn cached_json_response(body: Arc<[u8]>) -> axum::response::Response {
     (
@@ -2939,49 +3001,7 @@ pub async fn run(port: u16) -> Result<()> {
         activation,
     };
 
-    // All `/api` routes are guarded by the same-origin check so a malicious
-    // page cannot drive the bridge via the user's browser (CSRF). Requests
-    // without an Origin header (curl, direct integration) are allowed.
-    let api = Router::new()
-        .route("/api", get(api_status))
-        .route("/api/status", get(get_status))
-        .route("/api/activate", post(post_activate))
-        .route("/api/sync", post(post_sync))
-        .route(
-            "/api/identity",
-            get({
-                let bridge_identity = bridge_identity.clone();
-                move || {
-                    let bridge_identity = bridge_identity.clone();
-                    async move { Json((*bridge_identity).clone()) }
-                }
-            }),
-        )
-        .route("/api/review-queue", get(get_review_queue))
-        .route("/api/transactions", get(get_transactions))
-        .route("/api/categories", get(get_categories))
-        .route("/api/accounts", get(get_accounts))
-        .route("/api/cards", get(get_cards))
-        .route("/api/chart", get(get_chart))
-        .route("/api/forecasts", get(get_forecasts))
-        .route("/api/forecast-templates", get(get_forecast_templates))
-        .route("/api/events", post(post_events))
-        .route("/api/forecast", post(post_forecast))
-        .route("/api/forecast/delete", post(post_forecast_delete))
-        .route("/api/forecast/move", post(post_forecast_move))
-        .route("/api/forecast/settle", post(post_forecast_settle))
-        .route("/api/forecast-template/accept", post(post_accept_template))
-        .route(
-            "/api/forecast-template/dismiss",
-            post(post_dismiss_template),
-        )
-        .layer(axum::middleware::from_fn(guard_origin))
-        // Operation log (debug builds only): method, path, status, latency.
-        .layer(axum::middleware::from_fn(log_ops))
-        // Security headers on every response — outermost so they are never
-        // skipped even if an inner layer short-circuits.
-        .layer(axum::middleware::from_fn(security_headers))
-        .with_state(app_state);
+    let api = build_api_router(app_state, bridge_identity.clone());
 
     let app = api
         // Serve the embedded LiveStore SPA for everything else (index + assets
@@ -4562,5 +4582,76 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         }
         assert_eq!(calls.get(), 2, "errors must never be cached");
+    }
+
+    // ── request body size limit ────────────────────────────────────────────
+
+    /// Build a `/api` router backed by a throwaway state. The store actor is
+    /// never reached in the body-limit test: oversized requests are rejected by
+    /// the `DefaultBodyLimit` layer before any handler runs, so a dummy
+    /// (immediately-closed) store channel is sufficient.
+    fn dummy_api_router() -> Router {
+        let tmp = std::env::temp_dir();
+        let (tx, _rx) = mpsc::channel::<StoreRequest>(1);
+        let state = BridgeState {
+            tx: Arc::new(RwLock::new(tx)),
+            cache: ReadCache::default(),
+            config_tx: Arc::new(watch::channel(AppConfig::default()).0),
+            paths: Arc::new(temp_paths(&tmp)),
+            activation: Arc::new(RwLock::new(ActivationStatus {
+                activated: false,
+                label: None,
+                project_id: None,
+                dataset_id: None,
+                sync_available: false,
+            })),
+        };
+        let identity = Arc::new(bridge_identity_response(&AppConfig::default()));
+        build_api_router(state, identity)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn api_router_rejects_oversized_body_and_accepts_normal_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = dummy_api_router();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/api/events");
+
+        // Over the limit: must be rejected before reaching the handler.
+        let oversized = vec![b'a'; MAX_API_BODY_BYTES + 1];
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(oversized)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            "a body exceeding MAX_API_BODY_BYTES must be rejected with 413"
+        );
+
+        // Comfortably under the limit: the body limit must not fire. The dummy
+        // store channel is closed, so the handler itself fails (5xx), but the
+        // request is accepted past the limit — i.e. never a 413.
+        let normal = b"{}".to_vec();
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(normal)
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            "a small body must pass the body-size limit"
+        );
     }
 }
