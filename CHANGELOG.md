@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.29.0](https://github.com/phai-run/phai/compare/v5.28.2...v5.29.0) (2026-06-24)
+
+
+### Features
+
+* **site:** in-page modals for ADRs and source files on /architecture ([#230](https://github.com/phai-run/phai/issues/230)) ([28a2a8a](https://github.com/phai-run/phai/commit/28a2a8a22dddff6050db01992a3b1b004b533aac))
+* **site:** refresh landing — web app screenshots + 'Como funciona' section ([#232](https://github.com/phai-run/phai/issues/232)) ([305a579](https://github.com/phai-run/phai/commit/305a57927ac2efe85f5a8415ccf7de448eed70cf))
+
 ## [5.28.2](https://github.com/phai-run/phai/compare/v5.28.1...v5.28.2) (2026-06-24)
 
 
