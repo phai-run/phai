@@ -27,6 +27,11 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 
+/// Upper bound on Argon2 cost parameters read from an untrusted envelope,
+/// expressed as a multiple of the sealing defaults. Caps memory/time so a forged
+/// token cannot turn activation into a memory-bomb. See [`KdfParams::validate_within_caps`].
+const MAX_COST_MULTIPLE: u32 = 2;
+
 /// The decrypted contents of an invite. `service_account` is the raw Google
 /// service-account JSON, kept as an opaque value so phai-core does not need to
 /// model Google's key schema.
@@ -86,6 +91,22 @@ impl KdfParams {
             t_cost: p.t_cost(),
             p_cost: p.p_cost(),
         }
+    }
+
+    /// Reject KDF parameters lifted from an untrusted envelope before they reach
+    /// [`derive`]. A forged token could otherwise set `m_cost` arbitrarily high
+    /// and make Argon2 allocate gigabytes during activation (memory-bomb / DoS).
+    /// The cap is a small multiple of the sealing defaults — generous enough for
+    /// any honest `seal`, tight enough that a malicious value is refused fast.
+    fn validate_within_caps(&self) -> Result<()> {
+        let default = Self::default_params();
+        let too_big = self.m_cost > default.m_cost.saturating_mul(MAX_COST_MULTIPLE)
+            || self.t_cost > default.t_cost.saturating_mul(MAX_COST_MULTIPLE)
+            || self.p_cost > default.p_cost.saturating_mul(MAX_COST_MULTIPLE);
+        if too_big {
+            bail!("convite corrompido (parâmetros Argon2 acima do limite seguro)");
+        }
+        Ok(())
     }
 
     fn derive(&self, passphrase: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
@@ -165,6 +186,9 @@ pub fn open(token: &str, passphrase: &str) -> Result<Invite> {
         t_cost,
         p_cost,
     };
+    // The envelope is untrusted: cap the KDF cost before deriving so a forged
+    // token cannot make Argon2 allocate gigabytes during activation.
+    kdf.validate_within_caps()?;
     let key = kdf.derive(passphrase.as_bytes(), salt)?;
     let cipher = XChaCha20Poly1305::new(key.as_slice().into());
     let plaintext = cipher
@@ -245,5 +269,48 @@ mod tests {
     #[test]
     fn empty_passphrase_is_rejected_on_seal() {
         assert!(seal(&sample(), "").is_err());
+    }
+
+    /// Hand-build an envelope token with arbitrary KDF cost parameters, mirroring
+    /// the byte layout in [`seal`]. Used to forge malicious tokens in tests.
+    fn forge_token(m_cost: u32, t_cost: u32, p_cost: u32) -> String {
+        let salt = [7u8; SALT_LEN];
+        let nonce = [9u8; NONCE_LEN];
+        let ciphertext = [0u8; 32]; // non-empty body so the length check passes
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(ENVELOPE_MAGIC);
+        envelope.extend_from_slice(&m_cost.to_le_bytes());
+        envelope.extend_from_slice(&t_cost.to_le_bytes());
+        envelope.extend_from_slice(&p_cost.to_le_bytes());
+        envelope.extend_from_slice(&salt);
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ciphertext);
+        format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(envelope))
+    }
+
+    #[test]
+    fn rejects_absurd_kdf_params_before_derivation() {
+        // A maliciously crafted token must not be allowed to drive Argon2 into
+        // allocating gigabytes of memory. The cap is enforced before `derive`,
+        // so this returns promptly instead of attempting a memory-bomb.
+        let token = forge_token(u32::MAX, 2, 1);
+        assert!(open(&token, "pw").is_err());
+
+        // 10× the default m_cost is also over the cap.
+        let huge = KdfParams::default_params().m_cost.saturating_mul(10);
+        assert!(open(&forge_token(huge, 2, 1), "pw").is_err());
+
+        // Over-the-cap t_cost / p_cost are rejected too.
+        let d = KdfParams::default_params();
+        assert!(open(
+            &forge_token(d.m_cost, d.t_cost.saturating_mul(10), d.p_cost),
+            "pw"
+        )
+        .is_err());
+        assert!(open(
+            &forge_token(d.m_cost, d.t_cost, d.p_cost.saturating_mul(10)),
+            "pw"
+        )
+        .is_err());
     }
 }
