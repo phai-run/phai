@@ -23,7 +23,7 @@ deunicode = "1.6"
 dirs = "6.0"
 futures = "0.3"
 hex = "0.4"
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 nucleo = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rig-core = { version = "0.6", default-features = false, features = ["derive"] }

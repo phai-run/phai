@@ -23,6 +23,7 @@ serde_json.workspace = true
 flate2 = "1.0"
 futures.workspace = true
 minisign-verify = "0.2"
+moka.workspace = true
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 tar = "0.4"
