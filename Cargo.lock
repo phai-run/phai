@@ -1902,6 +1902,7 @@ dependencies = [
  "hostname",
  "include_dir",
  "minisign-verify",
+ "moka",
  "phai-core",
  "predicates",
  "reqwest 0.12.28",

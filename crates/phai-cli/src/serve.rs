@@ -70,7 +70,7 @@ const MAX_API_BODY_BYTES: usize = 512 * 1024;
 
 use crate::cashflow_chart::{build_chart_data, ChartData};
 use crate::forecast_cmd::{amount_matches, materialise_template_forecasts};
-use crate::serve_cache::ReadCache;
+use crate::serve_cache::{ReadCache, Resource};
 use crate::{
     all_transactions_for_review, apply_human_review, load_config, parse_month_ref,
     review_human_rows, HumanReviewPatch, ReviewFilters, ReviewHumanKind,
@@ -2566,9 +2566,17 @@ async fn post_events(State(state): Store, Json(body): Json<EventsBody>) -> impl 
                     }
                 }
             }
-            // Any acked write mutated the store — invalidate cached reads.
+            // Any acked write re-categorizes / re-owns transactions, which
+            // ripples into the review queue, category list, the chart (spend by
+            // category) and card bills. Forecasts/templates are unaffected.
             if !acked.is_empty() {
-                state.cache.bust();
+                state.cache.invalidate(&[
+                    Resource::Transactions,
+                    Resource::ReviewQueue,
+                    Resource::Categories,
+                    Resource::Chart,
+                    Resource::Cards,
+                ]);
             }
             Json(EventsResponse { acked, failed }).into_response()
         }
@@ -2598,7 +2606,11 @@ async fn patch_forecast_response(
     }
     match resp_rx.await {
         Ok(Ok(Some(forecast_id))) => {
-            state.cache.bust();
+            // A forecast edit changes the forecast list and the projected chart
+            // (forecasts feed the future portion). Nothing else depends on it.
+            state
+                .cache
+                .invalidate(&[Resource::Forecasts, Resource::Chart]);
             Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
         }
         Ok(Ok(None)) => error_response(StatusCode::NOT_FOUND, "forecast não encontrado"),
@@ -2706,7 +2718,10 @@ async fn post_forecast(State(state): Store, Json(body): Json<ForecastBody>) -> i
     }
     match resp_rx.await {
         Ok(Ok(forecast_id)) => {
-            state.cache.bust();
+            // New forecast → forecast list + projected chart only.
+            state
+                .cache
+                .invalidate(&[Resource::Forecasts, Resource::Chart]);
             Json(serde_json::json!({ "forecastId": forecast_id })).into_response()
         }
         Ok(Err(e)) => internal_error(e),
@@ -2745,7 +2760,11 @@ async fn post_forecast_move(
             forecast_id,
             status,
         })) => {
-            state.cache.bust();
+            // Moving a forecast to a new month shifts the forecast list and the
+            // projected chart; nothing else is affected.
+            state
+                .cache
+                .invalidate(&[Resource::Forecasts, Resource::Chart]);
             Json(serde_json::json!({
                 "forecastId": forecast_id,
                 "dueDate": due_date.format("%Y-%m-%d").to_string(),
@@ -2790,7 +2809,10 @@ async fn post_forecast_delete(
             forecast_id,
             status,
         })) => {
-            state.cache.bust();
+            // Deleting a forecast updates the forecast list + projected chart.
+            state
+                .cache
+                .invalidate(&[Resource::Forecasts, Resource::Chart]);
             Json(json!({ "forecastId": forecast_id, "status": status })).into_response()
         }
         Ok(Ok(DeleteForecastResult::NotFound)) => {
@@ -2827,7 +2849,15 @@ async fn post_forecast_settle(
             forecast_id,
             status,
         })) => {
-            state.cache.bust();
+            // Settling realizes a forecast against a real transaction: the
+            // forecast list and projected chart change, and the now-linked
+            // transaction can shift the transactions/review-queue views.
+            state.cache.invalidate(&[
+                Resource::Forecasts,
+                Resource::Chart,
+                Resource::Transactions,
+                Resource::ReviewQueue,
+            ]);
             Json(json!({ "forecastId": forecast_id, "status": status })).into_response()
         }
         Ok(Ok(SettleForecastResult::NotFound)) => {
@@ -2872,7 +2902,12 @@ async fn post_accept_template(
     }
     match resp_rx.await {
         Ok(Ok(result)) => {
-            state.cache.bust();
+            // Accepting a template materializes forecasts: the template list
+            // changes (it leaves the suggestions), and the new forecasts feed
+            // the forecast list + projected chart.
+            state
+                .cache
+                .invalidate(&[Resource::Templates, Resource::Forecasts, Resource::Chart]);
             Json(result).into_response()
         }
         Ok(Err(e)) => error_response(StatusCode::BAD_REQUEST, e.to_string()),
@@ -2899,7 +2934,9 @@ async fn post_dismiss_template(
     }
     match resp_rx.await {
         Ok(Ok(())) => {
-            state.cache.bust();
+            // Dismissing only drops a suggestion from the template list; it does
+            // not create forecasts, so nothing else needs invalidating.
+            state.cache.invalidate(&[Resource::Templates]);
             Json(serde_json::json!({ "template_id": template_id })).into_response()
         }
         Ok(Err(e)) => internal_error(e),
@@ -4665,14 +4702,31 @@ mod tests {
         .await;
         assert_eq!(calls.get(), 1, "second read must be served from cache");
 
-        // A bust forces the closure to run again.
-        cache.bust();
-        let _third = cached_read(&cache, key, || async {
+        // Invalidating an UNRELATED family must NOT evict this read.
+        cache.invalidate(&[Resource::Forecasts]);
+        let _third = cached_read(&cache, key.clone(), || async {
             calls.set(calls.get() + 1);
             Ok::<_, axum::response::Response>(CategoriesResponse { ids: vec![] })
         })
         .await;
-        assert_eq!(calls.get(), 2, "bust must force a re-query");
+        assert_eq!(
+            calls.get(),
+            1,
+            "invalidating an unrelated family must keep this read cached"
+        );
+
+        // Invalidating THIS family forces the closure to run again.
+        cache.invalidate(&[Resource::Categories]);
+        let _fourth = cached_read(&cache, key, || async {
+            calls.set(calls.get() + 1);
+            Ok::<_, axum::response::Response>(CategoriesResponse { ids: vec![] })
+        })
+        .await;
+        assert_eq!(
+            calls.get(),
+            2,
+            "invalidating the categories family must force a re-query"
+        );
     }
 
     /// An error outcome is returned verbatim and never cached: the next call
