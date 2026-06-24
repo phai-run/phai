@@ -4003,6 +4003,116 @@ mod tests {
         assert_eq!(all.len(), 1, "duplicate create must not stack a second row");
     }
 
+    // Regression (audit B1): the forecast table carries a DUAL status vocabulary
+    // where `ativo` (legacy pt-BR) and `active` (en) coexist for the same logical
+    // state. The idempotency key is status-agnostic by construction (status is not
+    // one of its inputs), so two creates of the same logical forecast that differ
+    // ONLY in this vocab — one `ativo`, one `active` — must still collapse to a
+    // single row. If status ever leaks into the key, this duplicate would survive.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_forecast_dedups_across_ativo_active_status_vocab() {
+        let (_dir, _config, store) = temp_store().await;
+
+        let mut first = dedup_sample_forecast();
+        first.status = "ativo".into();
+        let id1 = upsert_forecast(store.as_ref(), first).await.unwrap();
+
+        // Same logical forecast, but tagged with the English vocab variant.
+        let mut second = dedup_sample_forecast();
+        second.status = "active".into();
+        let id2 = upsert_forecast(store.as_ref(), second).await.unwrap();
+
+        assert_eq!(
+            id1, id2,
+            "a create differing only in the ativo/active vocab must dedup to the existing id"
+        );
+        let all = store.list_forecasts(None, None, None).await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "the ativo/active vocab split must not let a duplicate forecast survive"
+        );
+        // The lookup ignores discard state but not these two; both are live, so a
+        // status filter must treat them as a single deduped row regardless of vocab.
+        let live = store
+            .list_forecasts(None, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|f| matches!(f.status.to_lowercase().as_str(), "ativo" | "active"))
+            .count();
+        assert_eq!(live, 1, "exactly one live forecast across the vocab split");
+    }
+
+    // Regression (audit B1): materialised forecasts and their backing template
+    // live in two tables (`forecast` + `forecast_template`). Re-materialising the
+    // same template — e.g. a re-accept, or a retried POST — must be idempotent on
+    // the `forecast` table: the deterministic per-month forecast_id keeps the MERGE
+    // from stacking duplicate rows, even though the template row is a distinct
+    // entity that legitimately coexists with the forecasts it produces.
+    #[tokio::test(flavor = "current_thread")]
+    async fn rematerialising_template_does_not_stack_duplicate_forecasts() {
+        use crate::forecast_cmd::materialise_template_forecasts;
+        use phai_core::models::ForecastTemplateRecord;
+
+        let (_dir, _config, store) = temp_store().await;
+        let now = Utc::now();
+        let template = ForecastTemplateRecord {
+            template_id: "tpl-rent".into(),
+            kind: "fixed".into(),
+            description: "Aluguel".into(),
+            merchant_pattern: None,
+            category_id: Some("moradia:aluguel".into()),
+            account_id: Some("acc-1".into()),
+            amount: Decimal::from_str("-2500.00").unwrap(),
+            amount_lower: None,
+            amount_upper: None,
+            cadence: "monthly".into(),
+            next_due_day: Some(1),
+            start_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            end_date: None,
+            remaining_count: None,
+            source: "manual".into(),
+            confidence: None,
+            status: "ativo".into(),
+            metadata_json: Value::Object(Default::default()),
+            actor_id: "test-actor".into(),
+            idempotency_key: "template:tpl-rent".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .upsert_forecast_templates(std::slice::from_ref(&template))
+            .await
+            .unwrap();
+
+        let first = materialise_template_forecasts(store.as_ref(), &template, 3, "test-actor", now)
+            .await
+            .unwrap();
+        assert_eq!(first, 3, "first materialisation creates three months");
+
+        // Re-materialise the same template; deterministic forecast_ids must MERGE
+        // in place rather than stack new rows.
+        materialise_template_forecasts(store.as_ref(), &template, 3, "test-actor", now)
+            .await
+            .unwrap();
+
+        let forecasts = store.list_forecasts(None, None, None).await.unwrap();
+        assert_eq!(
+            forecasts.len(),
+            3,
+            "re-materialising a template must not stack duplicate forecast rows"
+        );
+        // The template row is a distinct entity and must survive alongside its
+        // materialised forecasts — the cross-table split is intentional, not a dup.
+        let templates = store.list_forecast_templates(None, None).await.unwrap();
+        assert_eq!(
+            templates.len(),
+            1,
+            "the backing template row coexists with its forecasts"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn apply_review_writes_persists_patch_and_isolates_failures() {
         let (_dir, config, store) = temp_store().await;
