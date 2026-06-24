@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phai — Relatório de Arquitetura, Modelo de Dados e UX</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2a3240; --accent:#7c9eff; --accent2:#36c08a; --warn:#f0b429; --danger:#ff6b6b;
+    --pill:#222b3a; --code:#0b0f16; --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:16px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  header.hero{padding:64px 0 40px;border-bottom:1px solid var(--line);background:
+    radial-gradient(1200px 400px at 20% -10%, rgba(124,158,255,.12), transparent),
+    radial-gradient(900px 360px at 90% 0%, rgba(54,192,138,.10), transparent)}
+  .logo{font-size:13px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent2);font-weight:700}
+  h1{font-size:42px;line-height:1.1;margin:.3em 0 .2em;font-weight:800;letter-spacing:-.02em}
+  .tagline{font-size:19px;color:var(--muted);max-width:760px}
+  .meta{margin-top:22px;display:flex;flex-wrap:wrap;gap:8px}
+  .pill{background:var(--pill);border:1px solid var(--line);color:var(--ink);
+    padding:5px 12px;border-radius:999px;font-size:12.5px;font-family:var(--mono)}
+  nav.toc{position:sticky;top:0;z-index:10;background:rgba(13,17,23,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);padding:12px 0}
+  nav.toc .wrap{display:flex;flex-wrap:wrap;gap:6px 16px}
+  nav.toc a{font-size:13.5px;color:var(--muted);font-weight:600}
+  nav.toc a:hover{color:var(--ink);text-decoration:none}
+  section{padding:52px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:28px;margin:0 0 6px;letter-spacing:-.01em;display:flex;align-items:center;gap:12px}
+  h2 .ix{font-family:var(--mono);font-size:15px;color:var(--accent);background:var(--panel2);
+    border:1px solid var(--line);border-radius:8px;padding:2px 9px}
+  h3{font-size:19px;margin:34px 0 10px;color:var(--ink)}
+  h4{font-size:15px;margin:22px 0 8px;color:var(--accent2);text-transform:uppercase;letter-spacing:.08em}
+  p{color:#cdd7e1}
+  .lead{font-size:17.5px;color:var(--muted)}
+  .grid{display:grid;gap:16px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:760px){.g2,.g3{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .card h3{margin:0 0 6px;font-size:16.5px}
+  .card p{margin:0;font-size:14.5px;color:var(--muted)}
+  .card .k{font-family:var(--mono);font-size:12px;color:var(--accent);display:block;margin-bottom:6px}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.05em}
+  td code,p code,li code,h4 code{font-family:var(--mono);font-size:12.8px;background:var(--code);
+    border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:#bcd}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.55;color:#c9d4e0}
+  pre .c{color:#5f6b7a}
+  pre .a{color:var(--accent)} pre .g{color:var(--accent2)} pre .y{color:var(--warn)}
+  ul,ol{color:#cdd7e1;padding-left:22px}
+  li{margin:6px 0}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;
+    border:1px solid var(--line);margin-right:4px}
+  .t-sec{color:var(--danger);border-color:rgba(255,107,107,.4)}
+  .t-perf{color:var(--accent);border-color:rgba(124,158,255,.4)}
+  .t-data{color:var(--accent2);border-color:rgba(54,192,138,.4)}
+  .callout{border-left:3px solid var(--accent);background:var(--panel2);border-radius:0 12px 12px 0;
+    padding:14px 18px;margin:18px 0}
+  .callout.warn{border-color:var(--warn)}
+  .callout.good{border-color:var(--accent2)}
+  .flow{display:flex;flex-direction:column;gap:0;margin:18px 0;font-family:var(--mono);font-size:13px}
+  .flow .node{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+  .flow .node b{color:var(--accent2)}
+  .flow .node .d{color:var(--muted);font-family:var(--sans);font-size:12.5px;margin-top:3px}
+  .flow .arr{color:var(--accent);text-align:center;padding:4px 0;font-size:16px}
+  .indent1{margin-left:26px} .indent2{margin-left:52px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 11px;
+    font-size:12.5px;font-family:var(--mono);color:#bcd}
+  .map{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:18px 0}
+  @media(max-width:760px){.map{grid-template-columns:1fr}}
+  .layer{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .layer .ttl{font-weight:700;margin-bottom:8px;font-size:15px}
+  .layer ul{padding-left:18px;margin:0}
+  .layer li{font-size:13px;color:var(--muted)}
+  footer{padding:40px 0 80px;color:var(--muted);font-size:13px}
+  .legend{font-size:12.5px;color:var(--muted);margin-top:8px}
+  .num{font-family:var(--mono);color:var(--accent)}
+  hr.s{border:0;border-top:1px dashed var(--line);margin:26px 0}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="logo">φ phai · relatório técnico</div>
+    <h1>Arquitetura, Modelo de Dados &amp; UX</h1>
+    <p class="tagline">Um CLI Rust de binário único que transforma o extrato bancário de uma família
+      em um banco de dados financeiro consultável, auditável e reportável — com app web local e
+      pipeline para agentes de IA. <em>“finanças da casa, inteligência de verdade.”</em></p>
+    <div class="meta">
+      <span class="pill">v5.28.2</span>
+      <span class="pill">Rust 2021 · MSRV 1.90</span>
+      <span class="pill">~53k LOC Rust + web</span>
+      <span class="pill">2 crates · 41 migrations</span>
+      <span class="pill">37 ADRs</span>
+      <span class="pill">gerado 2026-06-24</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#vis">1 · Visão</a>
+    <a href="#arch">2 · Arquitetura</a>
+    <a href="#data">3 · Modelo de dados</a>
+    <a href="#views">4 · Cadeia de views</a>
+    <a href="#ux">5 · UX</a>
+    <a href="#web">6 · App web</a>
+    <a href="#dec">7 · Decisões-chave</a>
+    <a href="#audit">8 · Estado atual</a>
+  </div>
+</nav>
+
+<!-- 1 VISÃO -->
+<section id="vis">
+  <div class="wrap">
+    <h2><span class="ix">01</span> Visão do produto</h2>
+    <p class="lead">phai conecta ao agregador open-finance <strong>Pluggy</strong>, normaliza tudo num
+      store relacional e produz relatórios legíveis por humanos (padrão) ou JSON estruturado
+      (<code>--raw</code>) consumido por agentes e dashboards.</p>
+
+    <div class="grid g3" style="margin-top:22px">
+      <div class="card"><span class="k">PROBLEMA</span><h3>Extrato ≠ entendimento</h3>
+        <p>Bancos mostram lançamentos brutos. Uma família quer saber para onde o dinheiro <em>realmente</em> vai, em regime de caixa, sem mentir centavos.</p></div>
+      <div class="card"><span class="k">ABORDAGEM</span><h3>O banco é a verdade</h3>
+        <p>Todo relatório, resposta de agente e tela deriva do store. Não há cache paralelo nem estado derivado que possa divergir.</p></div>
+      <div class="card"><span class="k">ENTREGA</span><h3>Humano + agente</h3>
+        <p>Formato humano (agrupado, emoji, legível no celular) é o padrão; JSON é um par, não um penduricalho. Pipeline diário via WhatsApp.</p></div>
+    </div>
+
+    <div class="callout">
+      <strong>Quem usa.</strong> Single-user/família. O autor roda em dinheiro real. É open source —
+      por isso <em>privacidade é regra de código</em>: nenhum nome de contraparte, rótulo de conta ou
+      “fingerprint” de extrato entra no código compartilhado. Classificação vive na tabela <code>rules</code>
+      em runtime ou em config privada.
+    </div>
+  </div>
+</section>
+
+<!-- 2 ARQUITETURA -->
+<section id="arch">
+  <div class="wrap">
+    <h2><span class="ix">02</span> Arquitetura</h2>
+    <p class="lead">Binário único, zero cerimônia. Sem Postgres, sem Redis, sem servidor de dashboard.
+      SQLite embarcado no binário; BigQuery por HTTPS. Migrations embutidas em tempo de compilação.</p>
+
+    <h3>Mapa de camadas</h3>
+    <div class="map">
+      <div class="layer">
+        <div class="ttl">🖥️ phai-cli <span class="tag t-perf">binário</span></div>
+        <ul>
+          <li><code>main.rs</code> — árvore de subcomandos clap</li>
+          <li><code>human_format.rs</code> — formatadores WhatsApp</li>
+          <li><code>serve.rs</code> — servidor web local (axum)</li>
+          <li><code>enrich.rs</code>, <code>forecast_cmd.rs</code>, <code>pulse.rs</code></li>
+          <li><code>update.rs</code> — self-update atômico</li>
+          <li><code>mcp.rs</code> — servidor MCP read-only</li>
+          <li>web/ — app LiveStore+React embarcado</li>
+        </ul>
+      </div>
+      <div class="layer">
+        <div class="ttl">⚙️ phai-core <span class="tag t-data">domínio</span></div>
+        <ul>
+          <li><code>models.rs</code> — records do domínio</li>
+          <li><code>storage/</code> — trait <code>FinanceStore</code> + 2 impls</li>
+          <li><code>pluggy.rs</code> — cliente REST + HMAC</li>
+          <li><code>rules.rs</code> — engine de classificação</li>
+          <li><code>splits.rs</code>, <code>installments.rs</code></li>
+          <li><code>idempotency.rs</code>, <code>invite.rs</code></li>
+          <li><code>enrichment/</code> — LLM + heurísticas + CNPJ + fuzzy</li>
+        </ul>
+      </div>
+      <div class="layer">
+        <div class="ttl">🗄️ Persistência <span class="tag t-data">dual</span></div>
+        <ul>
+          <li><code>schema/sqlite/</code> — backend local</li>
+          <li><code>schema/bigquery/</code> — backend produção</li>
+          <li>41 migrations espelhadas, prefixo numérico compartilhado</li>
+          <li>Decimal: SQLite <code>TEXT</code> · BigQuery <code>NUMERIC</code></li>
+          <li>Idempotentes: <code>CREATE … IF NOT EXISTS</code>, <code>MERGE</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Os 8 princípios que governam tudo</h3>
+    <div class="grid g2">
+      <div class="card"><h3>1 · O banco é a verdade</h3><p>Se o relatório discorda do banco, o relatório está errado.</p></div>
+      <div class="card"><h3>2 · Binário único</h3><p>Features que exigem processo longo, sidecar ou build na máquina do usuário são rejeitadas por padrão.</p></div>
+      <div class="card"><h3>3 · Decimal sempre</h3><p><code>rust_decimal</code> de ponta a ponta. Nunca <code>f64</code>. Erro de ponto flutuante em finanças é visível em segundos.</p></div>
+      <div class="card"><h3>4 · Todo write é evento</h3><p>Cada mutação emite um <code>AuditEvent</code> append-only. O dataset é um log replayável.</p></div>
+      <div class="card"><h3>5 · Dual backend atrás de 1 trait</h3><p>O CLI nunca ramifica por backend. Semântica não casa → feature não embarca.</p></div>
+      <div class="card"><h3>6 · Privacidade é regra de código</h3><p>Nada pessoal no source compartilhado. Vazamento por heurística “inofensiva” é irrecuperável.</p></div>
+      <div class="card"><h3>7 · Humano por padrão, agente sob demanda</h3><p>Todo relatório tem formato humano e <code>--raw</code> JSON.</p></div>
+      <div class="card"><h3>8 · Conventional Commits + Release Please</h3><p>Zero cerimônia de release. Merge na <code>main</code> → versão + changelog automáticos.</p></div>
+    </div>
+
+    <h3>Fluxo de sync (Pluggy → store)</h3>
+    <pre><span class="c"># phai sync pluggy</span>
+Pluggy.list_items() → fetch_transactions()      <span class="c">// TransactionRecord[] (Decimal)</span>
+  → store.<span class="a">existing_transaction_ids</span>(ids)        <span class="c">// BTreeSet&lt;String&gt;</span>
+  → store.<span class="a">upsert_transactions</span>(novos + alterados) <span class="c">// idempotente, ON CONFLICT</span>
+  → store.<span class="a">insert_audit_events</span>([Sync{…}])       <span class="c">// 1 evento por write</span>
+  → resumo humano  |  --json-summary</pre>
+    <p class="legend">Chaves de idempotência derivadas do payload Pluggy em <code>idempotency.rs</code>.
+      Re-rodar <code>sync</code> é seguro: não duplica.</p>
+
+    <h3>Stack técnico</h3>
+    <table>
+      <tr><th>Camada</th><th>Tecnologia</th><th>Nota</th></tr>
+      <tr><td>CLI</td><td><code>clap</code> 4.5 (derive)</td><td>Árvore de subcomandos a partir de structs</td></tr>
+      <tr><td>Local</td><td><code>rusqlite</code> 0.33 (bundled)</td><td>SQLite estático no binário</td></tr>
+      <tr><td>Cloud</td><td>BigQuery REST + service-account JWT</td><td>Sem SDK — REST manual mantém o grafo de deps fino</td></tr>
+      <tr><td>Dinheiro</td><td><code>rust_decimal</code> 1.36</td><td>Ponta a ponta</td></tr>
+      <tr><td>HTTP</td><td><code>reqwest</code> (rustls)</td><td>Pluggy + BigQuery</td></tr>
+      <tr><td>Async</td><td><code>tokio</code> rt-multi-thread</td><td>Trait de storage é <code>async fn</code></td></tr>
+      <tr><td>IA</td><td><code>rig-core</code></td><td>Sugestões de classificação assistidas por LLM</td></tr>
+      <tr><td>Web</td><td>LiveStore + React (Vite)</td><td>Client-only, embarcado via <code>include_dir!</code></td></tr>
+      <tr><td>Release</td><td>release-please + GitHub Actions</td><td>Tarballs assinados (minisign) + SHA-256</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- 3 MODELO DE DADOS -->
+<section id="data">
+  <div class="wrap">
+    <h2><span class="ix">03</span> Modelo de dados</h2>
+    <p class="lead">Shapes intencionalmente <strong>planos</strong>: uma linha entra, uma linha sai.
+      Join e formatação acontecem em <em>views</em> SQL, não em structs.</p>
+
+    <h3>A trait <code>FinanceStore</code> — a única costura</h3>
+    <p><code>async</code>, <code>Send + Sync</code>, ~50 métodos, 2 implementações. É <em>larga de propósito</em>:
+      o domínio é finito (não é ORM genérico), e relatórios são métodos de primeira classe
+      (<code>daily_pulse</code>, <code>card_summary</code>, <code>cashflow</code>…) porque empacotam a regra de negócio
+      que distingue “valor bruto” de “o que você deve ver”.</p>
+    <div class="chips">
+      <span class="chip">upsert_transactions</span><span class="chip">existing_transaction_ids</span>
+      <span class="chip">cashflow / cashflow_month</span><span class="chip">card_summary / cards_open_now</span>
+      <span class="chip">monthly_spend</span><span class="chip">forecast_vs_actual</span>
+      <span class="chip">daily_pulse</span><span class="chip">apply_transaction_split</span>
+      <span class="chip">set_commitment_tier</span><span class="chip">insert_audit_events</span>
+      <span class="chip">validate_table_name 🔒</span>
+    </div>
+
+    <h4>Invariantes da trait</h4>
+    <ol>
+      <li><strong>Nenhum valor interpolado em SQL.</strong> Todo parâmetro é bound. O único identificador dinâmico permitido é nome de tabela, e passa por <code>validate_table_name</code> (allowlist).</li>
+      <li><strong>Relatórios retornam <code>Decimal</code></strong> — nunca <code>f64</code>, nunca string-fingindo-decimal.</li>
+      <li><strong>Todo write emite <code>AuditEvent</code></strong> — o caller insere; testes asseguram a linha de auditoria.</li>
+      <li><strong>Upserts idempotentes</strong> — <code>ON CONFLICT</code>/<code>MERGE</code>, nunca insert+dedup na aplicação.</li>
+      <li><strong>Migrations append-only</strong> — prefixos monotônicos; migration liberada nunca é editada, só superseded.</li>
+    </ol>
+
+    <h3>Entidades centrais</h3>
+    <h4>TransactionRecord — a unidade atômica</h4>
+    <table>
+      <tr><th>Campo</th><th>Tipo</th><th>Significado</th></tr>
+      <tr><td><code>id</code></td><td>String</td><td>Id estável — id Pluggy ou chave de idempotência derivada</td></tr>
+      <tr><td><code>account_id</code></td><td>String</td><td>FK para <code>AccountRecord</code></td></tr>
+      <tr><td><code>posted_at</code></td><td>DateTime&lt;Utc&gt;</td><td>Data efetiva</td></tr>
+      <tr><td><code>amount</code></td><td>Decimal</td><td>Sinalizado; despesa negativa, receita positiva. Normalização de sinal de cartão acontece nas views</td></tr>
+      <tr><td><code>raw_description</code></td><td>String</td><td>Texto original do banco — usado por rules, auditoria, busca técnica</td></tr>
+      <tr><td><code>description</code></td><td>Option&lt;String&gt;</td><td>Descrição humana curta do que foi comprado</td></tr>
+      <tr><td><code>merchant_name</code></td><td>Option&lt;String&gt;</td><td>Nome limpo do estabelecimento (agrupamento/enriquecimento)</td></tr>
+      <tr><td><code>purpose</code></td><td>Option&lt;String&gt;</td><td>Intenção/motivo humano da compra</td></tr>
+      <tr><td><code>category</code></td><td>Option&lt;String&gt;</td><td>Categoria efetiva (rules + overrides); precedência resolvida nas views</td></tr>
+      <tr><td><code>metadata</code></td><td>JSON</td><td>Payload do agregador — parcelas Pluggy, MCC, moeda original</td></tr>
+    </table>
+    <p class="legend">“Anatomia da transação” = os campos humanos (<code>description</code>/<code>merchant_name</code>/<code>purpose</code>)
+      separados do <code>raw_description</code> técnico — ADR-0014.</p>
+
+    <h4>AuditEvent — log append-only de toda mutação</h4>
+    <pre>pub struct AuditEvent {
+  pub id: Uuid,            <span class="c">// v7 — ordenável cronologicamente</span>
+  pub actor_id: String,    <span class="c">// quem disparou (CLI actor, agente, device)</span>
+  pub action: String,      <span class="c">// "tx.categorize", "sync.pluggy", "split.apply"</span>
+  pub entity: String,      <span class="c">// "transaction", "rule", "budget"</span>
+  pub entity_id: String,
+  pub payload: Value,      <span class="c">// snapshot before/after</span>
+  pub created_at: DateTime&lt;Utc&gt;,
+}</pre>
+    <p class="legend">Gramática <code>entity.verb</code>: <code>tx.upsert</code>, <code>tx.split.apply</code>,
+      <code>rule.upsert</code>, <code>forecast.upsert</code>, <code>sync.pluggy</code>, <code>import.legacy</code>.</p>
+
+    <h3>Outras entidades do domínio</h3>
+    <div class="grid g2">
+      <div class="card"><span class="k">CONTAS &amp; SALDOS</span><h3>AccountRecord · AccountSnapshotRecord</h3>
+        <p>Conta bancária/cartão + snapshots de saldo ao longo do tempo. Cartões carregam
+          <code>billing_closing_day</code>/<code>billing_due_day</code> em <code>metadata_json</code> — base do regime de caixa.</p></div>
+      <div class="card"><span class="k">CLASSIFICAÇÃO</span><h3>RuleRecord · CategoryRecord</h3>
+        <p>Engine ordenado <em>first-match-wins</em>: condições sobre <code>raw_description</code>, conta, faixa de valor e data.
+          Rules são <em>dados de runtime</em>, não código — único caminho para lógica pessoal.</p></div>
+      <div class="card"><span class="k">PREVISÃO</span><h3>ForecastRecord · ForecastTemplateRecord</h3>
+        <p>Lançamentos previstos + templates recorrentes (chave natural idempotente, ADR-0022).
+          Materialização determinística (<code>tpl-{id}-{yyyymm}</code>) faz <code>MERGE</code>, nunca empilha.</p></div>
+      <div class="card"><span class="k">DIVISÃO</span><h3>TransactionSplitPayload · lines · items</h3>
+        <p>Um lançamento dividido em N linhas categorizadas; soma exata em <code>Decimal</code>.
+          Itens de recibo habilitam <code>report item-prices</code>. <span class="tag t-data">BigQuery-only hoje</span></p></div>
+      <div class="card"><span class="k">ORÇAMENTO</span><h3>CategoryBudgetRecord · BudgetStatusRow</h3>
+        <p>Envelopes por categoria/mês; status orçado vs realizado.</p></div>
+      <div class="card"><span class="k">COMPROMETIMENTO</span><h3>Commitment tiers</h3>
+        <p>Cada transação classificável por tier de comprometimento (fixo/variável…), com override
+          por transação (ADR-0030/0032). Tabela <code>transaction_tier</code> (migration 040).</p></div>
+    </div>
+
+    <h3>Idempotência</h3>
+    <p><code>idempotency.rs</code> deriva chaves estáveis de payloads. Detalhe relevante (achado na auditoria):
+      a chave de forecast usa actor + descrição + data + valor + conta + categoria + recorrência + template_id —
+      <strong>status não entra</strong>. Por isso duas previsões que só diferem no vocabulário de status
+      (<code>ativo</code> vs <code>active</code>) geram a <em>mesma</em> chave e deduplicam corretamente.</p>
+  </div>
+</section>
+
+<!-- 4 CADEIA DE VIEWS -->
+<section id="views">
+  <div class="wrap">
+    <h2><span class="ix">04</span> A cadeia de views canônica</h2>
+    <p class="lead">Relatórios <strong>não leem tabelas cruas</strong> — leem uma única cadeia de views que
+      assa a regra de negócio. É a regra que impede os números de fluxo de caixa de regredirem
+      (ADR-0026). CLI, gráfico de cashflow e app web leem a <em>mesma</em> cadeia.</p>
+
+    <div class="flow">
+      <div class="node"><b>transactions</b><div class="d">linhas cruas — Pluggy / OFX / legado / manual</div></div>
+      <div class="arr">↓</div>
+      <div class="node indent1"><b>v_transactions_effective</b><div class="d">expansão de splits + display labels</div></div>
+      <div class="arr indent1">↓</div>
+      <div class="node indent1"><b>v_transactions_reportable</b><div class="d">dedup: descarta linha legado/OFX sombreada por linha Pluggy (anti-join)</div></div>
+      <div class="arr indent2">↓</div>
+      <div class="node indent2"><b>v_transactions_cashbasis</b><div class="d">+ <code>cash_month</code> canônico: compra no cartão cai no mês em que a fatura é <em>PAGA</em></div></div>
+      <div class="arr indent2">↓</div>
+      <div class="node indent2">├─ <b>v_cashflow</b> <span class="d">— receita/despesa/líquido mensal (regime de caixa)</span></div>
+      <div class="node indent2">└─ <b>v_monthly_spend</b> <span class="d">— gasto mensal por categoria</span></div>
+    </div>
+
+    <h4>O que isso garante</h4>
+    <ul>
+      <li><strong>Regime de caixa, não competência.</strong> A família vê o mês em que o dinheiro de fato sai:
+        a fatura paga em maio “explode” nas compras individuais sob maio — não como pagamento único,
+        não nas datas originais. Requer <code>billing_closing_day</code>/<code>billing_due_day</code>
+        (<code>phai account set-billing-cycle</code>); sem isso, cai no mês-calendário do lançamento. (ADR-0025)</li>
+      <li><strong>Categorias internas</strong> (<code>credit-card-payment</code>, <code>transfer-internal</code>,
+        <code>same-person-transfer</code>) são a única lista de exclusão, aplicada nas views — pagar fatura
+        ou mover entre duas contas próprias rastreadas nunca dupla-conta. Dinheiro de conta <em>não rastreada</em>
+        (ex.: repasse de salário) é renda real e <strong>não</strong> é excluído.</li>
+      <li><code>FinanceStore::cashflow_reportable</code> é um <code>SELECT … FROM v_cashflow</code> fino.
+        Regra nova vai na view ou na lista de exclusão — <strong>nunca</strong> numa query Rust ou na camada web.</li>
+    </ul>
+
+    <div class="callout good">
+      <strong>Por que importa.</strong> Centralizar dedup + classificação dentro da cadeia é o que estabiliza
+      os números. Qualquer relatório que re-derive isso por fora é um bug esperando para acontecer.
+    </div>
+  </div>
+</section>
+
+<!-- 5 UX -->
+<section id="ux">
+  <div class="wrap">
+    <h2><span class="ix">05</span> UX — a voz dos relatórios</h2>
+    <p class="lead">phai é a <strong>única fonte de verdade</strong> operacional. Agentes (OpenClaw, Claude,
+      ChatGPT, Codex) preferem relatórios padrão a formatar à mão.</p>
+
+    <h3>Regras de naming &amp; classificação</h3>
+    <ul>
+      <li><strong>Nunca inventar categorias.</strong> Atribuição vem de rules + overrides efetivos na camada de view.</li>
+      <li><strong>Display label</strong> = <code>description</code> quando presente; senão <code>merchant_name</code>; senão <code>raw_description</code>.</li>
+      <li><code>classifier_trace</code> é debug técnico — <strong>nunca</strong> aparece em relatório para a família.</li>
+      <li>Nome de transação aparece com <strong>prefixo emoji</strong> das display rules.</li>
+    </ul>
+
+    <h3>Desambiguação de fatura (a sutileza que mais confunde)</h3>
+    <table>
+      <tr><th>Usuário pergunta</th><th>Fonte</th><th>Resposta</th></tr>
+      <tr><td>“fatura em aberto”, “atual”, “em andamento”</td><td><code>v_card_open_now</code> / <code>cards_open_now()</code></td><td>Saldo aberto mais recente por cartão — no máximo 1 linha por cartão</td></tr>
+      <tr><td>“como fecharam”, “fatura fechada”, “última fatura”</td><td>ciclos fechados</td><td>Default = último ciclo totalmente fechado; reporta <code>total fechado = total_charges − open_amount</code> primeiro</td></tr>
+      <tr><td>período</td><td><code>month_ref</code></td><td>É o <strong>ciclo de cobrança</strong> em que a fatura fecha (via <code>billing_closing_day</code>), <em>não</em> o mês-calendário do lançamento</td></tr>
+    </table>
+    <p class="legend">Ex.: compra em 28/mar com closing-day 3 vive no ciclo que fecha em 3/abr → <code>month_ref = 2026-04</code>.</p>
+
+    <h3>Pipeline de enriquecimento (propõe, não escreve)</h3>
+    <p>O enriquecimento <em>sugere</em>; a tabela <code>rules</code> <em>persiste</em>. Estágios, todos opcionais:</p>
+    <pre><span class="g">pluggy_map</span>  <span class="c">→ traduz dicas de categoria do Pluggy para a taxonomia local</span>
+<span class="g">cnpj</span>        <span class="c">→ consulta CNPJ (BrasilAPI) para enriquecer descrições</span>
+<span class="g">heuristics</span>  <span class="c">→ padrões genéricos NÃO-pessoais (moeda, parcela, sufixos comuns)</span>
+<span class="g">fuzzy</span>       <span class="c">→ casa descrição desconhecida com histórico rotulado (nucleo)</span>
+<span class="g">llm</span>         <span class="c">→ último recurso via rig-core; prompt.rs controla o system prompt</span>
+<span class="g">rule_gen</span>    <span class="c">→ propõe um RuleRecord de uma sugestão confiante; usuário aceita/rejeita</span></pre>
+    <p class="legend">Replicação de revisão humana (ADR-0033): transações recorrentes herdam
+      <code>description</code>/<code>purpose</code>/categoria confiável de histórico do mesmo merchant — replicação
+      direta com scoring tolerante a valor, <em>não</em> criação automática de regra.</p>
+
+    <h3>Superfícies de interação</h3>
+    <div class="grid g3">
+      <div class="card"><span class="k">CLI</span><h3>Terminal / WhatsApp</h3><p>Formato humano agrupado, emoji, legível no celular. <code>--raw</code> JSON · <code>--csv</code> · <code>--notify-summary</code>.</p></div>
+      <div class="card"><span class="k">SERVE</span><h3>App web local</h3><p><code>phai serve</code> — dashboard React em loopback. Ver seção 6.</p></div>
+      <div class="card"><span class="k">MCP</span><h3>Servidor read-only</h3><p>ADR-0027: expõe self-exec read-only para assistentes de IA.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- 6 WEB -->
+<section id="web">
+  <div class="wrap">
+    <h2><span class="ix">06</span> O app web (<code>phai serve</code>)</h2>
+    <p class="lead">LiveStore + React (Vite), <strong>client-only</strong> (sem backend de sync LiveStore),
+      embarcado no binário via <code>include_dir!("web/dist")</code>. Writes descarregam na ponte Rust
+      (<code>/api/*</code>), que é o sistema de registro BigQuery/SQLite (ADR-0023).</p>
+
+    <h3>Modelo de segurança da ponte (ADR-0036)</h3>
+    <p>Sem autenticação por requisição — a fronteira de segurança é:</p>
+    <div class="chips">
+      <span class="chip">bind 127.0.0.1 apenas</span>
+      <span class="chip">Host allowlist (anti-DNS-rebinding)</span>
+      <span class="chip">Origin/CSRF allowlist</span>
+      <span class="chip">CSP + headers de segurança</span>
+      <span class="chip">body limit 512KB</span>
+    </div>
+    <p class="legend">Protege: acesso remoto, DNS rebinding, CSRF cross-site, clickjacking.
+      Fora de escopo (aceito): processo <em>local</em> malicioso — que já tem o filesystem do usuário.</p>
+
+    <h3>Telas principais</h3>
+    <table>
+      <tr><th>View</th><th>Arquivo</th><th>O que faz</th></tr>
+      <tr><td>Dashboard</td><td><code>views/Dashboard.tsx</code></td><td>Hero + gráfico de planejamento; deriva séries client-side (memoizado)</td></tr>
+      <tr><td>Gráfico</td><td><code>views/PlanningChart.tsx</code></td><td>Barras/linhas de cashflow; linha de saldo (sólida realizada, tracejada prevista); navegação por teclado</td></tr>
+      <tr><td>Mês</td><td><code>views/MonthDetail.tsx</code></td><td>Transações do mês, filtros, forecast section, planejados manuais</td></tr>
+      <tr><td>Cartões</td><td><code>views/cards/CardDetailPanel.tsx</code></td><td>Badges OPEN/CLOSED/SETTLED + tooltips (regra REPORTING_UX)</td></tr>
+      <tr><td>Categorias</td><td><code>views/categorias/CategoryTreemap.tsx</code></td><td>Treemap de gasto por categoria</td></tr>
+      <tr><td>Plano</td><td><code>views/plano/WarPlanPanel.tsx</code></td><td>Metas via envelopes, sliders, simulação</td></tr>
+      <tr><td>Onboarding</td><td><code>views/Onboarding.tsx</code></td><td>Gate de ativação multi-device (convite criptografado)</td></tr>
+    </table>
+
+    <h3>Ativação multi-device (ADR-0034)</h3>
+    <p>Convite auto-contido criptografado por senha: empacota coordenadas BigQuery + chave de service-account
+      num único token <code>PHAI1E-…</code>. <strong>Argon2id</strong> deriva a chave; <strong>XChaCha20-Poly1305</strong>
+      cifra o payload. O blob <em>é</em> uma credencial. Fluxo zero-CLI: convite → install → onboarding web.</p>
+
+    <h3>Derivações client-side</h3>
+    <p><code>lib/derivations.ts</code> (~1100 linhas) é o cérebro do front: <code>filterTransactions</code>,
+      <code>groupByCategory</code>, <code>computeMonthSums</code>, <code>buildWarPlan</code>, <code>commitmentTier</code>,
+      <code>buildEnvelopeWrites</code>. Funções puras memoizadas nos call-sites. Tudo deriva do store —
+      consistente com o princípio #1.</p>
+  </div>
+</section>
+
+<!-- 7 DECISÕES -->
+<section id="dec">
+  <div class="wrap">
+    <h2><span class="ix">07</span> Decisões arquiteturais que moldam o resto</h2>
+    <p class="lead">37 ADRs em <code>docs/adr/</code>. Os que mais explicam o sistema:</p>
+    <table>
+      <tr><th>ADR</th><th>Decisão</th><th>Consequência</th></tr>
+      <tr><td>0001</td><td>Binário único Rust</td><td>Sem runtime externo; tudo embarcado</td></tr>
+      <tr><td>0002</td><td><code>FinanceStore</code> dual-backend</td><td>SQLite local + BigQuery prod atrás de 1 trait</td></tr>
+      <tr><td>0003</td><td><code>rust_decimal</code> ponta a ponta</td><td>Zero float em dinheiro</td></tr>
+      <tr><td>0005</td><td>Audit events append-only</td><td>Dataset replayável; correções seguras</td></tr>
+      <tr><td>0006</td><td>Migrations espelhadas idempotentes</td><td>Paridade dos 2 backends revisável lado a lado</td></tr>
+      <tr><td>0007</td><td>Self-update atômico + SHA-256</td><td>rename atômico + <code>execv</code> com sentinela anti-loop</td></tr>
+      <tr><td>0010 / 0025</td><td>Ciclo de cobrança + bill explosion</td><td>Regime de caixa: fatura explode no mês pago</td></tr>
+      <tr><td>0014 / 0015</td><td>Anatomia da transação + replicação</td><td>Campos humanos separados do texto técnico</td></tr>
+      <tr><td>0016 / 0022</td><td>Automação de forecast + chave natural</td><td>Templates recorrentes idempotentes</td></tr>
+      <tr><td>0023</td><td>App web LiveStore client-only</td><td>Sem servidor de sync; ponte Rust é o registro</td></tr>
+      <tr><td>0026</td><td>Cadeia de views canônica única</td><td>Números de cashflow não regridem</td></tr>
+      <tr><td>0030 / 0032</td><td>Commitment tiers + override por tx</td><td>Classificação de comprometimento granular</td></tr>
+      <tr><td>0034</td><td>Convite criptografado auto-contido</td><td>Ativação multi-device zero-CLI</td></tr>
+      <tr><td>0036</td><td>Ponte serve sem auth por requisição</td><td>Loopback + Host/Origin é a fronteira</td></tr>
+    </table>
+
+    <div class="callout warn">
+      <strong>Dívida de paridade conhecida.</strong> Splits + analytics de itens de recibo são
+      <em>BigQuery-only</em> hoje. O SQLite retorna <code>split_bigquery_only_error()</code>. Portar exige
+      migration SQLite de split, tradução <code>MERGE</code>→<code>UPSERT</code> em 5 métodos, e reproduzir
+      <code>item_prices</code> sem a camada analítica do BigQuery (provável FTS5). É a única quebra deliberada do ADR-0002.
+    </div>
+  </div>
+</section>
+
+<!-- 8 ESTADO ATUAL -->
+<section id="audit">
+  <div class="wrap">
+    <h2><span class="ix">08</span> Estado atual — release v5.28.2</h2>
+    <p class="lead">Auditoria de 2026-06-24 + 9 correções entregues. A base é sólida: cripto e SQL bem feitos,
+      servidor loopback com defesas reais.</p>
+
+    <div class="grid g2">
+      <div class="card"><span class="k">SEGURANÇA</span><h3>Sólida, 2 hardenings</h3>
+        <p><span class="tag t-sec">S1</span> cap em params Argon2 de envelope não-confiável (anti memory-bomb).
+        <span class="tag t-sec">S3</span> body limit explícito 512KB. SQL 100% bound + allowlist de tabela. Cripto: Argon2id+XChaCha20+AEAD.</p></div>
+      <div class="card"><span class="k">BUGS</span><h3>1 crash real corrigido</h3>
+        <p><span class="tag t-data">B3</span> panic em <code>card_open_bill_due_date</code> com <code>month_ref</code> malformado (“2026-13”).
+        Dedup forecast confirmado correto + cobertura nova.</p></div>
+      <div class="card"><span class="k">PERFORMANCE</span><h3>Cache + custo BQ</h3>
+        <p><span class="tag t-perf">P1</span> <code>maximumBytesBilled=20GiB</code> (limita custo GCP).
+        <span class="tag t-perf">P2/P3</span> cache <code>moka</code> LRU 256 + invalidação granular por recurso.</p></div>
+      <div class="card"><span class="k">DEPENDÊNCIAS</span><h3>RUSTSEC fechado</h3>
+        <p>bump <code>quinn-proto</code> 0.11.15 (RUSTSEC-2026-0185) — destravou o <code>cargo audit</code> em todo branch.</p></div>
+    </div>
+
+    <h3>Gates do projeto</h3>
+    <div class="chips">
+      <span class="chip">cargo fmt --check</span>
+      <span class="chip">clippy -D warnings</span>
+      <span class="chip">test --workspace (563 ✓)</span>
+      <span class="chip">cargo audit</span>
+      <span class="chip">cargo deny licenses</span>
+      <span class="chip">sentrux gate (quality ratchet)</span>
+    </div>
+
+    <h3>Pontos de atenção em aberto</h3>
+    <ul>
+      <li><strong>MonthDetail</strong> reimplementa filtro inline em vez de <code>filterTransactions</code> — em sync mas sem teste (issue #227).</li>
+      <li><strong>Daemon porta-80</strong> roda como root via launchd; binário em disco já é v5.28.2, falta restart manual (sudo).</li>
+      <li><strong>Paridade de splits</strong> SQLite ↔ BigQuery (acima).</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Relatório gerado a partir do código-fonte real em <code>2026-06-24</code> · phai v5.28.2 ·
+       fontes: <code>docs/ARCHITECTURE.md</code>, <code>docs/ABSTRACTIONS.md</code>, <code>REPORTING_UX.md</code>,
+       <code>models.rs</code>, <code>storage/mod.rs</code>, <code>docs/adr/</code>, app web <code>crates/phai-cli/web/src</code>.</p>
+    <p>github.com/phai-run/phai · phai.run</p>
+  </div>
+</footer>
+
+</body>
+</html>
