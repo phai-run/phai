@@ -86,6 +86,44 @@
   .legend{font-size:12.5px;color:var(--muted);margin-top:8px}
   .num{font-family:var(--mono);color:var(--accent)}
   hr.s{border:0;border-top:1px dashed var(--line);margin:26px 0}
+  /* clickable cross-references */
+  .xref{cursor:pointer;border-bottom:1px dotted var(--accent);color:var(--accent);
+    transition:background .12s}
+  .xref:hover{background:rgba(124,158,255,.14);border-bottom-style:solid}
+  code.xref{color:#bcd;border-bottom:1px dotted var(--accent2)}
+  code.xref:hover{background:rgba(54,192,138,.14)}
+  /* modal */
+  .mbk{position:fixed;inset:0;background:rgba(3,6,12,.72);backdrop-filter:blur(4px);
+    display:none;align-items:flex-start;justify-content:center;z-index:100;padding:48px 18px;overflow:auto}
+  .mbk.open{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    max-width:820px;width:100%;box-shadow:0 24px 80px rgba(0,0,0,.55);animation:pop .16s ease}
+  @keyframes pop{from{transform:translateY(8px) scale(.99);opacity:0}to{transform:none;opacity:1}}
+  .modal .top{display:flex;align-items:flex-start;gap:14px;padding:18px 20px;border-bottom:1px solid var(--line)}
+  .modal .top .meta{flex:1;min-width:0}
+  .modal .kind{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent2)}
+  .modal h3{margin:3px 0 2px;font-size:20px;color:var(--ink);word-break:break-word}
+  .modal .path{font-family:var(--mono);font-size:12px;color:var(--muted);word-break:break-all}
+  .modal .acts{display:flex;gap:8px;align-items:center;flex-shrink:0}
+  .btn{font-family:var(--sans);font-size:13px;font-weight:600;padding:8px 13px;border-radius:9px;
+    border:1px solid var(--line);background:var(--panel2);color:var(--ink);cursor:pointer;text-decoration:none;
+    display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+  .btn:hover{border-color:var(--accent);text-decoration:none}
+  .btn.gh{background:var(--accent);color:#0b1020;border-color:var(--accent)}
+  .btn.x{padding:8px 11px}
+  .modal .body{padding:18px 22px 24px;max-height:62vh;overflow:auto}
+  .modal .body.md{font-size:14.5px;line-height:1.65}
+  .modal .body.md h1{font-size:22px;margin:.2em 0 .4em} .modal .body.md h2{font-size:18px;margin:1em 0 .3em;border:0;padding:0}
+  .modal .body.md h3{font-size:15.5px;margin:.9em 0 .2em} .modal .body.md p{color:#cdd7e1;margin:.5em 0}
+  .modal .body.md ul,.modal .body.md ol{margin:.4em 0}
+  .modal .body.md pre{font-size:12.2px;margin:.6em 0}
+  .modal .body.md code{font-size:12.5px}
+  .modal .body.md a{color:var(--accent)} .modal .body.md hr{border:0;border-top:1px solid var(--line);margin:1em 0}
+  .modal .desc{color:#cdd7e1;font-size:15px}
+  .modal .loading,.modal .err{color:var(--muted);font-family:var(--mono);font-size:13px;padding:8px 0}
+  .modal .err{color:var(--danger)}
+  .hint{font-size:12px;color:var(--muted);margin-top:18px}
+  .hint b{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -105,6 +143,7 @@
       <span class="pill">37 ADRs</span>
       <span class="pill">gerado 2026-06-24</span>
     </div>
+    <p class="hint" style="margin-top:18px">💡 Referências sublinhadas — ADRs e arquivos de código — abrem em <b>modal</b> na página, com link para o fonte no GitHub.</p>
   </div>
 </header>
 
@@ -457,7 +496,7 @@ Pluggy.list_items() → fetch_transactions()      <span class="c">// Transaction
   <div class="wrap">
     <h2><span class="ix">07</span> Decisões arquiteturais que moldam o resto</h2>
     <p class="lead">37 ADRs em <code>docs/adr/</code>. Os que mais explicam o sistema:</p>
-    <table>
+    <table id="adr-table">
       <tr><th>ADR</th><th>Decisão</th><th>Consequência</th></tr>
       <tr><td>0001</td><td>Binário único Rust</td><td>Sem runtime externo; tudo embarcado</td></tr>
       <tr><td>0002</td><td><code>FinanceStore</code> dual-backend</td><td>SQLite local + BigQuery prod atrás de 1 trait</td></tr>
@@ -532,6 +571,207 @@ Pluggy.list_items() → fetch_transactions()      <span class="c">// Transaction
     <p>github.com/phai-run/phai · phai.run</p>
   </div>
 </footer>
+
+<!-- ───────────── modal ───────────── -->
+<div class="mbk" id="mbk" role="dialog" aria-modal="true">
+  <div class="modal" id="modal">
+    <div class="top">
+      <div class="meta">
+        <div class="kind" id="m-kind"></div>
+        <h3 id="m-title"></h3>
+        <div class="path" id="m-path"></div>
+      </div>
+      <div class="acts">
+        <a class="btn gh" id="m-gh" href="#" target="_blank" rel="noopener">⌥ Abrir no GitHub ↗</a>
+        <button class="btn x" id="m-close" aria-label="Fechar">✕</button>
+      </div>
+    </div>
+    <div class="body" id="m-body"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var REPO = "phai-run/phai", BRANCH = "main";
+  var BLOB = "https://github.com/"+REPO+"/blob/"+BRANCH+"/";
+  var RAW  = "https://raw.githubusercontent.com/"+REPO+"/"+BRANCH+"/";
+
+  // ── ADR filename map (number → file slug) ────────────────────────────────
+  var ADR = {
+    "0000":"0000-template","0001":"0001-single-binary-rust-cli",
+    "0002":"0002-financestore-trait-dual-backend","0003":"0003-rust-decimal-end-to-end",
+    "0004":"0004-pluggy-as-exclusive-aggregator","0005":"0005-append-only-audit-events",
+    "0006":"0006-mirrored-idempotent-migrations","0007":"0007-atomic-self-update",
+    "0008":"0008-privacy-no-personal-data-in-shared-source","0009":"0009-proactive-pulse-and-closing-plan",
+    "0010":"0010-card-billing-cycle","0011":"0011-canonical-payment-status",
+    "0012":"0012-amount-cents-exact-aggregation","0013":"0013-auto-migrate-on-every-command",
+    "0014":"0014-transaction-anatomy","0015":"0015-anatomy-replication",
+    "0016":"0016-forecast-automation","0017":"0017-release-signature-verification",
+    "0018":"0018-serve-local-dashboard","0019":"0019-serve-loopback-only-localhost-alias",
+    "0020":"0020-single-workspace-version","0021":"0021-ondisk-identity-migration-to-phai",
+    "0022":"0022-forecast-template-natural-key-idempotency","0023":"0023-web-app-on-livestore-client-only",
+    "0024":"0024-cashflow-chart-accrual-source","0025":"0025-cashflow-basis-bill-explosion",
+    "0026":"0026-single-view-chain-canonical-source","0027":"0027-mcp-server-read-only-self-exec",
+    "0028":"0028-launchd-agent-and-launcher-app","0029":"0029-serve-system-daemon-admin-auth",
+    "0030":"0030-commitment-tiers","0031":"0031-persisted-planning-overlay",
+    "0032":"0032-per-transaction-tier-override","0033":"0033-recurring-human-review-replication",
+    "0034":"0034-self-contained-encrypted-invite","0035":"0035-google-sheets-export",
+    "0036":"0036-serve-bridge-no-per-request-auth"
+  };
+
+  // ── code/file registry (token → metadata) ────────────────────────────────
+  function f(path,desc){return {path:path,desc:desc};}
+  var CODE = {
+    "models.rs":f("crates/phai-core/src/models.rs","Records planos do domínio: TransactionRecord, AuditEvent, AccountRecord, ForecastRecord, CardSummaryRow… Uma linha entra, uma linha sai — join e shape ficam nas views SQL."),
+    "storage/mod.rs":f("crates/phai-core/src/storage/mod.rs","Define a trait FinanceStore (a única costura domínio↔persistência), open_store() e validate_table_name (allowlist de identificadores dinâmicos)."),
+    "FinanceStore":f("crates/phai-core/src/storage/mod.rs","Trait async Send+Sync, ~50 métodos, 1 impl por backend (SQLite local, BigQuery prod). Relatórios são métodos de primeira classe que empacotam a regra de negócio."),
+    "storage/local.rs":f("crates/phai-core/src/storage/local.rs","Implementação SQLite do FinanceStore (rusqlite, bundled). Backend local/dev/testes E2E. Params bound, upserts ON CONFLICT."),
+    "storage/bigquery.rs":f("crates/phai-core/src/storage/bigquery.rs","Implementação BigQuery via REST + service-account JWT (sem SDK). Backend produção/multi-device. Splits e item-prices vivem aqui (BQ-only hoje)."),
+    "serve.rs":f("crates/phai-cli/src/serve.rs","Servidor web local (axum) do `phai serve`. Loopback-only, guard de Host/Origin (anti-rebinding+CSRF), security headers, ponte /api/* para o store."),
+    "invite.rs":f("crates/phai-core/src/invite.rs","Convites de ativação auto-contidos e cifrados (ADR-0034): Argon2id deriva a chave, XChaCha20-Poly1305 cifra o payload BigQuery+service-account num token PHAI1E-…"),
+    "idempotency.rs":f("crates/phai-core/src/idempotency.rs","Deriva chaves estáveis de payloads (id Pluggy, hash de conteúdo para entradas manuais). Re-rodar sync não duplica; forecast key ignora status (dedup ativo/active)."),
+    "pluggy.rs":f("crates/phai-core/src/pluggy.rs","Cliente REST do agregador Pluggy: credenciais HMAC, refresh automático de token, paginação interna. Único módulo de rede além de BigQuery e self-update."),
+    "rules.rs":f("crates/phai-core/src/rules.rs","Engine de classificação: RuleRecord + matching ordenado first-match-wins sobre raw_description, conta, faixa de valor e data. Rules são dados de runtime, nunca código."),
+    "splits.rs":f("crates/phai-core/src/splits.rs","Divisão de um lançamento em N linhas categorizadas; soma exata em Decimal. Itens de recibo habilitam report item-prices."),
+    "installments.rs":f("crates/phai-core/src/installments.rs","Detecção de cadeias de parcela (PARC 2/12, marcadores Pluggy) para mostrar 'X de Y' e projetar o fim da cadeia."),
+    "human_format.rs":f("crates/phai-cli/src/human_format.rs","Formatadores WhatsApp-friendly: agrupado, emoji, legível no celular. Formatação de locale acontece no último passo."),
+    "main.rs":f("crates/phai-cli/src/main.rs","Árvore de subcomandos clap (derive) + dispatch. Ponto de entrada do binário."),
+    "migrations.rs":f("crates/phai-core/src/migrations.rs","Registro de migrations embarcadas (include_str!) — espelhadas em schema/sqlite/ e schema/bigquery/ com prefixo numérico compartilhado."),
+    "enrich.rs":f("crates/phai-cli/src/enrich.rs","Subcomando `enrich` — orquestra o pipeline de enriquecimento (pluggy_map, cnpj, heuristics, fuzzy, llm, rule_gen)."),
+    "forecast_cmd.rs":f("crates/phai-cli/src/forecast_cmd.rs","Comandos de forecast/previsão e materialização de templates recorrentes."),
+    "mcp.rs":f("crates/phai-cli/src/mcp.rs","Servidor MCP read-only (ADR-0027): expõe self-exec read-only para assistentes de IA."),
+    "config.rs":f("crates/phai-core/src/config.rs","ConfigPaths (diretórios OS-apropriados) + AppConfig (backend, credenciais, actor_id de auditoria)."),
+    "prompt.rs":f("crates/phai-core/src/enrichment/prompt.rs","System prompt do estágio LLM do enriquecimento (rig-core)."),
+    "lib/derivations.ts":f("crates/phai-cli/web/src/lib/derivations.ts","O cérebro do front (~1100 linhas): filterTransactions, groupByCategory, computeMonthSums, buildWarPlan, commitmentTier, buildEnvelopeWrites. Funções puras memoizadas."),
+    "views/Dashboard.tsx":f("crates/phai-cli/web/src/views/Dashboard.tsx","Tela principal: hero + gráfico de planejamento; deriva séries client-side memoizadas a partir do store LiveStore."),
+    "views/PlanningChart.tsx":f("crates/phai-cli/web/src/views/PlanningChart.tsx","Gráfico de cashflow: barras/linhas, linha de saldo (sólida realizada / tracejada prevista), navegação por teclado."),
+    "views/MonthDetail.tsx":f("crates/phai-cli/web/src/views/MonthDetail.tsx","Detalhe do mês: transações, filtros, seção de forecast, planejados manuais. (Reimplementa filtro inline — issue #227.)"),
+    "views/cards/CardDetailPanel.tsx":f("crates/phai-cli/web/src/views/cards/CardDetailPanel.tsx","Painel de cartão: badges OPEN/CLOSED/SETTLED + tooltips de desambiguação (regra REPORTING_UX)."),
+    "views/categorias/CategoryTreemap.tsx":f("crates/phai-cli/web/src/views/categorias/CategoryTreemap.tsx","Treemap de gasto por categoria."),
+    "views/plano/WarPlanPanel.tsx":f("crates/phai-cli/web/src/views/plano/WarPlanPanel.tsx","Plano/metas via envelopes: sliders de objetivo e simulação."),
+    "views/Onboarding.tsx":f("crates/phai-cli/web/src/views/Onboarding.tsx","Gate de ativação multi-device: cola o convite criptografado e ativa o device (ADR-0034).")
+  };
+  // aliases (texto que aparece no doc → chave canônica)
+  var ALIAS = {"FinanceStore::cashflow_reportable":"FinanceStore","FinanceStore::cashflow":"FinanceStore"};
+
+  // ── linkify ──────────────────────────────────────────────────────────────
+  var SKIP = {PRE:1,SCRIPT:1,STYLE:1,A:1,BUTTON:1,TEXTAREA:1};
+  // 1) code elements that match the registry
+  Array.prototype.slice.call(document.querySelectorAll("code")).forEach(function(el){
+    if(el.closest("a")||el.closest("pre")) return;
+    var t=(el.textContent||"").trim();
+    var key=CODE[t]?t:(ALIAS[t]&&CODE[ALIAS[t]]?ALIAS[t]:null);
+    if(!key) return;
+    el.classList.add("xref"); el.setAttribute("data-code",key); el.setAttribute("role","button");
+    el.setAttribute("title","Ver "+key);
+  });
+  // 2) text nodes: ADR-00XX anywhere
+  (function walk(node){
+    for(var c=node.firstChild;c;){
+      var next=c.nextSibling;
+      if(c.nodeType===3){
+        var s=c.nodeValue;
+        if(s && s.indexOf("ADR-")>-1 && !SKIP[node.nodeName]){
+          var re=/ADR-(\d{4})/g, m, last=0, frag=null;
+          while((m=re.exec(s))){
+            if(!ADR[m[1]]) continue;
+            frag=frag||document.createDocumentFragment();
+            if(m.index>last) frag.appendChild(document.createTextNode(s.slice(last,m.index)));
+            var sp=document.createElement("span");
+            sp.className="xref"; sp.setAttribute("data-adr",m[1]); sp.setAttribute("role","button");
+            sp.textContent=m[0]; frag.appendChild(sp); last=m.index+m[0].length;
+          }
+          if(frag){ if(last<s.length) frag.appendChild(document.createTextNode(s.slice(last)));
+            node.replaceChild(frag,c); }
+        }
+      } else if(c.nodeType===1 && !SKIP[c.nodeName]) walk(c);
+      c=next;
+    }
+  })(document.body);
+  // 3) decisions table first column: bare 00NN numbers
+  var at=document.getElementById("adr-table");
+  if(at) Array.prototype.slice.call(at.querySelectorAll("tr")).forEach(function(tr){
+    var td=tr.querySelector("td"); if(!td) return;
+    var html=td.innerHTML.replace(/\b(00\d{2})\b/g,function(_,n){
+      return ADR[n]?'<span class="xref" data-adr="'+n+'" role="button">'+n+'</span>':n; });
+    td.innerHTML=html;
+  });
+
+  // ── modal ────────────────────────────────────────────────────────────────
+  var bk=document.getElementById("mbk"), body=document.getElementById("m-body"),
+      kind=document.getElementById("m-kind"), title=document.getElementById("m-title"),
+      path=document.getElementById("m-path"), gh=document.getElementById("m-gh");
+  function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+  function open(){bk.classList.add("open");document.body.style.overflow="hidden";}
+  function close(){bk.classList.remove("open");document.body.style.overflow="";body.innerHTML="";}
+  document.getElementById("m-close").onclick=close;
+  bk.addEventListener("click",function(e){if(e.target===bk)close();});
+  document.addEventListener("keydown",function(e){if(e.key==="Escape"&&bk.classList.contains("open"))close();});
+
+  function openCode(key){
+    var c=CODE[key]; if(!c) return;
+    kind.textContent="Fonte · "+(c.path.indexOf(".ts")>-1?"TypeScript":(c.path.indexOf(".rs")>-1?"Rust":"arquivo"));
+    title.textContent=key; path.textContent=c.path;
+    gh.href=BLOB+c.path;
+    body.className="body"; body.innerHTML='<p class="desc">'+esc(c.desc)+'</p>'+
+      '<p class="hint">Clique em <b>Abrir no GitHub</b> para ver o código completo na branch <b>'+BRANCH+'</b>.</p>';
+    open();
+  }
+  function openAdr(num){
+    var slug=ADR[num]; if(!slug) return;
+    kind.textContent="Architecture Decision Record";
+    title.textContent="ADR-"+num; path.textContent="docs/adr/"+slug+".md";
+    gh.href=BLOB+"docs/adr/"+slug+".md";
+    body.className="body"; body.innerHTML='<div class="loading">carregando ADR…</div>';
+    open();
+    fetch(RAW+"docs/adr/"+slug+".md").then(function(r){if(!r.ok)throw 0;return r.text();})
+      .then(function(md){ body.className="body md"; body.innerHTML=renderMd(md); })
+      .catch(function(){ body.className="body"; body.innerHTML=
+        '<div class="err">não consegui carregar o conteúdo aqui.</div>'+
+        '<p class="hint">Abra direto no <b>GitHub</b> pelo botão acima.</p>'; });
+  }
+  document.addEventListener("click",function(e){
+    var a=e.target.closest("[data-adr]"); if(a){e.preventDefault();openAdr(a.getAttribute("data-adr"));return;}
+    var c=e.target.closest("[data-code]"); if(c){e.preventDefault();openCode(c.getAttribute("data-code"));}
+  });
+
+  // ── tiny, safe markdown renderer (escape first, then format) ──────────────
+  function renderMd(src){
+    src=src.replace(/\r\n/g,"\n");
+    var out=[], lines=src.split("\n"), i=0;
+    function inline(t){
+      t=esc(t);
+      t=t.replace(/`([^`]+)`/g,function(_,c){return"<code>"+c+"</code>";});
+      t=t.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");
+      t=t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,function(_,txt,url){
+        return'<a href="'+url+'" target="_blank" rel="noopener">'+txt+"</a>";});
+      return t;
+    }
+    while(i<lines.length){
+      var ln=lines[i];
+      if(/^```/.test(ln)){ var buf=[]; i++;
+        while(i<lines.length && !/^```/.test(lines[i])){buf.push(lines[i]);i++;} i++;
+        out.push("<pre>"+esc(buf.join("\n"))+"</pre>"); continue; }
+      if(/^#{1,6}\s/.test(ln)){ var h=ln.match(/^#{1,6}/)[0].length;
+        out.push("<h"+h+">"+inline(ln.replace(/^#{1,6}\s/,""))+"</h"+h+">"); i++; continue; }
+      if(/^\s*[-*]\s/.test(ln)){ var li=[];
+        while(i<lines.length && /^\s*[-*]\s/.test(lines[i])){li.push("<li>"+inline(lines[i].replace(/^\s*[-*]\s/,""))+"</li>");i++;}
+        out.push("<ul>"+li.join("")+"</ul>"); continue; }
+      if(/^\s*\d+\.\s/.test(ln)){ var ol=[];
+        while(i<lines.length && /^\s*\d+\.\s/.test(lines[i])){ol.push("<li>"+inline(lines[i].replace(/^\s*\d+\.\s/,""))+"</li>");i++;}
+        out.push("<ol>"+ol.join("")+"</ol>"); continue; }
+      if(/^\s*([-*_]\s*){3,}$/.test(ln)){ out.push("<hr>"); i++; continue; }
+      if(/^>\s?/.test(ln)){ out.push("<blockquote>"+inline(ln.replace(/^>\s?/,""))+"</blockquote>"); i++; continue; }
+      if(ln.trim()===""){ i++; continue; }
+      var para=[ln]; i++;
+      while(i<lines.length && lines[i].trim()!=="" && !/^(#{1,6}\s|```|\s*[-*]\s|\s*\d+\.\s|>)/.test(lines[i])){para.push(lines[i]);i++;}
+      out.push("<p>"+inline(para.join(" "))+"</p>");
+    }
+    return out.join("\n");
+  }
+})();
+</script>
 
 </body>
 </html>
