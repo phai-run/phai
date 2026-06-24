@@ -584,13 +584,18 @@ fn shift_months(date: NaiveDate, delta: i32) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(year, month as u32, day)
 }
 
+/// Number of days in `month` (1..=12) of `year`. Callers must pass a calendar
+/// month in 1..=12 — `shift_months` normalises into that range, and
+/// `card_open_bill_due_date` validates parsed input before calling — so the
+/// `from_ymd_opt` below is infallible.
 fn days_in_month(year: i32, month: u32) -> u32 {
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1)
     } else {
         (year, month + 1)
     };
-    let first_next = NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid date");
+    let first_next = NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .expect("days_in_month requires month in 1..=12 (guaranteed by callers)");
     let last = first_next - chrono::Duration::days(1);
     last.day()
 }
@@ -2008,6 +2013,11 @@ fn card_open_bill_due_date(month_ref: &str, due_day: u32) -> Option<NaiveDate> {
     let (year_str, month_str) = month_ref.split_once('-')?;
     let y: i32 = year_str.parse().ok()?;
     let m: u32 = month_str.parse().ok()?;
+    // `month_ref` is external (store-derived) — guard the parsed month before
+    // handing it to `days_in_month`, which assumes a calendar month in 1..=12.
+    if !(1..=12).contains(&m) {
+        return None;
+    }
     let last = days_in_month(y, m);
     NaiveDate::from_ymd_opt(y, m, due_day.min(last))
 }
@@ -2547,6 +2557,18 @@ mod tests {
             card_open_bill_due_date("2026-02", 31),
             NaiveDate::from_ymd_opt(2026, 2, 28),
         );
+    }
+
+    #[test]
+    fn card_open_bill_due_date_rejects_malformed_month_ref() {
+        // `month_ref` is store-derived (external) input. A corrupt or
+        // out-of-range cycle month must yield None — never panic inside
+        // `days_in_month` on a month outside 1..=12.
+        assert_eq!(card_open_bill_due_date("2026-13", 10), None);
+        assert_eq!(card_open_bill_due_date("2026-00", 10), None);
+        assert_eq!(card_open_bill_due_date("2026-99", 10), None);
+        assert_eq!(card_open_bill_due_date("garbage", 10), None);
+        assert_eq!(card_open_bill_due_date("2026-jun", 10), None);
     }
 
     #[test]
