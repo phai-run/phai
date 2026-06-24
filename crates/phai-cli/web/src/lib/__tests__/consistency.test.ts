@@ -471,4 +471,46 @@ describe("(g) Filter consistency", () => {
 			expect(tx.reviewed).toBe(0);
 		}
 	});
+
+	it("uncategorizedOnly returns only transactions with no effective category", () => {
+		const result = filterTransactions(
+			txs12m,
+			{ ...noFilters, uncategorizedOnly: true },
+			emptyOverlay,
+			accountMap,
+		);
+		for (const tx of result) {
+			expect(tx.categoryId == null || tx.categoryId === "").toBe(true);
+		}
+		// Every truly-uncategorized seed row must be present (no over-filtering).
+		const expected = txs12m.filter(
+			(t) => t.categoryId == null || t.categoryId === "",
+		);
+		expect(result.length).toBe(expected.length);
+	});
+
+	it("uncategorizedOnly is overlay-aware: an overlay category hides the row", () => {
+		const target = txs12m.find(
+			(t) => t.categoryId == null || t.categoryId === "",
+		);
+		expect(target).toBeDefined();
+		if (!target) return;
+		const overlay = buildOverlayMap([
+			{
+				transactionId: target.id,
+				description: null,
+				merchantName: null,
+				purpose: null,
+				categoryId: "moradia",
+			},
+		]);
+		const result = filterTransactions(
+			txs12m,
+			{ ...noFilters, uncategorizedOnly: true },
+			overlay,
+			accountMap,
+		);
+		// The overlay gave it a category → it must no longer count as uncategorized.
+		expect(result.some((r) => r.id === target.id)).toBe(false);
+	});
 });
