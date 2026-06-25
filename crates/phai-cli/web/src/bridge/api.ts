@@ -278,6 +278,14 @@ export const api = {
 	dismissForecastTemplate: (templateId: string): Promise<unknown> =>
 		postJson("/api/forecast-template/dismiss", { template_id: templateId }),
 
+	version: (): Promise<VersionStatus> =>
+		fetch("/api/version").then((r) => json<VersionStatus>(r)),
+
+	triggerUpdate: (): Promise<UpdateResult> =>
+		fetch("/api/update", { method: "POST" }).then((r) =>
+			json<UpdateResult>(r),
+		),
+
 	/** Apply a batch of committed review writes; returns the writeIds that succeeded. */
 	flushReviews: (items: ReviewFlushItem[]): Promise<FlushResult> =>
 		postJson<FlushResult>("/api/events", { writes: items }),
@@ -323,6 +331,20 @@ export const api = {
 		return (await res.json()) as ActivateResult;
 	},
 };
+
+export interface VersionStatus {
+	currentVersion: string;
+	latestVersion: string | null;
+	updateAvailable: boolean;
+	lastCheck: string | null;
+	checking: boolean;
+	error: string | null;
+}
+
+export interface UpdateResult {
+	status: "restarting" | "up_to_date";
+	version: string;
+}
 
 export interface ActivationStatus {
 	activated: boolean;

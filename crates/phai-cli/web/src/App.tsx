@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
 import { useClientDocument } from "@livestore/react";
 import { tables } from "./livestore/schema";
-import { getBridgeVersion, useBridgeSync } from "./bridge/sync";
+import { useBridgeSync } from "./bridge/sync";
 import { useUnsyncedGuard } from "./hooks/useUnsyncedGuard";
+import { useUpdateCheck } from "./hooks/useUpdateCheck";
 import { DndProvider } from "./lib/dnd";
 import { Dashboard } from "./views/Dashboard";
 import { ViewErrorBoundary } from "./components/ErrorBoundary";
 import { PluggySyncButton } from "./components/PluggySyncButton";
+import { UpdateBanner } from "./components/UpdateBanner";
 
 /**
  * App shell — unified full-width workspace. A single Dashboard view replaces
@@ -21,11 +22,7 @@ export const App = () => {
 	const sync = useBridgeSync();
 	// Warn before closing while writes haven't reached the bridge yet.
 	useUnsyncedGuard(sync.pending);
-
-	const [version, setVersion] = useState<string | null>(null);
-	useEffect(() => {
-		getBridgeVersion().then(setVersion, () => setVersion(null));
-	}, []);
+	const update = useUpdateCheck();
 
 	return (
 		<>
@@ -52,16 +49,23 @@ export const App = () => {
 					error={sync.error}
 					onRetry={sync.retry}
 				/>
-				{version && (
+				{update.currentVersion && (
 					<span
 						className="mono"
 						title="running version"
-						style={{ fontSize: 11, color: "var(--muted2)" }}
+						style={{
+							fontSize: 11,
+							color: update.updateAvailable
+								? "var(--purple)"
+								: "var(--muted2)",
+						}}
 					>
-						v{version}
+						v{update.currentVersion}
 					</span>
 				)}
 			</div>
+
+			<UpdateBanner update={update} />
 
 			<a
 				href="#main-content"

@@ -1913,6 +1913,31 @@ struct DismissTemplateBody {
 
 // ── HTTP handlers ────────────────────────────────────────────────────────
 
+/// Live update status, refreshed by a background task every 2 hours.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateStatus {
+    current_version: String,
+    latest_version: Option<String>,
+    update_available: bool,
+    last_check: Option<String>,
+    checking: bool,
+    error: Option<String>,
+}
+
+impl UpdateStatus {
+    fn new() -> Self {
+        Self {
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: None,
+            update_available: false,
+            last_check: None,
+            checking: true,
+            error: None,
+        }
+    }
+}
+
 /// Shared axum state for the `/api` handlers: the (hot-swappable) store-actor
 /// sender plus the in-memory read cache.
 #[derive(Clone)]
@@ -1927,6 +1952,8 @@ struct BridgeState {
     /// Current activation state, surfaced by `/api/status` and updated by
     /// `/api/activate`.
     activation: Arc<RwLock<ActivationStatus>>,
+    /// Live update availability, refreshed by a background task.
+    update_status: Arc<RwLock<UpdateStatus>>,
 }
 
 /// What `/api/status` reports to the web app so it can choose between the
@@ -1995,6 +2022,8 @@ fn build_api_router(state: BridgeState, bridge_identity: Arc<BridgeIdentityRespo
             "/api/forecast-template/dismiss",
             post(post_dismiss_template),
         )
+        .route("/api/version", get(get_version))
+        .route("/api/update", post(post_update))
         // Explicit DoS-hardening cap on request body size — set intentionally
         // rather than relying on axum's implicit 2 MB `DefaultBodyLimit`, which
         // a future axum change or a route override could silently remove.
@@ -2944,6 +2973,56 @@ async fn post_dismiss_template(
     }
 }
 
+async fn get_version(State(state): Store) -> impl IntoResponse {
+    let status = state.update_status.read().await;
+    Json((*status).clone())
+}
+
+async fn post_update(State(state): Store) -> impl IntoResponse {
+    {
+        let status = state.update_status.read().await;
+        if !status.update_available {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "up_to_date", "version": status.current_version })),
+            )
+                .into_response();
+        }
+    }
+
+    let result = async {
+        let client = crate::update::http_client(15);
+        let release = crate::update::get_latest_release(&client).await?;
+        crate::update::download_and_replace(&client, &release).await?;
+        let latest = crate::update::strip_tag_prefix(&release.tag_name).to_string();
+        Ok::<String, anyhow::Error>(latest)
+    }
+    .await;
+
+    match result {
+        Ok(latest) => {
+            eprintln!(
+                "phai: atualização aplicada ({} → {latest}). Reiniciando servidor...",
+                env!("CARGO_PKG_VERSION")
+            );
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                crate::update::exec_new_binary("restart");
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "restarting", "version": latest })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            eprintln!("phai: falha ao atualizar: {msg}");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    }
+}
+
 /// Parse an optional `YYYY-MM-DD` date. Returns the offending value as the
 /// error so callers can build a 400 response.
 fn parse_opt_date(value: Option<&str>) -> Result<Option<NaiveDate>, String> {
@@ -3030,12 +3109,46 @@ pub async fn run(port: u16) -> Result<()> {
         }
     });
 
+    let update_status = Arc::new(RwLock::new(UpdateStatus::new()));
+
+    // Background update checker: immediate first check, then every 2 hours.
+    {
+        let status = update_status.clone();
+        tokio::spawn(async move {
+            const CHECK_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
+            loop {
+                {
+                    let mut s = status.write().await;
+                    s.checking = true;
+                    s.error = None;
+                }
+                match crate::update::check_for_update().await {
+                    Some((latest, _release)) => {
+                        let mut s = status.write().await;
+                        s.latest_version = Some(latest);
+                        s.update_available = true;
+                        s.checking = false;
+                        s.last_check = Some(Utc::now().to_rfc3339());
+                    }
+                    None => {
+                        let mut s = status.write().await;
+                        s.update_available = false;
+                        s.checking = false;
+                        s.last_check = Some(Utc::now().to_rfc3339());
+                    }
+                }
+                tokio::time::sleep(CHECK_INTERVAL).await;
+            }
+        });
+    }
+
     let app_state = BridgeState {
         tx: store_tx,
         cache: ReadCache::default(),
         config_tx,
         paths,
         activation,
+        update_status,
     };
 
     let api = build_api_router(app_state, bridge_identity.clone());
@@ -4769,6 +4882,7 @@ mod tests {
                 dataset_id: None,
                 sync_available: false,
             })),
+            update_status: Arc::new(RwLock::new(UpdateStatus::new())),
         };
         let identity = Arc::new(bridge_identity_response(&AppConfig::default()));
         build_api_router(state, identity)

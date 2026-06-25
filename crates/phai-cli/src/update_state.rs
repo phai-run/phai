@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
+const CHECK_INTERVAL_SECS: u64 = 4 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateState {
