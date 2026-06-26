@@ -352,7 +352,7 @@ pub(crate) fn exec_new_binary(new_version: &str) {
 }
 
 #[cfg(not(unix))]
-fn exec_new_binary(_new_version: &str) {
+pub(crate) fn exec_new_binary(_new_version: &str) {
     eprintln!("Warning: process re-exec is not supported on this platform.");
     eprintln!("Please restart phai manually.");
 }
@@ -528,6 +528,24 @@ async fn force_check_inner(data_dir: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Check for the latest release and return `Some((latest_tag, release))` when
+/// a newer version is available. Returns `None` when the binary is already
+/// up-to-date (or on network errors). Designed for the `phai serve` background
+/// checker where we want the release metadata without side-effects.
+pub(crate) async fn check_for_update() -> Option<(String, GitHubRelease)> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current = parse_version(current_version).ok()?;
+    let client = http_client(5);
+    let release = get_latest_release(&client).await.ok()?;
+    let latest_str = strip_tag_prefix(&release.tag_name);
+    let latest = parse_version(latest_str).ok()?;
+    if is_newer(&latest, &current) {
+        Some((latest_str.to_string(), release))
+    } else {
+        None
     }
 }
 
