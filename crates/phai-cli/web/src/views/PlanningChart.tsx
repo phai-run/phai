@@ -339,6 +339,9 @@ const FullChart = ({
 							}))
 							.sort((a, b) => b.mag - a.mag)
 					: [];
+				const monthForecasts = (forecastsByMonth.get(m.month) ?? []).filter(
+					(f) => !["descartado", "inativo"].includes(f.status),
+				);
 				return {
 					label: m.label,
 					isFuture: m.isFuture,
@@ -346,9 +349,10 @@ const FullChart = ({
 					expenses: model.realOuts[i] + model.fcOuts[i],
 					balance: model.balances[i],
 					cats,
+					forecasts: monthForecasts,
 				};
 			}),
-		[months, model, categorySeries],
+		[months, model, categorySeries, forecastsByMonth],
 	);
 
 	// Year totals
@@ -927,6 +931,73 @@ const FullChart = ({
 									color="var(--text)"
 									strong
 								/>
+								{hoverData[hover].forecasts.length > 0 && (
+									<>
+										<div
+											style={{
+												borderTop: "1px solid var(--border)",
+												margin: "4px 0 2px",
+												paddingTop: 4,
+											}}
+										>
+											<span
+												className="mono"
+												style={{
+													fontSize: 10,
+													color: "var(--muted)",
+													textTransform: "uppercase",
+													letterSpacing: "0.06em",
+												}}
+											>
+												forecasts
+											</span>
+										</div>
+										{hoverData[hover].forecasts.slice(0, 6).map((f) => {
+											const amt = numeric(f.amount);
+											return (
+												<div
+													key={f.forecastId}
+													className="mono"
+													style={{
+														display: "flex",
+														justifyContent: "space-between",
+														gap: 8,
+														fontSize: 11,
+														color:
+															amt >= 0
+																? "var(--green)"
+																: "var(--rose)",
+													}}
+												>
+													<span
+														style={{
+															overflow: "hidden",
+															textOverflow: "ellipsis",
+															whiteSpace: "nowrap",
+															flex: 1,
+														}}
+													>
+														{f.description}
+													</span>
+													<span>
+														{formatMoneyNumber(Math.abs(amt))}
+													</span>
+												</div>
+											);
+										})}
+										{hoverData[hover].forecasts.length > 6 && (
+											<span
+												className="mono"
+												style={{
+													fontSize: 10,
+													color: "var(--muted)",
+												}}
+											>
+												+{hoverData[hover].forecasts.length - 6} more
+											</span>
+										)}
+									</>
+								)}
 							</div>
 						)}
 					</div>

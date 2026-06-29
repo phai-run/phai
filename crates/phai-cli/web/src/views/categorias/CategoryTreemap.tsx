@@ -13,6 +13,7 @@ import {
 } from "../../lib/derivations";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 import { TierBadge, TIER_ICON } from "../../components/TierBadge";
+import type { ForecastView } from "../types";
 
 /**
  * Categorias as a drillable treemap. Level 1 tiles the month's expense
@@ -67,6 +68,8 @@ const colorFor = (index: number) => TILE_COLORS[index % TILE_COLORS.length]!;
 interface Bucket {
 	key: string;
 	total: number;
+	/** Portion of `total` coming from forecasts (for visual distinction). */
+	forecastTotal: number;
 	count: number;
 	txs: TxView[];
 }
@@ -74,18 +77,36 @@ interface Bucket {
 const bucketBy = (
 	txs: ReadonlyArray<TxView>,
 	keyOf: (tx: TxView) => string,
+	forecasts?: ReadonlyArray<ForecastView>,
+	forecastKeyOf?: (f: ForecastView) => string,
 ): Bucket[] => {
 	const map = new Map<string, Bucket>();
 	for (const tx of txs) {
 		const key = keyOf(tx);
 		let b = map.get(key);
 		if (!b) {
-			b = { key, total: 0, count: 0, txs: [] };
+			b = { key, total: 0, forecastTotal: 0, count: 0, txs: [] };
 			map.set(key, b);
 		}
 		b.total += Math.abs(toCents(tx.amount)) / 100;
 		b.count += 1;
 		b.txs.push(tx);
+	}
+	// Add forecast amounts into the same buckets.
+	if (forecasts && forecastKeyOf) {
+		for (const f of forecasts) {
+			if (["descartado", "inativo", "realizado"].includes(f.status)) continue;
+			const amt = Math.abs(toCents(f.amount)) / 100;
+			if (amt <= 0) continue;
+			const key = forecastKeyOf(f);
+			let b = map.get(key);
+			if (!b) {
+				b = { key, total: 0, forecastTotal: 0, count: 0, txs: [] };
+				map.set(key, b);
+			}
+			b.total += amt;
+			b.forecastTotal += amt;
+		}
 	}
 	return Array.from(map.values()).sort((a, b) => b.total - a.total);
 };
@@ -95,6 +116,7 @@ export const CategoryTreemap = ({
 	overlayMap,
 	onEditTx,
 	fixedCategories,
+	forecasts = [],
 }: {
 	/** The month's transactions, already filtered by the caller. */
 	txs: ReadonlyArray<TxView>;
@@ -102,6 +124,8 @@ export const CategoryTreemap = ({
 	onEditTx: (tx: TxView) => void;
 	/** Fixed-category set for the controllability lens (ADR-0030). */
 	fixedCategories?: ReadonlySet<string>;
+	/** Active forecasts for the current month, to integrate into treemap tiles. */
+	forecasts?: ReadonlyArray<ForecastView>;
 }) => {
 	const [drill, setDrill] = useState<Drill>({ level: 1 });
 	const [lens, setLens] = useState<Lens>("category");
@@ -112,6 +136,12 @@ export const CategoryTreemap = ({
 	);
 	const income = useMemo(() => txs.filter((t) => !isNegative(t.amount)), [txs]);
 	const cat = (tx: TxView) => effectiveCategory(tx, overlayMap);
+
+	// Expense forecasts to integrate into the treemap buckets.
+	const expenseForecasts = useMemo(
+		() => forecasts.filter((f) => isNegative(f.amount)),
+		[forecasts],
+	);
 
 	// Level-1 grouping key + the next-level key, both driven by the lens. In the
 	// tier lens level 1 is the controllability tier and level 2 is its
@@ -125,10 +155,16 @@ export const CategoryTreemap = ({
 			? (tx: TxView) => parseCategory(cat(tx)).parent
 			: (tx: TxView) => parseCategory(cat(tx)).sub ?? "—";
 
+	// Forecast grouping keys (same logic but keyed on categoryId).
+	const fcLevel1Key = (f: ForecastView): string =>
+		lens === "tier"
+			? "variable" // forecasts default to variable tier
+			: parseCategory(f.categoryId).parent;
+
 	const parents = useMemo(
-		() => bucketBy(expenses, level1Key),
+		() => bucketBy(expenses, level1Key, expenseForecasts, fcLevel1Key),
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[expenses, overlayMap, lens, fixedCategories],
+		[expenses, overlayMap, lens, fixedCategories, expenseForecasts],
 	);
 	const parentIndex = useMemo(
 		() => new Map(parents.map((p, i) => [p.key, i])),
@@ -161,9 +197,14 @@ export const CategoryTreemap = ({
 		if (drill.level === 1) return [];
 		const parent = drill.parent;
 		const inParent = expenses.filter((tx) => level1Key(tx) === parent);
-		return bucketBy(inParent, level2Key);
+		const inParentFc = expenseForecasts.filter((f) => fcLevel1Key(f) === parent);
+		const fcSubKey = (f: ForecastView): string =>
+			lens === "tier"
+				? parseCategory(f.categoryId).parent
+				: parseCategory(f.categoryId).sub ?? "—";
+		return bucketBy(inParent, level2Key, inParentFc, fcSubKey);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [drill, expenses, overlayMap, lens, fixedCategories]);
+	}, [drill, expenses, overlayMap, lens, fixedCategories, expenseForecasts]);
 
 	// Switching the lens invalidates any category-keyed drill path.
 	useEffect(() => setDrill({ level: 1 }), [lens]);
@@ -443,11 +484,15 @@ const TreemapBoard = React.memo(({
 				const b = byId.get(r.id)!;
 				const pct = total > 0 ? Math.round((b.total / total) * 100) : 0;
 				const big = r.w * r.h >= 6; // enough room for two text lines
+				const hasForecast = b.forecastTotal > 0;
+				const fcLabel = hasForecast
+					? ` (forecast ${formatMoneyNumber(b.forecastTotal)})`
+					: "";
 				return (
 					<button
 						key={r.id}
 						onClick={() => onOpen(r.id)}
-						title={`${labelOf ? labelOf(r.id) : r.id} · ${formatMoneyNumber(b.total)} (${pct}%) · ${b.count} tx`}
+						title={`${labelOf ? labelOf(r.id) : r.id} · ${formatMoneyNumber(b.total)} (${pct}%) · ${b.count} tx${fcLabel}`}
 						style={{
 							position: "absolute",
 							left: `${r.x}%`,
@@ -456,7 +501,9 @@ const TreemapBoard = React.memo(({
 							height: `${r.h}%`,
 							background: colorOf(r.id),
 							opacity: shade ? 0.45 + 0.55 * (b.total / (buckets[0]?.total || 1)) : 0.92,
-							border: "2px solid var(--bg)",
+							border: hasForecast
+								? "2px dashed rgba(255,255,255,0.6)"
+								: "2px solid var(--bg)",
 							borderRadius: 6,
 							cursor: "pointer",
 							display: "flex",
@@ -503,6 +550,11 @@ const TreemapBoard = React.memo(({
 								}}
 							>
 								{formatMoneyNumber(b.total)} · {pct}%
+								{hasForecast && (
+									<span style={{ opacity: 0.7, fontSize: 10 }}>
+										{" "}(fc {formatMoneyNumber(b.forecastTotal)})
+									</span>
+								)}
 							</span>
 						)}
 					</button>

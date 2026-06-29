@@ -28,14 +28,12 @@ import { CardsPanel } from "./CardsPanel";
 import { CashDecisionPanel, type CashWhen } from "./cash/CashDecisionPanel";
 import { AccountBalances } from "./cash/AccountBalances";
 import { PlanilhaView } from "./planilha/PlanilhaView";
-import { WarPlanPanel } from "./plano/WarPlanPanel";
 import type { ChartSimulation } from "./chart/model";
 import type { ChartMonthView, ForecastView } from "./types";
 
 const DETAIL_MODES = [
 	{ id: "planilha", label: "sheet" },
 	{ id: "categorias", label: "categories" },
-	{ id: "plano", label: "planning" },
 	{ id: "cartoes", label: "cards" },
 ] as const;
 
@@ -315,19 +313,6 @@ export const Dashboard = () => {
 					maxWidth: "var(--container)",
 					margin: "0 auto",
 					padding: "12px clamp(24px,3vw,32px) 0",
-					// In planning mode the chart sticks to the top (compact) so the
-					// annual balance line stays in view while you drag the sliders
-					// below and watch the simulation update live.
-					...((ui.detailMode || "planilha") === "plano"
-						? {
-								position: "sticky" as const,
-								top: 0,
-								zIndex: 40,
-								background: "var(--bg)",
-								borderBottom: "1px solid var(--border)",
-								paddingBottom: 8,
-							}
-						: {}),
 				}}
 			>
 				{loading ? (
@@ -342,10 +327,8 @@ export const Dashboard = () => {
 						selectedMonth={selected}
 						onSelectMonth={(m) => setUi({ selectedMonth: m })}
 						onDropForecast={moveForecast}
-						compact={(ui.detailMode || "planilha") === "plano"}
-						simulation={
-							(ui.detailMode || "planilha") === "plano" ? warSim : null
-						}
+						compact={false}
+						simulation={warSim}
 					/>
 					</div>
 				)}
@@ -446,9 +429,7 @@ export const Dashboard = () => {
 						</button>
 					</div>
 				) : (ui.detailMode || "planilha") === "planilha" ? (
-					<PlanilhaView month={selected} />
-				) : (ui.detailMode || "planilha") === "plano" ? (
-					<WarPlanPanel
+					<PlanilhaView
 						month={selected}
 						forecasts={forecastsByMonth.get(selected) ?? []}
 						isPast={heroWhen === "past"}

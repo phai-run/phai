@@ -292,6 +292,7 @@ export const MonthDetail = ({
 					overlayMap={overlayById}
 					onEditTx={onEdit}
 					fixedCategories={fixedCategories}
+					forecasts={forecasts}
 				/>
 			</div>
 
