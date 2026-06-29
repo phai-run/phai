@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.30.0](https://github.com/phai-run/phai/compare/v5.29.0...v5.30.0) (2026-06-29)
+
+
+### Features
+
+* **serve:** auto-update detection and in-app update for CLI and WebUI ([#234](https://github.com/phai-run/phai/issues/234)) ([575a129](https://github.com/phai-run/phai/commit/575a1293693406e4b34a33d3116339045bd08526))
+* **web:** QoL release — loading animation, ⌘K search, micro-animations, forecast UX consolidation ([#236](https://github.com/phai-run/phai/issues/236)) ([38952b7](https://github.com/phai-run/phai/commit/38952b7b2965f4f34e58e986fa681dc291c8a76e))
+
 ## [5.29.0](https://github.com/phai-run/phai/compare/v5.28.2...v5.29.0) (2026-06-24)
 
 
