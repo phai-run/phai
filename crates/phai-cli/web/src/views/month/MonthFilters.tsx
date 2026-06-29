@@ -363,7 +363,7 @@ export const ToggleBtn = ({
 }) => (
 	<button
 		onClick={onClick}
-		className="mono"
+		className="mono pressable"
 		style={{
 			...pillStyle,
 			color: active ? color : "var(--muted)",

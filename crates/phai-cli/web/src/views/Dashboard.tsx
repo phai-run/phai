@@ -1,7 +1,9 @@
 import { queryDb } from "@livestore/livestore";
 import { useStore, useQuery, useClientDocument } from "@livestore/react";
 import { useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import { events, tables } from "../livestore/schema";
+import { springSnap } from "../design/motion";
 import {
 	useChartSeed,
 	useForecastsSeed,
@@ -26,14 +28,12 @@ import { CardsPanel } from "./CardsPanel";
 import { CashDecisionPanel, type CashWhen } from "./cash/CashDecisionPanel";
 import { AccountBalances } from "./cash/AccountBalances";
 import { PlanilhaView } from "./planilha/PlanilhaView";
-import { WarPlanPanel } from "./plano/WarPlanPanel";
 import type { ChartSimulation } from "./chart/model";
 import type { ChartMonthView, ForecastView } from "./types";
 
 const DETAIL_MODES = [
 	{ id: "planilha", label: "sheet" },
 	{ id: "categorias", label: "categories" },
-	{ id: "plano", label: "planning" },
 	{ id: "cartoes", label: "cards" },
 ] as const;
 
@@ -159,6 +159,25 @@ export const Dashboard = () => {
 	const months = chartRows;
 	const currentMonth = currentMonthKey();
 	const selected = ui.selectedMonth ?? currentMonth;
+
+	// Global month navigation: Alt+Left / Alt+Right
+	useEffect(() => {
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (!e.altKey) return;
+			if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+			if (months.length === 0) return;
+			e.preventDefault();
+			const idx = months.findIndex((m) => m.month === selected);
+			if (idx === -1) return;
+			const next =
+				e.key === "ArrowLeft"
+					? months[idx - 1]
+					: months[idx + 1];
+			if (next) setUi({ selectedMonth: next.month });
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [months, selected, setUi]);
 
 	// The cash-decision hero shows the selected month (falling back to the
 	// current month). `when` drives the headline label/value: realized closing
@@ -294,19 +313,6 @@ export const Dashboard = () => {
 					maxWidth: "var(--container)",
 					margin: "0 auto",
 					padding: "12px clamp(24px,3vw,32px) 0",
-					// In planning mode the chart sticks to the top (compact) so the
-					// annual balance line stays in view while you drag the sliders
-					// below and watch the simulation update live.
-					...((ui.detailMode || "planilha") === "plano"
-						? {
-								position: "sticky" as const,
-								top: 0,
-								zIndex: 40,
-								background: "var(--bg)",
-								borderBottom: "1px solid var(--border)",
-								paddingBottom: 8,
-							}
-						: {}),
 				}}
 			>
 				{loading ? (
@@ -321,10 +327,8 @@ export const Dashboard = () => {
 						selectedMonth={selected}
 						onSelectMonth={(m) => setUi({ selectedMonth: m })}
 						onDropForecast={moveForecast}
-						compact={(ui.detailMode || "planilha") === "plano"}
-						simulation={
-							(ui.detailMode || "planilha") === "plano" ? warSim : null
-						}
+						compact={false}
+						simulation={warSim}
 					/>
 					</div>
 				)}
@@ -359,18 +363,33 @@ export const Dashboard = () => {
 								role="tab"
 								aria-selected={active}
 								onClick={() => setUi({ detailMode: m.id })}
-								className="mono"
+								className="mono pressable"
 								style={{
 									border: "none",
 									borderRadius: "var(--radius-full)",
 									padding: "6px 14px",
 									fontSize: 12,
 									cursor: "pointer",
-									background: active ? "var(--purple)" : "transparent",
+									background: "transparent",
 									color: active ? "#fff" : "var(--muted)",
-									transition: "background 150ms, color 150ms",
+									position: "relative",
+									zIndex: 1,
+									transition: "color 150ms",
 								}}
 							>
+								{active && (
+									<motion.span
+										layoutId="tab-indicator"
+										transition={springSnap}
+										style={{
+											position: "absolute",
+											inset: 0,
+											borderRadius: "var(--radius-full)",
+											background: "var(--purple)",
+											zIndex: -1,
+										}}
+									/>
+								)}
 								{m.label}
 							</button>
 						);
@@ -410,9 +429,7 @@ export const Dashboard = () => {
 						</button>
 					</div>
 				) : (ui.detailMode || "planilha") === "planilha" ? (
-					<PlanilhaView month={selected} />
-				) : (ui.detailMode || "planilha") === "plano" ? (
-					<WarPlanPanel
+					<PlanilhaView
 						month={selected}
 						forecasts={forecastsByMonth.get(selected) ?? []}
 						isPast={heroWhen === "past"}
