@@ -25,15 +25,69 @@ const Loading = ({ stage }: { stage: string }) => (
       alignItems: 'center',
       justifyContent: 'center',
       minHeight: '100vh',
-      gap: 16,
+      gap: 24,
+      background: 'var(--bg)',
     }}
   >
-    <span className="phi phi-hero" style={{ fontSize: '5rem' }}>
-      φ
+    {/* Glow halo + orbital particles + φ symbol */}
+    <div
+      style={{
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 160,
+        height: 160,
+      }}
+    >
+      {/* Glow disc behind the φ */}
+      <div
+        className="loading-glow"
+        style={{
+          position: 'absolute',
+          width: 100,
+          height: 100,
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+        }}
+      />
+      {/* Orbital particles */}
+      <div
+        style={{
+          position: 'absolute',
+          width: 0,
+          height: 0,
+          top: '50%',
+          left: '50%',
+        }}
+      >
+        <span className="loading-particle" />
+        <span className="loading-particle" />
+        <span className="loading-particle" />
+      </div>
+      {/* The φ with animated gradient */}
+      <span
+        className="phi phi-loading"
+        style={{
+          fontSize: '5rem',
+          position: 'relative',
+          zIndex: 1,
+          lineHeight: 1,
+        }}
+      >
+        φ
+      </span>
+    </div>
+    {/* Stage text */}
+    <span
+      className="mono loading-stage"
+      style={{ color: 'var(--muted)', fontSize: '0.8rem', letterSpacing: '0.05em' }}
+    >
+      {stage}
     </span>
-    <span className="mono" style={{ color: 'var(--muted)' }}>
-      loading… ({stage})
-    </span>
+    {/* Indeterminate progress bar */}
+    <div className="loading-progress" />
   </div>
 )
 

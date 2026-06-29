@@ -192,6 +192,149 @@ code,
 	}
 }
 
+/* ── Loading screen animations ──────────────────────────────────────── */
+
+/* Animated gradient flowing through the φ symbol */
+@keyframes gradient-flow {
+	0% { background-position: 0% 50%; }
+	50% { background-position: 100% 50%; }
+	100% { background-position: 0% 50%; }
+}
+
+.phi-loading {
+	background: linear-gradient(135deg, var(--cyan), var(--purple), var(--amber), var(--cyan));
+	background-size: 300% 300%;
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+	animation: gradient-flow 3s ease-in-out infinite;
+}
+
+/* Pulsing glow halo behind the φ */
+@keyframes glow-pulse {
+	0%, 100% {
+		box-shadow: 0 0 40px 8px rgba(109, 74, 255, 0.12),
+		            0 0 80px 16px rgba(13, 148, 136, 0.06);
+	}
+	50% {
+		box-shadow: 0 0 60px 16px rgba(109, 74, 255, 0.20),
+		            0 0 120px 32px rgba(13, 148, 136, 0.10);
+	}
+}
+
+.loading-glow {
+	border-radius: 50%;
+	animation: glow-pulse 3s ease-in-out infinite;
+}
+
+/* Orbital particle paths */
+@keyframes orbit-1 {
+	from { transform: rotate(0deg) translateX(60px) rotate(0deg); }
+	to   { transform: rotate(360deg) translateX(60px) rotate(-360deg); }
+}
+@keyframes orbit-2 {
+	from { transform: rotate(120deg) translateX(72px) rotate(-120deg); }
+	to   { transform: rotate(480deg) translateX(72px) rotate(-480deg); }
+}
+@keyframes orbit-3 {
+	from { transform: rotate(240deg) translateX(52px) rotate(-240deg); }
+	to   { transform: rotate(600deg) translateX(52px) rotate(-600deg); }
+}
+
+.loading-particle {
+	position: absolute;
+	border-radius: 50%;
+	pointer-events: none;
+}
+.loading-particle:nth-child(1) {
+	width: 5px; height: 5px;
+	background: var(--cyan);
+	animation: orbit-1 4s linear infinite;
+}
+.loading-particle:nth-child(2) {
+	width: 4px; height: 4px;
+	background: var(--purple);
+	animation: orbit-2 5.5s linear infinite;
+}
+.loading-particle:nth-child(3) {
+	width: 3px; height: 3px;
+	background: var(--amber);
+	animation: orbit-3 7s linear infinite;
+}
+
+/* Stage text fade */
+@keyframes stage-fade {
+	0%, 100% { opacity: 0.4; }
+	50% { opacity: 1; }
+}
+
+.loading-stage {
+	animation: stage-fade 2.5s ease-in-out infinite;
+}
+
+/* Indeterminate progress shimmer bar */
+@keyframes progress-shimmer {
+	0%   { transform: translateX(-100%); }
+	100% { transform: translateX(200%); }
+}
+
+.loading-progress {
+	position: relative;
+	width: 120px;
+	height: 2px;
+	background: var(--border);
+	border-radius: var(--radius-full);
+	overflow: hidden;
+}
+.loading-progress::after {
+	content: '';
+	position: absolute;
+	top: 0; left: 0;
+	width: 60%;
+	height: 100%;
+	background: linear-gradient(90deg, transparent, var(--purple), transparent);
+	border-radius: var(--radius-full);
+	animation: progress-shimmer 1.8s ease-in-out infinite;
+}
+
+/* Dissolve-out transition when app is ready */
+@keyframes dissolve-out {
+	from { opacity: 1; filter: blur(0); }
+	to   { opacity: 0; filter: blur(8px); }
+}
+
+.loading-dissolve {
+	animation: dissolve-out 400ms ease-out forwards;
+}
+
+/* Reduced motion: keep gradient + glow, remove orbits and shimmer */
+@media (prefers-reduced-motion: reduce) {
+	.phi-loading {
+		animation: none;
+		background-position: 50% 50%;
+	}
+	.loading-glow {
+		animation: none;
+		box-shadow: 0 0 40px 8px rgba(109, 74, 255, 0.12);
+	}
+	.loading-particle {
+		display: none;
+	}
+	.loading-stage {
+		animation: none;
+		opacity: 0.7;
+	}
+	.loading-progress::after {
+		animation: none;
+		opacity: 0.5;
+		transform: none;
+		width: 40%;
+	}
+	.loading-dissolve {
+		animation: dissolve-out 200ms ease-out forwards;
+	}
+}
+
 /* Subtle hover lift for interactive cards/tiles (N8 delight). */
 .lift {
   transition: transform 140ms ease, box-shadow 140ms ease;
