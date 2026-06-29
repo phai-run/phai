@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import { useClientDocument } from "@livestore/react";
 import { tables } from "./livestore/schema";
 import { useBridgeSync } from "./bridge/sync";
@@ -8,6 +9,7 @@ import { Dashboard } from "./views/Dashboard";
 import { ViewErrorBoundary } from "./components/ErrorBoundary";
 import { PluggySyncButton } from "./components/PluggySyncButton";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { SearchPalette } from "./components/SearchPalette";
 
 /**
  * App shell — unified full-width workspace. A single Dashboard view replaces
@@ -23,6 +25,21 @@ export const App = () => {
 	// Warn before closing while writes haven't reached the bridge yet.
 	useUnsyncedGuard(sync.pending);
 	const update = useUpdateCheck();
+	const [searchOpen, setSearchOpen] = useState(false);
+
+	// Global keyboard shortcuts: Cmd/Ctrl+K for search
+	useEffect(() => {
+		const onKeyDown = (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+				e.preventDefault();
+				setSearchOpen((v) => !v);
+			}
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, []);
+
+	const closeSearch = useCallback(() => setSearchOpen(false), []);
 
 	return (
 		<>
@@ -115,6 +132,41 @@ export const App = () => {
 				>
 					phai
 				</strong>
+				<button
+					type="button"
+					onClick={() => setSearchOpen(true)}
+					className="mono"
+					title="Search transactions (Cmd+K)"
+					style={{
+						marginLeft: "auto",
+						display: "flex",
+						alignItems: "center",
+						gap: 6,
+						background: "var(--surface)",
+						border: "1px solid var(--border)",
+						borderRadius: "var(--radius-full)",
+						padding: "5px 12px",
+						cursor: "pointer",
+						color: "var(--muted)",
+						fontSize: 12,
+						transition: "border-color 150ms",
+					}}
+				>
+					<span style={{ fontSize: 13 }}>/</span>
+					Search...
+					<kbd
+						style={{
+							fontSize: 10,
+							background: "var(--bg)",
+							border: "1px solid var(--border)",
+							borderRadius: 4,
+							padding: "1px 5px",
+							marginLeft: 4,
+						}}
+					>
+						{"⌘"}K
+					</kbd>
+				</button>
 			</header>
 
 			<DndProvider>
@@ -124,6 +176,8 @@ export const App = () => {
 					</ViewErrorBoundary>
 				</main>
 			</DndProvider>
+
+			<SearchPalette open={searchOpen} onClose={closeSearch} />
 		</>
 	);
 };

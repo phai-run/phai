@@ -160,6 +160,25 @@ export const Dashboard = () => {
 	const currentMonth = currentMonthKey();
 	const selected = ui.selectedMonth ?? currentMonth;
 
+	// Global month navigation: Alt+Left / Alt+Right
+	useEffect(() => {
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (!e.altKey) return;
+			if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+			if (months.length === 0) return;
+			e.preventDefault();
+			const idx = months.findIndex((m) => m.month === selected);
+			if (idx === -1) return;
+			const next =
+				e.key === "ArrowLeft"
+					? months[idx - 1]
+					: months[idx + 1];
+			if (next) setUi({ selectedMonth: next.month });
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [months, selected, setUi]);
+
 	// The cash-decision hero shows the selected month (falling back to the
 	// current month). `when` drives the headline label/value: realized closing
 	// balance for past/current, projected for future.
