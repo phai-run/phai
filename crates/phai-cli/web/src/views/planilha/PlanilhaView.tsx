@@ -81,11 +81,6 @@ const metaString = (meta: Record<string, unknown>, key: string): string | null =
 const monthOf = (date: string | null): string | null =>
 	date && date.length >= 7 ? date.slice(0, 7) : null;
 
-const isManualSheetForecast = (forecast: ForecastView): boolean =>
-	forecast.kind === "manual" &&
-	forecast.metadataJson.ui_role === "planned_transaction" &&
-	!["descartado", "inativo"].includes(forecast.status);
-
 /** All active forecasts for the sheet — includes envelopes, installments,
  *  templates, and manual planned transactions. */
 const isSheetForecast = (forecast: ForecastView): boolean =>

@@ -244,10 +244,15 @@ export const SearchPalette = ({
 						exit={{ opacity: 0, y: -20, scale: 0.98 }}
 						transition={{ duration: 0.15 }}
 						style={{
+							// Centred with margin-auto (not translateX) because framer-motion
+							// owns `transform` for the y/scale entrance — an inline
+							// translateX(-50%) would be clobbered mid-animation and the
+							// panel would drift right.
 							position: "fixed",
 							top: "12vh",
-							left: "50%",
-							transform: "translateX(-50%)",
+							left: 0,
+							right: 0,
+							marginInline: "auto",
 							zIndex: 201,
 							width: "min(600px, 92vw)",
 							maxHeight: "70vh",
