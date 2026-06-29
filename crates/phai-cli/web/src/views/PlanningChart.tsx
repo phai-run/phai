@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect } from "react";
+import React, { useMemo, useRef, useState, useEffect } from "react";
 import { formatMoneyNumber, numeric } from "../lib/format";
 import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
@@ -181,7 +181,7 @@ const ModeChip = ({
 		aria-checked={active}
 		aria-label={label}
 		onClick={onClick}
-		className="mono"
+		className="mono pressable"
 		style={{
 			padding: "4px 14px",
 			fontSize: 11,
@@ -450,7 +450,7 @@ const FullChart = ({
 				</div>
 			)}
 
-			<div style={{ position: "relative" }}>
+			<div className="contain-chart" style={{ position: "relative" }}>
 				<svg
 					viewBox={`0 0 ${W} ${H}`}
 					width="100%"
@@ -1115,7 +1115,7 @@ const ColumnOverlay = ({
 	</div>
 );
 
-const MonthColumn = ({
+const MonthColumn = React.memo(({
 	month,
 	index,
 	titleLeft,
@@ -1178,5 +1178,5 @@ const MonthColumn = ({
 			<div title={titleRight} />
 		</div>
 	);
-};
+});
 

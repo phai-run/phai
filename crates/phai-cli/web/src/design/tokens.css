@@ -351,3 +351,70 @@ code,
     box-shadow: none;
   }
 }
+
+/* ── Pressable — scale-down on press, subtle lift on hover ──────────── */
+
+.pressable {
+  transition: transform 100ms ease;
+}
+.pressable:hover {
+  transform: translateY(-1px);
+}
+.pressable:active {
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pressable,
+  .pressable:hover,
+  .pressable:active {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* ── Sync dot pulse (pending > 0) ───────────────────────────────────── */
+
+@keyframes sync-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.6; }
+}
+
+.sync-dot-pulse {
+  animation: sync-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sync-dot-pulse {
+    animation: none;
+  }
+}
+
+/* ── Row hover transition for sheet rows ────────────────────────────── */
+
+.sheet-row-hover {
+  transition: background-color 120ms ease;
+}
+.sheet-row-hover:hover {
+  background-color: rgba(109, 74, 255, 0.04);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-row-hover {
+    transition: none;
+  }
+}
+
+/* ── Performance: paint containment for heavy containers ────────────── */
+
+.contain-chart {
+  contain: layout style paint;
+}
+
+.contain-treemap {
+  contain: layout style paint;
+}
+
+/* ── Performance: content-visibility for large table bodies ─────────── */
+
+.sheet-tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 42px;
+}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { squarify } from "../../lib/treemap";
 import { categoryEmoji } from "../../lib/categoryEmoji";
 import {
@@ -212,7 +212,7 @@ export const CategoryTreemap = ({
 					<button
 						key={l}
 						onClick={() => setLens(l)}
-						className="mono"
+						className="mono pressable"
 						aria-pressed={lens === l}
 						style={{
 							background: lens === l ? "var(--purple)" : "transparent",
@@ -377,7 +377,7 @@ export const CategoryTreemap = ({
 };
 
 /** One treemap level rendered as absolutely-positioned tiles (percent space). */
-const TreemapBoard = ({
+const TreemapBoard = React.memo(({
 	buckets,
 	total,
 	colorOf,
@@ -429,6 +429,7 @@ const TreemapBoard = ({
 
 	return (
 		<div
+			className="contain-treemap"
 			style={{
 				position: "relative",
 				width: "100%",
@@ -465,13 +466,17 @@ const TreemapBoard = ({
 							padding: big ? "8px 10px" : "2px 6px",
 							overflow: "hidden",
 							color: "#fff",
-							transition: "filter 120ms",
+							transition: "filter 120ms, transform 120ms ease",
 						}}
 						onMouseEnter={(e) => {
-							(e.currentTarget as HTMLElement).style.filter = "brightness(1.12)";
+							const el = e.currentTarget as HTMLElement;
+							el.style.filter = "brightness(1.12)";
+							el.style.transform = "translateY(-1px)";
 						}}
 						onMouseLeave={(e) => {
-							(e.currentTarget as HTMLElement).style.filter = "";
+							const el = e.currentTarget as HTMLElement;
+							el.style.filter = "";
+							el.style.transform = "";
 						}}
 					>
 						<span
@@ -505,7 +510,7 @@ const TreemapBoard = ({
 			})}
 		</div>
 	);
-};
+});
 
 // Legibility floor for level-3 tiles: below this share of the board a tile
 // cannot render a readable value, so the transaction moves to the row list.
@@ -673,7 +678,7 @@ const TxBoard = ({
 };
 
 /** One level-3 tile: emoji + label when there is room, value always. */
-const TxTile = ({
+const TxTile = React.memo(({
 	tx,
 	rect,
 	color,
@@ -716,13 +721,17 @@ const TxTile = ({
 				padding: big ? "8px 10px" : "2px 6px",
 				overflow: "hidden",
 				color: "#fff",
-				transition: "filter 120ms",
+				transition: "filter 120ms, transform 120ms ease",
 			}}
 			onMouseEnter={(e) => {
-				(e.currentTarget as HTMLElement).style.filter = "brightness(1.12)";
+				const el = e.currentTarget as HTMLElement;
+				el.style.filter = "brightness(1.12)";
+				el.style.transform = "translateY(-1px)";
 			}}
 			onMouseLeave={(e) => {
-				(e.currentTarget as HTMLElement).style.filter = "";
+				const el = e.currentTarget as HTMLElement;
+				el.style.filter = "";
+				el.style.transform = "";
 			}}
 		>
 			{big && (
@@ -759,10 +768,10 @@ const TxTile = ({
 			</span>
 		</button>
 	);
-};
+});
 
 /** A below-the-board row for transactions too small to tile legibly. */
-const RestRow = ({
+const RestRow = React.memo(({
 	tx,
 	emoji,
 	maxMag,
@@ -834,4 +843,4 @@ const RestRow = ({
 			</span>
 		</button>
 	);
-};
+});

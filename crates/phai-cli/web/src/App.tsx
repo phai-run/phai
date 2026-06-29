@@ -226,6 +226,7 @@ export const SyncChip = ({
 			}}
 		>
 			<span
+				className={pending > 0 && !error ? "sync-dot-pulse" : undefined}
 				style={{ width: 6, height: 6, borderRadius: "50%", background: color }}
 			/>
 			{!error && pending > 0 && (

@@ -1,7 +1,9 @@
 import { queryDb } from "@livestore/livestore";
 import { useStore, useQuery, useClientDocument } from "@livestore/react";
 import { useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import { events, tables } from "../livestore/schema";
+import { springSnap } from "../design/motion";
 import {
 	useChartSeed,
 	useForecastsSeed,
@@ -378,18 +380,33 @@ export const Dashboard = () => {
 								role="tab"
 								aria-selected={active}
 								onClick={() => setUi({ detailMode: m.id })}
-								className="mono"
+								className="mono pressable"
 								style={{
 									border: "none",
 									borderRadius: "var(--radius-full)",
 									padding: "6px 14px",
 									fontSize: 12,
 									cursor: "pointer",
-									background: active ? "var(--purple)" : "transparent",
+									background: "transparent",
 									color: active ? "#fff" : "var(--muted)",
-									transition: "background 150ms, color 150ms",
+									position: "relative",
+									zIndex: 1,
+									transition: "color 150ms",
 								}}
 							>
+								{active && (
+									<motion.span
+										layoutId="tab-indicator"
+										transition={springSnap}
+										style={{
+											position: "absolute",
+											inset: 0,
+											borderRadius: "var(--radius-full)",
+											background: "var(--purple)",
+											zIndex: -1,
+										}}
+									/>
+								)}
 								{m.label}
 							</button>
 						);

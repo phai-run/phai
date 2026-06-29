@@ -25,8 +25,19 @@ export const springExpand = {
 	mass: 0.8,
 } as const;
 
+/** Quick spring for tab indicators and small layout shifts. */
+export const springSnap = {
+	type: "spring",
+	stiffness: 600,
+	damping: 38,
+	mass: 0.6,
+} as const;
+
 /** Quick ease for fades. */
 export const fast = { duration: 0.16, ease: "easeOut" } as const;
+
+/** Ultra-quick ease for micro-interactions (chip pulse, press). */
+export const micro = { duration: 0.1, ease: "easeOut" } as const;
 
 /** Fade-up reveal — pair with a stagger for lists. */
 export const fadeUp = {
@@ -34,6 +45,12 @@ export const fadeUp = {
 	animate: { opacity: 1, y: 0 },
 	exit: { opacity: 0, y: 6 },
 	transition: fast,
+} as const;
+
+/** Scale pulse: quick grow + settle, for toggling chips / category changes. */
+export const chipPulse = {
+	scale: [1, 1.06, 1],
+	transition: { duration: 0.18, ease: "easeOut" },
 } as const;
 
 /** Per-child delay for staggered list reveals. */

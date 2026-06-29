@@ -1,6 +1,6 @@
 import { queryDb } from "@livestore/livestore";
 import { useQuery, useStore, useClientDocument } from "@livestore/react";
-import {
+import React, {
 	useCallback,
 	useEffect,
 	useMemo,
@@ -681,7 +681,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 								value === "expense" ? null : "expense",
 							)
 						}
-						className="mono"
+						className="mono pressable"
 						style={inlineActionBtn("var(--rose)")}
 					>
 						+ despesa no mes
@@ -692,7 +692,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 								value === "income" ? null : "income",
 							)
 						}
-						className="mono"
+						className="mono pressable"
 						style={inlineActionBtn("var(--green)")}
 					>
 						+ receita no mes
@@ -822,7 +822,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 							<th style={{ ...thStyle, width: 70 }}>installment</th>
 						</tr>
 					</thead>
-					<tbody>
+					<tbody className="sheet-tbody">
 						{sheetRows.map((row, idx) => (
 							<SheetRow
 								key={`${row.kind}:${row.id}`}
@@ -946,7 +946,7 @@ export const PlanilhaView = ({ month }: { month: string }) => {
 								targetIds: Array.from(selectedIds),
 							})
 						}
-						className="mono"
+						className="mono pressable"
 						style={{
 							background: "var(--purple)",
 							color: "#fff",
@@ -1064,7 +1064,7 @@ const thStyle: React.CSSProperties = {
 	boxShadow: "0 1px 0 var(--border)",
 };
 
-const SheetRow = ({
+const SheetRow = React.memo(({
 	row,
 	idx,
 	selected,
@@ -1208,6 +1208,7 @@ const SheetRow = ({
 		<tr
 			data-row-idx={idx}
 			aria-selected={selected}
+			className={!selected ? "sheet-row-hover" : undefined}
 			onClick={(e) => onClick(tx, idx, e)}
 			style={{
 				cursor: "default",
@@ -1313,7 +1314,7 @@ const SheetRow = ({
 			</td>
 		</tr>
 	);
-};
+});
 
 const tdStyle: React.CSSProperties = {
 	padding: "6px 10px",
@@ -1497,21 +1498,21 @@ const SheetFilterBar = ({
 				))}
 			</select>
 			<button
-				className="mono"
+				className="mono pressable"
 				style={chip(ui.uncategorizedOnly)}
 				onClick={() => setUi({ uncategorizedOnly: !ui.uncategorizedOnly })}
 			>
 				uncategorized
 			</button>
 			<button
-				className="mono"
+				className="mono pressable"
 				style={chip(ui.unreviewedOnly)}
 				onClick={() => setUi({ unreviewedOnly: !ui.unreviewedOnly })}
 			>
 				unreviewed
 			</button>
 			<button
-				className="mono"
+				className="mono pressable"
 				style={chip(ui.installmentsOnly)}
 				onClick={() => setUi({ installmentsOnly: !ui.installmentsOnly })}
 			>
@@ -1530,7 +1531,7 @@ const SheetFilterBar = ({
 			{COMMITMENT_TIERS.map((tier) => (
 				<button
 					key={tier}
-					className="mono"
+					className="mono pressable"
 					style={tierChip(tier)}
 					aria-pressed={ui.tierFilter === tier}
 					onClick={() =>
