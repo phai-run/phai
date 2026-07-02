@@ -22,5 +22,6 @@ pub use invite::{open as open_invite, seal as seal_invite, Invite};
 pub use models::{
     AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, CheckingBalance,
     DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow,
-    RuleRecord, RuntimeMetadata, TransactionRecord, UncategorizedRow,
+    PlanChangeKind, PlanChangeRecord, PlanScenarioRecord, RuleRecord, RuntimeMetadata,
+    TransactionRecord, UncategorizedRow,
 };
