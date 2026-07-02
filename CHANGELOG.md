@@ -1,5 +1,19 @@
 # Changelog
 
+## [5.31.0](https://github.com/phai-run/phai/compare/v5.30.0...v5.31.0) (2026-07-02)
+
+
+### Features
+
+* **cli:** phai scenario subcommands for named what-if planning ([a102520](https://github.com/phai-run/phai/commit/a10252078a7bef4855767faf2cafeb1a020097e2))
+* **cli:** scenario promotion applies deltas to the real plan ([8c2f308](https://github.com/phai-run/phai/commit/8c2f3085d6b7b96898bce8906ce247fbcaf328e5))
+* **core:** plan_scenario and plan_change persistence (ADR-0037) ([d28dd0b](https://github.com/phai-run/phai/commit/d28dd0bc026037ad5e8bb25db77b82aff8cb6a00))
+* **core:** scenario projection engine (apply/diff) ([71af887](https://github.com/phai-run/phai/commit/71af887aa77c13fc0536e5c861edd46b261782b3))
+* **planning:** add named what-if scenarios ([e84198c](https://github.com/phai-run/phai/commit/e84198c12a8a5c849b318d3b63e98bb293fabdd9))
+* **serve:** /api/scenario endpoints for the web planner ([d5c4f9d](https://github.com/phai-run/phai/commit/d5c4f9da4a0936ad9153ff68c5e6781a36f81c9f))
+* **web:** scenario mode UI — picker, chart overlay and change routing ([68784f9](https://github.com/phai-run/phai/commit/68784f9ae51a1943affdbea4e54121646486c594))
+* **web:** scenario tables, events and sync routing (STORE_VERSION 11) ([7380ae1](https://github.com/phai-run/phai/commit/7380ae1a360764c577eb4bd2d9a9ba6ae78eacad))
+
 ## [5.30.0](https://github.com/phai-run/phai/compare/v5.29.0...v5.30.0) (2026-06-29)
 
 
