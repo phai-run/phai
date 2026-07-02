@@ -156,7 +156,8 @@ export interface EnvelopeUpsert {
 	description: string;
 	amount: string; // decimal string; negative = saída
 	due_date: string;
-	category_id: string;
+	/** null on update = keep the stored category (inline sheet re-amount). */
+	category_id: string | null;
 }
 
 /** Planning scenario (ADR-0037), snake_case from the bridge. */
@@ -307,6 +308,23 @@ export const api = {
 
 	deleteForecast: (forecastId: string): Promise<unknown> =>
 		postJson("/api/forecast/delete", { forecastId }),
+
+	/**
+	 * Soft-discard ANY active forecast, template-materialized included —
+	 * the unified sheet's "só em {mês}" removal.
+	 */
+	discardForecast: (forecastId: string): Promise<unknown> =>
+		postJson("/api/forecast/discard", { forecastId }),
+
+	/**
+	 * End a recurrence in the baseline: `effectiveFrom` (YYYY-MM) is the first
+	 * month without it — the unified sheet's "de {mês} em diante" removal.
+	 */
+	endForecastTemplate: (
+		templateId: string,
+		effectiveFrom: string,
+	): Promise<unknown> =>
+		postJson("/api/forecast-template/end", { templateId, effectiveFrom }),
 
 	settleForecast: (
 		forecastId: string,

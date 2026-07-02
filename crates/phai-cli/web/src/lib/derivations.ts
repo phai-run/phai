@@ -512,7 +512,9 @@ export type SheetSortKey =
 	| "description"
 	| "account"
 	| "category"
-	| "amount";
+	| "amount"
+	| "origin"
+	| "flow";
 
 export interface SheetSort {
 	key: SheetSortKey;
@@ -546,6 +548,11 @@ export const sortForSheet = (
 				return (effectiveCategory(tx, overlayMap) ?? "").toLowerCase();
 			case "amount":
 				return toCents(tx.amount);
+			case "origin":
+				// Every row here is a real transaction — origin can't discriminate.
+				return 0;
+			case "flow":
+				return isNegative(tx.amount) ? 1 : 0;
 		}
 	};
 	return [...transactions].sort((a, b) => {
@@ -620,7 +627,11 @@ export interface WarPlan {
 	totalProjecao: number;
 }
 
-const ACTIVE_FORECAST_STATUSES = new Set(["ativo", "active"]);
+/** Both status vocabularies coexist in the runtime (pt/en) — match either. */
+export const ACTIVE_FORECAST_STATUSES: ReadonlySet<string> = new Set([
+	"ativo",
+	"active",
+]);
 
 /**
  * A budget envelope is an ACTIVE parent-level EXPENSE forecast. Card bills
@@ -1077,6 +1088,521 @@ export const expensesByMonthCategory = (
 
 	return { categories, byMonth };
 };
+
+// ── Unified sheet (transactions + forecasts + scenario rows) ────────────────
+
+/**
+ * Where a sheet row comes from (ADR-0037 unified sheet). Drives the origin
+ * icon, the origin filter chips and the origin sort order.
+ */
+export type SheetOrigin =
+	| "real"
+	| "installment"
+	| "recurring"
+	| "fixed"
+	| "manual"
+	| "scenario";
+
+/** Origin glyphs for the sheet's first column. */
+export const SHEET_ORIGIN_ICONS: Record<SheetOrigin, string> = {
+	real: "✓",
+	installment: "≡",
+	recurring: "↻",
+	fixed: "⌂",
+	manual: "✎",
+	scenario: "🧪",
+};
+
+/** Classify a forecast row on the sheet-origin axis. */
+export const forecastSheetOrigin = (forecast: {
+	kind: string;
+	templateId: string | null;
+}): SheetOrigin => {
+	if (forecast.kind === "installment") return "installment";
+	if (forecast.kind === "fixed") return "fixed";
+	if (forecast.kind === "manual" && !forecast.templateId) return "manual";
+	return "recurring";
+};
+
+/** Whole calendar months from `from` to `to` (both "YYYY-MM"; can be negative). */
+export const monthDiff = (from: string, to: string): number => {
+	const [fy, fm] = from.split("-").map(Number);
+	const [ty, tm] = to.split("-").map(Number);
+	if (!fy || !fm || !ty || !tm) return Number.NaN;
+	return (ty - fy) * 12 + (tm - fm);
+};
+
+/** The forecast fields the unified sheet needs. */
+export interface SheetForecastLike {
+	forecastId: string;
+	dueDate: string | null;
+	description: string;
+	amount: string;
+	categoryId: string | null;
+	accountId: string | null;
+	status: string;
+	kind: string;
+	templateId: string | null;
+}
+
+/** A scenario delta as the sheet consumes it (subset of the LiveStore row). */
+export interface ScenarioChangeLike {
+	changeId: string;
+	kind: string;
+	targetForecastId: string | null;
+	targetTemplateId: string | null;
+	month: string | null;
+	effectiveFrom: string | null;
+	amount: string | null;
+	monthsCount: number | null;
+	description: string | null;
+	categoryId: string | null;
+	accountId: string | null;
+}
+
+/** One planned (non-realized) row of the unified sheet. */
+export interface PlannedSheetRow {
+	/** forecastId for baseline rows, changeId for scenario-added rows. */
+	id: string;
+	forecastId: string | null;
+	templateId: string | null;
+	origin: SheetOrigin;
+	description: string;
+	/** Effective amount after scenario adjustments (decimal string). */
+	amount: string;
+	/** The pre-adjustment amount when an `adjust_amount` delta applied. */
+	originalAmount: string | null;
+	/** True when a `skip_forecast` / `end_template` delta removed this row. */
+	skipped: boolean;
+	dueDate: string; // YYYY-MM-DD
+	categoryId: string | null;
+	accountId: string | null;
+	/** "n/N" for hypothetical installments. */
+	installmentLabel: string | null;
+	/** The scenario change that created this row (scenario-added rows only). */
+	changeId: string | null;
+	/** The adjust_amount change applied to this row, if any. */
+	adjustChangeId: string | null;
+	/** The skip/end change that skipped this row, if any. */
+	skipChangeId: string | null;
+}
+
+const plannedRowFromForecast = (
+	forecast: SheetForecastLike,
+	month: string,
+): PlannedSheetRow => ({
+	id: forecast.forecastId,
+	forecastId: forecast.forecastId,
+	templateId: forecast.templateId,
+	origin: forecastSheetOrigin(forecast),
+	description: forecast.description,
+	amount: forecast.amount,
+	originalAmount: null,
+	skipped: false,
+	dueDate: forecast.dueDate ?? `${month}-01`,
+	categoryId: forecast.categoryId,
+	accountId: forecast.accountId,
+	installmentLabel: null,
+	changeId: null,
+	adjustChangeId: null,
+	skipChangeId: null,
+});
+
+const changeAppliesToRow = (
+	change: ScenarioChangeLike,
+	row: PlannedSheetRow,
+	month: string,
+): boolean => {
+	if (change.kind === "adjust_amount" || change.kind === "skip_forecast") {
+		return change.targetForecastId === row.forecastId;
+	}
+	if (change.kind === "end_template") {
+		return (
+			row.templateId != null &&
+			change.targetTemplateId === row.templateId &&
+			change.effectiveFrom != null &&
+			change.effectiveFrom <= month
+		);
+	}
+	return false;
+};
+
+const applyChangesToRow = (
+	row: PlannedSheetRow,
+	changes: ReadonlyArray<ScenarioChangeLike>,
+	month: string,
+): PlannedSheetRow => {
+	let out = row;
+	for (const change of changes) {
+		if (!changeAppliesToRow(change, out, month)) continue;
+		if (change.kind === "adjust_amount" && change.amount != null) {
+			out = {
+				...out,
+				amount: change.amount,
+				originalAmount: out.originalAmount ?? row.amount,
+				adjustChangeId: change.changeId,
+			};
+		} else {
+			out = {
+				...out,
+				skipped: true,
+				skipChangeId: out.skipChangeId ?? change.changeId,
+			};
+		}
+	}
+	return out;
+};
+
+const scenarioAddedRow = (
+	change: ScenarioChangeLike,
+	month: string,
+	installmentLabel: string | null,
+): PlannedSheetRow => ({
+	id: change.changeId,
+	forecastId: null,
+	templateId: null,
+	origin: "scenario",
+	description: change.description ?? "",
+	amount: change.amount ?? "0",
+	originalAmount: null,
+	skipped: false,
+	dueDate: `${month}-01`,
+	categoryId: change.categoryId,
+	accountId: change.accountId,
+	installmentLabel,
+	changeId: change.changeId,
+	adjustChangeId: null,
+	skipChangeId: null,
+});
+
+const scenarioAddedRows = (
+	changes: ReadonlyArray<ScenarioChangeLike>,
+	month: string,
+): PlannedSheetRow[] => {
+	const rows: PlannedSheetRow[] = [];
+	for (const change of changes) {
+		if (change.kind === "add_one_shot" && change.month === month) {
+			rows.push(scenarioAddedRow(change, month, null));
+		} else if (
+			change.kind === "hypothetical_installment" &&
+			change.effectiveFrom != null
+		) {
+			const idx = monthDiff(change.effectiveFrom, month);
+			const count = change.monthsCount ?? 0;
+			if (Number.isFinite(idx) && idx >= 0 && idx < count) {
+				rows.push(scenarioAddedRow(change, month, `${idx + 1}/${count}`));
+			}
+		}
+	}
+	return rows;
+};
+
+/**
+ * Derive the planned rows of one sheet month with a scenario applied
+ * (ADR-0037, client-side): active forecasts of the month get `adjust_amount`
+ * substitutions (keeping `originalAmount` for the strikethrough),
+ * `skip_forecast` / `end_template` marks (`skipped`), and the scenario's own
+ * `add_one_shot` / `hypothetical_installment` rows are appended (installment
+ * position "n/N" computed from `effectiveFrom`). With `changes` empty this is
+ * simply the month's active forecasts — the baseline path.
+ */
+export const applyScenarioToMonthRows = (
+	forecasts: ReadonlyArray<SheetForecastLike>,
+	changes: ReadonlyArray<ScenarioChangeLike>,
+	month: string,
+): PlannedSheetRow[] => {
+	const base = forecasts
+		.filter(
+			(f) =>
+				ACTIVE_FORECAST_STATUSES.has(f.status) &&
+				(f.dueDate ?? "").slice(0, 7) === month,
+		)
+		.map((f) => applyChangesToRow(plannedRowFromForecast(f, month), changes, month));
+	return [...base, ...scenarioAddedRows(changes, month)];
+};
+
+// ── Unified sheet sorting + localStorage persistence ────────────────────────
+
+/** The row fields the unified sort compares. */
+export interface UnifiedRowKeys {
+	id: string;
+	date: string;
+	description: string;
+	account: string;
+	category: string | null;
+	amount: string;
+	origin: string;
+}
+
+const ORIGIN_SORT_ORDER: Record<string, number> = {
+	real: 0,
+	installment: 1,
+	recurring: 2,
+	fixed: 3,
+	manual: 4,
+	scenario: 5,
+};
+
+const unifiedSortKey = (row: UnifiedRowKeys, key: SheetSortKey): string | number => {
+	switch (key) {
+		case "date":
+			return row.date;
+		case "description":
+			return row.description.toLowerCase();
+		case "account":
+			return row.account.toLowerCase();
+		case "category":
+			return (row.category ?? "").toLowerCase();
+		case "amount":
+			return toCents(row.amount);
+		case "origin":
+			return ORIGIN_SORT_ORDER[row.origin] ?? 9;
+		case "flow":
+			// Ascending = income first (matches the green-on-top mental model).
+			return isNegative(row.amount) ? 1 : 0;
+	}
+};
+
+/**
+ * Sort the unified sheet (real + planned + scenario rows together). Stable
+ * for equal keys: falls back to date desc, then id, so re-renders never
+ * shuffle rows.
+ */
+export const sortUnifiedRows = <T extends UnifiedRowKeys>(
+	rows: ReadonlyArray<T>,
+	sort: SheetSort,
+): T[] =>
+	[...rows].sort((a, b) => {
+		const ka = unifiedSortKey(a, sort.key);
+		const kb = unifiedSortKey(b, sort.key);
+		const cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+		if (cmp !== 0) return cmp * sort.dir;
+		const dateCmp = a.date < b.date ? 1 : a.date > b.date ? -1 : 0;
+		return dateCmp !== 0 ? dateCmp : a.id < b.id ? -1 : 1;
+	});
+
+/** localStorage keys for the sheet's session-agnostic view preferences. */
+export const SHEET_SORT_STORAGE_KEY = "phai:sheetSort";
+export const SHEET_FILTERS_STORAGE_KEY = "phai:sheetFilters";
+
+const SHEET_SORT_KEYS: ReadonlySet<string> = new Set([
+	"date",
+	"description",
+	"account",
+	"category",
+	"amount",
+	"origin",
+	"flow",
+]);
+
+/**
+ * Read the persisted sheet sort ({col,dir} JSON in localStorage — NEVER the
+ * LiveStore ui document, so a sort click can't trigger a store migration).
+ * Unknown/corrupt payloads read as null (caller falls back to the default).
+ */
+export const readSheetSort = (
+	storage: Pick<Storage, "getItem">,
+): SheetSort | null => {
+	try {
+		const raw = storage.getItem(SHEET_SORT_STORAGE_KEY);
+		if (!raw) return null;
+		const parsed = JSON.parse(raw) as { col?: unknown; dir?: unknown };
+		if (
+			typeof parsed.col === "string" &&
+			SHEET_SORT_KEYS.has(parsed.col) &&
+			(parsed.dir === 1 || parsed.dir === -1)
+		) {
+			return { key: parsed.col as SheetSortKey, dir: parsed.dir };
+		}
+		return null;
+	} catch {
+		return null;
+	}
+};
+
+export const writeSheetSort = (
+	storage: Pick<Storage, "setItem">,
+	sort: SheetSort,
+): void => {
+	try {
+		storage.setItem(
+			SHEET_SORT_STORAGE_KEY,
+			JSON.stringify({ col: sort.key, dir: sort.dir }),
+		);
+	} catch {
+		/* private mode / quota — sort just won't persist */
+	}
+};
+
+export type SheetOriginFilter = "all" | SheetOrigin;
+export type SheetFlowFilter = "all" | "in" | "out";
+
+/** The two sheet-only filters persisted in localStorage (not the ui doc). */
+export interface SheetLocalFilters {
+	origin: SheetOriginFilter;
+	flow: SheetFlowFilter;
+}
+
+export const DEFAULT_SHEET_LOCAL_FILTERS: SheetLocalFilters = {
+	origin: "all",
+	flow: "all",
+};
+
+const SHEET_ORIGIN_FILTER_VALUES: ReadonlySet<string> = new Set([
+	"all",
+	"real",
+	"installment",
+	"recurring",
+	"fixed",
+	"manual",
+	"scenario",
+]);
+const SHEET_FLOW_FILTER_VALUES: ReadonlySet<string> = new Set([
+	"all",
+	"in",
+	"out",
+]);
+
+export const readSheetLocalFilters = (
+	storage: Pick<Storage, "getItem">,
+): SheetLocalFilters => {
+	try {
+		const raw = storage.getItem(SHEET_FILTERS_STORAGE_KEY);
+		if (!raw) return DEFAULT_SHEET_LOCAL_FILTERS;
+		const parsed = JSON.parse(raw) as { origin?: unknown; flow?: unknown };
+		return {
+			origin:
+				typeof parsed.origin === "string" &&
+				SHEET_ORIGIN_FILTER_VALUES.has(parsed.origin)
+					? (parsed.origin as SheetOriginFilter)
+					: "all",
+			flow:
+				typeof parsed.flow === "string" &&
+				SHEET_FLOW_FILTER_VALUES.has(parsed.flow)
+					? (parsed.flow as SheetFlowFilter)
+					: "all",
+		};
+	} catch {
+		return DEFAULT_SHEET_LOCAL_FILTERS;
+	}
+};
+
+export const writeSheetLocalFilters = (
+	storage: Pick<Storage, "setItem">,
+	filters: SheetLocalFilters,
+): void => {
+	try {
+		storage.setItem(SHEET_FILTERS_STORAGE_KEY, JSON.stringify(filters));
+	} catch {
+		/* private mode / quota — filters just won't persist */
+	}
+};
+
+/** Apply the sheet-only origin/flow chips to one unified row. */
+export const matchesSheetLocalFilters = (
+	row: { amount: string; origin: string },
+	filters: SheetLocalFilters,
+): boolean => {
+	if (filters.origin !== "all" && row.origin !== filters.origin) return false;
+	if (filters.flow === "in" && isNegative(row.amount)) return false;
+	if (filters.flow === "out" && !isNegative(row.amount)) return false;
+	return true;
+};
+
+// ── Unified sheet write routing (baseline vs. active scenario) ──────────────
+
+/** The row identity fields the write router needs. */
+export interface SheetRowRef {
+	origin: SheetOrigin;
+	forecastId: string | null;
+	templateId: string | null;
+	changeId: string | null;
+}
+
+/** "só em {mês}" vs. "de {mês} em diante". */
+export type SheetDeleteScope = "month" | "onward";
+
+export type SheetDeleteAction =
+	| { kind: "baselineDelete"; forecastId: string }
+	| { kind: "baselineDiscard"; forecastId: string }
+	| { kind: "baselineEndTemplate"; templateId: string; effectiveFrom: string }
+	| { kind: "scenarioSkip"; forecastId: string }
+	| { kind: "scenarioEndTemplate"; templateId: string; effectiveFrom: string }
+	| { kind: "scenarioRemoveChange"; changeId: string }
+	| { kind: "none" };
+
+/**
+ * Decide what deleting a planned sheet row means (design D). Baseline: manual
+ * one-shots are deleted, template-materialized rows are discarded for the
+ * month or the whole template is ended from the month on. Scenario active:
+ * the same gestures become plan deltas (skip_forecast / end_template), and a
+ * scenario-added row simply removes its own change.
+ */
+export const routeSheetDelete = (
+	row: SheetRowRef,
+	scope: SheetDeleteScope,
+	month: string,
+	activeScenarioId: string | null,
+): SheetDeleteAction => {
+	if (row.origin === "scenario") {
+		return row.changeId
+			? { kind: "scenarioRemoveChange", changeId: row.changeId }
+			: { kind: "none" };
+	}
+	if (scope === "onward" && row.templateId) {
+		return activeScenarioId
+			? {
+					kind: "scenarioEndTemplate",
+					templateId: row.templateId,
+					effectiveFrom: month,
+				}
+			: {
+					kind: "baselineEndTemplate",
+					templateId: row.templateId,
+					effectiveFrom: month,
+				};
+	}
+	if (!row.forecastId) return { kind: "none" };
+	if (activeScenarioId) {
+		return { kind: "scenarioSkip", forecastId: row.forecastId };
+	}
+	return row.origin === "manual"
+		? { kind: "baselineDelete", forecastId: row.forecastId }
+		: { kind: "baselineDiscard", forecastId: row.forecastId };
+};
+
+export type SheetAmountAction =
+	| { kind: "baselinePatch"; forecastId: string }
+	| { kind: "scenarioAdjust"; forecastId: string }
+	| { kind: "scenarioReplaceOneShot"; changeId: string }
+	| { kind: "none" };
+
+/**
+ * Decide what an inline amount edit on a planned row means (design C).
+ * Baseline: re-amount the forecast in place (envelope-upsert flow with
+ * forecastId). Scenario: an adjust_amount delta; a scenario-added row
+ * replaces its own change.
+ */
+export const routeSheetAmountEdit = (
+	row: SheetRowRef,
+	activeScenarioId: string | null,
+): SheetAmountAction => {
+	if (row.origin === "scenario") {
+		return row.changeId
+			? { kind: "scenarioReplaceOneShot", changeId: row.changeId }
+			: { kind: "none" };
+	}
+	if (!row.forecastId) return { kind: "none" };
+	return activeScenarioId
+		? { kind: "scenarioAdjust", forecastId: row.forecastId }
+		: { kind: "baselinePatch", forecastId: row.forecastId };
+};
+
+/** Decide what adding a sheet row means (design E). */
+export const routeSheetAdd = (
+	activeScenarioId: string | null,
+): "forecastCreate" | "scenarioAddOneShot" =>
+	activeScenarioId ? "scenarioAddOneShot" : "forecastCreate";
 
 /** A subcategory slice of a parent's monthly spend, for the chart hover. */
 export interface SubSlice {

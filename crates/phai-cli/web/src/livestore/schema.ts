@@ -38,7 +38,7 @@ import {
  * Enforced by __tests__/store-version.test.ts: change the schema and the
  * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
  */
-export const STORE_VERSION = 11;
+export const STORE_VERSION = 12;
 export const STORE_ID = `phai-s${STORE_VERSION}`;
 
 // Computes current month as "YYYY-MM" for the default selectedMonth.
@@ -478,6 +478,7 @@ export const events = {
 	}),
 	// A war-plan goal confirmed as a monthly budget envelope. forecastId ""
 	// creates a new envelope; otherwise the existing one is re-amounted.
+	// categoryId null = keep the stored category (inline sheet re-amount).
 	forecastEnvelopeUpserted: Events.synced({
 		name: "v1.ForecastEnvelopeUpserted",
 		schema: Schema.Struct({
@@ -486,7 +487,7 @@ export const events = {
 			description: Schema.String,
 			amount: Schema.String,
 			dueDate: Schema.String,
-			categoryId: Schema.String,
+			categoryId: Schema.NullOr(Schema.String),
 			upsertedAt: Schema.Number,
 		}),
 	}),
@@ -496,6 +497,31 @@ export const events = {
 			writeId: Schema.String,
 			forecastId: Schema.String,
 			deletedAt: Schema.Number,
+		}),
+	}),
+	// Soft-discard of ANY active forecast, template-materialized included —
+	// the unified sheet's "só em {mês}" removal (POST /api/forecast/discard).
+	forecastDiscarded: Events.synced({
+		name: "v1.ForecastDiscarded",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			forecastId: Schema.String,
+			discardedAt: Schema.Number,
+		}),
+	}),
+	// End a recurrence in the baseline from `effectiveFrom` (YYYY-MM) on —
+	// the unified sheet's "de {mês} em diante" removal
+	// (POST /api/forecast-template/end). `forecastIds` carries the template's
+	// active forecasts due on/after the cutoff so the optimistic overlay can
+	// gray them out before the bridge acks.
+	forecastTemplateEnded: Events.synced({
+		name: "v1.ForecastTemplateEnded",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			templateId: Schema.String,
+			effectiveFrom: Schema.String,
+			forecastIds: Schema.Array(Schema.String),
+			endedAt: Schema.Number,
 		}),
 	}),
 	forecastSettled: Events.synced({
@@ -781,6 +807,38 @@ const materializers = State.SQLite.materializers(events, {
 		tables.forecasts
 			.update({ status: "descartado" })
 			.where({ forecastId }),
+	],
+	"v1.ForecastDiscarded": ({ writeId, forecastId, discardedAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "forecastDiscard",
+			forecastId,
+			payload: {},
+			createdAt: discardedAt,
+			attempts: 0,
+		}),
+		tables.forecasts
+			.update({ status: "descartado" })
+			.where({ forecastId }),
+	],
+	"v1.ForecastTemplateEnded": ({
+		writeId,
+		templateId,
+		effectiveFrom,
+		forecastIds,
+		endedAt,
+	}) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "forecastTemplateEnd",
+			// drainQueue POSTs this to /api/forecast-template/end (camelCase body).
+			payload: { templateId, effectiveFrom },
+			createdAt: endedAt,
+			attempts: 0,
+		}),
+		...forecastIds.map((forecastId) =>
+			tables.forecasts.update({ status: "descartado" }).where({ forecastId }),
+		),
 	],
 	"v1.ForecastSettled": ({
 		writeId,
