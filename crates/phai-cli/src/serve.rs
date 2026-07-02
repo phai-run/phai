@@ -354,6 +354,21 @@ enum StoreRequest {
         forecast_id: String,
         resp: oneshot::Sender<Result<DeleteForecastResult>>,
     },
+    /// Soft-discard ANY active forecast, including template-materialized ones
+    /// (`POST /api/forecast/discard`) — the unified sheet's row removal.
+    DiscardForecast {
+        forecast_id: String,
+        resp: oneshot::Sender<Result<DiscardForecastResult>>,
+    },
+    /// End a template's recurrence in the baseline
+    /// (`POST /api/forecast-template/end`): stamp `end_date` on the last day
+    /// of the month before `cutoff` and discard the template's active
+    /// forecasts due on/after it.
+    EndForecastTemplate {
+        template_id: String,
+        cutoff: NaiveDate,
+        resp: oneshot::Sender<Result<EndForecastTemplateResult>>,
+    },
     /// Manually mark a manual forecast as realized by linking a real synced
     /// transaction (`POST /api/forecast/settle`).
     SettleForecast {
@@ -548,6 +563,18 @@ async fn handle_store_mutation(store: &dyn FinanceStore, config: &AppConfig, req
         }
         StoreRequest::DeleteForecast { forecast_id, resp } => {
             let result = delete_forecast(store, &forecast_id).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::DiscardForecast { forecast_id, resp } => {
+            let result = discard_forecast(store, &forecast_id).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::EndForecastTemplate {
+            template_id,
+            cutoff,
+            resp,
+        } => {
+            let result = end_forecast_template(store, &template_id, cutoff).await;
             let _ = resp.send(result);
         }
         StoreRequest::SettleForecast {
@@ -891,6 +918,24 @@ enum DeleteForecastResult {
     NotManual,
 }
 
+/// Outcome of a `POST /api/forecast/discard` request. Unlike delete, discard
+/// accepts template-materialized forecasts — but only rows still active.
+enum DiscardForecastResult {
+    Discarded { forecast_id: String, status: String },
+    NotFound,
+    NotActive,
+}
+
+/// Outcome of a `POST /api/forecast-template/end` request.
+enum EndForecastTemplateResult {
+    Ended {
+        template_id: String,
+        end_date: NaiveDate,
+        discarded_forecasts: usize,
+    },
+    NotFound,
+}
+
 enum SettleForecastResult {
     Settled { forecast_id: String, status: String },
     NotFound,
@@ -1102,6 +1147,41 @@ async fn patch_forecast(
     Ok(Some(forecast_id.to_string()))
 }
 
+/// The shared write half of delete/discard: stamp `record` as discarded,
+/// persist it and emit the `AuditEvent` (action `discard`). Returns the new
+/// status. Callers enforce their own preconditions (manual-only vs. active).
+async fn write_forecast_discard(
+    store: &dyn FinanceStore,
+    mut record: ForecastRecord,
+) -> Result<String> {
+    record.status = "descartado".to_string();
+    record.updated_at = Utc::now();
+    let discarded_at = record.updated_at.to_rfc3339();
+    let meta = forecast_metadata_obj(&mut record);
+    meta.insert("discarded_at".to_string(), Value::String(discarded_at));
+    let forecast_id = record.forecast_id.clone();
+    let status = record.status.clone();
+    let diff =
+        serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
+    store
+        .upsert_forecasts(&[record])
+        .await
+        .context("upsert_forecasts")?;
+    let event = AuditEvent::from_entity(
+        "forecast",
+        &forecast_id,
+        "discard",
+        SERVE_ACTOR_ID,
+        &Uuid::now_v7().to_string(),
+        diff,
+    );
+    store
+        .insert_audit_events(&[event])
+        .await
+        .context("audit forecast discard")?;
+    Ok(status)
+}
+
 async fn delete_forecast(
     store: &dyn FinanceStore,
     forecast_id: &str,
@@ -1116,35 +1196,68 @@ async fn delete_forecast(
     if manual_forecast_mut(&mut record).is_none() {
         return Ok(DeleteForecastResult::NotManual);
     }
-    record.status = "descartado".to_string();
-    record.updated_at = Utc::now();
-    let discarded_at = record.updated_at.to_rfc3339();
-    let meta = forecast_metadata_obj(&mut record);
-    meta.insert("discarded_at".to_string(), Value::String(discarded_at));
-    let status = record.status.clone();
-    let diff =
-        serde_json::to_value(&record).context("falha ao serializar forecast para auditoria")?;
-    store
-        .upsert_forecasts(&[record])
-        .await
-        .context("upsert_forecasts")?;
-    let event = AuditEvent {
-        event_id: Uuid::now_v7().to_string(),
-        entity_type: "forecast".into(),
-        entity_id: forecast_id.to_string(),
-        action: "discard".into(),
-        actor_id: SERVE_ACTOR_ID.into(),
-        event_timestamp: Utc::now(),
-        idempotency_key: Uuid::now_v7().to_string(),
-        diff_json: diff,
-    };
-    store
-        .insert_audit_events(&[event])
-        .await
-        .context("audit delete_forecast")?;
+    let status = write_forecast_discard(store, record).await?;
     Ok(DeleteForecastResult::Deleted {
         forecast_id: forecast_id.to_string(),
         status,
+    })
+}
+
+/// Soft-discard any active forecast (status → `descartado`), including rows
+/// materialized by a template (parcela/assinatura/fixa). The unified sheet's
+/// row removal: unlike [`delete_forecast`], provenance does not matter —
+/// only liveness does.
+async fn discard_forecast(
+    store: &dyn FinanceStore,
+    forecast_id: &str,
+) -> Result<DiscardForecastResult> {
+    let Some(record) = store
+        .get_forecast(forecast_id)
+        .await
+        .context("get_forecast")?
+    else {
+        return Ok(DiscardForecastResult::NotFound);
+    };
+    if !crate::scenario_cmd::forecast_is_active(&record.status) {
+        return Ok(DiscardForecastResult::NotActive);
+    }
+    let status = write_forecast_discard(store, record).await?;
+    Ok(DiscardForecastResult::Discarded {
+        forecast_id: forecast_id.to_string(),
+        status,
+    })
+}
+
+/// End a template's recurrence in the baseline: `end_date` becomes the last
+/// day of the month before `cutoff`, and every active forecast the template
+/// materialized due on/after `cutoff` is discarded. Reuses the scenario
+/// promotion's plan/apply helpers so both paths stay in lockstep.
+async fn end_forecast_template(
+    store: &dyn FinanceStore,
+    template_id: &str,
+    cutoff: NaiveDate,
+) -> Result<EndForecastTemplateResult> {
+    let Some(plan) = crate::scenario_cmd::plan_end_template(store, template_id, cutoff).await?
+    else {
+        return Ok(EndForecastTemplateResult::NotFound);
+    };
+    let end_date = plan.end_date;
+    let idempotency_key = format!(
+        "serve-end-template-{template_id}-{}",
+        cutoff.format("%Y-%m")
+    );
+    let discarded_forecasts = crate::scenario_cmd::apply_end_template(
+        store,
+        plan,
+        SERVE_ACTOR_ID,
+        "end_template",
+        &idempotency_key,
+    )
+    .await?;
+    Ok(EndForecastTemplateResult::Ended {
+        template_id: template_id.to_string(),
+        end_date,
+        discarded_forecasts,
     })
 }
 
@@ -2216,6 +2329,20 @@ struct DeleteForecastBody {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DiscardForecastBody {
+    forecast_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EndTemplateBody {
+    template_id: String,
+    /// First month without the recurrence, as `YYYY-MM`.
+    effective_from: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SettleForecastBody {
     forecast_id: String,
     transaction_id: String,
@@ -2336,9 +2463,14 @@ fn build_api_router(state: BridgeState, bridge_identity: Arc<BridgeIdentityRespo
         .route("/api/events", post(post_events))
         .route("/api/forecast", post(post_forecast))
         .route("/api/forecast/delete", post(post_forecast_delete))
+        .route("/api/forecast/discard", post(post_forecast_discard))
         .route("/api/forecast/move", post(post_forecast_move))
         .route("/api/forecast/settle", post(post_forecast_settle))
         .route("/api/forecast-template/accept", post(post_accept_template))
+        .route(
+            "/api/forecast-template/end",
+            post(post_forecast_template_end),
+        )
         .route(
             "/api/forecast-template/dismiss",
             post(post_dismiss_template),
@@ -3184,6 +3316,97 @@ async fn post_forecast_delete(
             StatusCode::CONFLICT,
             "apenas forecasts manuais podem ser excluídos pela web",
         ),
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn post_forecast_discard(
+    State(state): Store,
+    Json(body): Json<DiscardForecastBody>,
+) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::DiscardForecast {
+            forecast_id: body.forecast_id,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(DiscardForecastResult::Discarded {
+            forecast_id,
+            status,
+        })) => {
+            // Discarding a forecast updates the forecast list + projected chart.
+            state
+                .cache
+                .invalidate(&[Resource::Forecasts, Resource::Chart]);
+            Json(json!({ "forecastId": forecast_id, "status": status })).into_response()
+        }
+        Ok(Ok(DiscardForecastResult::NotFound)) => {
+            error_response(StatusCode::NOT_FOUND, "forecast não encontrado")
+        }
+        Ok(Ok(DiscardForecastResult::NotActive)) => error_response(
+            StatusCode::CONFLICT,
+            "apenas forecasts ativos podem ser descartados",
+        ),
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn post_forecast_template_end(
+    State(state): Store,
+    Json(body): Json<EndTemplateBody>,
+) -> impl IntoResponse {
+    let Some(cutoff) = phai_core::scenario::parse_month(body.effective_from.trim()) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "effectiveFrom inválido: '{}' (use YYYY-MM)",
+                body.effective_from
+            ),
+        );
+    };
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::EndForecastTemplate {
+            template_id: body.template_id,
+            cutoff,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(EndForecastTemplateResult::Ended {
+            template_id,
+            end_date,
+            discarded_forecasts,
+        })) => {
+            // Ending a recurrence rewrites the template (template list) and
+            // discards its future forecasts (forecast list + projected chart).
+            state
+                .cache
+                .invalidate(&[Resource::Templates, Resource::Forecasts, Resource::Chart]);
+            Json(json!({
+                "templateId": template_id,
+                "endDate": end_date.format("%Y-%m-%d").to_string(),
+                "discardedForecasts": discarded_forecasts,
+            }))
+            .into_response()
+        }
+        Ok(Ok(EndForecastTemplateResult::NotFound)) => {
+            error_response(StatusCode::NOT_FOUND, "template não encontrado")
+        }
         Ok(Err(e)) => internal_error(e),
         Err(_) => actor_silent(),
     }
@@ -4125,6 +4348,11 @@ async fn log_ops(
 /// as the invoking user so the browser attaches to their GUI session.
 fn open_browser(url: &str) {
     use std::process::Command;
+    // Headless/automation escape hatch: E2E tests (and daemons that manage
+    // their own browser) spawn `phai serve` with this set so no window pops.
+    if phai_core::compat::env_var_os("PHAI_NO_BROWSER", "FINANCE_OS_NO_BROWSER").is_some() {
+        return;
+    }
     let result = if cfg!(target_os = "macos") {
         match std::env::var("SUDO_USER") {
             Ok(user) if !user.is_empty() => Command::new("sudo")
@@ -5041,6 +5269,171 @@ mod tests {
         assert!(patched.is_none());
     }
 
+    // ── Behavioral: baseline discard/end-template (unified sheet) ──────────
+
+    // The unified sheet edits the amount of ANY active planned row, including
+    // template-materialized parcelas — patch_forecast must not gate on
+    // provenance the way delete_forecast does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn patch_forecast_accepts_template_materialized_rows() {
+        let (_dir, _config, store) = temp_store().await;
+        upsert_forecast(
+            store.as_ref(),
+            sample_forecast("f-parcela-1", Some("tpl-loja")),
+        )
+        .await
+        .unwrap();
+
+        let patched = patch_forecast(
+            store.as_ref(),
+            "f-parcela-1",
+            ForecastPatch {
+                amount: Decimal::from_str("-321.00").unwrap(),
+                due_date: None,
+                description: None,
+                category_id: None,
+                account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(patched.as_deref(), Some("f-parcela-1"));
+
+        let stored = store.get_forecast("f-parcela-1").await.unwrap().unwrap();
+        assert_eq!(stored.amount, Decimal::from_str("-321.00").unwrap());
+        assert_eq!(stored.template_id.as_deref(), Some("tpl-loja"));
+        assert_eq!(stored.status, "ativo");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discard_forecast_discards_template_materialized_row() {
+        let (_dir, _config, store) = temp_store().await;
+        upsert_forecast(
+            store.as_ref(),
+            sample_forecast("f-parcela-2", Some("tpl-loja")),
+        )
+        .await
+        .unwrap();
+
+        let result = discard_forecast(store.as_ref(), "f-parcela-2")
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            DiscardForecastResult::Discarded { ref status, .. } if status == "descartado"
+        ));
+        let stored = store.get_forecast("f-parcela-2").await.unwrap().unwrap();
+        assert_eq!(stored.status, "descartado");
+        assert!(
+            stored.metadata_json.get("discarded_at").is_some(),
+            "discard must stamp discarded_at metadata"
+        );
+
+        // A discarded row is no longer active → repeat discards conflict (409).
+        let repeat = discard_forecast(store.as_ref(), "f-parcela-2")
+            .await
+            .unwrap();
+        assert!(matches!(repeat, DiscardForecastResult::NotActive));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discard_forecast_unknown_id_returns_not_found() {
+        let (_dir, _config, store) = temp_store().await;
+        let result = discard_forecast(store.as_ref(), "missing").await.unwrap();
+        assert!(matches!(result, DiscardForecastResult::NotFound));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn end_forecast_template_stamps_end_date_and_discards_from_cutoff() {
+        use crate::forecast_cmd::materialise_template_forecasts;
+
+        let (_dir, _config, store) = temp_store().await;
+        let template = sample_template("tpl-rent");
+        store
+            .upsert_forecast_templates(std::slice::from_ref(&template))
+            .await
+            .unwrap();
+        let created =
+            materialise_template_forecasts(store.as_ref(), &template, 3, "test-actor", Utc::now())
+                .await
+                .unwrap();
+        assert_eq!(created, 3);
+
+        // Cutoff = first day of the month after the earliest materialized
+        // forecast: that first row survives, everything from the cutoff on is
+        // discarded.
+        let forecasts = store.list_forecasts(None, None, None).await.unwrap();
+        let earliest = forecasts.iter().filter_map(|f| f.due_date).min().unwrap();
+        let cutoff = first_of_month(earliest)
+            .checked_add_months(chrono::Months::new(1))
+            .unwrap();
+
+        let result = end_forecast_template(store.as_ref(), "tpl-rent", cutoff)
+            .await
+            .unwrap();
+        let EndForecastTemplateResult::Ended {
+            template_id,
+            end_date,
+            discarded_forecasts,
+        } = result
+        else {
+            panic!("expected Ended");
+        };
+        assert_eq!(template_id, "tpl-rent");
+        assert_eq!(end_date, cutoff.pred_opt().unwrap());
+        assert_eq!(discarded_forecasts, 2);
+
+        let stored_template = store
+            .get_forecast_template("tpl-rent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_template.end_date, Some(end_date));
+        for f in store.list_forecasts(None, None, None).await.unwrap() {
+            let due = f.due_date.unwrap();
+            if due >= cutoff {
+                assert_eq!(
+                    f.status, "descartado",
+                    "forecast at {due} must be discarded"
+                );
+            } else {
+                assert_eq!(f.status, "ativo", "forecast at {due} must stay active");
+            }
+        }
+
+        // Re-ending from the same cutoff is a no-op on the forecasts.
+        let repeat = end_forecast_template(store.as_ref(), "tpl-rent", cutoff)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repeat,
+            EndForecastTemplateResult::Ended {
+                discarded_forecasts: 0,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn end_forecast_template_unknown_template_returns_not_found() {
+        let (_dir, _config, store) = temp_store().await;
+        let cutoff = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        let result = end_forecast_template(store.as_ref(), "missing", cutoff)
+            .await
+            .unwrap();
+        assert!(matches!(result, EndForecastTemplateResult::NotFound));
+    }
+
+    // The handler's 400 guard: `effectiveFrom` must be a `YYYY-MM` month.
+    #[test]
+    fn end_template_effective_from_month_guard() {
+        use phai_core::scenario::parse_month;
+        assert!(parse_month("2026-09").is_some());
+        assert!(parse_month("setembro").is_none());
+        assert!(parse_month("2026-13").is_none());
+        assert!(parse_month("2026-09-01").is_none());
+    }
+
     // ── Behavioral: ApplyHumanReview against a real SQLite store ────────────
 
     async fn temp_store() -> (tempfile::TempDir, AppConfig, Box<dyn FinanceStore>) {
@@ -5141,15 +5534,10 @@ mod tests {
     // the `forecast` table: the deterministic per-month forecast_id keeps the MERGE
     // from stacking duplicate rows, even though the template row is a distinct
     // entity that legitimately coexists with the forecasts it produces.
-    #[tokio::test(flavor = "current_thread")]
-    async fn rematerialising_template_does_not_stack_duplicate_forecasts() {
-        use crate::forecast_cmd::materialise_template_forecasts;
-        use phai_core::models::ForecastTemplateRecord;
-
-        let (_dir, _config, store) = temp_store().await;
+    fn sample_template(template_id: &str) -> phai_core::models::ForecastTemplateRecord {
         let now = Utc::now();
-        let template = ForecastTemplateRecord {
-            template_id: "tpl-rent".into(),
+        phai_core::models::ForecastTemplateRecord {
+            template_id: template_id.into(),
             kind: "fixed".into(),
             description: "Aluguel".into(),
             merchant_pattern: None,
@@ -5168,10 +5556,19 @@ mod tests {
             status: "ativo".into(),
             metadata_json: Value::Object(Default::default()),
             actor_id: "test-actor".into(),
-            idempotency_key: "template:tpl-rent".into(),
+            idempotency_key: format!("template:{template_id}"),
             created_at: now,
             updated_at: now,
-        };
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rematerialising_template_does_not_stack_duplicate_forecasts() {
+        use crate::forecast_cmd::materialise_template_forecasts;
+
+        let (_dir, _config, store) = temp_store().await;
+        let now = Utc::now();
+        let template = sample_template("tpl-rent");
         store
             .upsert_forecast_templates(std::slice::from_ref(&template))
             .await

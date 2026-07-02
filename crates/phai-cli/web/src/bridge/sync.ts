@@ -306,38 +306,58 @@ const drainQueue = async (
 	for (const r of rows) {
 		const row = currentPendingRow(store, r.writeId);
 		if (!row) continue;
-		if (row.type === "forecastMove") {
-			await flushOne(store, row, errors, async () =>
-				api.moveForecast(
-					await resolveForecastId(store, row.forecastId),
-					(row.payload as { dueDate: string }).dueDate,
-				),
-			);
-		} else if (row.type === "forecastCreate") {
+		if (row.type === "forecastCreate") {
 			await flushForecastCreate(store, row, errors);
-		} else if (row.type === "forecastEnvelope") {
-			// The materializer queued the snake_case /api/forecast body verbatim.
-			await flushOne(store, row, errors, () =>
-				api.upsertForecast(row.payload as EnvelopeUpsert),
-			);
-		} else if (row.type === "forecastDelete") {
-			await flushOne(store, row, errors, async () =>
-				api.deleteForecast(await resolveForecastId(store, row.forecastId)),
-			);
-		} else if (row.type === "forecastSettle") {
-			await flushOne(store, row, errors, async () =>
-				api.settleForecast(
-					await resolveForecastId(store, row.forecastId),
-					(row.payload as { transactionId: string }).transactionId,
-				),
-			);
-		} else if (row.type.startsWith("scenario")) {
-			const send = scenarioFlushCall(row);
-			if (send) await flushOne(store, row, errors, send);
+			continue;
 		}
+		const send = forecastFlushCall(store, row) ?? scenarioFlushCall(row);
+		if (send) await flushOne(store, row, errors, send);
 	}
 
 	return errors;
+};
+
+/**
+ * Maps a forecast pending-write row to its bridge call. Returns null for
+ * non-forecast types (the scenario router takes over).
+ */
+const forecastFlushCall = (
+	store: StoreApi,
+	row: PendingRow,
+): (() => Promise<unknown>) | null => {
+	switch (row.type) {
+		case "forecastMove":
+			return async () =>
+				api.moveForecast(
+					await resolveForecastId(store, row.forecastId),
+					(row.payload as { dueDate: string }).dueDate,
+				);
+		case "forecastEnvelope":
+			// The materializer queued the snake_case /api/forecast body verbatim.
+			return () => api.upsertForecast(row.payload as EnvelopeUpsert);
+		case "forecastDelete":
+			return async () =>
+				api.deleteForecast(await resolveForecastId(store, row.forecastId));
+		case "forecastDiscard":
+			return async () =>
+				api.discardForecast(await resolveForecastId(store, row.forecastId));
+		case "forecastTemplateEnd": {
+			const payload = row.payload as {
+				templateId: string;
+				effectiveFrom: string;
+			};
+			return () =>
+				api.endForecastTemplate(payload.templateId, payload.effectiveFrom);
+		}
+		case "forecastSettle":
+			return async () =>
+				api.settleForecast(
+					await resolveForecastId(store, row.forecastId),
+					(row.payload as { transactionId: string }).transactionId,
+				);
+		default:
+			return null;
+	}
 };
 
 /**

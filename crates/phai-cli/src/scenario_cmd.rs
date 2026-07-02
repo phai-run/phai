@@ -969,47 +969,68 @@ struct ChangeOutcome {
     templates_written: usize,
 }
 
-async fn promote_end_template(
+/// The forecast status column carries a dual vocabulary — legacy pt-BR
+/// (`ativo`) and English (`active`) coexist for the same logical state — so
+/// any "is this row live?" check must accept both.
+pub(crate) fn forecast_is_active(status: &str) -> bool {
+    status.eq_ignore_ascii_case("ativo") || status.eq_ignore_ascii_case("active")
+}
+
+/// The resolved write set for ending a template's recurrence at a cutoff
+/// month: the template (whose `end_date` becomes the last day of the month
+/// before the cutoff) plus every active forecast it materialized due on or
+/// after the cutoff.
+pub(crate) struct EndTemplatePlan {
+    pub(crate) template: phai_core::ForecastTemplateRecord,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) doomed: Vec<phai_core::ForecastRecord>,
+}
+
+/// Resolve what ending `template_id` from `cutoff` (first day of the
+/// effective month) would touch, without writing anything. `None` when the
+/// template is unknown or already discarded.
+pub(crate) async fn plan_end_template(
     store: &dyn FinanceStore,
-    config: &AppConfig,
-    change: &PlanChangeRecord,
-    dry_run: bool,
-) -> Result<Option<ChangeOutcome>> {
-    let (Some(target), Some(effective_from)) = (
-        change.target_template_id.as_deref(),
-        change.effective_from.as_deref(),
-    ) else {
-        return Ok(None);
-    };
-    let Some(cutoff) = parse_month(effective_from) else {
-        return Ok(None);
-    };
-    let Some(mut template) = store.get_forecast_template(target).await? else {
+    template_id: &str,
+    cutoff: NaiveDate,
+) -> Result<Option<EndTemplatePlan>> {
+    let Some(template) = store.get_forecast_template(template_id).await? else {
         return Ok(None);
     };
     if template.status == "descartado" {
         return Ok(None);
     }
-    // Last day of the month before `effective_from`.
+    // Last day of the month before the cutoff.
     let end_date = cutoff.pred_opt().context("data inválida no cutoff")?;
     let doomed: Vec<_> = store
-        .list_forecasts(Some("ativo"), Some(cutoff), None)
+        .list_forecasts(None, Some(cutoff), None)
         .await?
         .into_iter()
-        .filter(|f| f.template_id.as_deref() == Some(target))
+        .filter(|f| f.template_id.as_deref() == Some(template_id) && forecast_is_active(&f.status))
         .collect();
-    let description = format!(
-        "encerrar {} a partir de {effective_from} ({} forecast(s) descartado(s))",
-        template.description,
-        doomed.len()
-    );
-    if dry_run {
-        return Ok(Some(ChangeOutcome {
-            description,
-            forecasts_written: doomed.len(),
-            templates_written: 1,
-        }));
-    }
+    Ok(Some(EndTemplatePlan {
+        template,
+        end_date,
+        doomed,
+    }))
+}
+
+/// Apply an [`EndTemplatePlan`]: stamp the template's end date and discard
+/// its doomed forecasts, emitting an `AuditEvent` per written row. Returns
+/// how many forecasts were discarded. Shared by scenario promotion and the
+/// web bridge's baseline `POST /api/forecast-template/end`.
+pub(crate) async fn apply_end_template(
+    store: &dyn FinanceStore,
+    plan: EndTemplatePlan,
+    actor_id: &str,
+    action: &str,
+    idempotency_key: &str,
+) -> Result<usize> {
+    let EndTemplatePlan {
+        mut template,
+        end_date,
+        doomed,
+    } = plan;
     template.end_date = Some(end_date);
     template.updated_at = Utc::now();
     store
@@ -1019,9 +1040,9 @@ async fn promote_end_template(
         .insert_audit_events(&[AuditEvent::from_entity(
             "forecast_template",
             &template.template_id,
-            "scenario_promote",
-            &config.actor_id,
-            &format!("scenario-{}-{}", change.scenario_id, change.change_id),
+            action,
+            actor_id,
+            idempotency_key,
             serde_json::to_value(&template)?,
         )])
         .await?;
@@ -1039,15 +1060,57 @@ async fn promote_end_template(
                 AuditEvent::from_entity(
                     "forecast",
                     &f.forecast_id,
-                    "scenario_promote",
-                    &config.actor_id,
-                    &format!("scenario-{}-{}", change.scenario_id, change.change_id),
+                    action,
+                    actor_id,
+                    idempotency_key,
                     serde_json::to_value(f).unwrap_or_default(),
                 )
             })
             .collect::<Vec<_>>();
         store.insert_audit_events(&events).await?;
     }
+    Ok(forecasts_written)
+}
+
+async fn promote_end_template(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    change: &PlanChangeRecord,
+    dry_run: bool,
+) -> Result<Option<ChangeOutcome>> {
+    let (Some(target), Some(effective_from)) = (
+        change.target_template_id.as_deref(),
+        change.effective_from.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let Some(cutoff) = parse_month(effective_from) else {
+        return Ok(None);
+    };
+    let Some(plan) = plan_end_template(store, target, cutoff).await? else {
+        return Ok(None);
+    };
+    let description = format!(
+        "encerrar {} a partir de {effective_from} ({} forecast(s) descartado(s))",
+        plan.template.description,
+        plan.doomed.len()
+    );
+    if dry_run {
+        return Ok(Some(ChangeOutcome {
+            description,
+            forecasts_written: plan.doomed.len(),
+            templates_written: 1,
+        }));
+    }
+    let idempotency_key = format!("scenario-{}-{}", change.scenario_id, change.change_id);
+    let forecasts_written = apply_end_template(
+        store,
+        plan,
+        &config.actor_id,
+        "scenario_promote",
+        &idempotency_key,
+    )
+    .await?;
     Ok(Some(ChangeOutcome {
         description,
         forecasts_written,

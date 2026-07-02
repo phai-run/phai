@@ -418,3 +418,34 @@ code,
   content-visibility: auto;
   contain-intrinsic-size: auto 42px;
 }
+
+/* ── Unified sheet: hover-revealed row affordances ───────────────────── */
+
+/* Per-row action icons (trash/settle) and the positional-insert "+" on the
+   row boundary appear on row hover (or keyboard focus within). */
+.sheet-row-actions {
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+tr:hover .sheet-row-actions,
+.sheet-row-actions:focus-within {
+  opacity: 1;
+}
+.sheet-insert-btn {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease;
+}
+tr:hover .sheet-insert-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.sheet-insert-btn:hover {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--purple) 35%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-row-actions,
+  .sheet-insert-btn {
+    transition: none;
+  }
+}

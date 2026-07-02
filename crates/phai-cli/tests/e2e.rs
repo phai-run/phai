@@ -6708,3 +6708,278 @@ fn scenario_promote_applies_deltas_to_real_plan_idempotently() {
     let second: Value = serde_json::from_slice(&stdout).expect("second promote json");
     assert_eq!(second["applied"].as_array().map(Vec::len), Some(0));
 }
+
+// ---------------------------------------------------------------------------
+// phai serve — baseline forecast endpoints for the unified sheet
+// ---------------------------------------------------------------------------
+
+/// Kills the spawned `phai serve` process when the test ends (pass or panic).
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawn `phai serve` on a free port and wait until the store actor answers.
+/// Returns the process guard and the `http://127.0.0.1:<port>` base URL.
+async fn spawn_serve(config_dir: &Path, data_dir: &Path) -> (KillOnDrop, String) {
+    // Grab a free port; the tiny bind/spawn race is acceptable for a test.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("probe port")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    let mut cmd = cargo_bin();
+    cmd.arg("serve").arg("--port").arg(port.to_string());
+    envs(&mut cmd, config_dir, data_dir)
+        .env("PHAI_NO_BROWSER", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = KillOnDrop(cmd.spawn().expect("spawn phai serve"));
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Readiness: /api/forecasts round-trips through the store actor, so a 200
+    // means migrations ran and the SQLite store is answering.
+    let client = reqwest::Client::new();
+    for _ in 0..150 {
+        if let Ok(resp) = client.get(format!("{base}/api/forecasts")).send().await {
+            if resp.status().is_success() {
+                return (child, base);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    panic!("phai serve did not become ready on {base}");
+}
+
+#[tokio::test]
+async fn serve_baseline_discard_and_end_template_endpoints() {
+    // The unified sheet's baseline writes, over a real installment chain:
+    // POST /api/forecast/discard soft-discards a template-materialized
+    // parcela (which /api/forecast/delete refuses), and
+    // POST /api/forecast-template/end stamps the template's end_date and
+    // discards the active parcelas from the cutoff month on.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("card_a")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Card A"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let today = Utc::now().date_naive();
+    for (n, months_back) in [(1u32, 2u32), (2, 1), (3, 0)] {
+        let date = today
+            .checked_sub_months(chrono::Months::new(months_back))
+            .expect("shift")
+            .with_day(5)
+            .expect("day 5");
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(format!("sheet-parcel-{n:02}"))
+                .arg("--account-id")
+                .arg("card_a")
+                .arg("--date")
+                .arg(date.format("%Y-%m-%d").to_string())
+                .arg("--description")
+                .arg(format!("Loja Exemplo Cadeira {n}/12"))
+                .arg("--amount=-300.00"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("refresh-installments")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("phai.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let template_id: String = conn
+        .query_row(
+            "SELECT template_id FROM forecast_template WHERE kind = 'installment' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("template id");
+    let forecast_for = |month: &str| -> String {
+        conn.query_row(
+            "SELECT forecast_id FROM forecast
+             WHERE template_id IS NOT NULL AND strftime('%Y-%m', due_date) = ?1
+             LIMIT 1",
+            [month],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| panic!("forecast in month {month}"))
+    };
+    let fc_month1 = forecast_for(&month_ref_from_today(1));
+    drop(conn);
+
+    let (_serve, base) = spawn_serve(&config_dir, &data_dir).await;
+    let client = reqwest::Client::new();
+
+    // The old delete endpoint keeps refusing template-materialized rows...
+    let resp = client
+        .post(format!("{base}/api/forecast/delete"))
+        .json(&serde_json::json!({ "forecastId": fc_month1 }))
+        .send()
+        .await
+        .expect("delete request");
+    assert_eq!(resp.status().as_u16(), 409, "delete must refuse a parcela");
+
+    // ...while discard soft-discards any active forecast, parcelas included.
+    let resp = client
+        .post(format!("{base}/api/forecast/discard"))
+        .json(&serde_json::json!({ "forecastId": fc_month1 }))
+        .send()
+        .await
+        .expect("discard request");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.expect("discard json");
+    assert_eq!(body["status"], "descartado");
+
+    // Discard is not repeatable (already inactive) and 404s on unknown ids.
+    let resp = client
+        .post(format!("{base}/api/forecast/discard"))
+        .json(&serde_json::json!({ "forecastId": fc_month1 }))
+        .send()
+        .await
+        .expect("repeat discard request");
+    assert_eq!(resp.status().as_u16(), 409);
+    let resp = client
+        .post(format!("{base}/api/forecast/discard"))
+        .json(&serde_json::json!({ "forecastId": "missing" }))
+        .send()
+        .await
+        .expect("unknown discard request");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // End the recurrence from month+3: month+2 parcela survives, everything
+    // due on/after the cutoff is discarded, end_date = last day of month+2.
+    let resp = client
+        .post(format!("{base}/api/forecast-template/end"))
+        .json(&serde_json::json!({
+            "templateId": template_id,
+            "effectiveFrom": month_ref_from_today(3),
+        }))
+        .send()
+        .await
+        .expect("end request");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.expect("end json");
+    assert_eq!(body["templateId"], template_id.as_str());
+    assert!(
+        body["discardedForecasts"].as_u64().unwrap_or(0) >= 1,
+        "cutoff must discard future parcelas, got: {body}"
+    );
+
+    // Month validation (400) and unknown template (404).
+    let resp = client
+        .post(format!("{base}/api/forecast-template/end"))
+        .json(&serde_json::json!({
+            "templateId": template_id,
+            "effectiveFrom": "setembro",
+        }))
+        .send()
+        .await
+        .expect("bad month request");
+    assert_eq!(resp.status().as_u16(), 400);
+    let resp = client
+        .post(format!("{base}/api/forecast-template/end"))
+        .json(&serde_json::json!({
+            "templateId": "missing",
+            "effectiveFrom": month_ref_from_today(3),
+        }))
+        .send()
+        .await
+        .expect("unknown template request");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Persisted state: discard + end-template landed in SQLite with audits.
+    let conn = Connection::open(&db_path).expect("reopen db");
+    let discarded_status: String = conn
+        .query_row(
+            "SELECT status FROM forecast WHERE forecast_id = ?1",
+            [&fc_month1],
+            |r| r.get(0),
+        )
+        .expect("discarded parcela status");
+    assert_eq!(discarded_status, "descartado");
+    let end_date: Option<String> = conn
+        .query_row(
+            "SELECT end_date FROM forecast_template WHERE template_id = ?1",
+            [&template_id],
+            |r| r.get(0),
+        )
+        .expect("end date");
+    let expected_end = phai_core::scenario::parse_month(&month_ref_from_today(3))
+        .expect("cutoff")
+        .pred_opt()
+        .expect("end date")
+        .format("%Y-%m-%d")
+        .to_string();
+    assert_eq!(end_date.as_deref(), Some(expected_end.as_str()));
+    let future_active: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast
+             WHERE template_id = ?1 AND status = 'ativo'
+               AND strftime('%Y-%m', due_date) >= ?2",
+            rusqlite::params![&template_id, &month_ref_from_today(3)],
+            |r| r.get(0),
+        )
+        .expect("future active");
+    assert_eq!(future_active, 0, "parcelas from cutoff must be discarded");
+    let survivor_active: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast
+             WHERE template_id = ?1 AND status = 'ativo'
+               AND strftime('%Y-%m', due_date) = ?2",
+            rusqlite::params![&template_id, &month_ref_from_today(2)],
+            |r| r.get(0),
+        )
+        .expect("survivor active");
+    assert_eq!(survivor_active, 1, "parcela before the cutoff must survive");
+    let audit_actions: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log
+             WHERE action IN ('discard', 'end_template')",
+            [],
+            |r| r.get(0),
+        )
+        .expect("audit rows");
+    assert!(
+        audit_actions >= 3,
+        "discard + end-template writes must be audited, got {audit_actions}"
+    );
+}
