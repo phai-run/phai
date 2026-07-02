@@ -1,5 +1,5 @@
 use assert_cmd::prelude::*;
-use chrono::{Duration, Utc};
+use chrono::{Datelike, Duration, Utc};
 use predicates::prelude::*;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -6036,4 +6036,368 @@ fn invite_create_rejects_non_service_account_json() {
 
     let out = child.wait_with_output().expect("wait");
     assert!(!out.status.success(), "non-SA JSON must be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// phai scenario — named what-if planning scenarios (ADR-0037)
+// ---------------------------------------------------------------------------
+
+/// `YYYY-MM` for `today + n` months.
+fn month_ref_from_today(n: i64) -> String {
+    let today = Utc::now().date_naive();
+    let shifted = today
+        .checked_add_months(chrono::Months::new(n as u32))
+        .expect("month shift");
+    shifted.format("%Y-%m").to_string()
+}
+
+#[test]
+fn scenario_full_cycle_create_edit_show_diff_archive_delete() {
+    // End-to-end over SQLite: seed an installment chain (relative to today so
+    // the remaining parcelas are always in the projection horizon), then run
+    // the whole scenario lifecycle: create → all five change kinds → show →
+    // diff → orphan handling via prune → delete-change → archive → delete.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("card_a")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Card A"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Parcelas 1..3 of a 12x chain anchored at today-2m/-1m/today, day 5, so
+    // the 9 remaining parcelas land on today+1m..today+9m regardless of when
+    // the test runs.
+    let today = Utc::now().date_naive();
+    for (n, months_back) in [(1u32, 2u32), (2, 1), (3, 0)] {
+        let date = today
+            .checked_sub_months(chrono::Months::new(months_back))
+            .expect("shift")
+            .with_day(5)
+            .expect("day 5");
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(format!("scn-parcel-{n:02}"))
+                .arg("--account-id")
+                .arg("card_a")
+                .arg("--date")
+                .arg(date.format("%Y-%m-%d").to_string())
+                .arg("--description")
+                .arg(format!("Loja Exemplo Sofa {n}/12"))
+                .arg("--amount=-300.00"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("refresh-installments")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("phai.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let template_id: String = conn
+        .query_row(
+            "SELECT template_id FROM forecast_template WHERE kind = 'installment' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("template id");
+    let forecast_for = |month: &str| -> String {
+        conn.query_row(
+            "SELECT forecast_id FROM forecast
+             WHERE template_id IS NOT NULL AND strftime('%Y-%m', due_date) = ?1
+             LIMIT 1",
+            [month],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| panic!("forecast in month {month}"))
+    };
+    let fc_month1 = forecast_for(&month_ref_from_today(1));
+    let fc_month5 = forecast_for(&month_ref_from_today(5));
+    drop(conn);
+
+    // Create the scenario.
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("create")
+            .arg("--name")
+            .arg("plano de teste")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let created: Value = serde_json::from_slice(&stdout).expect("create json");
+    let scenario_id = created["scenario_id"].as_str().expect("id").to_string();
+
+    // 1. add_one_shot: trip in month+2.
+    envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("add")
+            .arg(&scenario_id)
+            .arg("--month")
+            .arg(month_ref_from_today(2))
+            .arg("--amount=-2000.00")
+            .arg("--description")
+            .arg("viagem")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    // 2. adjust_amount: month+1 parcela from -300 to -100 (delta +200).
+    envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("adjust")
+            .arg(&scenario_id)
+            .arg("--forecast")
+            .arg(&fc_month1)
+            .arg("--amount=-100.00"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    // 3. skip_forecast: month+5 parcela (delta +300).
+    envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("skip")
+            .arg(&scenario_id)
+            .arg("--forecast")
+            .arg(&fc_month5),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    // 4. end_template from month+3 (kills remaining parcelas from there on).
+    envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("end-template")
+            .arg(&scenario_id)
+            .arg("--template")
+            .arg(&template_id)
+            .arg("--from")
+            .arg(month_ref_from_today(3)),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    // 5. hypothetical_installment: 10x of -300 starting month+1.
+    envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("installment")
+            .arg(&scenario_id)
+            .arg("--start")
+            .arg(month_ref_from_today(1))
+            .arg("--amount=-300.00")
+            .arg("--months")
+            .arg("10")
+            .arg("--description")
+            .arg("sofá novo"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Show: five changes, no orphans, deterministic deltas.
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("show")
+            .arg(&scenario_id)
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let shown: Value = serde_json::from_slice(&stdout).expect("show json");
+    assert_eq!(shown["changes"].as_array().map(Vec::len), Some(5));
+    assert_eq!(
+        shown["orphaned_change_ids"].as_array().map(Vec::len),
+        Some(0)
+    );
+    let delta_of = |payload: &Value, month: &str| -> Option<String> {
+        payload["monthly_delta"].as_array().and_then(|rows| {
+            rows.iter()
+                .find(|row| row["month"].as_str() == Some(month))
+                .and_then(|row| row["delta"].as_str().map(str::to_string))
+        })
+    };
+    // month+1: adjust +200.00, hypothetical parcela -300.00 → -100.00.
+    assert_eq!(
+        delta_of(&shown, &month_ref_from_today(1)).as_deref(),
+        Some("-100.00")
+    );
+    // month+2: add -2000.00, hypothetical parcela -300.00 → -2300.00.
+    assert_eq!(
+        delta_of(&shown, &month_ref_from_today(2)).as_deref(),
+        Some("-2300.00")
+    );
+
+    // Diff against baseline mirrors the monthly deltas.
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("diff")
+            .arg(&scenario_id)
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let diffed: Value = serde_json::from_slice(&stdout).expect("diff json");
+    let diff_month2 = diffed["monthly_diff"].as_array().and_then(|rows| {
+        rows.iter()
+            .find(|row| row["month"].as_str() == Some(month_ref_from_today(2).as_str()))
+            .and_then(|row| row["delta"].as_str().map(str::to_string))
+    });
+    assert_eq!(diff_month2.as_deref(), Some("-2300.00"));
+
+    // Orphan handling: realize the adjusted forecast behind the engine's
+    // back (simulates reconciliation) → show flags the change, prune marks it.
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute(
+        "UPDATE forecast SET status = 'realizado' WHERE forecast_id = ?1",
+        [&fc_month1],
+    )
+    .expect("realize forecast");
+    drop(conn);
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("show")
+            .arg(&scenario_id)
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let shown: Value = serde_json::from_slice(&stdout).expect("show json");
+    assert_eq!(
+        shown["orphaned_change_ids"].as_array().map(Vec::len),
+        Some(1)
+    );
+    envs(
+        cargo_bin().arg("scenario").arg("prune").arg(&scenario_id),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("1 mudança"));
+
+    // delete-change removes one delta.
+    let orphan_id = shown["orphaned_change_ids"][0]
+        .as_str()
+        .expect("orphan id")
+        .to_string();
+    envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("delete-change")
+            .arg(&orphan_id)
+            .arg("--scenario")
+            .arg(&scenario_id),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    // Archive blocks further edits.
+    envs(
+        cargo_bin().arg("scenario").arg("archive").arg(&scenario_id),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("add")
+            .arg(&scenario_id)
+            .arg("--month")
+            .arg(month_ref_from_today(2))
+            .arg("--amount=-1.00")
+            .arg("--description")
+            .arg("bloqueado"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure();
+
+    // Delete removes the scenario and its changes.
+    envs(
+        cargo_bin().arg("scenario").arg("delete").arg(&scenario_id),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    let conn = Connection::open(&db_path).expect("open db");
+    let scenarios: i64 = conn
+        .query_row("SELECT COUNT(*) FROM plan_scenario", [], |r| r.get(0))
+        .expect("count scenarios");
+    let changes: i64 = conn
+        .query_row("SELECT COUNT(*) FROM plan_change", [], |r| r.get(0))
+        .expect("count changes");
+    assert_eq!(scenarios, 0);
+    assert_eq!(changes, 0);
 }

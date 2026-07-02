@@ -1056,6 +1056,21 @@ impl FinanceStore for LocalStore {
         Ok(())
     }
 
+    async fn delete_plan_scenario(&self, scenario_id: &str) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM plan_change WHERE scenario_id = ?1",
+            [scenario_id],
+        )?;
+        tx.execute(
+            "DELETE FROM plan_scenario WHERE scenario_id = ?1",
+            [scenario_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     async fn upcoming_forecasts(
         &self,
         from: NaiveDate,

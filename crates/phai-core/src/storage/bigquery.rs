@@ -2189,6 +2189,22 @@ impl FinanceStore for BigQueryStore {
         Ok(())
     }
 
+    async fn delete_plan_scenario(&self, scenario_id: &str) -> Result<()> {
+        let sql = format!(
+            "DELETE FROM {} WHERE scenario_id = @sid",
+            self.qualified_table("plan_change")?,
+        );
+        self.run_query_with_params(&sql, &[Param::string("sid", scenario_id)])
+            .await?;
+        let sql = format!(
+            "DELETE FROM {} WHERE scenario_id = @sid",
+            self.qualified_table("plan_scenario")?,
+        );
+        self.run_query_with_params(&sql, &[Param::string("sid", scenario_id)])
+            .await?;
+        Ok(())
+    }
+
     async fn upcoming_forecasts(
         &self,
         from: NaiveDate,

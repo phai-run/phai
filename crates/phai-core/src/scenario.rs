@@ -65,167 +65,170 @@ pub fn apply_scenario(
     horizon: (NaiveDate, NaiveDate),
 ) -> ScenarioProjection {
     let (from, until) = horizon;
-    let mut virtual_forecasts: Vec<ForecastRecord> = baseline
-        .iter()
-        .filter(|f| {
-            f.status == "ativo" && f.due_date.map(|d| d >= from && d <= until).unwrap_or(false)
-        })
-        .cloned()
-        .collect();
-    let mut monthly_delta: BTreeMap<String, Decimal> = BTreeMap::new();
-    let mut orphaned_change_ids = Vec::new();
-
-    let mut bump = |deltas: &mut BTreeMap<String, Decimal>, month: String, amount: Decimal| {
-        if amount.is_zero() {
-            return;
-        }
-        *deltas.entry(month).or_insert_with(Decimal::default) += amount;
+    let mut projector = Projector {
+        virtual_forecasts: baseline
+            .iter()
+            .filter(|f| {
+                f.status == "ativo" && f.due_date.map(|d| d >= from && d <= until).unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+        monthly_delta: BTreeMap::new(),
+        from,
+        until,
     };
+    let mut orphaned_change_ids = Vec::new();
 
     for change in changes {
         if change.status == "aplicado" {
             continue;
         }
-        let Some(kind) = PlanChangeKind::parse(&change.kind) else {
-            orphaned_change_ids.push(change.change_id.clone());
-            continue;
+        let applied = match PlanChangeKind::parse(&change.kind) {
+            Some(PlanChangeKind::AddOneShot) => projector.add_one_shot(change),
+            Some(PlanChangeKind::AdjustAmount) => projector.adjust_amount(change),
+            Some(PlanChangeKind::SkipForecast) => projector.skip_forecast(change),
+            Some(PlanChangeKind::EndTemplate) => projector.end_template(change, templates),
+            Some(PlanChangeKind::HypotheticalInstallment) => {
+                projector.hypothetical_installment(change)
+            }
+            None => None,
         };
-        match kind {
-            PlanChangeKind::AddOneShot => {
-                let (Some(month), Some(amount)) = (change.month.as_deref(), change.amount) else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                let Some(month_start) = parse_month(month) else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                let due_date = synthetic_due_date(month_start);
-                if due_date < from || due_date > until {
-                    // Outside the horizon: valid change, no effect here.
-                    continue;
-                }
-                virtual_forecasts.push(synthetic_forecast(
-                    format!("scn-{}", change.change_id),
-                    due_date,
-                    amount,
-                    change,
-                ));
-                bump(&mut monthly_delta, month.to_string(), amount);
-            }
-            PlanChangeKind::AdjustAmount => {
-                let (Some(target), Some(new_amount)) =
-                    (change.target_forecast_id.as_deref(), change.amount)
-                else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                match virtual_forecasts
-                    .iter_mut()
-                    .find(|f| f.forecast_id == target)
-                {
-                    Some(forecast) => {
-                        let month = forecast.due_date.map(month_ref).unwrap_or_default();
-                        let delta = new_amount - forecast.amount;
-                        forecast.amount = new_amount;
-                        bump(&mut monthly_delta, month, delta);
-                    }
-                    None => orphaned_change_ids.push(change.change_id.clone()),
-                }
-            }
-            PlanChangeKind::SkipForecast => {
-                let Some(target) = change.target_forecast_id.as_deref() else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                match virtual_forecasts
-                    .iter()
-                    .position(|f| f.forecast_id == target)
-                {
-                    Some(index) => {
-                        let removed = virtual_forecasts.remove(index);
-                        let month = removed.due_date.map(month_ref).unwrap_or_default();
-                        bump(&mut monthly_delta, month, -removed.amount);
-                    }
-                    None => orphaned_change_ids.push(change.change_id.clone()),
-                }
-            }
-            PlanChangeKind::EndTemplate => {
-                let (Some(target), Some(effective_from)) = (
-                    change.target_template_id.as_deref(),
-                    change.effective_from.as_deref(),
-                ) else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                let Some(cutoff) = parse_month(effective_from) else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                let template_alive = templates
-                    .iter()
-                    .find(|t| t.template_id == target)
-                    .map(|t| {
-                        t.status != "descartado"
-                            && t.end_date.map(|end| end >= cutoff).unwrap_or(true)
-                    })
-                    .unwrap_or(false);
-                if !template_alive {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                }
-                let mut kept = Vec::with_capacity(virtual_forecasts.len());
-                for forecast in virtual_forecasts.drain(..) {
-                    let ends = forecast.template_id.as_deref() == Some(target)
-                        && forecast.due_date.map(|d| d >= cutoff).unwrap_or(false);
-                    if ends {
-                        let month = forecast.due_date.map(month_ref).unwrap_or_default();
-                        bump(&mut monthly_delta, month, -forecast.amount);
-                    } else {
-                        kept.push(forecast);
-                    }
-                }
-                virtual_forecasts = kept;
-            }
-            PlanChangeKind::HypotheticalInstallment => {
-                let (Some(effective_from), Some(amount), Some(count)) = (
-                    change.effective_from.as_deref(),
-                    change.amount,
-                    change.months_count,
-                ) else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                let Some(first_month) = parse_month(effective_from) else {
-                    orphaned_change_ids.push(change.change_id.clone());
-                    continue;
-                };
-                for n in 0..count.max(0) as u32 {
-                    let Some(month_start) = first_month.checked_add_months(Months::new(n)) else {
-                        break;
-                    };
-                    let due_date = synthetic_due_date(month_start);
-                    if due_date < from || due_date > until {
-                        continue;
-                    }
-                    virtual_forecasts.push(synthetic_forecast(
-                        format!("scn-{}-{:03}", change.change_id, n + 1),
-                        due_date,
-                        amount,
-                        change,
-                    ));
-                    bump(&mut monthly_delta, month_ref(due_date), amount);
-                }
-            }
+        if applied.is_none() {
+            orphaned_change_ids.push(change.change_id.clone());
         }
     }
 
-    monthly_delta.retain(|_, v| !v.is_zero());
-    virtual_forecasts.sort_by_key(|f| f.due_date);
+    projector.monthly_delta.retain(|_, v| !v.is_zero());
+    projector.virtual_forecasts.sort_by_key(|f| f.due_date);
     ScenarioProjection {
-        virtual_forecasts,
-        monthly_delta,
+        virtual_forecasts: projector.virtual_forecasts,
+        monthly_delta: projector.monthly_delta,
         orphaned_change_ids,
+    }
+}
+
+/// Mutable projection state while changes are applied. Each handler returns
+/// `Some(())` when the change applied and `None` when it is an orphaned
+/// no-op (missing/invalid target).
+struct Projector {
+    virtual_forecasts: Vec<ForecastRecord>,
+    monthly_delta: BTreeMap<String, Decimal>,
+    from: NaiveDate,
+    until: NaiveDate,
+}
+
+impl Projector {
+    fn bump(&mut self, month: String, amount: Decimal) {
+        if amount.is_zero() {
+            return;
+        }
+        *self.monthly_delta.entry(month).or_default() += amount;
+    }
+
+    fn in_horizon(&self, date: NaiveDate) -> bool {
+        date >= self.from && date <= self.until
+    }
+
+    fn add_one_shot(&mut self, change: &PlanChangeRecord) -> Option<()> {
+        let (month, amount) = (change.month.as_deref()?, change.amount?);
+        let due_date = synthetic_due_date(parse_month(month)?);
+        if self.in_horizon(due_date) {
+            self.virtual_forecasts.push(synthetic_forecast(
+                format!("scn-{}", change.change_id),
+                due_date,
+                amount,
+                change,
+            ));
+            self.bump(month.to_string(), amount);
+        }
+        // Outside the horizon: valid change, just no effect here.
+        Some(())
+    }
+
+    fn adjust_amount(&mut self, change: &PlanChangeRecord) -> Option<()> {
+        let (target, new_amount) = (change.target_forecast_id.as_deref()?, change.amount?);
+        let forecast = self
+            .virtual_forecasts
+            .iter_mut()
+            .find(|f| f.forecast_id == target)?;
+        let month = forecast.due_date.map(month_ref).unwrap_or_default();
+        let delta = new_amount - forecast.amount;
+        forecast.amount = new_amount;
+        self.bump(month, delta);
+        Some(())
+    }
+
+    fn skip_forecast(&mut self, change: &PlanChangeRecord) -> Option<()> {
+        let target = change.target_forecast_id.as_deref()?;
+        let index = self
+            .virtual_forecasts
+            .iter()
+            .position(|f| f.forecast_id == target)?;
+        let removed = self.virtual_forecasts.remove(index);
+        let month = removed.due_date.map(month_ref).unwrap_or_default();
+        self.bump(month, -removed.amount);
+        Some(())
+    }
+
+    fn end_template(
+        &mut self,
+        change: &PlanChangeRecord,
+        templates: &[ForecastTemplateRecord],
+    ) -> Option<()> {
+        let target = change.target_template_id.as_deref()?;
+        let cutoff = parse_month(change.effective_from.as_deref()?)?;
+        let template_alive = templates
+            .iter()
+            .find(|t| t.template_id == target)
+            .map(|t| {
+                t.status != "descartado" && t.end_date.map(|end| end >= cutoff).unwrap_or(true)
+            })?;
+        if !template_alive {
+            return None;
+        }
+        let mut kept = Vec::with_capacity(self.virtual_forecasts.len());
+        let mut ended = Vec::new();
+        for forecast in self.virtual_forecasts.drain(..) {
+            let ends = forecast.template_id.as_deref() == Some(target)
+                && forecast.due_date.map(|d| d >= cutoff).unwrap_or(false);
+            if ends {
+                ended.push(forecast);
+            } else {
+                kept.push(forecast);
+            }
+        }
+        self.virtual_forecasts = kept;
+        for forecast in ended {
+            let month = forecast.due_date.map(month_ref).unwrap_or_default();
+            self.bump(month, -forecast.amount);
+        }
+        Some(())
+    }
+
+    fn hypothetical_installment(&mut self, change: &PlanChangeRecord) -> Option<()> {
+        let (effective_from, amount, count) = (
+            change.effective_from.as_deref()?,
+            change.amount?,
+            change.months_count?,
+        );
+        let first_month = parse_month(effective_from)?;
+        for n in 0..count.max(0) as u32 {
+            let Some(month_start) = first_month.checked_add_months(Months::new(n)) else {
+                break;
+            };
+            let due_date = synthetic_due_date(month_start);
+            if !self.in_horizon(due_date) {
+                continue;
+            }
+            self.virtual_forecasts.push(synthetic_forecast(
+                format!("scn-{}-{:03}", change.change_id, n + 1),
+                due_date,
+                amount,
+                change,
+            ));
+            self.bump(month_ref(due_date), amount);
+        }
+        Some(())
     }
 }
 
@@ -234,10 +237,39 @@ pub fn apply_scenario(
 pub fn diff_scenarios(a: &ScenarioProjection, b: &ScenarioProjection) -> BTreeMap<String, Decimal> {
     let mut out = a.monthly_delta.clone();
     for (month, amount) in &b.monthly_delta {
-        *out.entry(month.clone()).or_insert_with(Decimal::default) -= *amount;
+        *out.entry(month.clone()).or_default() -= *amount;
     }
     out.retain(|_, v| !v.is_zero());
     out
+}
+
+fn synthetic_forecast(
+    forecast_id: String,
+    due_date: NaiveDate,
+    amount: Decimal,
+    change: &PlanChangeRecord,
+) -> ForecastRecord {
+    ForecastRecord {
+        forecast_id,
+        due_date: Some(due_date),
+        description: change
+            .description
+            .clone()
+            .unwrap_or_else(|| "planejado".to_string()),
+        amount,
+        category_id: change.category_id.clone(),
+        account_id: change.account_id.clone(),
+        status: "ativo".to_string(),
+        recurrence: None,
+        actor_id: change.actor_id.clone(),
+        idempotency_key: format!("scenario-{}-{}", change.scenario_id, change.change_id),
+        metadata_json: serde_json::json!({ "scenario_id": change.scenario_id }),
+        created_at: change.created_at,
+        updated_at: change.updated_at,
+        template_id: None,
+        realized_transaction_id: None,
+        realized_at: None,
+    }
 }
 
 #[cfg(test)]
@@ -533,34 +565,5 @@ mod tests {
         let pb = apply_scenario(&[], &[], &[b], horizon());
         let diff = diff_scenarios(&pa, &pb);
         assert_eq!(diff.get("2026-09"), Some(&Decimal::new(-60000, 2)));
-    }
-}
-
-fn synthetic_forecast(
-    forecast_id: String,
-    due_date: NaiveDate,
-    amount: Decimal,
-    change: &PlanChangeRecord,
-) -> ForecastRecord {
-    ForecastRecord {
-        forecast_id,
-        due_date: Some(due_date),
-        description: change
-            .description
-            .clone()
-            .unwrap_or_else(|| "planejado".to_string()),
-        amount,
-        category_id: change.category_id.clone(),
-        account_id: change.account_id.clone(),
-        status: "ativo".to_string(),
-        recurrence: None,
-        actor_id: change.actor_id.clone(),
-        idempotency_key: format!("scenario-{}-{}", change.scenario_id, change.change_id),
-        metadata_json: serde_json::json!({ "scenario_id": change.scenario_id }),
-        created_at: change.created_at,
-        updated_at: change.updated_at,
-        template_id: None,
-        realized_transaction_id: None,
-        realized_at: None,
     }
 }

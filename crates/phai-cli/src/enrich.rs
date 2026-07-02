@@ -1766,6 +1766,9 @@ mod test_support {
         async fn delete_plan_change(&self, _: &str) -> Result<()> {
             Ok(())
         }
+        async fn delete_plan_scenario(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn upcoming_forecasts(
             &self,
             _: NaiveDate,

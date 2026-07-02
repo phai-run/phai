@@ -135,6 +135,9 @@ pub trait FinanceStore {
     /// Hard-delete a delta — a change is a draft edit, not history; audit
     /// trail lives in `audit_log`.
     async fn delete_plan_change(&self, change_id: &str) -> Result<()>;
+    /// Hard-delete a scenario and all of its deltas. Scenarios are drafts;
+    /// promoted writes and the audit trail survive independently.
+    async fn delete_plan_scenario(&self, scenario_id: &str) -> Result<()>;
     /// Look up an existing, non-discarded forecast by its idempotency key.
     /// Used to dedup duplicate create requests (the web sync queue's flush guard
     /// is per-mount, so the same create can fire twice). `Ok(None)` when none.
