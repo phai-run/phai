@@ -8,8 +8,11 @@ import {
 	type ChartData,
 	type EnvelopeUpsert,
 	type NewForecast,
+	type NewScenarioChange,
 	type ForecastRecord,
 	type ForecastTemplateRecord,
+	type PlanChangeRecord,
+	type PlanScenarioRecord,
 	type ReviewFlushItem,
 	type TxRow,
 } from "./api";
@@ -328,10 +331,48 @@ const drainQueue = async (
 					(row.payload as { transactionId: string }).transactionId,
 				),
 			);
+		} else if (row.type.startsWith("scenario")) {
+			const send = scenarioFlushCall(row);
+			if (send) await flushOne(store, row, errors, send);
 		}
 	}
 
 	return errors;
+};
+
+/**
+ * Maps a scenario pending-write row (ADR-0037) to its bridge call. Returns
+ * null for unknown scenario types (skipped; nothing to flush).
+ */
+const scenarioFlushCall = (row: PendingRow): (() => Promise<unknown>) | null => {
+	const payload = row.payload as {
+		scenarioId: string;
+		name?: string;
+		description?: string | null;
+		changeId?: string;
+	};
+	switch (row.type) {
+		case "scenarioCreate":
+			return () =>
+				api.createScenario({
+					scenarioId: payload.scenarioId,
+					name: payload.name ?? "",
+					description: payload.description ?? null,
+				});
+		case "scenarioChange":
+			return () => api.addScenarioChange(row.payload as NewScenarioChange);
+		case "scenarioChangeDelete":
+			return () =>
+				api.deleteScenarioChange(payload.changeId ?? "", payload.scenarioId);
+		case "scenarioArchive":
+			return () => api.archiveScenario(payload.scenarioId);
+		case "scenarioDelete":
+			return () => api.deleteScenario(payload.scenarioId);
+		case "scenarioPromote":
+			return () => api.promoteScenario(payload.scenarioId);
+		default:
+			return null;
+	}
 };
 
 /**
@@ -790,6 +831,96 @@ const normalizeTemplates = (templates: ForecastTemplateRecord[]) =>
 		status: t.status ?? "",
 		confidence: t.confidence == null ? null : String(t.confidence),
 	}));
+
+export const normalizeScenarios = (rows: PlanScenarioRecord[]) =>
+	rows.map((s) => ({
+		scenarioId: s.scenario_id,
+		name: s.name ?? "",
+		description: s.description ?? null,
+		status: s.status ?? "ativo",
+	}));
+
+export const normalizeScenarioChanges = (
+	changes: PlanChangeRecord[],
+	orphaned: string[],
+) =>
+	changes.map((c) => ({
+		changeId: c.change_id,
+		scenarioId: c.scenario_id,
+		kind: c.kind ?? "",
+		targetForecastId: c.target_forecast_id ?? null,
+		targetTemplateId: c.target_template_id ?? null,
+		month: c.month ?? null,
+		effectiveFrom: c.effective_from ?? null,
+		amount: c.amount ?? null,
+		monthsCount: c.months_count ?? null,
+		description: c.description ?? null,
+		categoryId: c.category_id ?? null,
+		accountId: c.account_id ?? null,
+		status: c.status ?? "ativo",
+		orphaned: orphaned.includes(c.change_id) ? 1 : 0,
+	}));
+
+/**
+ * Re-seed the scenario list. No freshness stamp: the list is tiny and must
+ * reflect this session's own writes as soon as the flusher lands them.
+ */
+export const useScenariosSeed = (): SeedState => {
+	const { store } = useStore();
+	const fetcher = useCallback(
+		async (isCurrent: () => boolean) => {
+			const { scenarios } = await api.scenarios();
+			if (!isCurrent()) return;
+			store.commit(
+				events.scenariosSeeded({ rows: normalizeScenarios(scenarios) }),
+			);
+		},
+		[store],
+	);
+	return useSeed(fetcher, [fetcher]);
+};
+
+/**
+ * Re-seed the active scenario's changes (with server-recomputed orphan flags)
+ * and its chart projection. Pass `null` to clear nothing — the hook is a
+ * no-op until a scenario is active. `nonce` forces a refetch after local
+ * writes flush.
+ */
+export const useScenarioDetailSeed = (
+	scenarioId: string | null,
+	monthsBack: number,
+	monthsAhead: number,
+	nonce = 0,
+): SeedState => {
+	const { store } = useStore();
+	const fetcher = useCallback(
+		async (isCurrent: () => boolean) => {
+			if (!scenarioId) return;
+			const [{ changes, orphaned }, projection] = await Promise.all([
+				api.scenarioChanges(scenarioId),
+				api.scenarioProjection(scenarioId, monthsBack, monthsAhead),
+			]);
+			if (!isCurrent()) return;
+			store.commit(
+				events.scenarioChangesSeeded({
+					scenarioId,
+					rows: normalizeScenarioChanges(changes, orphaned),
+				}),
+			);
+			store.commit(
+				events.scenarioChartSeeded({
+					scenarioId,
+					months: normalizeChart(projection).map((m) => ({
+						...m,
+						scenarioId,
+					})),
+				}),
+			);
+		},
+		[store, scenarioId, monthsBack, monthsAhead],
+	);
+	return useSeed(fetcher, [fetcher, nonce]);
+};
 
 /** Re-seed forecasts + templates from the bridge; reload after mutations. */
 export const useForecastsSeed = (status: string | null): SeedState => {
