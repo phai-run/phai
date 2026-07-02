@@ -6401,3 +6401,310 @@ fn scenario_full_cycle_create_edit_show_diff_archive_delete() {
     assert_eq!(scenarios, 0);
     assert_eq!(changes, 0);
 }
+
+#[test]
+fn scenario_promote_applies_deltas_to_real_plan_idempotently() {
+    // Promote a scenario carrying all five change kinds, then verify the
+    // real plan: one-shot forecast created, forecast adjusted, forecast
+    // discarded, template end_date set (+ future parcelas discarded), and
+    // a manual installment template + parcelas created. A second promote
+    // must be a no-op (changes already 'aplicado'), and orphaned changes
+    // are skipped with a warning.
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    envs(
+        cargo_bin()
+            .arg("account")
+            .arg("upsert")
+            .arg("--account-id")
+            .arg("card_a")
+            .arg("--owner")
+            .arg("test")
+            .arg("--account-type")
+            .arg("credit")
+            .arg("--bank")
+            .arg("test-bank")
+            .arg("--label")
+            .arg("Card A"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let today = Utc::now().date_naive();
+    for (n, months_back) in [(1u32, 2u32), (2, 1), (3, 0)] {
+        let date = today
+            .checked_sub_months(chrono::Months::new(months_back))
+            .expect("shift")
+            .with_day(5)
+            .expect("day 5");
+        envs(
+            cargo_bin()
+                .arg("tx")
+                .arg("upsert-manual")
+                .arg("--transaction-id")
+                .arg(format!("promo-parcel-{n:02}"))
+                .arg("--account-id")
+                .arg("card_a")
+                .arg("--date")
+                .arg(date.format("%Y-%m-%d").to_string())
+                .arg("--description")
+                .arg(format!("Loja Exemplo Cadeira {n}/12"))
+                .arg("--amount=-300.00"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+    envs(
+        cargo_bin()
+            .arg("forecast")
+            .arg("refresh-installments")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let db_path = data_dir.join("phai.local.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    let template_id: String = conn
+        .query_row(
+            "SELECT template_id FROM forecast_template WHERE kind = 'installment' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("template id");
+    let forecast_for = |month: &str| -> String {
+        conn.query_row(
+            "SELECT forecast_id FROM forecast
+             WHERE template_id IS NOT NULL AND strftime('%Y-%m', due_date) = ?1
+             LIMIT 1",
+            [month],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| panic!("forecast in month {month}"))
+    };
+    let fc_month1 = forecast_for(&month_ref_from_today(1));
+    let fc_month2 = forecast_for(&month_ref_from_today(2));
+    drop(conn);
+
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("create")
+            .arg("--name")
+            .arg("promover teste")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let created: Value = serde_json::from_slice(&stdout).expect("create json");
+    let scenario_id = created["scenario_id"].as_str().expect("id").to_string();
+
+    // All five kinds. The skip target (month+2 parcela) is deliberately
+    // *also* covered by end-template (from month+4) on other months so both
+    // operations coexist.
+    for args in [
+        vec![
+            "add".to_string(),
+            scenario_id.clone(),
+            "--month".to_string(),
+            month_ref_from_today(2),
+            "--amount=-2000.00".to_string(),
+            "--description".to_string(),
+            "viagem".to_string(),
+        ],
+        vec![
+            "adjust".to_string(),
+            scenario_id.clone(),
+            "--forecast".to_string(),
+            fc_month1.clone(),
+            "--amount=-100.00".to_string(),
+        ],
+        vec![
+            "skip".to_string(),
+            scenario_id.clone(),
+            "--forecast".to_string(),
+            fc_month2.clone(),
+        ],
+        vec![
+            "end-template".to_string(),
+            scenario_id.clone(),
+            "--template".to_string(),
+            template_id.clone(),
+            "--from".to_string(),
+            month_ref_from_today(4),
+        ],
+        vec![
+            "installment".to_string(),
+            scenario_id.clone(),
+            "--start".to_string(),
+            month_ref_from_today(1),
+            "--amount=-250.00".to_string(),
+            "--months".to_string(),
+            "6".to_string(),
+            "--description".to_string(),
+            "cadeira nova".to_string(),
+        ],
+    ] {
+        let mut cmd = cargo_bin();
+        cmd.arg("scenario");
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        envs(&mut cmd, &config_dir, &data_dir).assert().success();
+    }
+
+    // Dry-run: reports the writes but touches nothing.
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("promote")
+            .arg(&scenario_id)
+            .arg("--dry-run")
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let dry: Value = serde_json::from_slice(&stdout).expect("dry json");
+    assert_eq!(dry["applied"].as_array().map(Vec::len), Some(5));
+    let conn = Connection::open(&db_path).expect("open db");
+    let scn_forecasts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE forecast_id LIKE 'scenario-%' OR forecast_id LIKE 'scn-installment-%'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(scn_forecasts, 0, "dry-run must not write");
+    drop(conn);
+
+    // Real promotion.
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("promote")
+            .arg(&scenario_id)
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let summary: Value = serde_json::from_slice(&stdout).expect("promote json");
+    assert_eq!(summary["applied"].as_array().map(Vec::len), Some(5));
+    assert_eq!(summary["skipped_orphans"].as_array().map(Vec::len), Some(0));
+
+    let conn = Connection::open(&db_path).expect("open db");
+    // add_one_shot → real forecast row.
+    let one_shot: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE description = 'viagem' AND status = 'ativo'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("one shot");
+    assert_eq!(one_shot, 1);
+    // adjust_amount → amount overwritten.
+    let adjusted: String = conn
+        .query_row(
+            "SELECT amount FROM forecast WHERE forecast_id = ?1",
+            [&fc_month1],
+            |r| r.get(0),
+        )
+        .expect("adjusted amount");
+    assert_eq!(adjusted, "-100.00");
+    // skip_forecast → discarded.
+    let skipped: String = conn
+        .query_row(
+            "SELECT status FROM forecast WHERE forecast_id = ?1",
+            [&fc_month2],
+            |r| r.get(0),
+        )
+        .expect("skipped status");
+    assert_eq!(skipped, "descartado");
+    // end_template → end_date set + future parcelas discarded.
+    let end_date: Option<String> = conn
+        .query_row(
+            "SELECT end_date FROM forecast_template WHERE template_id = ?1",
+            [&template_id],
+            |r| r.get(0),
+        )
+        .expect("end date");
+    assert!(end_date.is_some(), "template end_date must be set");
+    let future_active: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast
+             WHERE template_id = ?1 AND status = 'ativo'
+               AND strftime('%Y-%m', due_date) >= ?2",
+            rusqlite::params![&template_id, &month_ref_from_today(4)],
+            |r| r.get(0),
+        )
+        .expect("future active");
+    assert_eq!(future_active, 0, "parcelas from cutoff must be discarded");
+    // hypothetical_installment → manual template + 6 parcelas.
+    let installment_forecasts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM forecast WHERE template_id LIKE 'scn-installment-%'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("installment forecasts");
+    assert_eq!(installment_forecasts, 6);
+    // Scenario is now 'promovido' and its changes 'aplicado'.
+    let scn_status: String = conn
+        .query_row(
+            "SELECT status FROM plan_scenario WHERE scenario_id = ?1",
+            [&scenario_id],
+            |r| r.get(0),
+        )
+        .expect("scenario status");
+    assert_eq!(scn_status, "promovido");
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM plan_change WHERE scenario_id = ?1 AND status != 'aplicado'",
+            [&scenario_id],
+            |r| r.get(0),
+        )
+        .expect("pending changes");
+    assert_eq!(pending, 0);
+    drop(conn);
+
+    // Second promote → no-op.
+    let stdout = envs(
+        cargo_bin()
+            .arg("scenario")
+            .arg("promote")
+            .arg(&scenario_id)
+            .arg("--raw"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let second: Value = serde_json::from_slice(&stdout).expect("second promote json");
+    assert_eq!(second["applied"].as_array().map(Vec::len), Some(0));
+}

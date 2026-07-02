@@ -6,7 +6,7 @@
 //! promoted into the real plan.
 
 use anyhow::{bail, Context, Result};
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use clap::{Args, Subcommand};
 use phai_core::migrations::run_migrations;
 use phai_core::scenario::{apply_scenario, diff_scenarios, parse_month, ScenarioProjection};
@@ -55,6 +55,21 @@ pub(crate) enum ScenarioCommand {
     /// Mark orphaned changes (target realized/removed) so they stop
     /// cluttering the list. Never runs automatically.
     Prune(ScenarioIdArgs),
+    /// Apply the scenario's changes to the real plan (forecasts and
+    /// templates). Orphaned changes are skipped with a warning.
+    Promote(ScenarioPromoteArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct ScenarioPromoteArgs {
+    /// Scenario id (`scn-…`).
+    scenario_id: String,
+    /// Print the writes that would happen without applying them.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit JSON.
+    #[arg(long)]
+    raw: bool,
 }
 
 #[derive(Args)]
@@ -226,6 +241,7 @@ pub(crate) async fn run(command: ScenarioCommand) -> Result<()> {
         ScenarioCommand::Archive(args) => run_set_status(args, "arquivado").await,
         ScenarioCommand::Delete(args) => run_delete(args).await,
         ScenarioCommand::Prune(args) => run_prune(args).await,
+        ScenarioCommand::Promote(args) => run_promote(args).await,
     }
 }
 
@@ -818,5 +834,536 @@ async fn run_prune(args: ScenarioIdArgs) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     store.insert_audit_events(&events).await?;
     println!("🧪 {} mudança(s) marcada(s) como órfã(s).", pruned.len());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Promotion — apply scenario deltas to the real plan (ADR-0037)
+// ---------------------------------------------------------------------------
+
+/// One concrete write the promotion will perform (or performed).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct PromotionAction {
+    pub change_id: String,
+    pub kind: String,
+    pub description: String,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub(crate) struct PromotionSummary {
+    pub applied: Vec<PromotionAction>,
+    pub skipped_orphans: Vec<String>,
+    pub forecasts_written: usize,
+    pub templates_written: usize,
+}
+
+/// Deterministic promotion order: template-level cuts first, then per-row
+/// edits, then additions. Every write is idempotent via natural keys
+/// (`scenario-{scenario_id}-{change_id}` — ADR-0022), so a retry after a
+/// partial BigQuery failure re-executes as a no-op.
+fn promotion_rank(kind: &str) -> u8 {
+    match PlanChangeKind::parse(kind) {
+        Some(PlanChangeKind::EndTemplate) => 0,
+        Some(PlanChangeKind::SkipForecast) => 1,
+        Some(PlanChangeKind::AdjustAmount) => 2,
+        Some(PlanChangeKind::AddOneShot) => 3,
+        Some(PlanChangeKind::HypotheticalInstallment) => 4,
+        None => u8::MAX,
+    }
+}
+
+pub(crate) async fn promote_scenario(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    scenario_id: &str,
+    dry_run: bool,
+) -> Result<PromotionSummary> {
+    let scenario = store
+        .get_plan_scenario(scenario_id)
+        .await?
+        .with_context(|| format!("Cenário não encontrado: {scenario_id}"))?;
+    if scenario.status == "arquivado" {
+        bail!(
+            "Cenário {scenario_id} está arquivado — desarquive criando um novo ou promova outro."
+        );
+    }
+    let mut changes = store.list_plan_changes(scenario_id, None).await?;
+    changes.sort_by_key(|c| (promotion_rank(&c.kind), c.created_at));
+
+    let mut summary = PromotionSummary::default();
+    let mut applied_changes: Vec<PlanChangeRecord> = Vec::new();
+
+    for change in changes {
+        if change.status == "aplicado" {
+            continue;
+        }
+        let outcome = match PlanChangeKind::parse(&change.kind) {
+            Some(PlanChangeKind::EndTemplate) => {
+                promote_end_template(store, config, &change, dry_run).await?
+            }
+            Some(PlanChangeKind::SkipForecast) => {
+                promote_skip(store, config, &change, dry_run).await?
+            }
+            Some(PlanChangeKind::AdjustAmount) => {
+                promote_adjust(store, config, &change, dry_run).await?
+            }
+            Some(PlanChangeKind::AddOneShot) => {
+                promote_add_one_shot(store, config, &change, dry_run).await?
+            }
+            Some(PlanChangeKind::HypotheticalInstallment) => {
+                promote_installment(store, config, &change, dry_run).await?
+            }
+            None => None,
+        };
+        match outcome {
+            Some(action) => {
+                summary.forecasts_written += action.forecasts_written;
+                summary.templates_written += action.templates_written;
+                summary.applied.push(PromotionAction {
+                    change_id: change.change_id.clone(),
+                    kind: change.kind.clone(),
+                    description: action.description,
+                });
+                applied_changes.push(change);
+            }
+            None => summary.skipped_orphans.push(change.change_id.clone()),
+        }
+    }
+
+    if !dry_run {
+        for change in &mut applied_changes {
+            change.status = "aplicado".to_string();
+            change.updated_at = Utc::now();
+        }
+        if !applied_changes.is_empty() {
+            store.upsert_plan_changes(&applied_changes).await?;
+            let events = applied_changes
+                .iter()
+                .map(|c| audit_event_for_plan_change(c, "scenario_promote", &config.actor_id))
+                .collect::<Result<Vec<_>>>()?;
+            store.insert_audit_events(&events).await?;
+        }
+        store
+            .set_plan_scenario_status(scenario_id, "promovido", &config.actor_id)
+            .await?;
+        let promoted = store
+            .get_plan_scenario(scenario_id)
+            .await?
+            .with_context(|| format!("Cenário não encontrado: {scenario_id}"))?;
+        store
+            .insert_audit_events(&[audit_event_for_scenario(
+                &promoted,
+                "scenario_promote",
+                &config.actor_id,
+            )?])
+            .await?;
+    }
+
+    Ok(summary)
+}
+
+/// Result of promoting a single change.
+struct ChangeOutcome {
+    description: String,
+    forecasts_written: usize,
+    templates_written: usize,
+}
+
+async fn promote_end_template(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    change: &PlanChangeRecord,
+    dry_run: bool,
+) -> Result<Option<ChangeOutcome>> {
+    let (Some(target), Some(effective_from)) = (
+        change.target_template_id.as_deref(),
+        change.effective_from.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let Some(cutoff) = parse_month(effective_from) else {
+        return Ok(None);
+    };
+    let Some(mut template) = store.get_forecast_template(target).await? else {
+        return Ok(None);
+    };
+    if template.status == "descartado" {
+        return Ok(None);
+    }
+    // Last day of the month before `effective_from`.
+    let end_date = cutoff.pred_opt().context("data inválida no cutoff")?;
+    let doomed: Vec<_> = store
+        .list_forecasts(Some("ativo"), Some(cutoff), None)
+        .await?
+        .into_iter()
+        .filter(|f| f.template_id.as_deref() == Some(target))
+        .collect();
+    let description = format!(
+        "encerrar {} a partir de {effective_from} ({} forecast(s) descartado(s))",
+        template.description,
+        doomed.len()
+    );
+    if dry_run {
+        return Ok(Some(ChangeOutcome {
+            description,
+            forecasts_written: doomed.len(),
+            templates_written: 1,
+        }));
+    }
+    template.end_date = Some(end_date);
+    template.updated_at = Utc::now();
+    store
+        .upsert_forecast_templates(std::slice::from_ref(&template))
+        .await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "forecast_template",
+            &template.template_id,
+            "scenario_promote",
+            &config.actor_id,
+            &format!("scenario-{}-{}", change.scenario_id, change.change_id),
+            serde_json::to_value(&template)?,
+        )])
+        .await?;
+    let mut discarded = doomed;
+    for forecast in &mut discarded {
+        forecast.status = "descartado".to_string();
+        forecast.updated_at = Utc::now();
+    }
+    let forecasts_written = discarded.len();
+    if !discarded.is_empty() {
+        store.upsert_forecasts(&discarded).await?;
+        let events = discarded
+            .iter()
+            .map(|f| {
+                AuditEvent::from_entity(
+                    "forecast",
+                    &f.forecast_id,
+                    "scenario_promote",
+                    &config.actor_id,
+                    &format!("scenario-{}-{}", change.scenario_id, change.change_id),
+                    serde_json::to_value(f).unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        store.insert_audit_events(&events).await?;
+    }
+    Ok(Some(ChangeOutcome {
+        description,
+        forecasts_written,
+        templates_written: 1,
+    }))
+}
+
+async fn promote_forecast_edit(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    change: &PlanChangeRecord,
+    dry_run: bool,
+    edit: impl FnOnce(&mut phai_core::ForecastRecord),
+    describe: impl FnOnce(&phai_core::ForecastRecord) -> String,
+) -> Result<Option<ChangeOutcome>> {
+    let Some(target) = change.target_forecast_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(mut forecast) = store.get_forecast(target).await? else {
+        return Ok(None);
+    };
+    if forecast.status != "ativo" {
+        return Ok(None);
+    }
+    let description = describe(&forecast);
+    if dry_run {
+        return Ok(Some(ChangeOutcome {
+            description,
+            forecasts_written: 1,
+            templates_written: 0,
+        }));
+    }
+    edit(&mut forecast);
+    forecast.updated_at = Utc::now();
+    store
+        .upsert_forecasts(std::slice::from_ref(&forecast))
+        .await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "forecast",
+            &forecast.forecast_id,
+            "scenario_promote",
+            &config.actor_id,
+            &format!("scenario-{}-{}", change.scenario_id, change.change_id),
+            serde_json::to_value(&forecast)?,
+        )])
+        .await?;
+    Ok(Some(ChangeOutcome {
+        description,
+        forecasts_written: 1,
+        templates_written: 0,
+    }))
+}
+
+async fn promote_skip(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    change: &PlanChangeRecord,
+    dry_run: bool,
+) -> Result<Option<ChangeOutcome>> {
+    promote_forecast_edit(
+        store,
+        config,
+        change,
+        dry_run,
+        |f| f.status = "descartado".to_string(),
+        |f| format!("descartar {} ({})", f.forecast_id, f.description),
+    )
+    .await
+}
+
+async fn promote_adjust(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    change: &PlanChangeRecord,
+    dry_run: bool,
+) -> Result<Option<ChangeOutcome>> {
+    let Some(new_amount) = change.amount else {
+        return Ok(None);
+    };
+    promote_forecast_edit(
+        store,
+        config,
+        change,
+        dry_run,
+        |f| f.amount = new_amount,
+        |f| {
+            format!(
+                "ajustar {} ({}) para {}",
+                f.forecast_id,
+                f.description,
+                crate::human_format::brl_signed(new_amount)
+            )
+        },
+    )
+    .await
+}
+
+async fn promote_add_one_shot(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    change: &PlanChangeRecord,
+    dry_run: bool,
+) -> Result<Option<ChangeOutcome>> {
+    let (Some(month), Some(amount)) = (change.month.as_deref(), change.amount) else {
+        return Ok(None);
+    };
+    let Some(month_start) = parse_month(month) else {
+        return Ok(None);
+    };
+    let due_date = month_start.with_day(15).unwrap_or(month_start);
+    let now = Utc::now();
+    let idempotency_key = format!("scenario-{}-{}", change.scenario_id, change.change_id);
+    let forecast = phai_core::ForecastRecord {
+        forecast_id: idempotency_key.clone(),
+        due_date: Some(due_date),
+        description: change
+            .description
+            .clone()
+            .unwrap_or_else(|| "planejado".to_string()),
+        amount,
+        category_id: change.category_id.clone(),
+        account_id: change.account_id.clone(),
+        status: "ativo".to_string(),
+        recurrence: None,
+        actor_id: config.actor_id.clone(),
+        idempotency_key: idempotency_key.clone(),
+        metadata_json: serde_json::json!({ "scenario_id": change.scenario_id }),
+        created_at: now,
+        updated_at: now,
+        template_id: None,
+        realized_transaction_id: None,
+        realized_at: None,
+    };
+    let description = format!(
+        "criar {} em {} ({})",
+        forecast.description,
+        month,
+        crate::human_format::brl_signed(amount)
+    );
+    if dry_run {
+        return Ok(Some(ChangeOutcome {
+            description,
+            forecasts_written: 1,
+            templates_written: 0,
+        }));
+    }
+    store
+        .upsert_forecasts(std::slice::from_ref(&forecast))
+        .await?;
+    store
+        .insert_audit_events(&[AuditEvent::from_entity(
+            "forecast",
+            &forecast.forecast_id,
+            "scenario_promote",
+            &config.actor_id,
+            &idempotency_key,
+            serde_json::to_value(&forecast)?,
+        )])
+        .await?;
+    Ok(Some(ChangeOutcome {
+        description,
+        forecasts_written: 1,
+        templates_written: 0,
+    }))
+}
+
+async fn promote_installment(
+    store: &dyn FinanceStore,
+    config: &AppConfig,
+    change: &PlanChangeRecord,
+    dry_run: bool,
+) -> Result<Option<ChangeOutcome>> {
+    let (Some(effective_from), Some(amount), Some(count)) = (
+        change.effective_from.as_deref(),
+        change.amount,
+        change.months_count,
+    ) else {
+        return Ok(None);
+    };
+    let Some(first_month) = parse_month(effective_from) else {
+        return Ok(None);
+    };
+    if count <= 0 {
+        return Ok(None);
+    }
+    let now = Utc::now();
+    let template_id = format!("scn-installment-{}", change.change_id);
+    let description_text = change
+        .description
+        .clone()
+        .unwrap_or_else(|| "parcelamento planejado".to_string());
+    let last_month = first_month
+        .checked_add_months(chrono::Months::new(count as u32 - 1))
+        .context("falha ao calcular última parcela")?;
+    let template = phai_core::ForecastTemplateRecord {
+        template_id: template_id.clone(),
+        kind: "installment".to_string(),
+        description: description_text.clone(),
+        merchant_pattern: None,
+        category_id: change.category_id.clone(),
+        account_id: change.account_id.clone(),
+        amount,
+        amount_lower: None,
+        amount_upper: None,
+        cadence: "monthly".to_string(),
+        next_due_day: Some(15),
+        start_date: first_month,
+        end_date: Some(last_month),
+        remaining_count: Some(count),
+        source: "manual".to_string(),
+        confidence: None,
+        status: "ativo".to_string(),
+        metadata_json: serde_json::json!({ "scenario_id": change.scenario_id }),
+        actor_id: config.actor_id.clone(),
+        idempotency_key: format!("scenario-{}-{}", change.scenario_id, change.change_id),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut forecasts = Vec::with_capacity(count as usize);
+    for n in 0..count as u32 {
+        let Some(month_start) = first_month.checked_add_months(chrono::Months::new(n)) else {
+            break;
+        };
+        let due_date = month_start.with_day(15).unwrap_or(month_start);
+        let forecast_id = format!("{template_id}-{:03}", n + 1);
+        forecasts.push(phai_core::ForecastRecord {
+            forecast_id: forecast_id.clone(),
+            due_date: Some(due_date),
+            description: format!("{} {}/{}", description_text, n + 1, count),
+            amount,
+            category_id: change.category_id.clone(),
+            account_id: change.account_id.clone(),
+            status: "ativo".to_string(),
+            recurrence: None,
+            actor_id: config.actor_id.clone(),
+            idempotency_key: forecast_id,
+            metadata_json: serde_json::json!({ "scenario_id": change.scenario_id }),
+            created_at: now,
+            updated_at: now,
+            template_id: Some(template_id.clone()),
+            realized_transaction_id: None,
+            realized_at: None,
+        });
+    }
+    let description = format!(
+        "criar {} — {}x de {} desde {}",
+        description_text,
+        count,
+        crate::human_format::brl_signed(amount),
+        effective_from
+    );
+    if dry_run {
+        return Ok(Some(ChangeOutcome {
+            description,
+            forecasts_written: forecasts.len(),
+            templates_written: 1,
+        }));
+    }
+    store
+        .upsert_forecast_templates(std::slice::from_ref(&template))
+        .await?;
+    store.upsert_forecasts(&forecasts).await?;
+    let mut events = vec![AuditEvent::from_entity(
+        "forecast_template",
+        &template.template_id,
+        "scenario_promote",
+        &config.actor_id,
+        &template.idempotency_key,
+        serde_json::to_value(&template)?,
+    )];
+    for forecast in &forecasts {
+        events.push(AuditEvent::from_entity(
+            "forecast",
+            &forecast.forecast_id,
+            "scenario_promote",
+            &config.actor_id,
+            &forecast.idempotency_key,
+            serde_json::to_value(forecast)?,
+        ));
+    }
+    store.insert_audit_events(&events).await?;
+    Ok(Some(ChangeOutcome {
+        description,
+        forecasts_written: forecasts.len(),
+        templates_written: 1,
+    }))
+}
+
+async fn run_promote(args: ScenarioPromoteArgs) -> Result<()> {
+    let (config, store) = open().await?;
+    let summary =
+        promote_scenario(store.as_ref(), &config, &args.scenario_id, args.dry_run).await?;
+
+    if args.raw {
+        println!("{}", serde_json::to_string_pretty(&json!(summary))?);
+        return Ok(());
+    }
+    let header = if args.dry_run {
+        "🧪 Promoção (dry-run) — nada foi gravado:"
+    } else {
+        "🧪 Cenário promovido ao plano real:"
+    };
+    println!("{header}");
+    if summary.applied.is_empty() {
+        println!("  Nenhuma mudança pendente.");
+    }
+    for action in &summary.applied {
+        println!("  ✓ {}", action.description);
+    }
+    for orphan in &summary.skipped_orphans {
+        println!("  ⚠️ {orphan} pulada (alvo realizado/removido)");
+    }
+    println!(
+        "  {} forecast(s), {} template(s) afetado(s).",
+        summary.forecasts_written, summary.templates_written
+    );
     Ok(())
 }
