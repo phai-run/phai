@@ -22,15 +22,16 @@ use phai_core::idempotency::ensure_forecast_idempotency;
 use phai_core::migrations::run_migrations;
 use phai_core::models::{
     AccountRecord, AuditEvent, CardSummaryRow, ForecastRecord, ForecastTemplateRecord,
-    TransactionRecord,
+    PlanChangeKind, PlanChangeRecord, PlanScenarioRecord, TransactionRecord,
 };
+use phai_core::scenario::{apply_scenario, parse_month};
 use phai_core::storage::{open_store, FinanceStore};
 use phai_core::{parse_installment_description, AppConfig, BackendKind, ConfigPaths};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -364,6 +365,57 @@ enum StoreRequest {
         writes: Vec<ReviewWrite>,
         resp: oneshot::Sender<Vec<ReviewWriteOutcome>>,
     },
+    /// Planning scenarios (ADR-0037) — `GET /api/scenarios`.
+    ListPlanScenarios {
+        status: Option<String>,
+        resp: oneshot::Sender<Result<Vec<PlanScenarioRecord>>>,
+    },
+    /// `GET /api/scenario/changes` — the scenario's deltas plus which of
+    /// them are currently orphaned (recomputed on read).
+    ScenarioChanges {
+        scenario_id: String,
+        resp: oneshot::Sender<Result<(Vec<PlanChangeRecord>, Vec<String>)>>,
+    },
+    /// `GET /api/scenario/projection` — the `/api/chart` shape with the
+    /// scenario's monthly deltas layered on the future months.
+    ScenarioProjection {
+        scenario_id: String,
+        months_back: usize,
+        months_ahead: usize,
+        resp: oneshot::Sender<Result<ChartData>>,
+    },
+    /// `POST /api/scenario`.
+    UpsertPlanScenario {
+        record: Box<PlanScenarioRecord>,
+        resp: oneshot::Sender<Result<String>>,
+    },
+    /// `POST /api/scenario/archive`.
+    SetPlanScenarioStatus {
+        scenario_id: String,
+        status: String,
+        resp: oneshot::Sender<Result<()>>,
+    },
+    /// `POST /api/scenario/delete`.
+    DeletePlanScenario {
+        scenario_id: String,
+        resp: oneshot::Sender<Result<()>>,
+    },
+    /// `POST /api/scenario/change`.
+    UpsertPlanChange {
+        record: Box<PlanChangeRecord>,
+        resp: oneshot::Sender<Result<String>>,
+    },
+    /// `POST /api/scenario/change/delete`.
+    DeletePlanChange {
+        change_id: String,
+        scenario_id: String,
+        resp: oneshot::Sender<Result<()>>,
+    },
+    /// `POST /api/scenario/promote` — apply the scenario to the real plan.
+    PromoteScenario {
+        scenario_id: String,
+        resp: oneshot::Sender<Result<Value>>,
+    },
 }
 
 async fn store_actor_loop(
@@ -434,6 +486,24 @@ async fn try_handle_store_query(
             let result = list_forecasts_enriched(store, status.as_deref(), from, until).await;
             let _ = resp.send(result);
         }
+        StoreRequest::ListPlanScenarios { status, resp } => {
+            let result = store.list_plan_scenarios(status.as_deref()).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::ScenarioChanges { scenario_id, resp } => {
+            let result = load_scenario_changes(store, &scenario_id).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::ScenarioProjection {
+            scenario_id,
+            months_back,
+            months_ahead,
+            resp,
+        } => {
+            let result =
+                build_scenario_projection(store, &scenario_id, months_back, months_ahead).await;
+            let _ = resp.send(result);
+        }
         write => return Some(write),
     }
     None
@@ -491,6 +561,50 @@ async fn handle_store_mutation(store: &dyn FinanceStore, config: &AppConfig, req
         StoreRequest::ApplyHumanReview { writes, resp } => {
             let outcomes = apply_review_writes(store, config, writes).await;
             let _ = resp.send(outcomes);
+        }
+        scenario_write => handle_scenario_mutation(store, config, scenario_write).await,
+    }
+}
+
+/// Serve the planning-scenario writes (ADR-0037), split out of
+/// [`handle_store_mutation`] to keep each dispatcher small.
+async fn handle_scenario_mutation(store: &dyn FinanceStore, config: &AppConfig, req: StoreRequest) {
+    match req {
+        StoreRequest::UpsertPlanScenario { record, resp } => {
+            let result = upsert_plan_scenario(store, *record).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::SetPlanScenarioStatus {
+            scenario_id,
+            status,
+            resp,
+        } => {
+            let result = set_plan_scenario_status(store, &scenario_id, &status).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::DeletePlanScenario { scenario_id, resp } => {
+            let result = delete_plan_scenario(store, &scenario_id).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::UpsertPlanChange { record, resp } => {
+            let result = upsert_plan_change(store, *record).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::DeletePlanChange {
+            change_id,
+            scenario_id,
+            resp,
+        } => {
+            let result = delete_plan_change(store, &change_id, &scenario_id).await;
+            let _ = resp.send(result);
+        }
+        StoreRequest::PromoteScenario { scenario_id, resp } => {
+            let result = crate::scenario_cmd::promote_scenario(store, config, &scenario_id, false)
+                .await
+                .and_then(|summary| {
+                    serde_json::to_value(&summary).context("serializar PromotionSummary")
+                });
+            let _ = resp.send(result);
         }
         _ => debug_assert!(false, "query request leaked past try_handle_store_query"),
     }
@@ -1135,6 +1249,213 @@ async fn upsert_forecast(store: &dyn FinanceStore, mut record: ForecastRecord) -
     };
     store.insert_audit_events(&[event]).await.context("audit")?;
     Ok(forecast_id)
+}
+
+// ── Planning scenarios (ADR-0037) ──────────────────────────────────────────
+
+/// Horizon used when recomputing orphaned changes for the changes listing.
+const SCENARIO_ORPHAN_HORIZON_MONTHS: u32 = 12;
+
+/// Load a scenario's changes plus the ids that are currently orphaned
+/// (target realized/removed) — recomputed on every read, never persisted
+/// automatically.
+async fn load_scenario_changes(
+    store: &dyn FinanceStore,
+    scenario_id: &str,
+) -> Result<(Vec<PlanChangeRecord>, Vec<String>)> {
+    store
+        .get_plan_scenario(scenario_id)
+        .await?
+        .with_context(|| format!("cenário não encontrado: {scenario_id}"))?;
+    let changes = store.list_plan_changes(scenario_id, None).await?;
+    let today = Utc::now().date_naive();
+    let until = today
+        .checked_add_months(chrono::Months::new(SCENARIO_ORPHAN_HORIZON_MONTHS))
+        .context("horizonte de órfãos")?;
+    let baseline = store
+        .list_forecasts(Some("ativo"), Some(today), Some(until))
+        .await?;
+    let templates = store.list_forecast_templates(None, None).await?;
+    let projection = apply_scenario(&baseline, &templates, &changes, (today, until));
+    Ok((changes, projection.orphaned_change_ids))
+}
+
+/// `/api/chart` shape with the scenario's monthly deltas applied to the
+/// future months (forecast-remaining bars + projected saldo line).
+async fn build_scenario_projection(
+    store: &dyn FinanceStore,
+    scenario_id: &str,
+    months_back: usize,
+    months_ahead: usize,
+) -> Result<ChartData> {
+    store
+        .get_plan_scenario(scenario_id)
+        .await?
+        .with_context(|| format!("cenário não encontrado: {scenario_id}"))?;
+    let changes = store.list_plan_changes(scenario_id, None).await?;
+    let today = Utc::now().date_naive();
+    let until = today
+        .checked_add_months(chrono::Months::new(months_ahead.max(1) as u32))
+        .context("horizonte da projeção")?;
+    let baseline = store
+        .list_forecasts(Some("ativo"), Some(today), Some(until))
+        .await?;
+    let templates = store.list_forecast_templates(None, None).await?;
+    let projection = apply_scenario(&baseline, &templates, &changes, (today, until));
+    let mut chart = build_chart_data(store, months_back, months_ahead, true).await?;
+    overlay_scenario_on_chart(&mut chart, &projection.monthly_delta);
+    Ok(chart)
+}
+
+/// Layer a scenario's per-month deltas onto chart months: a negative delta
+/// grows the forecast-outflows-remaining bar, a positive one the inflows
+/// bar, and the projected saldo line shifts by the cumulative delta from
+/// that month onwards. Pure so it is unit-testable without a store.
+fn overlay_scenario_on_chart(chart: &mut ChartData, monthly_delta: &BTreeMap<String, Decimal>) {
+    let mut cumulative = Decimal::ZERO;
+    for month in chart.months.iter_mut() {
+        if let Some(delta) = monthly_delta.get(&month.month) {
+            if delta.is_sign_negative() {
+                let out = month
+                    .forecast_outflows_remaining
+                    .get_or_insert(Decimal::ZERO);
+                *out += -*delta;
+            } else {
+                let inflow = month
+                    .forecast_inflows_remaining
+                    .get_or_insert(Decimal::ZERO);
+                *inflow += *delta;
+            }
+            cumulative += *delta;
+        }
+        if !cumulative.is_zero() {
+            if let Some(projected) = month.projected_closing_balance.as_mut() {
+                *projected += cumulative;
+            }
+        }
+    }
+}
+
+async fn upsert_plan_scenario(
+    store: &dyn FinanceStore,
+    record: PlanScenarioRecord,
+) -> Result<String> {
+    let scenario_id = record.scenario_id.clone();
+    let diff = serde_json::to_value(&record).context("serializar cenário para auditoria")?;
+    store
+        .upsert_plan_scenarios(&[record])
+        .await
+        .context("upsert_plan_scenarios")?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "plan_scenario".into(),
+        entity_id: scenario_id.clone(),
+        action: "upsert".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: diff,
+    };
+    store.insert_audit_events(&[event]).await.context("audit")?;
+    Ok(scenario_id)
+}
+
+async fn set_plan_scenario_status(
+    store: &dyn FinanceStore,
+    scenario_id: &str,
+    status: &str,
+) -> Result<()> {
+    store
+        .set_plan_scenario_status(scenario_id, status, SERVE_ACTOR_ID)
+        .await?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "plan_scenario".into(),
+        entity_id: scenario_id.to_string(),
+        action: "update".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: json!({ "status": status }),
+    };
+    store.insert_audit_events(&[event]).await.context("audit")?;
+    Ok(())
+}
+
+async fn delete_plan_scenario(store: &dyn FinanceStore, scenario_id: &str) -> Result<()> {
+    store
+        .get_plan_scenario(scenario_id)
+        .await?
+        .with_context(|| format!("cenário não encontrado: {scenario_id}"))?;
+    store.delete_plan_scenario(scenario_id).await?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "plan_scenario".into(),
+        entity_id: scenario_id.to_string(),
+        action: "delete".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: Value::Object(Default::default()),
+    };
+    store.insert_audit_events(&[event]).await.context("audit")?;
+    Ok(())
+}
+
+async fn upsert_plan_change(store: &dyn FinanceStore, record: PlanChangeRecord) -> Result<String> {
+    let scenario = store
+        .get_plan_scenario(&record.scenario_id)
+        .await?
+        .with_context(|| format!("cenário não encontrado: {}", record.scenario_id))?;
+    if scenario.status != "ativo" {
+        anyhow::bail!(
+            "cenário {} está '{}' — apenas cenários ativos aceitam mudanças",
+            record.scenario_id,
+            scenario.status
+        );
+    }
+    let change_id = record.change_id.clone();
+    let diff = serde_json::to_value(&record).context("serializar mudança para auditoria")?;
+    store
+        .upsert_plan_changes(&[record])
+        .await
+        .context("upsert_plan_changes")?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "plan_change".into(),
+        entity_id: change_id.clone(),
+        action: "upsert".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: diff,
+    };
+    store.insert_audit_events(&[event]).await.context("audit")?;
+    Ok(change_id)
+}
+
+async fn delete_plan_change(
+    store: &dyn FinanceStore,
+    change_id: &str,
+    scenario_id: &str,
+) -> Result<()> {
+    let changes = store.list_plan_changes(scenario_id, None).await?;
+    if !changes.iter().any(|c| c.change_id == change_id) {
+        anyhow::bail!("mudança {change_id} não encontrada no cenário {scenario_id}");
+    }
+    store.delete_plan_change(change_id).await?;
+    let event = AuditEvent {
+        event_id: Uuid::now_v7().to_string(),
+        entity_type: "plan_change".into(),
+        entity_id: change_id.to_string(),
+        action: "delete".into(),
+        actor_id: SERVE_ACTOR_ID.into(),
+        event_timestamp: Utc::now(),
+        idempotency_key: Uuid::now_v7().to_string(),
+        diff_json: json!({ "scenario_id": scenario_id }),
+    };
+    store.insert_audit_events(&[event]).await.context("audit")?;
+    Ok(())
 }
 
 async fn handle_accept_template(
@@ -2022,6 +2343,18 @@ fn build_api_router(state: BridgeState, bridge_identity: Arc<BridgeIdentityRespo
             "/api/forecast-template/dismiss",
             post(post_dismiss_template),
         )
+        .route("/api/scenarios", get(get_scenarios))
+        .route("/api/scenario", post(post_scenario))
+        .route("/api/scenario/archive", post(post_scenario_archive))
+        .route("/api/scenario/delete", post(post_scenario_delete))
+        .route("/api/scenario/changes", get(get_scenario_changes))
+        .route("/api/scenario/change", post(post_scenario_change))
+        .route(
+            "/api/scenario/change/delete",
+            post(post_scenario_change_delete),
+        )
+        .route("/api/scenario/projection", get(get_scenario_projection))
+        .route("/api/scenario/promote", post(post_scenario_promote))
         .route("/api/version", get(get_version))
         .route("/api/update", post(post_update))
         // Explicit DoS-hardening cap on request body size — set intentionally
@@ -2973,6 +3306,481 @@ async fn post_dismiss_template(
     }
 }
 
+// ── Planning-scenario HTTP handlers (ADR-0037) ─────────────────────────────
+
+/// Input-length guardrails for scenario payloads, mirroring the forecast
+/// body limits (description is a short label, ids are slugs).
+const MAX_SCENARIO_TEXT_LEN: usize = 500;
+const MAX_SCENARIO_ID_LEN: usize = 100;
+
+#[derive(Deserialize)]
+struct ScenariosQuery {
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioBody {
+    /// Client-supplied id for idempotent retries; generated when absent.
+    scenario_id: Option<String>,
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioIdBody {
+    scenario_id: String,
+}
+
+#[derive(Deserialize)]
+struct ScenarioChangesQuery {
+    scenario_id: String,
+}
+
+#[derive(Deserialize)]
+struct ScenarioProjectionQuery {
+    scenario_id: String,
+    months_back: Option<usize>,
+    months_ahead: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioChangeBody {
+    /// Client-supplied id for idempotent retries; generated when absent.
+    change_id: Option<String>,
+    scenario_id: String,
+    kind: String,
+    target_forecast_id: Option<String>,
+    target_template_id: Option<String>,
+    month: Option<String>,
+    effective_from: Option<String>,
+    amount: Option<String>,
+    months_count: Option<i32>,
+    description: Option<String>,
+    category_id: Option<String>,
+    account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioChangeDeleteBody {
+    change_id: String,
+    scenario_id: String,
+}
+
+/// A client-supplied id is accepted only in a conservative shape; anything
+/// else gets a fresh UUID-based id instead of an error (ids are opaque).
+fn sanitize_client_id(raw: Option<&str>, prefix: &str) -> String {
+    let ok = raw
+        .map(str::trim)
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .map(str::to_string);
+    ok.unwrap_or_else(|| format!("{prefix}-{}", Uuid::now_v7()))
+}
+
+/// Which optional fields each change kind requires. Returns the camelCase
+/// name of the first missing field.
+fn missing_change_field(
+    kind: PlanChangeKind,
+    body: &ScenarioChangeBody,
+    amount: Option<Decimal>,
+) -> Option<&'static str> {
+    let need = |ok: bool, field: &'static str| (!ok).then_some(field);
+    match kind {
+        PlanChangeKind::AddOneShot => {
+            need(body.month.is_some(), "month").or_else(|| need(amount.is_some(), "amount"))
+        }
+        PlanChangeKind::AdjustAmount => need(body.target_forecast_id.is_some(), "targetForecastId")
+            .or_else(|| need(amount.is_some(), "amount")),
+        PlanChangeKind::SkipForecast => need(body.target_forecast_id.is_some(), "targetForecastId"),
+        PlanChangeKind::EndTemplate => need(body.target_template_id.is_some(), "targetTemplateId")
+            .or_else(|| need(body.effective_from.is_some(), "effectiveFrom")),
+        PlanChangeKind::HypotheticalInstallment => {
+            need(body.effective_from.is_some(), "effectiveFrom")
+                .or_else(|| need(amount.is_some(), "amount"))
+        }
+    }
+}
+
+/// Length guardrails shared by the free-text fields of a change body.
+fn oversized_change_field(body: &ScenarioChangeBody) -> Option<String> {
+    if let Some(len) = body.description.as_deref().map(str::len) {
+        if len > MAX_SCENARIO_TEXT_LEN {
+            return Some(format!(
+                "description muito longa ({len} caracteres; máximo {MAX_SCENARIO_TEXT_LEN})"
+            ));
+        }
+    }
+    for (field, value) in [
+        ("categoryId", &body.category_id),
+        ("accountId", &body.account_id),
+    ] {
+        if let Some(len) = value.as_deref().map(str::len) {
+            if len > MAX_SCENARIO_ID_LEN {
+                return Some(format!(
+                    "{field} muito longo ({len} caracteres; máximo {MAX_SCENARIO_ID_LEN})"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Validate + assemble a `PlanChangeRecord` from the request body. The error
+/// is the human-readable 400 message.
+fn validate_scenario_change_body(body: ScenarioChangeBody) -> Result<PlanChangeRecord, String> {
+    let Some(kind) = PlanChangeKind::parse(&body.kind) else {
+        return Err(format!("kind desconhecido: '{}'", body.kind));
+    };
+    let amount = match body.amount.as_deref().map(str::trim) {
+        Some(raw) => match Decimal::from_str(raw) {
+            Ok(d) => Some(d),
+            Err(_) => return Err(format!("amount inválido: '{raw}' (use formato: -250.00)")),
+        },
+        None => None,
+    };
+    for (field, value) in [
+        ("month", &body.month),
+        ("effectiveFrom", &body.effective_from),
+    ] {
+        if let Some(raw) = value.as_deref() {
+            if parse_month(raw).is_none() {
+                return Err(format!("{field} inválido: '{raw}' (esperado YYYY-MM)"));
+            }
+        }
+    }
+    if let Some(field) = missing_change_field(kind, &body, amount) {
+        return Err(format!(
+            "campo obrigatório ausente para {}: {field}",
+            kind.as_str()
+        ));
+    }
+    if kind == PlanChangeKind::HypotheticalInstallment && body.months_count.unwrap_or(0) < 1 {
+        return Err("monthsCount deve ser ≥ 1".to_string());
+    }
+    if let Some(msg) = oversized_change_field(&body) {
+        return Err(msg);
+    }
+    let now = Utc::now();
+    let change_id = sanitize_client_id(body.change_id.as_deref(), "chg");
+    Ok(PlanChangeRecord {
+        change_id: change_id.clone(),
+        scenario_id: body.scenario_id,
+        kind: kind.as_str().to_string(),
+        target_forecast_id: body.target_forecast_id,
+        target_template_id: body.target_template_id,
+        month: body.month,
+        effective_from: body.effective_from,
+        amount,
+        months_count: body.months_count,
+        description: body.description,
+        category_id: body.category_id,
+        account_id: body.account_id,
+        status: "ativo".to_string(),
+        payload_json: Value::Object(Default::default()),
+        actor_id: SERVE_ACTOR_ID.to_string(),
+        idempotency_key: change_id,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+async fn get_scenarios(
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<ScenariosQuery>,
+) -> impl IntoResponse {
+    let key = ReadCache::key("/api/scenarios", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::ListPlanScenarios {
+                status: q.status,
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            // PlanScenarioRecord serialises as snake_case; the frontend adapts.
+            Ok(Ok(scenarios)) => Ok(serde_json::json!({ "scenarios": scenarios })),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
+}
+
+async fn post_scenario(State(state): Store, Json(body): Json<ScenarioBody>) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "name é obrigatório");
+    }
+    if name.len() > MAX_SCENARIO_TEXT_LEN {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!("name muito longo (máximo {MAX_SCENARIO_TEXT_LEN})"),
+        );
+    }
+    let now = Utc::now();
+    let scenario_id = sanitize_client_id(body.scenario_id.as_deref(), "scn");
+    let record = Box::new(PlanScenarioRecord {
+        scenario_id: scenario_id.clone(),
+        name,
+        description: body.description,
+        status: "ativo".to_string(),
+        promoted_at: None,
+        metadata_json: Value::Object(Default::default()),
+        actor_id: SERVE_ACTOR_ID.to_string(),
+        idempotency_key: scenario_id,
+        created_at: now,
+        updated_at: now,
+    });
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::UpsertPlanScenario {
+            record,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(scenario_id)) => {
+            state.cache.invalidate(&[Resource::Scenarios]);
+            Json(serde_json::json!({ "scenarioId": scenario_id })).into_response()
+        }
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn post_scenario_status(
+    state: BridgeState,
+    scenario_id: String,
+    status: &'static str,
+) -> axum::response::Response {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::SetPlanScenarioStatus {
+            scenario_id: scenario_id.clone(),
+            status: status.to_string(),
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(())) => {
+            state.cache.invalidate(&[Resource::Scenarios]);
+            Json(serde_json::json!({ "scenarioId": scenario_id, "status": status })).into_response()
+        }
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn post_scenario_archive(
+    State(state): Store,
+    Json(body): Json<ScenarioIdBody>,
+) -> impl IntoResponse {
+    post_scenario_status(state, body.scenario_id, "arquivado").await
+}
+
+async fn post_scenario_delete(
+    State(state): Store,
+    Json(body): Json<ScenarioIdBody>,
+) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::DeletePlanScenario {
+            scenario_id: body.scenario_id.clone(),
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(())) => {
+            state.cache.invalidate(&[Resource::Scenarios]);
+            Json(serde_json::json!({ "scenarioId": body.scenario_id })).into_response()
+        }
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn get_scenario_changes(
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<ScenarioChangesQuery>,
+) -> impl IntoResponse {
+    let key = ReadCache::key("/api/scenario/changes", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::ScenarioChanges {
+                scenario_id: q.scenario_id,
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            Ok(Ok((changes, orphaned))) => Ok(serde_json::json!({
+                "changes": changes,
+                "orphaned": orphaned,
+            })),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
+}
+
+async fn post_scenario_change(
+    State(state): Store,
+    Json(body): Json<ScenarioChangeBody>,
+) -> impl IntoResponse {
+    let record = match validate_scenario_change_body(body) {
+        Ok(record) => Box::new(record),
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::UpsertPlanChange {
+            record,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(change_id)) => {
+            state.cache.invalidate(&[Resource::Scenarios]);
+            Json(serde_json::json!({ "changeId": change_id })).into_response()
+        }
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn post_scenario_change_delete(
+    State(state): Store,
+    Json(body): Json<ScenarioChangeDeleteBody>,
+) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::DeletePlanChange {
+            change_id: body.change_id.clone(),
+            scenario_id: body.scenario_id,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(())) => {
+            state.cache.invalidate(&[Resource::Scenarios]);
+            Json(serde_json::json!({ "changeId": body.change_id })).into_response()
+        }
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
+async fn get_scenario_projection(
+    State(state): Store,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<ScenarioProjectionQuery>,
+) -> impl IntoResponse {
+    let key = ReadCache::key("/api/scenario/projection", raw_query.as_deref());
+    cached_read(&state.cache, key, || async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let tx = clone_actor_tx(&state.tx).await;
+        if tx
+            .send(StoreRequest::ScenarioProjection {
+                scenario_id: q.scenario_id,
+                months_back: q.months_back.unwrap_or(6),
+                months_ahead: q.months_ahead.unwrap_or(6),
+                resp: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(actor_unavailable());
+        }
+        match resp_rx.await {
+            Ok(Ok(chart)) => Ok(chart),
+            Ok(Err(e)) => Err(internal_error(e)),
+            Err(_) => Err(actor_silent()),
+        }
+    })
+    .await
+}
+
+async fn post_scenario_promote(
+    State(state): Store,
+    Json(body): Json<ScenarioIdBody>,
+) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let tx = clone_actor_tx(&state.tx).await;
+    if tx
+        .send(StoreRequest::PromoteScenario {
+            scenario_id: body.scenario_id,
+            resp: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return actor_unavailable();
+    }
+    match resp_rx.await {
+        Ok(Ok(summary)) => {
+            // Promotion writes real forecasts and templates — the projected
+            // chart, forecast list and template list all change.
+            state.cache.invalidate(&[
+                Resource::Scenarios,
+                Resource::Forecasts,
+                Resource::Chart,
+                Resource::Templates,
+            ]);
+            Json(summary).into_response()
+        }
+        Ok(Err(e)) => internal_error(e),
+        Err(_) => actor_silent(),
+    }
+}
+
 async fn get_version(State(state): Store) -> impl IntoResponse {
     let status = state.update_status.read().await;
     Json((*status).clone())
@@ -3415,6 +4223,139 @@ mod tests {
         assert!(!category_is_locked(Some("moradia:servicos"), &locked));
         assert!(!category_is_locked(Some("alimentacao:mercado"), &locked));
         assert!(!category_is_locked(None, &locked));
+    }
+
+    // ── planning scenarios (ADR-0037) ─────────────────────────────────────
+
+    fn chart_month(month: &str, projected: Option<i64>) -> crate::cashflow_chart::MonthDatum {
+        crate::cashflow_chart::MonthDatum {
+            label: month.to_string(),
+            month: month.to_string(),
+            inflows: Decimal::ZERO,
+            outflows: Decimal::ZERO,
+            closing_balance: None,
+            forecast_inflows_remaining: Some(Decimal::ZERO),
+            forecast_outflows_remaining: Some(Decimal::ZERO),
+            projected_closing_balance: projected.map(|v| Decimal::new(v, 2)),
+            is_future: true,
+        }
+    }
+
+    #[test]
+    fn overlay_scenario_shifts_bars_and_cumulative_balance() {
+        let mut chart = ChartData {
+            months: vec![
+                chart_month("2026-08", Some(100000)),
+                chart_month("2026-09", Some(100000)),
+                chart_month("2026-10", Some(100000)),
+            ],
+            initial_balance: None,
+            with_forecast: true,
+            realized_count: 0,
+            scenario: None,
+        };
+        let mut deltas = std::collections::BTreeMap::new();
+        deltas.insert("2026-09".to_string(), Decimal::new(-50000, 2)); // -500 expense
+        overlay_scenario_on_chart(&mut chart, &deltas);
+
+        // August untouched.
+        assert_eq!(
+            chart.months[0].projected_closing_balance,
+            Some(Decimal::new(100000, 2))
+        );
+        // September: outflow bar grows, saldo drops by 500.
+        assert_eq!(
+            chart.months[1].forecast_outflows_remaining,
+            Some(Decimal::new(50000, 2))
+        );
+        assert_eq!(
+            chart.months[1].projected_closing_balance,
+            Some(Decimal::new(50000, 2))
+        );
+        // October: no new delta, but the cumulative shift persists.
+        assert_eq!(
+            chart.months[2].projected_closing_balance,
+            Some(Decimal::new(50000, 2))
+        );
+
+        // A positive delta lands on the inflows bar.
+        let mut inflow_delta = std::collections::BTreeMap::new();
+        inflow_delta.insert("2026-08".to_string(), Decimal::new(30000, 2));
+        overlay_scenario_on_chart(&mut chart, &inflow_delta);
+        assert_eq!(
+            chart.months[0].forecast_inflows_remaining,
+            Some(Decimal::new(30000, 2))
+        );
+    }
+
+    fn change_body(kind: &str) -> ScenarioChangeBody {
+        ScenarioChangeBody {
+            change_id: None,
+            scenario_id: "scn-1".to_string(),
+            kind: kind.to_string(),
+            target_forecast_id: None,
+            target_template_id: None,
+            month: None,
+            effective_from: None,
+            amount: None,
+            months_count: None,
+            description: None,
+            category_id: None,
+            account_id: None,
+        }
+    }
+
+    #[test]
+    fn scenario_change_validation_rejects_bad_input() {
+        // Unknown kind.
+        assert!(validate_scenario_change_body(change_body("teleport")).is_err());
+        // Invalid amount.
+        let mut body = change_body("add_one_shot");
+        body.month = Some("2026-09".to_string());
+        body.amount = Some("abc".to_string());
+        assert!(validate_scenario_change_body(body).is_err());
+        // Invalid month.
+        let mut body = change_body("add_one_shot");
+        body.month = Some("setembro".to_string());
+        body.amount = Some("-100.00".to_string());
+        assert!(validate_scenario_change_body(body).is_err());
+        // Missing required target.
+        let mut body = change_body("adjust_amount");
+        body.amount = Some("-100.00".to_string());
+        assert!(validate_scenario_change_body(body).is_err());
+        // Installment needs monthsCount ≥ 1.
+        let mut body = change_body("hypothetical_installment");
+        body.effective_from = Some("2026-09".to_string());
+        body.amount = Some("-100.00".to_string());
+        body.months_count = Some(0);
+        assert!(validate_scenario_change_body(body).is_err());
+    }
+
+    #[test]
+    fn scenario_change_validation_builds_record_and_sane_ids() {
+        let mut body = change_body("add_one_shot");
+        body.month = Some("2026-09".to_string());
+        body.amount = Some("-2000.00".to_string());
+        body.description = Some("viagem".to_string());
+        let record = validate_scenario_change_body(body).expect("valid");
+        assert_eq!(record.kind, "add_one_shot");
+        assert_eq!(record.amount, Some(Decimal::new(-200000, 2)));
+        assert!(record.change_id.starts_with("chg-"));
+        assert_eq!(record.idempotency_key, record.change_id);
+
+        // Client-supplied well-formed id is honoured (idempotent retries)...
+        let mut body = change_body("skip_forecast");
+        body.change_id = Some("chg-client-123".to_string());
+        body.target_forecast_id = Some("f1".to_string());
+        let record = validate_scenario_change_body(body).expect("valid");
+        assert_eq!(record.change_id, "chg-client-123");
+        // ...but a malformed one is replaced, not rejected.
+        let mut body = change_body("skip_forecast");
+        body.change_id = Some("../etc/passwd".to_string());
+        body.target_forecast_id = Some("f1".to_string());
+        let record = validate_scenario_change_body(body).expect("valid");
+        assert!(record.change_id.starts_with("chg-"));
+        assert!(!record.change_id.contains('/'));
     }
 
     #[test]

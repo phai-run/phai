@@ -57,6 +57,9 @@ pub enum Resource {
     Forecasts,
     /// `GET /api/forecast-templates`
     Templates,
+    /// `GET /api/scenarios`, `GET /api/scenario/changes`,
+    /// `GET /api/scenario/projection` (ADR-0037)
+    Scenarios,
 }
 
 impl Resource {
@@ -74,6 +77,9 @@ impl Resource {
             "/api/categories" => Some(Self::Categories),
             "/api/forecasts" => Some(Self::Forecasts),
             "/api/forecast-templates" => Some(Self::Templates),
+            "/api/scenarios" | "/api/scenario/changes" | "/api/scenario/projection" => {
+                Some(Self::Scenarios)
+            }
             _ => None,
         }
     }
