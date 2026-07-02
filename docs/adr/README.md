@@ -88,6 +88,7 @@ proposed → active → superseded
 | [0034](0034-self-contained-encrypted-invite.md) | Self-contained encrypted invite for multi-device activation | active |
 | [0035](0035-google-sheets-export.md) | Open in Google Sheets via the Sheets API (OAuth) | proposed |
 | [0036](0036-serve-bridge-no-per-request-auth.md) | `phai serve` bridge: loopback + Host/Origin guard as the security boundary, no per-request auth | active |
+| [0037](0037-named-planning-scenarios.md) | Named planning scenarios: persisted what-if deltas over the live forecast baseline | accepted |
 
 ---
 
