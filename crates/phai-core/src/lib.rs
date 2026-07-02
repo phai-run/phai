@@ -10,6 +10,7 @@ pub mod migrations;
 pub mod models;
 pub mod pluggy;
 pub mod rules;
+pub mod scenario;
 mod split_payload;
 pub mod splits;
 pub mod storage;
