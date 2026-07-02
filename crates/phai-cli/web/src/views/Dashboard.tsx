@@ -7,8 +7,11 @@ import { springSnap } from "../design/motion";
 import {
 	useChartSeed,
 	useForecastsSeed,
+	useScenarioDetailSeed,
+	useScenariosSeed,
 	useTransactionsSeed,
 } from "../bridge/sync";
+import { ScenarioPanel } from "./scenario/ScenarioPanel";
 
 import {
 	buildOverlayMap,
@@ -54,6 +57,10 @@ const forecasts$ = queryDb(tables.forecasts.orderBy("dueDate", "asc"));
 const forecastOverlay$ = queryDb(tables.forecastOverlay);
 const txAll$ = queryDb(tables.transactions);
 const reviewOverlay$ = queryDb(tables.reviewOverlay);
+const scenarioChart$ = queryDb(
+	tables.scenarioChartMonths.orderBy("ordinal", "asc"),
+);
+const pendingWrites$ = queryDb(tables.pendingWrites);
 
 const monthOf = (date: string | null): string | null =>
 	date ? date.slice(0, 7) : null;
@@ -119,6 +126,36 @@ export const Dashboard = () => {
 		YEAR_WINDOW.transactionMonthsBack,
 		YEAR_WINDOW.monthsAhead,
 	);
+
+	// ── Planning scenarios (ADR-0037) ────────────────────────────────────────
+	const activeScenarioId = ui.activeScenarioId ?? null;
+	useScenariosSeed();
+	// Re-fetch the scenario projection once this session's scenario writes
+	// finish flushing (pending scenario rows transition to zero).
+	const pendingRows = useQuery(pendingWrites$) as ReadonlyArray<{
+		type: string;
+	}>;
+	const pendingScenarioWrites = useMemo(
+		() => pendingRows.filter((r) => r.type.startsWith("scenario")).length,
+		[pendingRows],
+	);
+	const [scenarioSeedNonce, setScenarioSeedNonce] = useState(0);
+	const [prevPending, setPrevPending] = useState(0);
+	useEffect(() => {
+		if (prevPending > 0 && pendingScenarioWrites === 0) {
+			setScenarioSeedNonce((n) => n + 1);
+		}
+		setPrevPending(pendingScenarioWrites);
+	}, [pendingScenarioWrites, prevPending]);
+	useScenarioDetailSeed(
+		activeScenarioId,
+		YEAR_WINDOW.chartMonthsBack,
+		YEAR_WINDOW.monthsAhead,
+		scenarioSeedNonce,
+	);
+	const scenarioChartRows = useQuery(scenarioChart$) as ReadonlyArray<
+		ChartMonthView & { scenarioId: string }
+	>;
 
 	// Apply forecast re-dating overlay
 	const overlayById = useMemo(
@@ -215,6 +252,27 @@ export const Dashboard = () => {
 	// clientDocument — slider drags would commit an event per pixel). The
 	// panel clears it on unmount, so it never outlives the plano mode.
 	const [warSim, setWarSim] = useState<ChartSimulation | null>(null);
+
+	// A scenario overlay and the war-plan live simulation don't compose (each
+	// shifts the same projected saldo); the scenario wins while active.
+	useEffect(() => {
+		if (activeScenarioId) setWarSim(null);
+	}, [activeScenarioId]);
+
+	// Scenario saldo per chart month (aligned with `months`; null = no data).
+	const scenarioBalances = useMemo(() => {
+		if (!activeScenarioId) return null;
+		const byMonth = new Map(
+			scenarioChartRows
+				.filter((r) => r.scenarioId === activeScenarioId)
+				.map((r) => [r.month, Number(r.projectedClosingBalance)]),
+		);
+		if (byMonth.size === 0) return null;
+		return months.map((m) => {
+			const v = byMonth.get(m.month);
+			return v != null && Number.isFinite(v) ? v : null;
+		});
+	}, [activeScenarioId, scenarioChartRows, months]);
 
 	// Months a confirmed goal writes envelopes for: the selected month through
 	// December, never a past month.
@@ -329,10 +387,29 @@ export const Dashboard = () => {
 						onDropForecast={moveForecast}
 						compact={false}
 						simulation={warSim}
+						scenarioBalances={scenarioBalances}
 					/>
 					</div>
 				)}
 			</div>
+
+			{/* ── Planning scenarios (ADR-0037): picker + change list + promote ── */}
+			{!loading && months.length > 0 && (
+				<div
+					style={{
+						maxWidth: "var(--container)",
+						margin: "0 auto",
+						padding: "0 clamp(24px,3vw,32px)",
+					}}
+				>
+					<ScenarioPanel
+						selectedMonth={selected}
+						activeScenarioId={activeScenarioId}
+						onActivate={(id) => setUi({ activeScenarioId: id })}
+						onMutated={() => setScenarioSeedNonce((n) => n + 1)}
+					/>
+				</div>
+			)}
 
 			{/* ── Month detail (sheet | categories | planning | cards) ── */}
 			<div

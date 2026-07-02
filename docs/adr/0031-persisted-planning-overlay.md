@@ -102,6 +102,9 @@ reflected on the chart). B is the documented upgrade path.
 - **Re-evaluate → Option B** when the user needs multiple concurrent saved
   scenarios (compare plan A vs plan B), named plans, or plan history. At that
   point migrate the tagged-envelope set into a dedicated `plans` table in both
-  backends.
+  backends. *Materialised by
+  [ADR-0037](0037-named-planning-scenarios.md) (named planning scenarios,
+  `plan_scenario` + `plan_change`); this ADR remains valid for the single
+  plan-of-envelopes written by the goal sliders.*
 - All plan amounts stay `Decimal` end-to-end (ADR-0003); every plan write emits
   an `AuditEvent` (ADR-0005) like any other forecast write.

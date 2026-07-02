@@ -13,6 +13,7 @@ import {
 	buildModel,
 	cashY,
 	currentMonthKey,
+	extendScale,
 	firstShortfallMonth,
 	innerH,
 	innerW,
@@ -54,6 +55,7 @@ export const PlanningChart = ({
 	onSelectMonth,
 	onDropForecast,
 	simulation,
+	scenarioBalances = null,
 	compact = false,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
@@ -66,15 +68,25 @@ export const PlanningChart = ({
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
 	/** Live war-plan goal overlay: shifts forecast outflows + future balances. */
 	simulation?: ChartSimulation | null;
+	/**
+	 * Active planning scenario's projected saldo per month (aligned with
+	 * `months`; null = no data for that month). Renders as a second dashed
+	 * line with a shaded wedge vs the baseline (ADR-0037).
+	 */
+	scenarioBalances?: ReadonlyArray<number | null> | null;
 	/** Planning mode: shrink the chart so it can stay pinned above the sliders. */
 	compact?: boolean;
 }) => {
 	const model = useMemo(() => {
 		const base = buildModel(months);
-		return simulation && simulation.monthlySaving !== 0
-			? applySimulationToModel(base, months, simulation)
-			: base;
-	}, [months, simulation]);
+		const simulated =
+			simulation && simulation.monthlySaving !== 0
+				? applySimulationToModel(base, months, simulation)
+				: base;
+		return scenarioBalances
+			? extendScale(simulated, scenarioBalances)
+			: simulated;
+	}, [months, simulation, scenarioBalances]);
 	const [mode, setMode] = useState<ChartMode>("caixa");
 
 	const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -126,6 +138,7 @@ export const PlanningChart = ({
 				selectedMonth={selectedMonth}
 				onSelectMonth={onSelectMonth}
 				onDropForecast={onDropForecast}
+				scenarioBalances={scenarioBalances}
 				compact={compact}
 			/>
 		</div>
@@ -211,6 +224,7 @@ const FullChart = ({
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
+	scenarioBalances,
 	compact,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
@@ -222,6 +236,7 @@ const FullChart = ({
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
+	scenarioBalances?: ReadonlyArray<number | null> | null;
 	compact: boolean;
 }) => {
 	const [hover, setHover] = useState<number | null>(null);
@@ -798,6 +813,16 @@ const FullChart = ({
 									opacity={0.6}
 								/>
 							)}
+							{/* Active planning scenario (ADR-0037): dashed cyan saldo
+							    line + shaded wedge vs the baseline projection. */}
+							{scenarioBalances && (
+								<ScenarioSaldoOverlay
+									months={months}
+									model={model}
+									scenarioBalances={scenarioBalances}
+									midX={midX}
+								/>
+							)}
 							{model.balances.map((b, i) => (
 								<circle
 									key={months[i].month}
@@ -1251,3 +1276,68 @@ const MonthColumn = React.memo(({
 	);
 });
 
+
+// ── Scenario saldo overlay (ADR-0037) ──────────────────────────────────────
+
+/**
+ * Dashed cyan line for the active scenario's projected saldo, plus a shaded
+ * wedge between it and the baseline projection on the months where both
+ * exist — the visual "cash freed / committed" gap.
+ */
+const ScenarioSaldoOverlay = ({
+	months,
+	model,
+	scenarioBalances,
+	midX,
+}: {
+	months: ReadonlyArray<ChartMonthView>;
+	model: ChartModel;
+	scenarioBalances: ReadonlyArray<number | null>;
+	midX: (i: number) => number;
+}) => {
+	const y = (v: number) => cashY(v, model.cashMin, model.cashSpan);
+	const points = months
+		.map((m, i) => ({ i, value: scenarioBalances[i], isFuture: m.isFuture === 1 }))
+		.filter((p): p is { i: number; value: number; isFuture: boolean } => p.value != null);
+	if (points.length === 0) return null;
+
+	const line = points
+		.map((p, k) => `${k === 0 ? "M" : "L"} ${midX(p.i)} ${y(p.value)}`)
+		.join(" ");
+
+	// Wedge between baseline and scenario saldo across future months only.
+	const wedgePoints = points.filter((p) => p.isFuture);
+	const wedge =
+		wedgePoints.length > 1
+			? [
+					...wedgePoints.map((p) => `${midX(p.i)},${y(model.balances[p.i])}`),
+					...[...wedgePoints]
+						.reverse()
+						.map((p) => `${midX(p.i)},${y(p.value)}`),
+				].join(" ")
+			: null;
+
+	return (
+		<>
+			{wedge && <polygon points={wedge} fill="var(--cyan)" opacity={0.12} />}
+			<path
+				d={line}
+				fill="none"
+				stroke="var(--cyan)"
+				strokeWidth={1.5}
+				strokeDasharray="6 3"
+				opacity={0.85}
+			/>
+			{points.map((p) => (
+				<circle
+					key={months[p.i].month}
+					cx={midX(p.i)}
+					cy={y(p.value)}
+					r={2}
+					fill="var(--cyan)"
+					opacity={0.85}
+				/>
+			))}
+		</>
+	);
+};

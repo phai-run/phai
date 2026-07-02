@@ -59,6 +59,12 @@ item_prices(query, since)
 // audit & forecasting
 insert_audit_events(rows)      upsert_forecasts(rows)
 
+// planning scenarios (ADR-0037)
+upsert_plan_scenarios(rows)    list_plan_scenarios(status)       get_plan_scenario(id)
+set_plan_scenario_status(id, status)                             delete_plan_scenario(id)
+upsert_plan_changes(rows)      list_plan_changes(scenario, status)
+delete_plan_change(id)
+
 // validation
 validate_table_name(table)     // standalone fn — allowlist gate for any dynamic SQL identifier
 ```
@@ -202,6 +208,17 @@ Until ported, the CLI surfaces a clear unsupported-backend error on local for: `
 ## Installments (parcelas)
 
 `installments.rs` detects installment chains in transaction descriptions (`PARC 2/12`, `1 de 6`, Pluggy structured markers). A chain groups related rows so reports can show "X de Y" and project the chain's end. Detection happens at sync time and during description enrichment.
+
+## Planning Scenarios (ADR-0037)
+
+A scenario (`plan_scenario`) is a named set of typed deltas (`plan_change`:
+`add_one_shot` | `adjust_amount` | `skip_forecast` | `end_template` |
+`hypothetical_installment`) layered over the live forecast baseline at read
+time by the pure engine `phai_core::scenario::apply_scenario`. Nothing is
+copied, so the what-if projection never goes stale; changes whose target was
+realized/removed become orphaned no-ops (recomputed on read, pruned only
+explicitly). Promotion applies the deltas to the real plan with natural
+idempotency keys (`scenario-{scenario_id}-{change_id}`, ADR-0022).
 
 ## Config & Paths
 

@@ -214,6 +214,14 @@ phai forecast suggest        List detected recurring candidates awaiting accept/
 phai forecast accept         Accept a proposed template and materialise next N months
 phai forecast dismiss        Dismiss a proposed template so the detector skips it
 phai forecast scenario       What-if: project balance with a hypothetical recurring commitment
+phai scenario create         Create a named what-if planning scenario (ADR-0037)
+phai scenario list/show/diff Inspect scenarios: changes, orphans, monthly delta vs baseline
+phai scenario add            Add a one-shot entry to a month (e.g. a planned trip)
+phai scenario adjust/skip    Override or drop a specific forecast inside the scenario
+phai scenario end-template   Cancel a recurrence from a month onwards (e.g. cancel Netflix in August)
+phai scenario installment    Add a hypothetical installment purchase (N monthly parcels)
+phai scenario promote        Apply the scenario's changes to the real plan (--dry-run first)
+phai scenario archive/delete/prune  Lifecycle: shelve, remove, or mark orphaned changes
 phai rule upsert/list/inspect Classification rule management
 phai account upsert          Create or update an account
 phai budget upsert/list      Category budget management

@@ -1732,6 +1732,43 @@ mod test_support {
         ) -> Result<Option<phai_core::ForecastTemplateRecord>> {
             Ok(None)
         }
+        async fn upsert_plan_scenarios(
+            &self,
+            _: &[phai_core::PlanScenarioRecord],
+        ) -> Result<usize> {
+            Ok(0)
+        }
+        async fn list_plan_scenarios(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<phai_core::PlanScenarioRecord>> {
+            Ok(vec![])
+        }
+        async fn get_plan_scenario(
+            &self,
+            _: &str,
+        ) -> Result<Option<phai_core::PlanScenarioRecord>> {
+            Ok(None)
+        }
+        async fn set_plan_scenario_status(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn upsert_plan_changes(&self, _: &[phai_core::PlanChangeRecord]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn list_plan_changes(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<phai_core::PlanChangeRecord>> {
+            Ok(vec![])
+        }
+        async fn delete_plan_change(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_plan_scenario(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn upcoming_forecasts(
             &self,
             _: NaiveDate,

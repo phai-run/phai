@@ -37,6 +37,7 @@ mod forecast_cmd;
 mod human_format;
 mod mcp;
 mod pulse;
+mod scenario_cmd;
 mod self_cmd;
 mod serve;
 mod serve_assets;
@@ -115,6 +116,12 @@ enum Commands {
     Forecast {
         #[command(subcommand)]
         command: ForecastCommand,
+    },
+    /// Named what-if planning scenarios: persisted deltas over the live
+    /// forecast baseline (ADR-0037).
+    Scenario {
+        #[command(subcommand)]
+        command: scenario_cmd::ScenarioCommand,
     },
     Rule {
         #[command(subcommand)]
@@ -1850,7 +1857,9 @@ enum ForecastCommand {
                       de saldo (cashflow-chart --forecast) considerando um compromisso recorrente \
                       adicional. Retorna o saldo projetado com e sem o cenário, o delta, e — quando \
                       --minimum-balance é passado — o primeiro mês em que o saldo cairia abaixo \
-                      do limite. Usado pelo agente para responder 'posso afford esse gasto?'."
+                      do limite. Usado pelo agente para responder 'posso afford esse gasto?'. \
+                      Para cenários nomeados persistidos (editar/comparar/promover), veja \
+                      `phai scenario` (ADR-0037)."
     )]
     Scenario(ForecastScenarioArgs),
 }
@@ -3258,6 +3267,7 @@ async fn run_command(command: Option<Commands>) -> Result<()> {
             ForecastCommand::Dismiss(args) => forecast_cmd::run_dismiss(args).await,
             ForecastCommand::Scenario(args) => forecast_cmd::run_scenario(args).await,
         },
+        Some(Commands::Scenario { command }) => scenario_cmd::run(command).await,
         Some(Commands::Rule { command }) => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,
             RuleCommand::List(args) => rule_list(args).await,

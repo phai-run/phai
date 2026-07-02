@@ -4,8 +4,8 @@ use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
     CheckingBalance, DailyPulseItem, DuplicateTransactionGroup, ForecastRecord,
-    ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    TransactionContextRow, TransactionRecord, UncategorizedRow,
+    ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow, PlanChangeRecord,
+    PlanScenarioRecord, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -695,6 +695,59 @@ fn forecast_template_from_bq(values: &[Option<String>]) -> Result<ForecastTempla
         metadata_json,
         actor_id: required_string(values, 18, "actor_id")?,
         idempotency_key: required_string(values, 19, "idempotency_key")?,
+        created_at: parse_datetime_or_now(Some(&created_str)),
+        updated_at: parse_datetime_or_now(Some(&updated_str)),
+    })
+}
+
+fn plan_scenario_from_bq(values: &[Option<String>]) -> Result<PlanScenarioRecord> {
+    let promoted_at = optional_string(values, 4).map(|raw| parse_datetime_or_now(Some(&raw)));
+    let metadata_json = optional_json(values, 5, "metadata_json")?
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let created_str = required_string(values, 8, "created_at")?;
+    let updated_str = required_string(values, 9, "updated_at")?;
+    Ok(PlanScenarioRecord {
+        scenario_id: required_string(values, 0, "scenario_id")?,
+        name: required_string(values, 1, "name")?,
+        description: optional_string(values, 2),
+        status: required_string(values, 3, "status")?,
+        promoted_at,
+        metadata_json,
+        actor_id: required_string(values, 6, "actor_id")?,
+        idempotency_key: required_string(values, 7, "idempotency_key")?,
+        created_at: parse_datetime_or_now(Some(&created_str)),
+        updated_at: parse_datetime_or_now(Some(&updated_str)),
+    })
+}
+
+fn plan_change_from_bq(values: &[Option<String>]) -> Result<PlanChangeRecord> {
+    let amount = optional_string(values, 7)
+        .map(|s| Decimal::from_str(&s).with_context(|| "amount"))
+        .transpose()?;
+    let months_count = optional_string(values, 8)
+        .map(|s| s.parse::<i32>().with_context(|| "months_count"))
+        .transpose()?;
+    let payload_json = optional_json(values, 13, "payload_json")?
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let created_str = required_string(values, 16, "created_at")?;
+    let updated_str = required_string(values, 17, "updated_at")?;
+    Ok(PlanChangeRecord {
+        change_id: required_string(values, 0, "change_id")?,
+        scenario_id: required_string(values, 1, "scenario_id")?,
+        kind: required_string(values, 2, "kind")?,
+        target_forecast_id: optional_string(values, 3),
+        target_template_id: optional_string(values, 4),
+        month: optional_string(values, 5),
+        effective_from: optional_string(values, 6),
+        amount,
+        months_count,
+        description: optional_string(values, 9),
+        category_id: optional_string(values, 10),
+        account_id: optional_string(values, 11),
+        status: required_string(values, 12, "status")?,
+        payload_json,
+        actor_id: required_string(values, 14, "actor_id")?,
+        idempotency_key: required_string(values, 15, "idempotency_key")?,
         created_at: parse_datetime_or_now(Some(&created_str)),
         updated_at: parse_datetime_or_now(Some(&updated_str)),
     })
@@ -1823,6 +1876,333 @@ impl FinanceStore for BigQueryStore {
         };
         let values = row_values(&row);
         Ok(Some(forecast_template_from_bq(&values)?))
+    }
+
+    async fn upsert_plan_scenarios(&self, rows: &[PlanScenarioRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("scenario_id", BqType::String),
+                ("name", BqType::String),
+                ("description", BqType::String),
+                ("status", BqType::String),
+                ("promoted_at", BqType::Timestamp),
+                ("metadata_json", BqType::Json),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("scenario_id", bv_str(&r.scenario_id)),
+                        field("name", bv_str(&r.name)),
+                        field("description", bv_opt_str(r.description.as_deref())),
+                        field("status", bv_str(&r.status)),
+                        field(
+                            "promoted_at",
+                            match r.promoted_at {
+                                Some(ts) => bv_ts(ts),
+                                None => BqValue::Null,
+                            },
+                        ),
+                        field("metadata_json", bv_json(&r.metadata_json)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                    ]
+                })
+                .collect(),
+        );
+        let sql = format!(
+            "
+            MERGE {} target
+            USING (SELECT * FROM UNNEST(@batch)) source
+            ON target.scenario_id = source.scenario_id
+            WHEN MATCHED THEN UPDATE SET
+              name = source.name,
+              description = source.description,
+              status = source.status,
+              promoted_at = source.promoted_at,
+              metadata_json = source.metadata_json,
+              actor_id = source.actor_id,
+              idempotency_key = source.idempotency_key,
+              updated_at = source.updated_at
+            WHEN NOT MATCHED THEN INSERT (
+              scenario_id, name, description, status, promoted_at,
+              metadata_json, actor_id, idempotency_key, created_at, updated_at
+            ) VALUES (
+              source.scenario_id, source.name, source.description, source.status, source.promoted_at,
+              source.metadata_json, source.actor_id, source.idempotency_key, source.created_at, source.updated_at
+            )
+            ",
+            self.qualified_table("plan_scenario")?,
+        );
+        self.run_query_with_params(&sql, &[param]).await?;
+        Ok(rows.len())
+    }
+
+    async fn list_plan_scenarios(&self, status: Option<&str>) -> Result<Vec<PlanScenarioRecord>> {
+        let mut filters = Vec::new();
+        let mut params = Vec::new();
+        if let Some(s) = status {
+            filters.push("status = @status");
+            params.push(Param::string("status", s));
+        }
+        let where_sql = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", filters.join(" AND "))
+        };
+        let sql = format!(
+            "
+            SELECT
+              scenario_id, name, description, status,
+              FORMAT_TIMESTAMP('%FT%T%Ez', promoted_at),
+              TO_JSON_STRING(metadata_json), actor_id, idempotency_key,
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            {where_sql}
+            ORDER BY created_at DESC
+            ",
+            self.qualified_table("plan_scenario")?,
+        );
+        let response = self.run_query_with_params(&sql, &params).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(plan_scenario_from_bq(&values)?);
+        }
+        Ok(items)
+    }
+
+    async fn get_plan_scenario(&self, scenario_id: &str) -> Result<Option<PlanScenarioRecord>> {
+        let sql = format!(
+            "
+            SELECT
+              scenario_id, name, description, status,
+              FORMAT_TIMESTAMP('%FT%T%Ez', promoted_at),
+              TO_JSON_STRING(metadata_json), actor_id, idempotency_key,
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            WHERE scenario_id = @sid
+            LIMIT 1
+            ",
+            self.qualified_table("plan_scenario")?,
+        );
+        let response = self
+            .run_query_with_params(&sql, &[Param::string("sid", scenario_id)])
+            .await?;
+        let Some(row) = response.rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let values = row_values(&row);
+        Ok(Some(plan_scenario_from_bq(&values)?))
+    }
+
+    async fn set_plan_scenario_status(
+        &self,
+        scenario_id: &str,
+        status: &str,
+        actor_id: &str,
+    ) -> Result<()> {
+        let sql = format!(
+            "
+            UPDATE {}
+            SET status = @status,
+                promoted_at = IF(@status = 'promovido', CURRENT_TIMESTAMP(), promoted_at),
+                actor_id = @actor_id,
+                updated_at = CURRENT_TIMESTAMP()
+            WHERE scenario_id = @sid
+            ",
+            self.qualified_table("plan_scenario")?,
+        );
+        let response = self
+            .run_query_with_params(
+                &sql,
+                &[
+                    Param::string("status", status),
+                    Param::string("actor_id", actor_id),
+                    Param::string("sid", scenario_id),
+                ],
+            )
+            .await?;
+        let affected: i64 = response
+            .num_dml_affected_rows
+            .as_deref()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        if affected == 0 {
+            anyhow::bail!("Cenário não encontrado: {scenario_id}");
+        }
+        Ok(())
+    }
+
+    async fn upsert_plan_changes(&self, rows: &[PlanChangeRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let param = batch_array_param(
+            "batch",
+            vec![
+                ("change_id", BqType::String),
+                ("scenario_id", BqType::String),
+                ("kind", BqType::String),
+                ("target_forecast_id", BqType::String),
+                ("target_template_id", BqType::String),
+                ("month", BqType::String),
+                ("effective_from", BqType::String),
+                ("amount", BqType::Numeric),
+                ("months_count", BqType::Int64),
+                ("description", BqType::String),
+                ("category_id", BqType::String),
+                ("account_id", BqType::String),
+                ("status", BqType::String),
+                ("payload_json", BqType::Json),
+                ("actor_id", BqType::String),
+                ("idempotency_key", BqType::String),
+                ("created_at", BqType::Timestamp),
+                ("updated_at", BqType::Timestamp),
+            ],
+            rows.iter()
+                .map(|r| {
+                    vec![
+                        field("change_id", bv_str(&r.change_id)),
+                        field("scenario_id", bv_str(&r.scenario_id)),
+                        field("kind", bv_str(&r.kind)),
+                        field(
+                            "target_forecast_id",
+                            bv_opt_str(r.target_forecast_id.as_deref()),
+                        ),
+                        field(
+                            "target_template_id",
+                            bv_opt_str(r.target_template_id.as_deref()),
+                        ),
+                        field("month", bv_opt_str(r.month.as_deref())),
+                        field("effective_from", bv_opt_str(r.effective_from.as_deref())),
+                        field("amount", bv_opt_dec(r.amount)),
+                        field("months_count", bv_opt_int(r.months_count.map(|c| c as i64))),
+                        field("description", bv_opt_str(r.description.as_deref())),
+                        field("category_id", bv_opt_str(r.category_id.as_deref())),
+                        field("account_id", bv_opt_str(r.account_id.as_deref())),
+                        field("status", bv_str(&r.status)),
+                        field("payload_json", bv_json(&r.payload_json)),
+                        field("actor_id", bv_str(&r.actor_id)),
+                        field("idempotency_key", bv_str(&r.idempotency_key)),
+                        field("created_at", bv_ts(r.created_at)),
+                        field("updated_at", bv_ts(r.updated_at)),
+                    ]
+                })
+                .collect(),
+        );
+        let sql = format!(
+            "
+            MERGE {} target
+            USING (SELECT * FROM UNNEST(@batch)) source
+            ON target.change_id = source.change_id
+            WHEN MATCHED THEN UPDATE SET
+              scenario_id = source.scenario_id,
+              kind = source.kind,
+              target_forecast_id = source.target_forecast_id,
+              target_template_id = source.target_template_id,
+              month = source.month,
+              effective_from = source.effective_from,
+              amount = source.amount,
+              months_count = source.months_count,
+              description = source.description,
+              category_id = source.category_id,
+              account_id = source.account_id,
+              status = source.status,
+              payload_json = source.payload_json,
+              actor_id = source.actor_id,
+              idempotency_key = source.idempotency_key,
+              updated_at = source.updated_at
+            WHEN NOT MATCHED THEN INSERT (
+              change_id, scenario_id, kind, target_forecast_id, target_template_id,
+              month, effective_from, amount, months_count, description,
+              category_id, account_id, status, payload_json, actor_id,
+              idempotency_key, created_at, updated_at
+            ) VALUES (
+              source.change_id, source.scenario_id, source.kind, source.target_forecast_id, source.target_template_id,
+              source.month, source.effective_from, source.amount, source.months_count, source.description,
+              source.category_id, source.account_id, source.status, source.payload_json, source.actor_id,
+              source.idempotency_key, source.created_at, source.updated_at
+            )
+            ",
+            self.qualified_table("plan_change")?,
+        );
+        self.run_query_with_params(&sql, &[param]).await?;
+        Ok(rows.len())
+    }
+
+    async fn list_plan_changes(
+        &self,
+        scenario_id: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<PlanChangeRecord>> {
+        let mut filters = vec!["scenario_id = @sid"];
+        let mut params = vec![Param::string("sid", scenario_id)];
+        if let Some(s) = status {
+            filters.push("status = @status");
+            params.push(Param::string("status", s));
+        }
+        let where_sql = format!("WHERE {}", filters.join(" AND "));
+        let sql = format!(
+            "
+            SELECT
+              change_id, scenario_id, kind, target_forecast_id, target_template_id,
+              month, effective_from, CAST(amount AS STRING), months_count, description,
+              category_id, account_id, status, TO_JSON_STRING(payload_json), actor_id,
+              idempotency_key,
+              FORMAT_TIMESTAMP('%FT%T%Ez', created_at),
+              FORMAT_TIMESTAMP('%FT%T%Ez', updated_at)
+            FROM {}
+            {where_sql}
+            ORDER BY created_at ASC
+            ",
+            self.qualified_table("plan_change")?,
+        );
+        let response = self.run_query_with_params(&sql, &params).await?;
+        let mut items = Vec::with_capacity(response.rows.len());
+        for row in response.rows {
+            let values = row_values(&row);
+            items.push(plan_change_from_bq(&values)?);
+        }
+        Ok(items)
+    }
+
+    async fn delete_plan_change(&self, change_id: &str) -> Result<()> {
+        let sql = format!(
+            "DELETE FROM {} WHERE change_id = @cid",
+            self.qualified_table("plan_change")?,
+        );
+        self.run_query_with_params(&sql, &[Param::string("cid", change_id)])
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_plan_scenario(&self, scenario_id: &str) -> Result<()> {
+        let sql = format!(
+            "DELETE FROM {} WHERE scenario_id = @sid",
+            self.qualified_table("plan_change")?,
+        );
+        self.run_query_with_params(&sql, &[Param::string("sid", scenario_id)])
+            .await?;
+        let sql = format!(
+            "DELETE FROM {} WHERE scenario_id = @sid",
+            self.qualified_table("plan_scenario")?,
+        );
+        self.run_query_with_params(&sql, &[Param::string("sid", scenario_id)])
+            .await?;
+        Ok(())
     }
 
     async fn upcoming_forecasts(

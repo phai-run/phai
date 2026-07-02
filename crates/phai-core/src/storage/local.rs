@@ -4,8 +4,8 @@ use crate::models::{
     parse_datetime_or_now, AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow,
     CardClosedTransactionRow, CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord,
     CheckingBalance, DailyPulseItem, DuplicateTransactionGroup, ForecastRecord,
-    ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow, RuleRecord,
-    TransactionContextRow, TransactionRecord, UncategorizedRow,
+    ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow, PlanChangeRecord,
+    PlanScenarioRecord, RuleRecord, TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -190,6 +190,62 @@ fn forecast_template_row_from_local(row: &Row<'_>) -> rusqlite::Result<ForecastT
         metadata_json,
         actor_id: row.get(18)?,
         idempotency_key: row.get(19)?,
+        created_at: parse_datetime_or_now(Some(&created_str)),
+        updated_at: parse_datetime_or_now(Some(&updated_str)),
+    })
+}
+
+fn plan_scenario_row_from_local(row: &Row<'_>) -> rusqlite::Result<PlanScenarioRecord> {
+    let promoted_at = row
+        .get::<_, Option<String>>(4)?
+        .map(|raw| parse_datetime_or_now(Some(&raw)));
+    let metadata_str: String = row.get(5)?;
+    let metadata_json: Value =
+        serde_json::from_str(&metadata_str).unwrap_or_else(|_| Value::Object(Default::default()));
+    let created_str: String = row.get(8)?;
+    let updated_str: String = row.get(9)?;
+    Ok(PlanScenarioRecord {
+        scenario_id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        status: row.get(3)?,
+        promoted_at,
+        metadata_json,
+        actor_id: row.get(6)?,
+        idempotency_key: row.get(7)?,
+        created_at: parse_datetime_or_now(Some(&created_str)),
+        updated_at: parse_datetime_or_now(Some(&updated_str)),
+    })
+}
+
+fn plan_change_row_from_local(row: &Row<'_>) -> rusqlite::Result<PlanChangeRecord> {
+    let amount = row
+        .get::<_, Option<String>>(7)?
+        .map(parse_decimal)
+        .transpose()
+        .map_err(parse_decimal_err)?;
+    let payload_str: String = row.get(13)?;
+    let payload_json: Value =
+        serde_json::from_str(&payload_str).unwrap_or_else(|_| Value::Object(Default::default()));
+    let created_str: String = row.get(16)?;
+    let updated_str: String = row.get(17)?;
+    Ok(PlanChangeRecord {
+        change_id: row.get(0)?,
+        scenario_id: row.get(1)?,
+        kind: row.get(2)?,
+        target_forecast_id: row.get(3)?,
+        target_template_id: row.get(4)?,
+        month: row.get(5)?,
+        effective_from: row.get(6)?,
+        amount,
+        months_count: row.get(8)?,
+        description: row.get(9)?,
+        category_id: row.get(10)?,
+        account_id: row.get(11)?,
+        status: row.get(12)?,
+        payload_json,
+        actor_id: row.get(14)?,
+        idempotency_key: row.get(15)?,
         created_at: parse_datetime_or_now(Some(&created_str)),
         updated_at: parse_datetime_or_now(Some(&updated_str)),
     })
@@ -779,6 +835,240 @@ impl FinanceStore for LocalStore {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
         }
+    }
+
+    async fn upsert_plan_scenarios(&self, rows: &[PlanScenarioRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "
+            INSERT INTO plan_scenario (
+              scenario_id, name, description, status, promoted_at,
+              metadata_json, actor_id, idempotency_key, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(scenario_id) DO UPDATE SET
+              name = excluded.name,
+              description = excluded.description,
+              status = excluded.status,
+              promoted_at = excluded.promoted_at,
+              metadata_json = excluded.metadata_json,
+              actor_id = excluded.actor_id,
+              idempotency_key = excluded.idempotency_key,
+              updated_at = excluded.updated_at
+            ",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                row.scenario_id,
+                row.name,
+                row.description,
+                row.status,
+                row.promoted_at.map(|d| d.to_rfc3339()),
+                row.metadata_json.to_string(),
+                row.actor_id,
+                row.idempotency_key,
+                row.created_at.to_rfc3339(),
+                row.updated_at.to_rfc3339(),
+            ])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    async fn list_plan_scenarios(&self, status: Option<&str>) -> Result<Vec<PlanScenarioRecord>> {
+        let conn = self.connection()?;
+        let mut filters: Vec<&'static str> = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        if let Some(s) = status {
+            filters.push("status = ?");
+            params.push(s.to_string());
+        }
+        let where_sql = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", filters.join(" AND "))
+        };
+        let sql = format!(
+            "
+            SELECT scenario_id, name, description, status, promoted_at,
+                   metadata_json, actor_id, idempotency_key, created_at, updated_at
+            FROM plan_scenario
+            {where_sql}
+            ORDER BY datetime(created_at) DESC
+            "
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_dyn: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_dyn.as_slice(), plan_scenario_row_from_local)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn get_plan_scenario(&self, scenario_id: &str) -> Result<Option<PlanScenarioRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "
+            SELECT scenario_id, name, description, status, promoted_at,
+                   metadata_json, actor_id, idempotency_key, created_at, updated_at
+            FROM plan_scenario
+            WHERE scenario_id = ?1
+            ",
+        )?;
+        let mut rows = stmt.query_map([scenario_id], plan_scenario_row_from_local)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn set_plan_scenario_status(
+        &self,
+        scenario_id: &str,
+        status: &str,
+        actor_id: &str,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        let now = Utc::now().to_rfc3339();
+        let promoted_at = (status == "promovido").then(|| now.clone());
+        let updated = conn.execute(
+            "
+            UPDATE plan_scenario
+            SET status = ?2,
+                promoted_at = COALESCE(?3, promoted_at),
+                actor_id = ?4,
+                updated_at = ?5
+            WHERE scenario_id = ?1
+            ",
+            params![scenario_id, status, promoted_at, actor_id, now],
+        )?;
+        if updated == 0 {
+            bail!("Cenário não encontrado: {scenario_id}");
+        }
+        Ok(())
+    }
+
+    async fn upsert_plan_changes(&self, rows: &[PlanChangeRecord]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "
+            INSERT INTO plan_change (
+              change_id, scenario_id, kind, target_forecast_id, target_template_id,
+              month, effective_from, amount, months_count, description,
+              category_id, account_id, status, payload_json, actor_id,
+              idempotency_key, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            ON CONFLICT(change_id) DO UPDATE SET
+              scenario_id = excluded.scenario_id,
+              kind = excluded.kind,
+              target_forecast_id = excluded.target_forecast_id,
+              target_template_id = excluded.target_template_id,
+              month = excluded.month,
+              effective_from = excluded.effective_from,
+              amount = excluded.amount,
+              months_count = excluded.months_count,
+              description = excluded.description,
+              category_id = excluded.category_id,
+              account_id = excluded.account_id,
+              status = excluded.status,
+              payload_json = excluded.payload_json,
+              actor_id = excluded.actor_id,
+              idempotency_key = excluded.idempotency_key,
+              updated_at = excluded.updated_at
+            ",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                row.change_id,
+                row.scenario_id,
+                row.kind,
+                row.target_forecast_id,
+                row.target_template_id,
+                row.month,
+                row.effective_from,
+                row.amount.as_ref().map(decimal_to_sql),
+                row.months_count,
+                row.description,
+                row.category_id,
+                row.account_id,
+                row.status,
+                row.payload_json.to_string(),
+                row.actor_id,
+                row.idempotency_key,
+                row.created_at.to_rfc3339(),
+                row.updated_at.to_rfc3339(),
+            ])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    async fn list_plan_changes(
+        &self,
+        scenario_id: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<PlanChangeRecord>> {
+        let conn = self.connection()?;
+        let mut filters: Vec<&'static str> = vec!["scenario_id = ?"];
+        let mut params: Vec<String> = vec![scenario_id.to_string()];
+        if let Some(s) = status {
+            filters.push("status = ?");
+            params.push(s.to_string());
+        }
+        let where_sql = format!("WHERE {}", filters.join(" AND "));
+        let sql = format!(
+            "
+            SELECT change_id, scenario_id, kind, target_forecast_id, target_template_id,
+                   month, effective_from, amount, months_count, description,
+                   category_id, account_id, status, payload_json, actor_id,
+                   idempotency_key, created_at, updated_at
+            FROM plan_change
+            {where_sql}
+            ORDER BY datetime(created_at) ASC
+            "
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_dyn: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_dyn.as_slice(), plan_change_row_from_local)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_plan_change(&self, change_id: &str) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM plan_change WHERE change_id = ?1", [change_id])?;
+        Ok(())
+    }
+
+    async fn delete_plan_scenario(&self, scenario_id: &str) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM plan_change WHERE scenario_id = ?1",
+            [scenario_id],
+        )?;
+        tx.execute(
+            "DELETE FROM plan_scenario WHERE scenario_id = ?1",
+            [scenario_id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     async fn upcoming_forecasts(
@@ -2929,6 +3219,90 @@ mod tests {
             .expect("may cashflow");
 
         assert_eq!(may.expenses, Decimal::new(16603, 2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_scenario_and_changes_round_trip() {
+        use crate::models::{PlanChangeRecord, PlanScenarioRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        let now = Utc::now();
+        let scenario = PlanScenarioRecord {
+            scenario_id: "scn-1".to_string(),
+            name: "plano de teste".to_string(),
+            description: None,
+            status: "ativo".to_string(),
+            promoted_at: None,
+            metadata_json: serde_json::json!({}),
+            actor_id: "test".to_string(),
+            idempotency_key: "scn-1".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .upsert_plan_scenarios(std::slice::from_ref(&scenario))
+            .await
+            .unwrap();
+
+        // Upsert is idempotent on the primary key.
+        store.upsert_plan_scenarios(&[scenario]).await.unwrap();
+        let listed = store.list_plan_scenarios(Some("ativo")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "plano de teste");
+
+        let change = PlanChangeRecord {
+            change_id: "chg-1".to_string(),
+            scenario_id: "scn-1".to_string(),
+            kind: "add_one_shot".to_string(),
+            target_forecast_id: None,
+            target_template_id: None,
+            month: Some("2026-09".to_string()),
+            effective_from: None,
+            amount: Some(Decimal::new(-200000, 2)),
+            months_count: None,
+            description: Some("viagem".to_string()),
+            category_id: Some("lazer".to_string()),
+            account_id: None,
+            status: "ativo".to_string(),
+            payload_json: serde_json::json!({}),
+            actor_id: "test".to_string(),
+            idempotency_key: "chg-1".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        store.upsert_plan_changes(&[change]).await.unwrap();
+
+        let changes = store.list_plan_changes("scn-1", None).await.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "add_one_shot");
+        assert_eq!(changes[0].amount, Some(Decimal::new(-200000, 2)));
+        assert_eq!(changes[0].month.as_deref(), Some("2026-09"));
+
+        // Status transition sets promoted_at only for `promovido`.
+        store
+            .set_plan_scenario_status("scn-1", "promovido", "test")
+            .await
+            .unwrap();
+        let promoted = store.get_plan_scenario("scn-1").await.unwrap().unwrap();
+        assert_eq!(promoted.status, "promovido");
+        assert!(promoted.promoted_at.is_some());
+
+        // Unknown scenario errors instead of silently no-oping.
+        assert!(store
+            .set_plan_scenario_status("scn-missing", "arquivado", "test")
+            .await
+            .is_err());
+
+        store.delete_plan_change("chg-1").await.unwrap();
+        assert!(store
+            .list_plan_changes("scn-1", None)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

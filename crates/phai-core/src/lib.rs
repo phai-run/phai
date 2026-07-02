@@ -10,6 +10,7 @@ pub mod migrations;
 pub mod models;
 pub mod pluggy;
 pub mod rules;
+pub mod scenario;
 mod split_payload;
 pub mod splits;
 pub mod storage;
@@ -22,5 +23,6 @@ pub use invite::{open as open_invite, seal as seal_invite, Invite};
 pub use models::{
     AccountRecord, AuditEvent, CardSummaryRow, CashflowRow, CategoryRecord, CheckingBalance,
     DailyPulseItem, ForecastRecord, ForecastTemplateRecord, ForecastVsActualRow, MonthlySpendRow,
-    RuleRecord, RuntimeMetadata, TransactionRecord, UncategorizedRow,
+    PlanChangeKind, PlanChangeRecord, PlanScenarioRecord, RuleRecord, RuntimeMetadata,
+    TransactionRecord, UncategorizedRow,
 };

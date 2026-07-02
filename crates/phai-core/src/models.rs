@@ -269,6 +269,96 @@ pub struct ForecastTemplateRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Named what-if planning scenario (ADR-0037). A scenario is a set of typed
+/// deltas (`PlanChangeRecord`) layered over the live forecast baseline at
+/// read time — nothing is copied, so the projection never goes stale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanScenarioRecord {
+    pub scenario_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// `ativo` | `arquivado` | `promovido`.
+    pub status: String,
+    pub promoted_at: Option<DateTime<Utc>>,
+    pub metadata_json: Value,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Typed delta inside a planning scenario (ADR-0037). Which optional fields
+/// apply depends on [`PlanChangeKind`]; the rest stay `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanChangeRecord {
+    pub change_id: String,
+    pub scenario_id: String,
+    /// See [`PlanChangeKind`].
+    pub kind: String,
+    /// Target for `adjust_amount` / `skip_forecast`.
+    pub target_forecast_id: Option<String>,
+    /// Target for `end_template`.
+    pub target_template_id: Option<String>,
+    /// `YYYY-MM` — month of an `add_one_shot` entry.
+    pub month: Option<String>,
+    /// `YYYY-MM` — first affected month for `end_template` (inclusive) and
+    /// `hypothetical_installment` (first parcel).
+    pub effective_from: Option<String>,
+    /// Signed magnitude — positive = inflow, negative = outflow. For
+    /// `adjust_amount` this is the new absolute value, not a delta.
+    pub amount: Option<Decimal>,
+    /// Number of parcels for `hypothetical_installment`.
+    pub months_count: Option<i32>,
+    pub description: Option<String>,
+    pub category_id: Option<String>,
+    pub account_id: Option<String>,
+    /// `ativo` | `orfao` | `aplicado`.
+    pub status: String,
+    pub payload_json: Value,
+    pub actor_id: String,
+    pub idempotency_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The five delta operations a scenario supports (ADR-0037).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanChangeKind {
+    /// One-shot entry in a given month.
+    AddOneShot,
+    /// Override the amount of an existing forecast instance.
+    AdjustAmount,
+    /// Drop an existing forecast instance from the projection.
+    SkipForecast,
+    /// Stop a template from generating forecasts from a month onwards.
+    EndTemplate,
+    /// A hypothetical installment chain (N monthly parcels).
+    HypotheticalInstallment,
+}
+
+impl PlanChangeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanChangeKind::AddOneShot => "add_one_shot",
+            PlanChangeKind::AdjustAmount => "adjust_amount",
+            PlanChangeKind::SkipForecast => "skip_forecast",
+            PlanChangeKind::EndTemplate => "end_template",
+            PlanChangeKind::HypotheticalInstallment => "hypothetical_installment",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "add_one_shot" => Some(PlanChangeKind::AddOneShot),
+            "adjust_amount" => Some(PlanChangeKind::AdjustAmount),
+            "skip_forecast" => Some(PlanChangeKind::SkipForecast),
+            "end_template" => Some(PlanChangeKind::EndTemplate),
+            "hypothetical_installment" => Some(PlanChangeKind::HypotheticalInstallment),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryRecord {
     pub category_id: String,

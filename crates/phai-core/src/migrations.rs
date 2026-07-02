@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 
 type Migration = (&'static str, &'static str);
 
-const SQLITE_MIGRATIONS: [Migration; 40] = [
+const SQLITE_MIGRATIONS: [Migration; 41] = [
     (
         "001_initial",
         include_str!("../../../schema/sqlite/001_initial.sql"),
@@ -165,9 +165,13 @@ const SQLITE_MIGRATIONS: [Migration; 40] = [
         "040_transaction_tier",
         include_str!("../../../schema/sqlite/040_transaction_tier.sql"),
     ),
+    (
+        "041_plan_scenario",
+        include_str!("../../../schema/sqlite/041_plan_scenario.sql"),
+    ),
 ];
 
-const BIGQUERY_MIGRATIONS: [Migration; 40] = [
+const BIGQUERY_MIGRATIONS: [Migration; 41] = [
     (
         "001_initial",
         include_str!("../../../schema/bigquery/001_initial.sql"),
@@ -328,6 +332,10 @@ const BIGQUERY_MIGRATIONS: [Migration; 40] = [
         "040_transaction_tier",
         include_str!("../../../schema/bigquery/040_transaction_tier.sql"),
     ),
+    (
+        "041_plan_scenario",
+        include_str!("../../../schema/bigquery/041_plan_scenario.sql"),
+    ),
 ];
 
 fn backend_migrations(backend: BackendKind) -> &'static [Migration] {
@@ -431,6 +439,40 @@ mod tests {
             )
             .expect("same-person-transfer row");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn plan_scenario_migration_is_registered_in_both_backends() {
+        assert!(SQLITE_MIGRATIONS
+            .iter()
+            .any(|(version, _)| *version == "041_plan_scenario"));
+        assert!(BIGQUERY_MIGRATIONS
+            .iter()
+            .any(|(version, _)| *version == "041_plan_scenario"));
+    }
+
+    #[test]
+    fn sqlite_plan_scenario_migration_creates_tables() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        let sql = SQLITE_MIGRATIONS
+            .iter()
+            .find(|(version, _)| *version == "041_plan_scenario")
+            .map(|(_, sql)| *sql)
+            .expect("041 migration");
+        conn.execute_batch(sql).expect("apply migration");
+        // Idempotent: applying twice must not fail.
+        conn.execute_batch(sql).expect("re-apply migration");
+
+        for table in ["plan_scenario", "plan_change"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("table lookup");
+            assert_eq!(count, 1, "missing table {table}");
+        }
     }
 
     #[test]

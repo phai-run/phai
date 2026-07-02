@@ -118,6 +118,22 @@ export function applySimulationToModel(
 	});
 }
 
+/**
+ * Widen a model's cash scale so extra series (e.g. the scenario saldo line,
+ * ADR-0037) fit inside the viewport without re-deriving the bars.
+ */
+export function extendScale(
+	model: ChartModel,
+	extra: ReadonlyArray<number | null>,
+): ChartModel {
+	const values = extra.filter((v): v is number => v != null);
+	if (values.length === 0) return model;
+	const cashMax = model.cashMin + model.cashSpan;
+	const nextMin = Math.min(model.cashMin, ...values);
+	const nextMax = Math.max(cashMax, ...values);
+	return { ...model, cashMin: nextMin, cashSpan: nextMax - nextMin || 1 };
+}
+
 // ── Goal solving (ADR-0031) ────────────────────────────────────────────────
 
 /** The first FUTURE month whose projected balance dips below `target`. */

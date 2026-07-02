@@ -3,8 +3,8 @@ use crate::models::{
     AccountRecord, AccountSnapshotRecord, AuditEvent, BudgetStatusRow, CardClosedTransactionRow,
     CardSummaryRow, CashflowRow, CategoryBudgetRecord, CategoryRecord, CheckingBalance,
     DailyPulseItem, DuplicateTransactionGroup, ForecastRecord, ForecastTemplateRecord,
-    ForecastVsActualRow, MonthlySpendRow, RuleRecord, TransactionContextRow, TransactionRecord,
-    UncategorizedRow,
+    ForecastVsActualRow, MonthlySpendRow, PlanChangeRecord, PlanScenarioRecord, RuleRecord,
+    TransactionContextRow, TransactionRecord, UncategorizedRow,
 };
 use crate::splits::{
     ItemPriceRow, ReceiptItemRecord, SplitCandidateRow, TransactionSplitDetail,
@@ -45,6 +45,8 @@ const ALLOWED_TABLES: &[&str] = &[
     "split_review_policies",
     "audit_log",
     "forecast",
+    "plan_scenario",
+    "plan_change",
 ];
 
 pub fn validate_table_name(table: &str) -> Result<()> {
@@ -106,6 +108,36 @@ pub trait FinanceStore {
     ) -> Result<Vec<ForecastRecord>>;
     /// Look up a single forecast by its primary key. `Ok(None)` when missing.
     async fn get_forecast(&self, forecast_id: &str) -> Result<Option<ForecastRecord>>;
+    /// Insert or update planning scenarios (ADR-0037). Merge key is the
+    /// primary key, like the other upserts.
+    async fn upsert_plan_scenarios(&self, rows: &[PlanScenarioRecord]) -> Result<usize>;
+    /// List scenarios, optionally filtered by status. Newest first.
+    async fn list_plan_scenarios(&self, status: Option<&str>) -> Result<Vec<PlanScenarioRecord>>;
+    /// Look up a single scenario by its primary key. `Ok(None)` when missing.
+    async fn get_plan_scenario(&self, scenario_id: &str) -> Result<Option<PlanScenarioRecord>>;
+    /// Update a scenario's lifecycle status (`ativo` | `arquivado` |
+    /// `promovido`). Sets `promoted_at` when the new status is `promovido`.
+    async fn set_plan_scenario_status(
+        &self,
+        scenario_id: &str,
+        status: &str,
+        actor_id: &str,
+    ) -> Result<()>;
+    /// Insert or update scenario deltas (ADR-0037).
+    async fn upsert_plan_changes(&self, rows: &[PlanChangeRecord]) -> Result<usize>;
+    /// List a scenario's deltas, optionally filtered by status. Oldest first
+    /// so promotion applies them in creation order.
+    async fn list_plan_changes(
+        &self,
+        scenario_id: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<PlanChangeRecord>>;
+    /// Hard-delete a delta — a change is a draft edit, not history; audit
+    /// trail lives in `audit_log`.
+    async fn delete_plan_change(&self, change_id: &str) -> Result<()>;
+    /// Hard-delete a scenario and all of its deltas. Scenarios are drafts;
+    /// promoted writes and the audit trail survive independently.
+    async fn delete_plan_scenario(&self, scenario_id: &str) -> Result<()>;
     /// Look up an existing, non-discarded forecast by its idempotency key.
     /// Used to dedup duplicate create requests (the web sync queue's flush guard
     /// is per-mount, so the same create can fire twice). `Ok(None)` when none.

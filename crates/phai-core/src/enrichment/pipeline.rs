@@ -541,6 +541,46 @@ mod tests {
         ) -> Result<Option<crate::models::ForecastTemplateRecord>> {
             Ok(None)
         }
+        async fn upsert_plan_scenarios(
+            &self,
+            _: &[crate::models::PlanScenarioRecord],
+        ) -> Result<usize> {
+            Ok(0)
+        }
+        async fn list_plan_scenarios(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<crate::models::PlanScenarioRecord>> {
+            Ok(vec![])
+        }
+        async fn get_plan_scenario(
+            &self,
+            _: &str,
+        ) -> Result<Option<crate::models::PlanScenarioRecord>> {
+            Ok(None)
+        }
+        async fn set_plan_scenario_status(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn upsert_plan_changes(
+            &self,
+            _: &[crate::models::PlanChangeRecord],
+        ) -> Result<usize> {
+            Ok(0)
+        }
+        async fn list_plan_changes(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<crate::models::PlanChangeRecord>> {
+            Ok(vec![])
+        }
+        async fn delete_plan_change(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_plan_scenario(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn upcoming_forecasts(
             &self,
             _: NaiveDate,

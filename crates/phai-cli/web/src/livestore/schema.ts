@@ -38,7 +38,7 @@ import {
  * Enforced by __tests__/store-version.test.ts: change the schema and the
  * sentinel fails until you bump STORE_VERSION and re-record the fingerprint.
  */
-export const STORE_VERSION = 10;
+export const STORE_VERSION = 11;
 export const STORE_ID = `phai-s${STORE_VERSION}`;
 
 // Computes current month as "YYYY-MM" for the default selectedMonth.
@@ -177,6 +177,58 @@ export const tables = {
 		},
 	}),
 
+	// Named what-if planning scenarios (ADR-0037), seeded from /api/scenarios.
+	scenarios: State.SQLite.table({
+		name: "scenarios",
+		columns: {
+			scenarioId: State.SQLite.text({ primaryKey: true }),
+			name: State.SQLite.text({ default: "" }),
+			description: State.SQLite.text({ nullable: true }),
+			status: State.SQLite.text({ default: "ativo" }),
+		},
+	}),
+
+	// A scenario's typed deltas, seeded from /api/scenario/changes.
+	scenarioChanges: State.SQLite.table({
+		name: "scenarioChanges",
+		columns: {
+			changeId: State.SQLite.text({ primaryKey: true }),
+			scenarioId: State.SQLite.text({ default: "" }),
+			kind: State.SQLite.text({ default: "" }),
+			targetForecastId: State.SQLite.text({ nullable: true }),
+			targetTemplateId: State.SQLite.text({ nullable: true }),
+			month: State.SQLite.text({ nullable: true }),
+			effectiveFrom: State.SQLite.text({ nullable: true }),
+			amount: State.SQLite.text({ nullable: true }), // decimal-as-string
+			monthsCount: State.SQLite.integer({ nullable: true }),
+			description: State.SQLite.text({ nullable: true }),
+			categoryId: State.SQLite.text({ nullable: true }),
+			accountId: State.SQLite.text({ nullable: true }),
+			status: State.SQLite.text({ default: "ativo" }),
+			// Recomputed server-side on every read: target realized/removed.
+			orphaned: State.SQLite.integer({ default: 0 }),
+		},
+	}),
+
+	// The active scenario's chart projection (same shape as chartMonths),
+	// seeded from /api/scenario/projection.
+	scenarioChartMonths: State.SQLite.table({
+		name: "scenarioChartMonths",
+		columns: {
+			label: State.SQLite.text({ primaryKey: true }),
+			scenarioId: State.SQLite.text({ default: "" }),
+			month: State.SQLite.text({ default: "" }),
+			inflows: State.SQLite.text({ default: "0" }),
+			outflows: State.SQLite.text({ default: "0" }),
+			forecastInflowsRemaining: State.SQLite.text({ default: "0" }),
+			forecastOutflowsRemaining: State.SQLite.text({ default: "0" }),
+			closingBalance: State.SQLite.text({ default: "0" }),
+			projectedClosingBalance: State.SQLite.text({ default: "0" }),
+			isFuture: State.SQLite.integer({ default: 0 }),
+			ordinal: State.SQLite.integer({ default: 0 }),
+		},
+	}),
+
 	// Session-local UI state (month selection, filters, chart compact state).
 	ui: State.SQLite.clientDocument({
 		name: "ui",
@@ -199,6 +251,8 @@ export const tables = {
 			forecastStatusFilter: Schema.NullOr(Schema.String),
 			// Controllability tier filter (ADR-0030): "locked"|"cancellable"|"variable".
 			tierFilter: Schema.NullOr(Schema.String),
+			// Active planning scenario (ADR-0037): null = baseline (no overlay).
+			activeScenarioId: Schema.NullOr(Schema.String),
 		}),
 		default: {
 			id: SessionIdSymbol,
@@ -215,6 +269,7 @@ export const tables = {
 				uncategorizedOnly: false,
 				forecastStatusFilter: null,
 				tierFilter: null,
+				activeScenarioId: null,
 			},
 		},
 	}),
@@ -277,6 +332,44 @@ const ForecastRow = Schema.Struct({
 	metadataJson: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
 });
 
+const ScenarioRow = Schema.Struct({
+	scenarioId: Schema.String,
+	name: Schema.String,
+	description: Schema.NullOr(Schema.String),
+	status: Schema.String,
+});
+
+const ScenarioChangeRow = Schema.Struct({
+	changeId: Schema.String,
+	scenarioId: Schema.String,
+	kind: Schema.String,
+	targetForecastId: Schema.NullOr(Schema.String),
+	targetTemplateId: Schema.NullOr(Schema.String),
+	month: Schema.NullOr(Schema.String),
+	effectiveFrom: Schema.NullOr(Schema.String),
+	amount: Schema.NullOr(Schema.String),
+	monthsCount: Schema.NullOr(Schema.Number),
+	description: Schema.NullOr(Schema.String),
+	categoryId: Schema.NullOr(Schema.String),
+	accountId: Schema.NullOr(Schema.String),
+	status: Schema.String,
+	orphaned: Schema.Number,
+});
+
+const ScenarioChartMonth = Schema.Struct({
+	label: Schema.String,
+	scenarioId: Schema.String,
+	month: Schema.String,
+	inflows: Schema.String,
+	outflows: Schema.String,
+	forecastInflowsRemaining: Schema.String,
+	forecastOutflowsRemaining: Schema.String,
+	closingBalance: Schema.String,
+	projectedClosingBalance: Schema.String,
+	isFuture: Schema.Number,
+	ordinal: Schema.Number,
+});
+
 const ForecastTemplateRow = Schema.Struct({
 	templateId: Schema.String,
 	description: Schema.String,
@@ -324,6 +417,24 @@ export const events = {
 	forecastTemplatesSeeded: Events.synced({
 		name: "v1.ForecastTemplatesSeeded",
 		schema: Schema.Struct({ rows: Schema.Array(ForecastTemplateRow) }),
+	}),
+	scenariosSeeded: Events.synced({
+		name: "v1.ScenariosSeeded",
+		schema: Schema.Struct({ rows: Schema.Array(ScenarioRow) }),
+	}),
+	scenarioChangesSeeded: Events.synced({
+		name: "v1.ScenarioChangesSeeded",
+		schema: Schema.Struct({
+			scenarioId: Schema.String,
+			rows: Schema.Array(ScenarioChangeRow),
+		}),
+	}),
+	scenarioChartSeeded: Events.synced({
+		name: "v1.ScenarioChartSeeded",
+		schema: Schema.Struct({
+			scenarioId: Schema.String,
+			months: Schema.Array(ScenarioChartMonth),
+		}),
 	}),
 	bridgeIdentityChanged: Events.synced({
 		name: "v1.BridgeIdentityChanged",
@@ -424,6 +535,60 @@ export const events = {
 			}),
 		}),
 	}),
+	// ── Planning-scenario writes (ADR-0037). Ids are generated client-side
+	// (`scn-…`/`chg-…` + UUID) and honoured by the bridge, so retries are
+	// idempotent without an ack-remap round-trip. ─────────────────────────
+	scenarioCreated: Events.synced({
+		name: "v1.ScenarioCreated",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			scenarioId: Schema.String,
+			name: Schema.String,
+			description: Schema.NullOr(Schema.String),
+			createdAt: Schema.Number,
+		}),
+	}),
+	scenarioChangeAdded: Events.synced({
+		name: "v1.ScenarioChangeAdded",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			row: ScenarioChangeRow,
+			addedAt: Schema.Number,
+		}),
+	}),
+	scenarioChangeRemoved: Events.synced({
+		name: "v1.ScenarioChangeRemoved",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			changeId: Schema.String,
+			scenarioId: Schema.String,
+			removedAt: Schema.Number,
+		}),
+	}),
+	scenarioArchived: Events.synced({
+		name: "v1.ScenarioArchived",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			scenarioId: Schema.String,
+			archivedAt: Schema.Number,
+		}),
+	}),
+	scenarioDeleted: Events.synced({
+		name: "v1.ScenarioDeleted",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			scenarioId: Schema.String,
+			deletedAt: Schema.Number,
+		}),
+	}),
+	scenarioPromoted: Events.synced({
+		name: "v1.ScenarioPromoted",
+		schema: Schema.Struct({
+			writeId: Schema.String,
+			scenarioId: Schema.String,
+			promotedAt: Schema.Number,
+		}),
+	}),
 	writeAcked: Events.synced({
 		name: "v1.WriteAcked",
 		schema: Schema.Struct({ writeId: Schema.String }),
@@ -477,6 +642,18 @@ const materializers = State.SQLite.materializers(events, {
 		tables.forecastTemplates.delete(),
 		...rows.map((r) => tables.forecastTemplates.insert(r)),
 	],
+	"v1.ScenariosSeeded": ({ rows }) => [
+		tables.scenarios.delete(),
+		...rows.map((r) => tables.scenarios.insert(r)),
+	],
+	"v1.ScenarioChangesSeeded": ({ scenarioId, rows }) => [
+		tables.scenarioChanges.delete().where({ scenarioId }),
+		...rows.map((r) => tables.scenarioChanges.insert(r)),
+	],
+	"v1.ScenarioChartSeeded": ({ scenarioId, months }) => [
+		tables.scenarioChartMonths.delete(),
+		...months.map((m) => tables.scenarioChartMonths.insert({ ...m, scenarioId })),
+	],
 	"v1.BridgeIdentityChanged": () => [
 		tables.transactions.delete(),
 		tables.categories.delete(),
@@ -484,6 +661,9 @@ const materializers = State.SQLite.materializers(events, {
 		tables.chartMonths.delete(),
 		tables.forecasts.delete(),
 		tables.forecastTemplates.delete(),
+		tables.scenarios.delete(),
+		tables.scenarioChanges.delete(),
+		tables.scenarioChartMonths.delete(),
 		tables.pendingWrites.delete(),
 		tables.reviewOverlay.delete(),
 		tables.forecastOverlay.delete(),
@@ -678,6 +858,82 @@ const materializers = State.SQLite.materializers(events, {
 		tables.forecastOverlay
 			.update({ forecastId: serverForecastId })
 			.where({ forecastId: localForecastId }),
+	],
+	"v1.ScenarioCreated": ({ writeId, scenarioId, name, description, createdAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "scenarioCreate",
+			payload: { scenarioId, name, description },
+			createdAt,
+			attempts: 0,
+		}),
+		tables.scenarios
+			.insert({ scenarioId, name, description, status: "ativo" })
+			.onConflict("scenarioId", "replace"),
+	],
+	"v1.ScenarioChangeAdded": ({ writeId, row, addedAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "scenarioChange",
+			payload: {
+				changeId: row.changeId,
+				scenarioId: row.scenarioId,
+				kind: row.kind,
+				targetForecastId: row.targetForecastId,
+				targetTemplateId: row.targetTemplateId,
+				month: row.month,
+				effectiveFrom: row.effectiveFrom,
+				amount: row.amount,
+				monthsCount: row.monthsCount,
+				description: row.description,
+				categoryId: row.categoryId,
+				accountId: row.accountId,
+			},
+			createdAt: addedAt,
+			attempts: 0,
+		}),
+		tables.scenarioChanges.insert(row).onConflict("changeId", "replace"),
+	],
+	"v1.ScenarioChangeRemoved": ({ writeId, changeId, scenarioId, removedAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "scenarioChangeDelete",
+			payload: { changeId, scenarioId },
+			createdAt: removedAt,
+			attempts: 0,
+		}),
+		tables.scenarioChanges.delete().where({ changeId }),
+	],
+	"v1.ScenarioArchived": ({ writeId, scenarioId, archivedAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "scenarioArchive",
+			payload: { scenarioId },
+			createdAt: archivedAt,
+			attempts: 0,
+		}),
+		tables.scenarios.update({ status: "arquivado" }).where({ scenarioId }),
+	],
+	"v1.ScenarioDeleted": ({ writeId, scenarioId, deletedAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "scenarioDelete",
+			payload: { scenarioId },
+			createdAt: deletedAt,
+			attempts: 0,
+		}),
+		tables.scenarios.delete().where({ scenarioId }),
+		tables.scenarioChanges.delete().where({ scenarioId }),
+	],
+	"v1.ScenarioPromoted": ({ writeId, scenarioId, promotedAt }) => [
+		tables.pendingWrites.insert({
+			writeId,
+			type: "scenarioPromote",
+			payload: { scenarioId },
+			createdAt: promotedAt,
+			attempts: 0,
+		}),
+		tables.scenarios.update({ status: "promovido" }).where({ scenarioId }),
 	],
 	"v1.WriteAcked": ({ writeId }) =>
 		tables.pendingWrites.delete().where({ writeId }),

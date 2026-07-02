@@ -159,6 +159,54 @@ export interface EnvelopeUpsert {
 	category_id: string;
 }
 
+/** Planning scenario (ADR-0037), snake_case from the bridge. */
+export interface PlanScenarioRecord {
+	scenario_id: string;
+	name: string;
+	description: string | null;
+	status: string;
+}
+
+/** A scenario's typed delta, snake_case from the bridge. */
+export interface PlanChangeRecord {
+	change_id: string;
+	scenario_id: string;
+	kind: string;
+	target_forecast_id: string | null;
+	target_template_id: string | null;
+	month: string | null;
+	effective_from: string | null;
+	amount: string | null;
+	months_count: number | null;
+	description: string | null;
+	category_id: string | null;
+	account_id: string | null;
+	status: string;
+}
+
+/** Body of POST /api/scenario/change (camelCase; ids client-generated). */
+export interface NewScenarioChange {
+	changeId: string;
+	scenarioId: string;
+	kind: string;
+	targetForecastId?: string | null;
+	targetTemplateId?: string | null;
+	month?: string | null;
+	effectiveFrom?: string | null;
+	amount?: string | null;
+	monthsCount?: number | null;
+	description?: string | null;
+	categoryId?: string | null;
+	accountId?: string | null;
+}
+
+export interface PromotionSummary {
+	applied: { change_id: string; kind: string; description: string }[];
+	skipped_orphans: string[];
+	forecasts_written: number;
+	templates_written: number;
+}
+
 export interface BridgeIdentity {
 	identity: string;
 	backend: string;
@@ -277,6 +325,57 @@ export const api = {
 
 	dismissForecastTemplate: (templateId: string): Promise<unknown> =>
 		postJson("/api/forecast-template/dismiss", { template_id: templateId }),
+
+	// ── Planning scenarios (ADR-0037) ───────────────────────────────────────
+	scenarios: (status?: string | null): Promise<{ scenarios: PlanScenarioRecord[] }> =>
+		fetch(`/api/scenarios?${trimParams({ status })}`).then((r) =>
+			json<{ scenarios: PlanScenarioRecord[] }>(r),
+		),
+
+	createScenario: (body: {
+		scenarioId: string;
+		name: string;
+		description?: string | null;
+	}): Promise<{ scenarioId: string }> =>
+		postJson<{ scenarioId: string }>("/api/scenario", body),
+
+	archiveScenario: (scenarioId: string): Promise<unknown> =>
+		postJson("/api/scenario/archive", { scenarioId }),
+
+	deleteScenario: (scenarioId: string): Promise<unknown> =>
+		postJson("/api/scenario/delete", { scenarioId }),
+
+	scenarioChanges: (
+		scenarioId: string,
+	): Promise<{ changes: PlanChangeRecord[]; orphaned: string[] }> =>
+		fetch(
+			`/api/scenario/changes?${trimParams({ scenario_id: scenarioId })}`,
+		).then((r) => json<{ changes: PlanChangeRecord[]; orphaned: string[] }>(r)),
+
+	addScenarioChange: (body: NewScenarioChange): Promise<{ changeId: string }> =>
+		postJson<{ changeId: string }>("/api/scenario/change", body),
+
+	deleteScenarioChange: (
+		changeId: string,
+		scenarioId: string,
+	): Promise<unknown> =>
+		postJson("/api/scenario/change/delete", { changeId, scenarioId }),
+
+	scenarioProjection: (
+		scenarioId: string,
+		monthsBack: number,
+		monthsAhead: number,
+	): Promise<ChartData> =>
+		fetch(
+			`/api/scenario/projection?${trimParams({
+				scenario_id: scenarioId,
+				months_back: String(monthsBack),
+				months_ahead: String(monthsAhead),
+			})}`,
+		).then((r) => json<ChartData>(r)),
+
+	promoteScenario: (scenarioId: string): Promise<PromotionSummary> =>
+		postJson<PromotionSummary>("/api/scenario/promote", { scenarioId }),
 
 	version: (): Promise<VersionStatus> =>
 		fetch("/api/version").then((r) => json<VersionStatus>(r)),
