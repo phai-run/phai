@@ -378,3 +378,37 @@ describe("buildModel edge cases", () => {
 		expect(m.expMaxBar).toBeGreaterThan(0);
 	});
 });
+
+// ── extendScale (scenario saldo overlay, ADR-0037) ────────────────────────
+
+import { extendScale } from "../chart/model";
+
+describe("extendScale", () => {
+	it("widens the cash scale to fit scenario balances outside the range", () => {
+		const model = buildModel([
+			makeMonth({ month: "2026-08", closingBalance: "1000", isFuture: 0 }),
+			makeMonth({
+				month: "2026-09",
+				projectedClosingBalance: "1200",
+				isFuture: 1,
+			}),
+		]);
+		const cashMaxBefore = model.cashMin + model.cashSpan;
+		// Scenario dips far below and spikes above the baseline range.
+		const extended = extendScale(model, [null, -5000]);
+		expect(extended.cashMin).toBeLessThanOrEqual(-5000);
+		expect(extended.cashMin + extended.cashSpan).toBeGreaterThanOrEqual(
+			cashMaxBefore,
+		);
+		// Bars are untouched — only the scale moves.
+		expect(extended.balances).toEqual(model.balances);
+	});
+
+	it("is a no-op for empty or all-null overlays", () => {
+		const model = buildModel([
+			makeMonth({ month: "2026-08", closingBalance: "1000", isFuture: 0 }),
+		]);
+		expect(extendScale(model, [])).toEqual(model);
+		expect(extendScale(model, [null])).toEqual(model);
+	});
+});

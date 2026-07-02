@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useStore } from "@livestore/react";
-import { events } from "../../livestore/schema";
+import { useClientDocument, useStore } from "@livestore/react";
+import { events, tables } from "../../livestore/schema";
 import { amountColor, formatMoney } from "../../lib/format";
 import { useDnd } from "../../lib/dnd";
 import { ToggleBtn } from "./MonthFilters";
@@ -23,6 +23,10 @@ export const ForecastSection = ({
 	onMoveForecast: (forecastId: string, targetMonth: string) => void;
 }) => {
 	const { store } = useStore();
+	const [ui] = useClientDocument(tables.ui);
+	// Active planning scenario (ADR-0037): while set, edits on future months
+	// become scenario deltas instead of real forecast writes.
+	const activeScenarioId = ui.activeScenarioId ?? null;
 	const [open, setOpen] = useState(false);
 	const [addOpen, setAddOpen] = useState(false);
 	const [description, setDescription] = useState("");
@@ -31,6 +35,7 @@ export const ForecastSection = ({
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const [movingId, setMovingId] = useState<string | null>(null);
 	const [pickerOpen, setPickerOpen] = useState(false);
+	const [adjustValue, setAdjustValue] = useState("");
 	const { startDrag, dragging } = useDnd();
 
 	// Allowed target months: current month + any future months (no past).
@@ -104,23 +109,88 @@ export const ForecastSection = ({
 		const desc = description.trim();
 		const mag = amount.replace(/^-/, "").trim();
 		if (!desc || !mag) return;
-		store.commit(
-			events.forecastCreated({
-				writeId: crypto.randomUUID(),
-				description: desc,
-				amount: outflow ? `-${mag}` : mag,
-				dueDate: `${month}-01`,
-				categoryId: null,
-				accountId: null,
-				uiRole: null,
-				createdAt: Date.now(),
-			}),
-		);
+		const signed = outflow ? `-${mag}` : mag;
+		if (activeScenarioId) {
+			// Scenario mode: a new entry is an add_one_shot delta, not a real
+			// forecast — it only lands when the scenario is promoted.
+			store.commit(
+				events.scenarioChangeAdded({
+					writeId: crypto.randomUUID(),
+					row: {
+						changeId: `chg-${crypto.randomUUID()}`,
+						scenarioId: activeScenarioId,
+						kind: "add_one_shot",
+						targetForecastId: null,
+						targetTemplateId: null,
+						month,
+						effectiveFrom: null,
+						amount: signed,
+						monthsCount: null,
+						description: desc,
+						categoryId: null,
+						accountId: null,
+						status: "ativo",
+						orphaned: 0,
+					},
+					addedAt: Date.now(),
+				}),
+			);
+		} else {
+			store.commit(
+				events.forecastCreated({
+					writeId: crypto.randomUUID(),
+					description: desc,
+					amount: signed,
+					dueDate: `${month}-01`,
+					categoryId: null,
+					accountId: null,
+					uiRole: null,
+					createdAt: Date.now(),
+				}),
+			);
+		}
 		setDescription("");
 		setAmount("");
 		setAddOpen(false);
 		onAdded();
-	}, [description, amount, outflow, month, store, onAdded]);
+	}, [description, amount, outflow, month, store, onAdded, activeScenarioId]);
+
+	// Scenario deltas targeting the selected forecast (ADR-0037).
+	const commitScenarioChange = useCallback(
+		(
+			kind: "adjust_amount" | "skip_forecast" | "end_template",
+			forecast: ForecastView,
+			newAmount?: string,
+		) => {
+			if (!activeScenarioId) return;
+			store.commit(
+				events.scenarioChangeAdded({
+					writeId: crypto.randomUUID(),
+					row: {
+						changeId: `chg-${crypto.randomUUID()}`,
+						scenarioId: activeScenarioId,
+						kind,
+						targetForecastId: kind === "end_template" ? null : forecast.forecastId,
+						targetTemplateId: kind === "end_template" ? forecast.templateId : null,
+						month: null,
+						effectiveFrom: kind === "end_template" ? month : null,
+						amount: kind === "adjust_amount" ? (newAmount ?? null) : null,
+						monthsCount: null,
+						description: forecast.description,
+						categoryId: forecast.categoryId ?? null,
+						accountId: forecast.accountId ?? null,
+						status: "ativo",
+						orphaned: 0,
+					},
+					addedAt: Date.now(),
+				}),
+			);
+			setSelectedId(null);
+			setAdjustValue("");
+			onAdded();
+		},
+		[activeScenarioId, month, store, onAdded],
+	);
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
@@ -287,6 +357,91 @@ export const ForecastSection = ({
 						</div>
 					</motion.div>
 				)}
+			</AnimatePresence>
+
+			{/* Scenario actions on the selected forecast (ADR-0037) */}
+			<AnimatePresence>
+				{activeScenarioId &&
+					selectedId &&
+					(() => {
+						const f = forecasts.find((x) => x.forecastId === selectedId);
+						if (!f) return null;
+						return (
+							<motion.div
+								initial={{ opacity: 0, height: 0 }}
+								animate={{ opacity: 1, height: "auto" }}
+								exit={{ opacity: 0, height: 0 }}
+								style={{ overflow: "hidden", marginTop: 8 }}
+							>
+								<div
+									style={{
+										display: "flex",
+										gap: 6,
+										flexWrap: "wrap",
+										alignItems: "center",
+										padding: 8,
+										border: "1px dashed var(--cyan)",
+										borderRadius: "var(--radius-sm)",
+									}}
+								>
+									<span
+										className="mono"
+										style={{ fontSize: 11, color: "var(--cyan)" }}
+									>
+										🧪 no cenário:
+									</span>
+									<button
+										onClick={() => commitScenarioChange("skip_forecast", f)}
+										className="mono"
+										style={pillStyle}
+									>
+										pular este
+									</button>
+									<span style={{ display: "inline-flex", gap: 4 }}>
+										<input
+											inputMode="decimal"
+											placeholder="novo valor"
+											value={adjustValue}
+											onChange={(e) => setAdjustValue(e.target.value)}
+											onKeyDown={(e) => {
+												if (e.key !== "Enter") return;
+												const mag = adjustValue.replace(/^-/, "").trim();
+												if (mag)
+													commitScenarioChange("adjust_amount", f, `-${mag}`);
+											}}
+											className="mono"
+											style={{ ...inputStyle, width: 90 }}
+										/>
+										<button
+											onClick={() => {
+												const mag = adjustValue.replace(/^-/, "").trim();
+												if (mag)
+													commitScenarioChange("adjust_amount", f, `-${mag}`);
+											}}
+											disabled={!adjustValue.trim()}
+											className="mono"
+											style={{
+												...pillStyle,
+												opacity: adjustValue.trim() ? 1 : 0.4,
+											}}
+										>
+											ajustar
+										</button>
+									</span>
+									{f.templateId && (
+										<button
+											onClick={() => commitScenarioChange("end_template", f)}
+											className="mono"
+											style={pillStyle}
+											title="a recorrência para de gerar previsões a partir deste mês"
+										>
+											encerrar desde {month}
+										</button>
+									)}
+								</div>
+							</motion.div>
+						);
+					})()}
 			</AnimatePresence>
 
 			{/* Add forecast inline form */}
