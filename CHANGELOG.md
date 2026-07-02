@@ -1,5 +1,14 @@
 # Changelog
 
+## [5.32.0](https://github.com/phai-run/phai/compare/v5.31.0...v5.32.0) (2026-07-02)
+
+
+### Features
+
+* **serve:** baseline discard and end-template endpoints for the unified sheet ([0905de4](https://github.com/phai-run/phai/commit/0905de4581e5862005a703d533fb92c70c583fda))
+* **serve:** complete unified sheet baseline and scenario flows ([75b4350](https://github.com/phai-run/phai/commit/75b435012d24abb9e1f4b1215511242b4376f358))
+* **web:** finish unified sheet scenario interactions ([c695500](https://github.com/phai-run/phai/commit/c6955001c0950de2d5d90435b5b0338c78cd3bc9))
+
 ## [5.31.0](https://github.com/phai-run/phai/compare/v5.30.0...v5.31.0) (2026-07-02)
 
 
