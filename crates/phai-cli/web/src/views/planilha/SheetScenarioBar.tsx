@@ -18,8 +18,7 @@ interface ScenarioView {
  * Compact scenario pills for the unified sheet header (design H): baseline |
  * active scenarios | "+ novo" (inline input). While a scenario is active, a
  * thin teal strip shows "N mudanças · Δ {soma}" plus promote (one extra
- * confirmation click) and discard. Same events as the ScenarioPanel — this is
- * just its sheet-sized rendering.
+ * confirmation click) and discard.
  */
 export const SheetScenarioBar = ({
 	activeScenarioId,

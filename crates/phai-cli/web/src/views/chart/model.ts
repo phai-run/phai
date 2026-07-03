@@ -75,26 +75,15 @@ export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
 	});
 }
 
-/** A live war-plan goal simulation projected onto the cash chart. */
-export interface ChartSimulation {
-	/** First month ("YYYY-MM") the monthly saving applies to. */
+interface SimulationParams {
 	fromMonth: string;
-	/** Saving vs. the baseline projection (negative = goals above it). */
 	monthlySaving: number;
 }
 
-/**
- * Overlay a war-plan goal simulation on a chart model: from `fromMonth` on,
- * each month's forecast outflow shrinks by the monthly saving (a positive
- * saving never cuts below zero — realized spend is untouchable), and every
- * FUTURE month's balance shifts by the savings accumulated up to it. Realized
- * balances (past + current month) stay as observed. Scale is recomputed so
- * the overlay renders like any other model.
- */
-export function applySimulationToModel(
+function applySimulationToModel(
 	model: ChartModel,
 	months: ReadonlyArray<ChartMonthView>,
-	sim: ChartSimulation,
+	sim: SimulationParams,
 ): ChartModel {
 	const fcOuts = [...model.fcOuts];
 	const balances = [...model.balances];
@@ -214,10 +203,10 @@ export interface GoalSolution {
 }
 
 /**
- * Inverse of {@link applySimulationToModel}: find the smallest constant monthly
- * saving (a forecast-outflow cut from `fromMonth` on) that keeps every future
- * month's balance at or above `target`. Binary-searches over the real clamped
- * simulation, so the answer respects "you can't cut more than you spend".
+ * Find the smallest constant monthly saving (a forecast-outflow cut from
+ * `fromMonth` on) that keeps every future month's balance at or above `target`.
+ * Binary-searches over a clamped simulation, so the answer respects "you can't
+ * cut more than you spend".
  * Returns `achievable: false` (with the maximal cut) when the goal is out of
  * reach by cutting forecast alone.
  */

@@ -4,7 +4,6 @@ import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView, ChartMode } from "./types";
 import {
-	applySimulationToModel,
 	BASELINE,
 	H,
 	PAD,
@@ -21,7 +20,6 @@ import {
 	scenarioSliceExtents,
 	solveRequiredSaving,
 	type ChartModel,
-	type ChartSimulation,
 	type ScenarioBarDelta,
 } from "./chart/model";
 import { ChartLegend } from "./chart/ChartLegend";
@@ -68,11 +66,9 @@ export const PlanningChart = ({
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
-	simulation,
 	scenarioBalances = null,
 	scenarioMonths = null,
 	scenarioItemsByMonth = null,
-	compact = false,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
@@ -82,8 +78,6 @@ export const PlanningChart = ({
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
-	/** Live war-plan goal overlay: shifts forecast outflows + future balances. */
-	simulation?: ChartSimulation | null;
 	/**
 	 * Active planning scenario's projected saldo per month (aligned with
 	 * `months`; null = no data for that month). Renders as a second dashed
@@ -94,8 +88,6 @@ export const PlanningChart = ({
 	scenarioMonths?: ReadonlyArray<ChartMonthView> | null;
 	/** month → the scenario's changes hitting it, for the hover card. */
 	scenarioItemsByMonth?: ReadonlyMap<string, ScenarioMonthItem[]> | null;
-	/** Planning mode: shrink the chart so it can stay pinned above the sliders. */
-	compact?: boolean;
 }) => {
 	// Extra bar flow the active scenario adds per future month (teal slices).
 	const scenarioDeltas = useMemo(
@@ -107,16 +99,12 @@ export const PlanningChart = ({
 	);
 	const model = useMemo(() => {
 		const base = buildModel(months);
-		const simulated =
-			simulation && simulation.monthlySaving !== 0
-				? applySimulationToModel(base, months, simulation)
-				: base;
 		const extras = [
 			...(scenarioBalances ?? []),
 			...(scenarioDeltas ? scenarioSliceExtents(months, scenarioDeltas) : []),
 		];
-		return extras.length > 0 ? extendScale(simulated, extras) : simulated;
-	}, [months, simulation, scenarioBalances, scenarioDeltas]);
+		return extras.length > 0 ? extendScale(base, extras) : base;
+	}, [months, scenarioBalances, scenarioDeltas]);
 	const [mode, setMode] = useState<ChartMode>("caixa");
 
 	const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -171,7 +159,6 @@ export const PlanningChart = ({
 				scenarioBalances={scenarioBalances}
 				scenarioDeltas={scenarioDeltas}
 				scenarioItemsByMonth={scenarioItemsByMonth}
-				compact={compact}
 			/>
 		</div>
 	);
@@ -259,7 +246,6 @@ const FullChart = ({
 	scenarioBalances,
 	scenarioDeltas,
 	scenarioItemsByMonth,
-	compact,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	model: ChartModel;
@@ -273,7 +259,6 @@ const FullChart = ({
 	scenarioBalances?: ReadonlyArray<number | null> | null;
 	scenarioDeltas: ReadonlyMap<string, ScenarioBarDelta> | null;
 	scenarioItemsByMonth?: ReadonlyMap<string, ScenarioMonthItem[]> | null;
-	compact: boolean;
 }) => {
 	const [hover, setHover] = useState<number | null>(null);
 	// Per-segment hover in the expenses-bars mode: which (month, category) slice.
@@ -461,16 +446,12 @@ const FullChart = ({
 					viewBox={`0 0 ${W} ${H}`}
 					width="100%"
 					role="img"
-					preserveAspectRatio={compact ? "xMidYMid meet" : undefined}
 					aria-label={
 						mode === "caixa"
 							? "monthly cash chart — income and expense bars, balance line"
 							: "monthly expenses chart"
 					}
-					style={{
-						display: "block",
-						...(compact ? { maxHeight: "32vh", margin: "0 auto" } : {}),
-					}}
+					style={{ display: "block" }}
 				>
 					<defs>
 						{/* Forecast expense — lighter solid (no hatch) */}
@@ -884,13 +865,11 @@ const FullChart = ({
 			</div>
 
 			{/* Legend */}
-			{!compact && (
-				<ChartLegend
-					mode={mode}
-					months={months}
-					scenarioActive={scenarioBalances != null}
-				/>
-			)}
+			<ChartLegend
+				mode={mode}
+				months={months}
+				scenarioActive={scenarioBalances != null}
+			/>
 		</div>
 	);
 };

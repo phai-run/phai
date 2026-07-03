@@ -11,7 +11,6 @@ import {
 	useScenariosSeed,
 	useTransactionsSeed,
 } from "../bridge/sync";
-import { ScenarioPanel } from "./scenario/ScenarioPanel";
 
 import {
 	buildOverlayMap,
@@ -33,7 +32,7 @@ import { CardsPanel } from "./CardsPanel";
 import { CashDecisionPanel, type CashWhen } from "./cash/CashDecisionPanel";
 import { AccountBalances } from "./cash/AccountBalances";
 import { PlanilhaView } from "./planilha/PlanilhaView";
-import type { ChartSimulation } from "./chart/model";
+import { numeric } from "../lib/format";
 import type { ChartMonthView, ForecastView } from "./types";
 
 const DETAIL_MODES = [
@@ -254,17 +253,6 @@ export const Dashboard = () => {
 		);
 	};
 
-	// Live war-plan goal simulation: lifted plain React state (NOT the ui
-	// clientDocument — slider drags would commit an event per pixel). The
-	// panel clears it on unmount, so it never outlives the plano mode.
-	const [warSim, setWarSim] = useState<ChartSimulation | null>(null);
-
-	// A scenario overlay and the war-plan live simulation don't compose (each
-	// shifts the same projected saldo); the scenario wins while active.
-	useEffect(() => {
-		if (activeScenarioId) setWarSim(null);
-	}, [activeScenarioId]);
-
 	// The active scenario's chart projection rows (null = baseline).
 	const scenarioMonths = useMemo(
 		() =>
@@ -298,15 +286,21 @@ export const Dashboard = () => {
 		return scenarioChangesByMonth(changes, forecasts);
 	}, [activeScenarioId, scenarioChangeRows, forecasts]);
 
-	// Months a confirmed goal writes envelopes for: the selected month through
-	// December, never a past month.
-	const persistMonths = useMemo(
-		() =>
-			months
-				.filter((m) => m.month >= selected && m.month >= currentMonth)
-				.map((m) => m.month),
-		[months, selected, currentMonth],
-	);
+	// Selected-month projected-saldo delta of the active scenario vs. the
+	// baseline (null when the scenario projection isn't seeded for it) — the
+	// number the sheet's scenario strip shows next to the change count.
+	const scenarioDelta = useMemo(() => {
+		if (!scenarioBalances) return null;
+		const idx = months.findIndex((m) => m.month === selected);
+		if (idx === -1) return null;
+		const scenario = scenarioBalances[idx];
+		if (scenario == null) return null;
+		const m = months[idx];
+		const baseline = numeric(
+			m.isFuture ? m.projectedClosingBalance : m.closingBalance,
+		);
+		return scenario - baseline;
+	}, [scenarioBalances, months, selected]);
 
 	// Compact strip visibility. The strip is position:fixed, so toggling it
 	// never changes document flow — the old sticky variant swapped the tall
@@ -409,8 +403,6 @@ export const Dashboard = () => {
 						selectedMonth={selected}
 						onSelectMonth={(m) => setUi({ selectedMonth: m })}
 						onDropForecast={moveForecast}
-						compact={false}
-						simulation={warSim}
 						scenarioBalances={scenarioBalances}
 						scenarioMonths={scenarioMonths}
 						scenarioItemsByMonth={scenarioItemsByMonth}
@@ -419,25 +411,7 @@ export const Dashboard = () => {
 				)}
 			</div>
 
-			{/* ── Planning scenarios (ADR-0037): picker + change list + promote ── */}
-			{!loading && months.length > 0 && (
-				<div
-					style={{
-						maxWidth: "var(--container)",
-						margin: "0 auto",
-						padding: "0 clamp(24px,3vw,32px)",
-					}}
-				>
-					<ScenarioPanel
-						selectedMonth={selected}
-						activeScenarioId={activeScenarioId}
-						onActivate={(id) => setUi({ activeScenarioId: id })}
-						onMutated={() => setScenarioSeedNonce((n) => n + 1)}
-					/>
-				</div>
-			)}
-
-			{/* ── Month detail (sheet | categories | planning | cards) ── */}
+			{/* ── Month detail (sheet | categories | cards) ── */}
 			<div
 				style={{
 					maxWidth: "var(--container)",
@@ -534,15 +508,10 @@ export const Dashboard = () => {
 				) : (ui.detailMode || "planilha") === "planilha" ? (
 					<PlanilhaView
 						month={selected}
-						forecasts={forecastsByMonth.get(selected) ?? []}
-						isPast={heroWhen === "past"}
-						allForecasts={forecasts}
-						persistMonths={persistMonths}
-						onSimulationChange={setWarSim}
-						onSaved={() => {
-							forecastSeed.reload();
-							chartSeed.reload();
-						}}
+						activeScenarioId={activeScenarioId}
+						scenarioDelta={scenarioDelta}
+						onActivateScenario={(id) => setUi({ activeScenarioId: id })}
+						onScenarioMutated={() => setScenarioSeedNonce((n) => n + 1)}
 					/>
 				) : (ui.detailMode || "planilha") === "cartoes" ? (
 					<div style={{ marginTop: 12 }}>
@@ -558,9 +527,6 @@ export const Dashboard = () => {
 						month={selected}
 						chart={months.find((m) => m.month === selected) ?? null}
 						forecasts={forecastsByMonth.get(selected) ?? []}
-						onForecastAdded={() => forecastSeed.reload()}
-						months={months}
-						onMoveForecast={moveForecast}
 					/>
 				)}
 			</div>

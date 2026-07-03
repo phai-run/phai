@@ -14,8 +14,6 @@ import { useDebounce } from "../hooks/useDebounce";
 import { CategoryTreemap } from "./categorias/CategoryTreemap";
 import { TransactionModal } from "../components/TransactionModal";
 import type { ChartMonthView, ForecastView } from "./types";
-import { ForecastSection } from "./month/ForecastSection";
-import { ManualPlannedTransactions } from "./month/ManualPlannedTransactions";
 import { FilterBar, FilterSummary } from "./month/MonthFilters";
 
 // ── LiveStore queries (module-level for stable refs) ──────────────────────
@@ -58,16 +56,10 @@ export const MonthDetail = ({
 	month,
 	chart,
 	forecasts,
-	onForecastAdded,
-	months,
-	onMoveForecast,
 }: {
 	month: string;
 	chart: ChartMonthView | null;
 	forecasts: ForecastView[];
-	onForecastAdded: () => void;
-	months: ReadonlyArray<ChartMonthView>;
-	onMoveForecast: (forecastId: string, targetMonth: string) => void;
 }) => {
 	const { store } = useStore();
 	const [ui, setUi] = useClientDocument(tables.ui);
@@ -242,18 +234,6 @@ export const MonthDetail = ({
 				installmentCount={installments.length}
 				installmentSum={installmentSum}
 			/>
-
-			{/* ── Forecasts section ── */}
-			<ManualPlannedTransactions month={month} />
-			{forecasts.length > 0 || true ? (
-				<ForecastSection
-					month={month}
-					forecasts={forecasts}
-					onAdded={onForecastAdded}
-					months={months}
-					onMoveForecast={onMoveForecast}
-				/>
-			) : null}
 
 			{/* ── Filter bar ── */}
 			<FilterBar
