@@ -233,6 +233,29 @@ export const commitmentTier = (
  *
  * Returns a new array; does not mutate the input.
  */
+/**
+ * The account filter is a multi-select: `accountFilter` is a comma-joined list
+ * of account ids (a single id is just a one-element list, so the shape stays
+ * backward-compatible and needs no LiveStore schema bump — ADR-0038 view-tweak
+ * rule). Empty/null means "all accounts".
+ */
+export const accountFilterIds = (raw: string | null | undefined): string[] =>
+	raw
+		? raw
+				.split(",")
+				.map((s) => s.trim())
+				.filter(Boolean)
+		: [];
+
+/** True when `accountId` passes the (possibly multi-value) account filter. */
+export const matchesAccountFilter = (
+	raw: string | null | undefined,
+	accountId: string,
+): boolean => {
+	const ids = accountFilterIds(raw);
+	return ids.length === 0 || ids.includes(accountId);
+};
+
 export const filterTransactions = (
 	transactions: ReadonlyArray<TxView>,
 	filters: TxFilters,
@@ -257,7 +280,7 @@ export const filterTransactions = (
 			(effectiveCategory(tx, overlayMap) ?? "") !== ""
 		)
 			return false;
-		if (filters.accountFilter && tx.accountId !== filters.accountFilter)
+		if (!matchesAccountFilter(filters.accountFilter, tx.accountId))
 			return false;
 		if (filters.ownerFilter) {
 			if ((accountMap.get(tx.accountId)?.owner ?? "") !== filters.ownerFilter)
