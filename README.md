@@ -139,9 +139,7 @@ The headline: cash balance, income vs expenses vs net for the selected month, an
 
 ![Categories mode — drillable expense treemap](docs/screenshots/categories.png)
 
-**Planning** — per category: budget envelope vs spent vs 3-month average vs projection, with a goal slider per subcategory. Drag to simulate cuts (the annual chart updates live), confirm to persist the goals as monthly budget envelopes — visible to `phai forecast list` and any agent on top:
-
-![Planning mode — budgets, goals and the cut simulator](docs/screenshots/planning.png)
+**Planning** — forecasts and scenario items appear as inline rows in the sheet. Add, edit, or remove entries directly; sort and filter by amount, category, or origin. Named what-if scenarios (ADR-0037) layer deltas over the live baseline and render as teal slices on the chart; promote a scenario to apply its changes to the real plan.
 
 Everything runs client-side on [LiveStore](https://livestore.dev) seeded from the local bridge; writes flush back through the binary with a full audit trail. No Node on your machine — the web app is embedded in the binary at build time ([ADR-0001](docs/adr/0001-single-binary-rust-cli.md)).
 

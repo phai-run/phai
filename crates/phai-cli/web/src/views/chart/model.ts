@@ -75,26 +75,15 @@ export function buildModel(months: ReadonlyArray<ChartMonthView>): ChartModel {
 	});
 }
 
-/** A live war-plan goal simulation projected onto the cash chart. */
-export interface ChartSimulation {
-	/** First month ("YYYY-MM") the monthly saving applies to. */
+interface SimulationParams {
 	fromMonth: string;
-	/** Saving vs. the baseline projection (negative = goals above it). */
 	monthlySaving: number;
 }
 
-/**
- * Overlay a war-plan goal simulation on a chart model: from `fromMonth` on,
- * each month's forecast outflow shrinks by the monthly saving (a positive
- * saving never cuts below zero — realized spend is untouchable), and every
- * FUTURE month's balance shifts by the savings accumulated up to it. Realized
- * balances (past + current month) stay as observed. Scale is recomputed so
- * the overlay renders like any other model.
- */
-export function applySimulationToModel(
+function applySimulationToModel(
 	model: ChartModel,
 	months: ReadonlyArray<ChartMonthView>,
-	sim: ChartSimulation,
+	sim: SimulationParams,
 ): ChartModel {
 	const fcOuts = [...model.fcOuts];
 	const balances = [...model.balances];
@@ -134,6 +123,63 @@ export function extendScale(
 	return { ...model, cashMin: nextMin, cashSpan: nextMax - nextMin || 1 };
 }
 
+// ── Scenario bar slices (ADR-0037) ─────────────────────────────────────────
+
+/** Extra flow a scenario adds to one month's bars (vs. the baseline). */
+export interface ScenarioBarDelta {
+	/** Additional expense magnitude (scenario spends more than the baseline). */
+	extraOut: number;
+	/** Additional income magnitude (scenario earns more than the baseline). */
+	extraIn: number;
+}
+
+const totalOutOf = (m: ChartMonthView): number =>
+	Math.abs(numeric(m.outflows)) + Math.abs(numeric(m.forecastOutflowsRemaining));
+const totalInOf = (m: ChartMonthView): number =>
+	Math.max(0, numeric(m.inflows)) +
+	Math.max(0, numeric(m.forecastInflowsRemaining));
+
+/**
+ * Per future month, how much MORE the active scenario's projection flows than
+ * the baseline — the teal slice rendered on top of the expense/income bar.
+ * Reductions (a skip/end freeing cash) clamp to zero: a shorter bar can't be
+ * drawn as a slice, and the scenario saldo line already shows the relief.
+ */
+export function scenarioBarDeltas(
+	baseMonths: ReadonlyArray<ChartMonthView>,
+	scenarioMonths: ReadonlyArray<ChartMonthView>,
+): Map<string, ScenarioBarDelta> {
+	const scenByMonth = new Map(scenarioMonths.map((m) => [m.month, m]));
+	const out = new Map<string, ScenarioBarDelta>();
+	for (const m of baseMonths) {
+		if (!m.isFuture) continue;
+		const s = scenByMonth.get(m.month);
+		if (!s) continue;
+		const extraOut = Math.max(0, totalOutOf(s) - totalOutOf(m));
+		const extraIn = Math.max(0, totalInOf(s) - totalInOf(m));
+		if (extraOut > 0 || extraIn > 0) out.set(m.month, { extraOut, extraIn });
+	}
+	return out;
+}
+
+/**
+ * The bar extremities once scenario slices are stacked on top — fed to
+ * {@link extendScale} so a slice never renders outside the viewport.
+ */
+export function scenarioSliceExtents(
+	months: ReadonlyArray<ChartMonthView>,
+	deltas: ReadonlyMap<string, ScenarioBarDelta>,
+): number[] {
+	const out: number[] = [];
+	for (const m of months) {
+		const d = deltas.get(m.month);
+		if (!d) continue;
+		if (d.extraOut > 0) out.push(-(totalOutOf(m) + d.extraOut));
+		if (d.extraIn > 0) out.push(totalInOf(m) + d.extraIn);
+	}
+	return out;
+}
+
 // ── Goal solving (ADR-0031) ────────────────────────────────────────────────
 
 /** The first FUTURE month whose projected balance dips below `target`. */
@@ -157,10 +203,10 @@ export interface GoalSolution {
 }
 
 /**
- * Inverse of {@link applySimulationToModel}: find the smallest constant monthly
- * saving (a forecast-outflow cut from `fromMonth` on) that keeps every future
- * month's balance at or above `target`. Binary-searches over the real clamped
- * simulation, so the answer respects "you can't cut more than you spend".
+ * Find the smallest constant monthly saving (a forecast-outflow cut from
+ * `fromMonth` on) that keeps every future month's balance at or above `target`.
+ * Binary-searches over a clamped simulation, so the answer respects "you can't
+ * cut more than you spend".
  * Returns `achievable: false` (with the maximal cut) when the goal is out of
  * reach by cutting forecast alone.
  */

@@ -476,8 +476,8 @@ export const events = {
 			createdAt: Schema.Number,
 		}),
 	}),
-	// A war-plan goal confirmed as a monthly budget envelope. forecastId ""
-	// creates a new envelope; otherwise the existing one is re-amounted.
+	// Budget envelope upsert. forecastId "" creates a new envelope;
+	// otherwise the existing one is re-amounted.
 	// categoryId null = keep the stored category (inline sheet re-amount).
 	forecastEnvelopeUpserted: Events.synced({
 		name: "v1.ForecastEnvelopeUpserted",

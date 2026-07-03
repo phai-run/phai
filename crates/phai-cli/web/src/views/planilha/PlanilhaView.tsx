@@ -37,8 +37,7 @@ import {
 	type TxView,
 } from "../../lib/derivations";
 import type { ForecastView } from "../types";
-import type { ChartSimulation } from "../chart/model";
-import { WarPlanPanel } from "../plano/WarPlanPanel";
+import { SheetScenarioBar } from "./SheetScenarioBar";
 
 const txAll$ = queryDb(tables.transactions.orderBy("postedAt", "desc"));
 const overlay$ = queryDb(tables.reviewOverlay);
@@ -218,24 +217,19 @@ const downloadCsv = (filename: string, csv: string) => {
  */
 export const PlanilhaView = ({
 	month,
-	forecasts: monthForecasts = [],
-	isPast = false,
-	allForecasts = [],
-	persistMonths = [],
-	onSimulationChange,
-	onSaved,
+	activeScenarioId = null,
+	scenarioDelta = null,
+	onActivateScenario,
+	onScenarioMutated,
 }: {
 	month: string;
-	/** Forecasts for the selected month (passed from Dashboard). */
-	forecasts?: ForecastView[];
-	isPast?: boolean;
-	/** All seeded forecasts (all months) — needed for WarPlanPanel envelope updates. */
-	allForecasts?: ForecastView[];
-	/** Months a confirmed goal writes envelopes for. */
-	persistMonths?: ReadonlyArray<string>;
-	/** Live goal simulation callback for the annual chart. */
-	onSimulationChange?: (sim: ChartSimulation | null) => void;
-	onSaved?: () => void;
+	/** Active planning scenario (ADR-0037); null = baseline. */
+	activeScenarioId?: string | null;
+	/** Selected-month projected-saldo delta vs. baseline (null = not seeded). */
+	scenarioDelta?: number | null;
+	onActivateScenario?: (scenarioId: string | null) => void;
+	/** Fired after any scenario write so the caller re-seeds the projection. */
+	onScenarioMutated?: () => void;
 }) => {
 	const { store } = useStore();
 	const [ui, setUi] = useClientDocument(tables.ui);
@@ -271,7 +265,6 @@ export const PlanilhaView = ({
 	const [forecastAccountId, setForecastAccountId] = useState("");
 	const [forecastCategoryId, setForecastCategoryId] = useState("");
 	const [settlingId, setSettlingId] = useState<string | null>(null);
-	const [goalsOpen, setGoalsOpen] = useState(false);
 	const tableRef = useRef<HTMLDivElement>(null);
 
 	const filters = useMemo(
@@ -679,60 +672,14 @@ export const PlanilhaView = ({
 
 	return (
 		<section aria-label={`Sheet for ${month}`}>
-			{/* ── Collapsible Budget Goals (WarPlanPanel embedded) ── */}
-			{onSimulationChange && (
-				<div style={{ marginBottom: 8 }}>
-					<button
-						onClick={() => setGoalsOpen((v) => !v)}
-						className="mono"
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 8,
-							width: "100%",
-							background: goalsOpen
-								? "rgba(109,74,255,0.06)"
-								: "transparent",
-							border: "1px solid var(--border)",
-							borderRadius: "var(--radius-md)",
-							padding: "10px 14px",
-							cursor: "pointer",
-							fontSize: 13,
-							color: "var(--purple)",
-							fontWeight: 600,
-							transition: "background 150ms",
-						}}
-					>
-						<span style={{ transform: goalsOpen ? "rotate(90deg)" : "none", transition: "transform 150ms" }}>
-							▶
-						</span>
-						budget goals
-						<span style={{ fontWeight: 400, fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
-							{goalsOpen ? "collapse" : "set monthly goals and see the simulation"}
-						</span>
-					</button>
-					{goalsOpen && (
-						<div
-							style={{
-								border: "1px solid var(--border)",
-								borderTop: "none",
-								borderRadius: "0 0 var(--radius-md) var(--radius-md)",
-								padding: "12px 14px",
-								background: "rgba(109,74,255,0.02)",
-							}}
-						>
-							<WarPlanPanel
-								month={month}
-								forecasts={monthForecasts}
-								isPast={isPast}
-								allForecasts={allForecasts}
-								persistMonths={persistMonths}
-								onSimulationChange={onSimulationChange}
-								onSaved={onSaved ?? (() => {})}
-							/>
-						</div>
-					)}
-				</div>
+			{/* ── Scenario pills (ADR-0037) — the sheet header owns them ── */}
+			{onActivateScenario && onScenarioMutated && (
+				<SheetScenarioBar
+					activeScenarioId={activeScenarioId}
+					scenarioDelta={scenarioDelta}
+					onActivate={onActivateScenario}
+					onMutated={onScenarioMutated}
+				/>
 			)}
 
 			<SheetFilterBar

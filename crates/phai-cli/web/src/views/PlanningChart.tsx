@@ -4,7 +4,6 @@ import { CountMoney } from "../components/ui";
 import { useDnd } from "../lib/dnd";
 import type { ChartMonthView, ForecastView, ChartMode } from "./types";
 import {
-	applySimulationToModel,
 	BASELINE,
 	H,
 	PAD,
@@ -17,14 +16,27 @@ import {
 	firstShortfallMonth,
 	innerH,
 	innerW,
+	scenarioBarDeltas,
+	scenarioSliceExtents,
 	solveRequiredSaving,
 	type ChartModel,
-	type ChartSimulation,
+	type ScenarioBarDelta,
 } from "./chart/model";
 import { ChartLegend } from "./chart/ChartLegend";
+import {
+	CashHoverCard,
+	ExpensesHoverCard,
+	HoverCardShell,
+	SegmentHoverCard,
+	type ChartHoverDatum,
+} from "./chart/ChartHoverCard";
 
 export { buildModel } from "./chart/model";
-import type { CategoryMonthSeries, SubSlice } from "../lib/derivations";
+import type {
+	CategoryMonthSeries,
+	ScenarioMonthItem,
+	SubSlice,
+} from "../lib/derivations";
 
 // Qualitative palette for the per-category "Despesas" stacked bars. Kept
 // distinct from the semantic income (cyan/green) and expense (rose) hues so a
@@ -54,9 +66,9 @@ export const PlanningChart = ({
 	selectedMonth,
 	onSelectMonth,
 	onDropForecast,
-	simulation,
 	scenarioBalances = null,
-	compact = false,
+	scenarioMonths = null,
+	scenarioItemsByMonth = null,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	forecastsByMonth: Map<string, ForecastView[]>;
@@ -66,27 +78,33 @@ export const PlanningChart = ({
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
-	/** Live war-plan goal overlay: shifts forecast outflows + future balances. */
-	simulation?: ChartSimulation | null;
 	/**
 	 * Active planning scenario's projected saldo per month (aligned with
 	 * `months`; null = no data for that month). Renders as a second dashed
 	 * line with a shaded wedge vs the baseline (ADR-0037).
 	 */
 	scenarioBalances?: ReadonlyArray<number | null> | null;
-	/** Planning mode: shrink the chart so it can stay pinned above the sliders. */
-	compact?: boolean;
+	/** The active scenario's full chart projection, for the bar slices. */
+	scenarioMonths?: ReadonlyArray<ChartMonthView> | null;
+	/** month → the scenario's changes hitting it, for the hover card. */
+	scenarioItemsByMonth?: ReadonlyMap<string, ScenarioMonthItem[]> | null;
 }) => {
+	// Extra bar flow the active scenario adds per future month (teal slices).
+	const scenarioDeltas = useMemo(
+		() =>
+			scenarioMonths && scenarioMonths.length > 0
+				? scenarioBarDeltas(months, scenarioMonths)
+				: null,
+		[months, scenarioMonths],
+	);
 	const model = useMemo(() => {
 		const base = buildModel(months);
-		const simulated =
-			simulation && simulation.monthlySaving !== 0
-				? applySimulationToModel(base, months, simulation)
-				: base;
-		return scenarioBalances
-			? extendScale(simulated, scenarioBalances)
-			: simulated;
-	}, [months, simulation, scenarioBalances]);
+		const extras = [
+			...(scenarioBalances ?? []),
+			...(scenarioDeltas ? scenarioSliceExtents(months, scenarioDeltas) : []),
+		];
+		return extras.length > 0 ? extendScale(base, extras) : base;
+	}, [months, scenarioBalances, scenarioDeltas]);
 	const [mode, setMode] = useState<ChartMode>("caixa");
 
 	const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -139,7 +157,8 @@ export const PlanningChart = ({
 				onSelectMonth={onSelectMonth}
 				onDropForecast={onDropForecast}
 				scenarioBalances={scenarioBalances}
-				compact={compact}
+				scenarioDeltas={scenarioDeltas}
+				scenarioItemsByMonth={scenarioItemsByMonth}
 			/>
 		</div>
 	);
@@ -225,7 +244,8 @@ const FullChart = ({
 	onSelectMonth,
 	onDropForecast,
 	scenarioBalances,
-	compact,
+	scenarioDeltas,
+	scenarioItemsByMonth,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
 	model: ChartModel;
@@ -237,7 +257,8 @@ const FullChart = ({
 	onSelectMonth: (month: string) => void;
 	onDropForecast: (forecastId: string, targetMonth: string) => void;
 	scenarioBalances?: ReadonlyArray<number | null> | null;
-	compact: boolean;
+	scenarioDeltas: ReadonlyMap<string, ScenarioBarDelta> | null;
+	scenarioItemsByMonth?: ReadonlyMap<string, ScenarioMonthItem[]> | null;
 }) => {
 	const [hover, setHover] = useState<number | null>(null);
 	// Per-segment hover in the expenses-bars mode: which (month, category) slice.
@@ -286,59 +307,10 @@ const FullChart = ({
 
 	const isExpensesMode = mode.startsWith("despesas");
 
-	// Native hover tooltips per column half. The interaction overlay sits on
-	// top of the SVG (it owns click/drag), so per-rect <title>s never fire —
-	// the values live on the overlay halves instead: left half = the income
-	// bar, right half = the expense bar.
-	const hoverTitles = useMemo(() => {
-		const money = (v: number) => formatMoneyNumber(v);
-		return months.map((m, i) => {
-			if (isExpensesMode) {
-				const catMags = categorySeries.byMonth.get(m.month);
-				const total = model.realOuts[i] + model.fcOuts[i];
-				const lines = catMags
-					? Array.from(catMags.entries())
-							.sort((a, b) => b[1] - a[1])
-							.map(
-								([cat, mag]) =>
-									`${cat}: ${money(mag)} (${total > 0 ? Math.round((mag / total) * 100) : 0}%)`,
-							)
-					: [];
-				const txt = [`expenses ${m.label} · ${money(total)}`, ...lines].join("\n");
-				return { left: txt, right: txt };
-			}
-			const balance = model.balances[i];
-			const saldoLine = `${m.isFuture ? "projected " : ""}balance ${money(balance)}`;
-			const left = [
-				`income ${m.label}`,
-				`actual ${money(model.realIns[i])}`,
-				...(model.fcIns[i] > 0 ? [`forecast +${money(model.fcIns[i])}`] : []),
-				`total ${money(model.realIns[i] + model.fcIns[i])}`,
-				saldoLine,
-			].join("\n");
-			const right = [
-				`expenses ${m.label}`,
-				`actual ${money(model.realOuts[i])}`,
-				...(model.fcOuts[i] > 0
-					? [
-							`forecast +${money(model.fcOuts[i])}${
-								committedMag[i] > 0
-									? ` (installments ${money(Math.min(committedMag[i], model.fcOuts[i]))})`
-									: ""
-							}`,
-						]
-					: []),
-				`total ${money(model.realOuts[i] + model.fcOuts[i])}`,
-				saldoLine,
-			].join("\n");
-			return { left, right };
-		});
-	}, [months, model, committedMag, categorySeries, isExpensesMode]);
-
-	// Structured per-month detail for the floating hover balloon: the column
-	// total plus the category breakdown (with each category's bar colour), so
-	// hovering the chart shows "how much, and on what".
-	const hoverData = useMemo(
+	// Structured per-month detail for the floating hover card: flows split into
+	// realized + forecast, the baseline saldo, the category breakdown, and the
+	// active scenario's saldo + changes for that month (ADR-0037).
+	const hoverData = useMemo<ChartHoverDatum[]>(
 		() =>
 			months.map((m, i) => {
 				const catMap = categorySeries.byMonth.get(m.month);
@@ -354,20 +326,20 @@ const FullChart = ({
 							}))
 							.sort((a, b) => b.mag - a.mag)
 					: [];
-				const monthForecasts = (forecastsByMonth.get(m.month) ?? []).filter(
-					(f) => !["descartado", "inativo"].includes(f.status),
-				);
 				return {
 					label: m.label,
-					isFuture: m.isFuture,
-					income: model.realIns[i] + model.fcIns[i],
-					expenses: model.realOuts[i] + model.fcOuts[i],
+					isFuture: m.isFuture === 1,
+					realIn: model.realIns[i],
+					fcIn: model.fcIns[i],
+					realOut: model.realOuts[i],
+					fcOut: model.fcOuts[i],
 					balance: model.balances[i],
+					scenarioBalance: scenarioBalances?.[i] ?? null,
+					scenarioItems: scenarioItemsByMonth?.get(m.month) ?? [],
 					cats,
-					forecasts: monthForecasts,
 				};
 			}),
-		[months, model, categorySeries, forecastsByMonth],
+		[months, model, categorySeries, scenarioBalances, scenarioItemsByMonth],
 	);
 
 	// Year totals
@@ -474,16 +446,12 @@ const FullChart = ({
 					viewBox={`0 0 ${W} ${H}`}
 					width="100%"
 					role="img"
-					preserveAspectRatio={compact ? "xMidYMid meet" : undefined}
 					aria-label={
 						mode === "caixa"
 							? "monthly cash chart — income and expense bars, balance line"
 							: "monthly expenses chart"
 					}
-					style={{
-						display: "block",
-						...(compact ? { maxHeight: "32vh", margin: "0 auto" } : {}),
-					}}
+					style={{ display: "block" }}
 				>
 					<defs>
 						{/* Forecast expense — lighter solid (no hatch) */}
@@ -544,6 +512,7 @@ const FullChart = ({
 								model.fcIns[i] -
 								model.realOuts[i] -
 								model.fcOuts[i];
+							const scenarioDelta = scenarioDeltas?.get(m.month) ?? null;
 
 							return (
 								<g key={m.label}>
@@ -632,6 +601,20 @@ const FullChart = ({
 												</>
 											);
 										})()}
+
+									{/* Scenario slices (ADR-0037): the extra flow the active
+									    scenario adds this month, stacked on top of the bars. */}
+									{scenarioDelta && (
+										<ScenarioBarSlices
+											delta={scenarioDelta}
+											model={model}
+											outBase={model.realOuts[i] + model.fcOuts[i]}
+											inBase={model.realIns[i] + model.fcIns[i]}
+											ix={ix}
+											ox={ox}
+											barW={barW}
+										/>
+									)}
 
 									{/* Month label */}
 									<text
@@ -735,9 +718,8 @@ const FullChart = ({
 													onMouseEnter={() => setHoverSeg({ i, cat })}
 													onMouseLeave={() => setHoverSeg(null)}
 													onClick={() => onSelectMonth(m.month)}
-												>
-													<title>{`${cat}: ${formatMoneyNumber(mag)} (${pct}%)`}</title>
-												</rect>
+													aria-label={`${cat}: ${formatMoneyNumber(mag)} (${pct}%)`}
+												/>
 											);
 										});
 									})()}
@@ -837,10 +819,9 @@ const FullChart = ({
 					)}
 				</svg>
 
-				{/* Interaction overlay (click/drag/hover; carries the value tooltips) */}
+				{/* Interaction overlay (click/drag/hover) */}
 				<ColumnOverlay
 					months={months}
-					titles={hoverTitles}
 					selectedMonth={selectedMonth}
 					onSelectMonth={onSelectMonth}
 					onHover={setHover}
@@ -848,329 +829,113 @@ const FullChart = ({
 					interactive={!isExpensesMode}
 				/>
 
-				{/* Floating hover balloon: value + which expense, on top of the chart. */}
+				{/* Floating hover card: one per column, on top of the chart. */}
 				{hover != null && hoverData[hover] && (
-					<div
-						style={{
-							position: "absolute",
-							top: 6,
-							left: `${((hover + 0.5) / months.length) * 100}%`,
-							transform:
-								hover < months.length / 2
-									? "translateX(10px)"
-									: "translateX(calc(-100% - 10px))",
-							pointerEvents: "none",
-							zIndex: 30,
-							background: "var(--card)",
-							border: "1px solid var(--border)",
-							borderRadius: "var(--radius-md)",
-							boxShadow: "0 8px 28px rgba(0,0,0,0.16)",
-							padding: "10px 12px",
-							minWidth: 190,
-							maxWidth: 280,
-						}}
-					>
-						<div
-							className="mono"
-							style={{ fontWeight: 700, marginBottom: 6, fontSize: 12 }}
-						>
-							{hoverData[hover].label}
-						</div>
+					<HoverCardShell index={hover} count={months.length}>
 						{isExpensesMode ? (
-							<div style={{ display: "grid", gap: 4 }}>
-								<div
-									className="mono"
-									style={{
-										display: "flex",
-										justifyContent: "space-between",
-										fontSize: 12,
-										color: "var(--rose)",
-										fontWeight: 600,
-									}}
-								>
-									<span>despesas</span>
-									<span>{formatMoneyNumber(hoverData[hover].expenses)}</span>
-								</div>
-								{hoverData[hover].cats.slice(0, 8).map((c) => {
-									const pct =
-										hoverData[hover].expenses > 0
-											? Math.round((c.mag / hoverData[hover].expenses) * 100)
-											: 0;
-									return (
-										<div
-											key={c.name}
-											className="mono"
-											style={{
-												display: "flex",
-												alignItems: "center",
-												gap: 6,
-												fontSize: 11,
-												color: "var(--muted)",
-											}}
-										>
-											<span
-												aria-hidden
-												style={{
-													width: 8,
-													height: 8,
-													borderRadius: 2,
-													background: c.color,
-													flexShrink: 0,
-												}}
-											/>
-											<span
-												style={{
-													flex: 1,
-													overflow: "hidden",
-													textOverflow: "ellipsis",
-													whiteSpace: "nowrap",
-												}}
-											>
-												{c.name}
-											</span>
-											<span style={{ color: "var(--text)" }}>
-												{formatMoneyNumber(c.mag)}
-											</span>
-											<span style={{ width: 34, textAlign: "right" }}>{pct}%</span>
-										</div>
-									);
-								})}
-							</div>
+							<ExpensesHoverCard d={hoverData[hover]} />
 						) : (
-							<div style={{ display: "grid", gap: 4 }}>
-								<HoverLine
-									label="entradas"
-									value={hoverData[hover].income}
-									color="var(--green)"
-								/>
-								<HoverLine
-									label="saídas"
-									value={hoverData[hover].expenses}
-									color="var(--rose)"
-								/>
-								<HoverLine
-									label={
-										hoverData[hover].isFuture ? "saldo projetado" : "saldo"
-									}
-									value={hoverData[hover].balance}
-									color="var(--text)"
-									strong
-								/>
-								{hoverData[hover].forecasts.length > 0 && (
-									<>
-										<div
-											style={{
-												borderTop: "1px solid var(--border)",
-												margin: "4px 0 2px",
-												paddingTop: 4,
-											}}
-										>
-											<span
-												className="mono"
-												style={{
-													fontSize: 10,
-													color: "var(--muted)",
-													textTransform: "uppercase",
-													letterSpacing: "0.06em",
-												}}
-											>
-												forecasts
-											</span>
-										</div>
-										{hoverData[hover].forecasts.slice(0, 6).map((f) => {
-											const amt = numeric(f.amount);
-											return (
-												<div
-													key={f.forecastId}
-													className="mono"
-													style={{
-														display: "flex",
-														justifyContent: "space-between",
-														gap: 8,
-														fontSize: 11,
-														color:
-															amt >= 0
-																? "var(--green)"
-																: "var(--rose)",
-													}}
-												>
-													<span
-														style={{
-															overflow: "hidden",
-															textOverflow: "ellipsis",
-															whiteSpace: "nowrap",
-															flex: 1,
-														}}
-													>
-														{f.description}
-													</span>
-													<span>
-														{formatMoneyNumber(Math.abs(amt))}
-													</span>
-												</div>
-											);
-										})}
-										{hoverData[hover].forecasts.length > 6 && (
-											<span
-												className="mono"
-												style={{
-													fontSize: 10,
-													color: "var(--muted)",
-												}}
-											>
-												+{hoverData[hover].forecasts.length - 6} more
-											</span>
-										)}
-									</>
-								)}
-							</div>
+							<CashHoverCard d={hoverData[hover]} />
 						)}
-					</div>
+					</HoverCardShell>
 				)}
 
-				{/* Per-segment balloon (expenses mode): one category + its top subs. */}
-				{isExpensesMode &&
-					hoverSeg &&
-					(() => {
-						const m = months[hoverSeg.i];
-						const value =
-							categorySeries.byMonth.get(m.month)?.get(hoverSeg.cat) ?? 0;
-						const subs = (
-							subSeries.get(m.month)?.get(hoverSeg.cat) ?? []
-						).slice(0, 3);
-						const color = catColor(
-							categorySeries.categories.indexOf(hoverSeg.cat),
-							categorySeries.categories.length,
-						);
-						return (
-							<div
-								style={{
-									position: "absolute",
-									top: 6,
-									left: `${((hoverSeg.i + 0.5) / months.length) * 100}%`,
-									transform:
-										hoverSeg.i < months.length / 2
-											? "translateX(10px)"
-											: "translateX(calc(-100% - 10px))",
-									pointerEvents: "none",
-									zIndex: 30,
-									background: "var(--card)",
-									border: "1px solid var(--border)",
-									borderRadius: "var(--radius-md)",
-									boxShadow: "0 8px 28px rgba(0,0,0,0.16)",
-									padding: "10px 12px",
-									minWidth: 180,
-									maxWidth: 260,
-								}}
-							>
-								<div
-									className="mono"
-									style={{
-										display: "flex",
-										alignItems: "center",
-										gap: 6,
-										fontWeight: 700,
-										fontSize: 12,
-										marginBottom: 2,
-									}}
-								>
-									<span
-										aria-hidden
-										style={{
-											width: 9,
-											height: 9,
-											borderRadius: 2,
-											background: color,
-											flexShrink: 0,
-										}}
-									/>
-									<span style={{ flex: 1 }}>{hoverSeg.cat}</span>
-									<span>{formatMoneyNumber(value)}</span>
-								</div>
-								<div
-									className="mono"
-									style={{
-										fontSize: 10,
-										color: "var(--muted)",
-										marginBottom: 6,
-									}}
-								>
-									{m.label}
-								</div>
-								{subs.length > 0 ? (
-									<div style={{ display: "grid", gap: 3 }}>
-										{subs.map((s) => (
-											<div
-												key={s.sub}
-												className="mono"
-												style={{
-													display: "flex",
-													justifyContent: "space-between",
-													gap: 12,
-													fontSize: 11,
-													color: "var(--muted)",
-												}}
-											>
-												<span
-													style={{
-														overflow: "hidden",
-														textOverflow: "ellipsis",
-														whiteSpace: "nowrap",
-													}}
-												>
-													↳ {s.sub}
-												</span>
-												<span style={{ color: "var(--text)" }}>
-													{formatMoneyNumber(s.mag)}
-												</span>
-											</div>
-										))}
-									</div>
-								) : null}
-							</div>
-						);
-					})()}
+				{/* Per-segment card (expenses mode): one category + its top subs. */}
+				{isExpensesMode && hoverSeg && (
+					<HoverCardShell index={hoverSeg.i} count={months.length}>
+						<SegmentHoverCard
+							cat={hoverSeg.cat}
+							color={catColor(
+								categorySeries.categories.indexOf(hoverSeg.cat),
+								categorySeries.categories.length,
+							)}
+							value={
+								categorySeries.byMonth
+									.get(months[hoverSeg.i].month)
+									?.get(hoverSeg.cat) ?? 0
+							}
+							monthLabel={months[hoverSeg.i].label}
+							subs={(
+								subSeries.get(months[hoverSeg.i].month)?.get(hoverSeg.cat) ??
+								[]
+							).slice(0, 3)}
+						/>
+					</HoverCardShell>
+				)}
 			</div>
 
 			{/* Legend */}
-			{!compact && <ChartLegend mode={mode} months={months} />}
+			<ChartLegend
+				mode={mode}
+				months={months}
+				scenarioActive={scenarioBalances != null}
+			/>
 		</div>
 	);
 };
 
-/** One labelled money line in the cash-mode hover balloon. */
-const HoverLine = ({
-	label,
-	value,
-	color,
-	strong = false,
+// ── Scenario bar slices (ADR-0037) ─────────────────────────────────────────
+
+/**
+ * Teal slices stacked on the bar ends: the extra expense/income the active
+ * scenario adds to one future month vs. the baseline projection.
+ */
+const ScenarioBarSlices = ({
+	delta,
+	model,
+	outBase,
+	inBase,
+	ix,
+	ox,
+	barW,
 }: {
-	label: string;
-	value: number;
-	color: string;
-	strong?: boolean;
-}) => (
-	<div
-		className="mono"
-		style={{
-			display: "flex",
-			justifyContent: "space-between",
-			gap: 16,
-			fontSize: 12,
-			color,
-			fontWeight: strong ? 700 : 400,
-		}}
-	>
-		<span>{label}</span>
-		<span>{formatMoneyNumber(value)}</span>
-	</div>
-);
+	delta: ScenarioBarDelta;
+	model: ChartModel;
+	/** Baseline expense magnitude (realized + forecast) for the month. */
+	outBase: number;
+	/** Baseline income magnitude (realized + forecast) for the month. */
+	inBase: number;
+	ix: number;
+	ox: number;
+	barW: number;
+}) => {
+	const y = (v: number) => cashY(v, model.cashMin, model.cashSpan);
+	const outTop = y(-outBase);
+	const outH = y(-(outBase + delta.extraOut)) - outTop;
+	const inTop = y(inBase + delta.extraIn);
+	const inH = y(inBase) - inTop;
+	return (
+		<>
+			{outH > 0.5 && (
+				<rect
+					x={ox}
+					y={outTop}
+					width={barW}
+					height={outH}
+					rx={2}
+					fill="var(--cyan)"
+					opacity={0.5}
+				/>
+			)}
+			{inH > 0.5 && (
+				<rect
+					x={ix}
+					y={inTop}
+					width={barW}
+					height={inH}
+					rx={2}
+					fill="var(--cyan)"
+					opacity={0.5}
+				/>
+			)}
+		</>
+	);
+};
 
 // ── Shared interaction overlay ─────────────────────────────────────────────
 
 const ColumnOverlay = ({
 	months,
-	titles,
 	selectedMonth,
 	onSelectMonth,
 	onHover,
@@ -1178,7 +943,6 @@ const ColumnOverlay = ({
 	interactive,
 }: {
 	months: ReadonlyArray<ChartMonthView>;
-	titles: ReadonlyArray<{ left: string; right: string }>;
 	selectedMonth: string | null;
 	onSelectMonth: (month: string) => void;
 	onHover: (i: number | null) => void;
@@ -1200,8 +964,6 @@ const ColumnOverlay = ({
 				key={m.month}
 				month={m.month}
 				index={i}
-				titleLeft={titles[i]?.left ?? ""}
-				titleRight={titles[i]?.right ?? ""}
 				selected={m.month === selectedMonth}
 				onSelect={() => onSelectMonth(m.month)}
 				onHover={onHover}
@@ -1214,16 +976,12 @@ const ColumnOverlay = ({
 const MonthColumn = React.memo(({
 	month,
 	index,
-	titleLeft,
-	titleRight,
 	onSelect,
 	onHover,
 	onDropForecast,
 }: {
 	month: string;
 	index: number;
-	titleLeft: string;
-	titleRight: string;
 	selected: boolean;
 	onSelect: () => void;
 	onHover: (i: number | null) => void;
@@ -1263,16 +1021,9 @@ const MonthColumn = React.memo(({
 				outlineOffset: -2,
 				background: isDropTarget ? "rgba(109,74,255,0.10)" : "transparent",
 				transition: "outline-color 100ms",
-				display: "grid",
-				gridTemplateColumns: "1fr 1fr",
 			}}
 			aria-label={`select ${month}`}
-		>
-			{/* Halves only carry the native value tooltips: left = the income
-			    bar, right = the expense bar (matching the bars' x-positions). */}
-			<div title={titleLeft} />
-			<div title={titleRight} />
-		</div>
+		/>
 	);
 });
 

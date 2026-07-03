@@ -381,7 +381,11 @@ describe("buildModel edge cases", () => {
 
 // ── extendScale (scenario saldo overlay, ADR-0037) ────────────────────────
 
-import { extendScale } from "../chart/model";
+import {
+	extendScale,
+	scenarioBarDeltas,
+	scenarioSliceExtents,
+} from "../chart/model";
 
 describe("extendScale", () => {
 	it("widens the cash scale to fit scenario balances outside the range", () => {
@@ -410,5 +414,85 @@ describe("extendScale", () => {
 		]);
 		expect(extendScale(model, [])).toEqual(model);
 		expect(extendScale(model, [null])).toEqual(model);
+	});
+});
+
+// ── scenarioBarDeltas (per-month scenario bar slices, ADR-0037) ────────────
+
+describe("scenarioBarDeltas", () => {
+	const base = [
+		makeMonth({
+			month: "2026-06",
+			outflows: "-1000",
+			inflows: "2000",
+			isFuture: 0,
+		}),
+		makeMonth({
+			month: "2026-07",
+			outflows: "-500",
+			forecastOutflowsRemaining: "-500",
+			inflows: "0",
+			forecastInflowsRemaining: "2000",
+			isFuture: 1,
+		}),
+		makeMonth({
+			month: "2026-08",
+			forecastOutflowsRemaining: "-1000",
+			forecastInflowsRemaining: "2000",
+			isFuture: 1,
+		}),
+	];
+
+	it("yields extra outflow/inflow only on future months where the scenario adds flow", () => {
+		const scenario = [
+			// Past month with extra spend — must be ignored (realized is immutable).
+			makeMonth({ month: "2026-06", outflows: "-9000", isFuture: 0 }),
+			// +300 extra expense, +150 extra income.
+			makeMonth({
+				month: "2026-07",
+				outflows: "-500",
+				forecastOutflowsRemaining: "-800",
+				forecastInflowsRemaining: "2150",
+				isFuture: 1,
+			}),
+			// Scenario REDUCES the outflow → clamps to zero (no slice).
+			makeMonth({
+				month: "2026-08",
+				forecastOutflowsRemaining: "-400",
+				forecastInflowsRemaining: "2000",
+				isFuture: 1,
+			}),
+		];
+		const deltas = scenarioBarDeltas(base, scenario);
+		expect(deltas.get("2026-06")).toBeUndefined();
+		expect(deltas.get("2026-07")).toEqual({ extraOut: 300, extraIn: 150 });
+		expect(deltas.get("2026-08")).toBeUndefined();
+	});
+
+	it("skips months the scenario projection does not cover", () => {
+		const deltas = scenarioBarDeltas(base, []);
+		expect(deltas.size).toBe(0);
+	});
+});
+
+describe("scenarioSliceExtents", () => {
+	it("returns the bar extremities including the scenario slice, for scale extension", () => {
+		const base = [
+			makeMonth({
+				month: "2026-07",
+				outflows: "-500",
+				forecastOutflowsRemaining: "-500",
+				forecastInflowsRemaining: "2000",
+				isFuture: 1,
+			}),
+		];
+		const deltas = new Map([["2026-07", { extraOut: 300, extraIn: 150 }]]);
+		// Expense extremity: -(500+500+300) = -1300; income: 2000+150 = 2150.
+		expect(scenarioSliceExtents(base, deltas)).toEqual([-1300, 2150]);
+	});
+
+	it("is empty when there are no deltas", () => {
+		const base = [makeMonth({ month: "2026-07", isFuture: 1 })];
+		expect(scenarioSliceExtents(base, new Map())).toEqual([]);
 	});
 });

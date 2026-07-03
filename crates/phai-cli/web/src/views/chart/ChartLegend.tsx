@@ -5,9 +5,12 @@ import type { ChartMonthView, ChartMode } from "../types";
 export const ChartLegend = ({
 	mode,
 	months,
+	scenarioActive = false,
 }: {
 	mode: ChartMode;
 	months: ReadonlyArray<ChartMonthView>;
+	/** True while a planning scenario overlays the chart (ADR-0037). */
+	scenarioActive?: boolean;
 }) => {
 	const hasFc = months.some((m) => m.isFuture === 1);
 
@@ -30,6 +33,9 @@ export const ChartLegend = ({
 			label: "balance",
 			dashed: true,
 		});
+		if (scenarioActive) {
+			items.push({ color: "var(--cyan)", label: "cenário", dashed: true });
+		}
 	} else if (mode === "despesas-barras") {
 		items.push({ color: "var(--rose)", label: "actual" });
 		if (hasFc)

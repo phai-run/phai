@@ -149,7 +149,7 @@ export interface NewForecast {
 	ui_role?: string;
 }
 
-/** A war-plan envelope write: update in place (forecast_id) or create (null). */
+/** Budget envelope write: update in place (forecast_id) or create (null). */
 export interface EnvelopeUpsert {
 	forecast_id: string | null;
 	/** Empty on update — the bridge keeps the stored description. */
@@ -298,7 +298,7 @@ export const api = {
 	createForecast: (forecast: NewForecast): Promise<{ forecast_id: string }> =>
 		postJson<{ forecast_id: string }>("/api/forecast", forecast),
 
-	/** Upsert a monthly budget envelope (war-plan goal confirmation). */
+	/** Upsert a budget envelope (inline amount edit or creation). */
 	upsertForecast: (envelope: EnvelopeUpsert): Promise<{ forecastId: string }> =>
 		postJson<{ forecastId: string }>("/api/forecast", envelope),
 
