@@ -108,3 +108,7 @@ reflected on the chart). B is the documented upgrade path.
   plan-of-envelopes written by the goal sliders.*
 - All plan amounts stay `Decimal` end-to-end (ADR-0003); every plan write emits
   an `AuditEvent` (ADR-0005) like any other forecast write.
+- **UI superseded by [ADR-0038](0038-unified-sheet.md)**: the goal-slider UI
+  (`WarPlanPanel`) and the `simulation` overlay on `PlanningChart` have been
+  removed. Planning now happens as inline rows in the unified sheet. The passive
+  shortfall indicator and solver remain.
