@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.34.1](https://github.com/phai-run/phai/compare/v5.34.0...v5.34.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **web:** read forecastId (camelCase) from the create-forecast response ([39cc407](https://github.com/phai-run/phai/commit/39cc4077d0ffc96bc9fd42d78eea047de58d049b))
+* **web:** read forecastId from create-forecast response (inline add-row error) ([9af567b](https://github.com/phai-run/phai/commit/9af567b429efd0cf2944dfd10545aab641c3db1c))
+
 ## [5.34.0](https://github.com/phai-run/phai/compare/v5.33.1...v5.34.0) (2026-07-03)
 
 
