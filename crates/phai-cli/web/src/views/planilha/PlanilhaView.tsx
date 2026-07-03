@@ -18,202 +18,190 @@ import { TierBadge } from "../../components/TierBadge";
 import { categoryEmoji } from "../../lib/categoryEmoji";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 import {
+	applyScenarioToMonthRows,
 	buildAccountMap,
 	buildOverlayMap,
 	commitmentTier,
 	COMMITMENT_TIER_LABELS,
 	COMMITMENT_TIERS,
+	DEFAULT_SHEET_LOCAL_FILTERS,
 	effectiveCategory,
 	effectiveTx,
 	filterTransactions,
 	fixedCategoriesFromForecasts,
 	hasActiveFilters,
+	matchesSheetLocalFilters,
+	readSheetLocalFilters,
+	readSheetSort,
+	routeSheetAdd,
+	routeSheetAmountEdit,
+	routeSheetDelete,
+	SHEET_ORIGIN_ICONS,
 	sheetLabel,
-	sortForSheet,
+	sortUnifiedRows,
 	transactionsForMonth,
+	writeSheetLocalFilters,
+	writeSheetSort,
 	type CommitmentTier,
+	type PlannedSheetRow,
+	type ScenarioChangeLike,
+	type SheetDeleteScope,
+	type SheetForecastLike,
+	type SheetLocalFilters,
+	type SheetOrigin,
+	type SheetRowRef,
 	type SheetSort,
 	type SheetSortKey,
 	type TxView,
 } from "../../lib/derivations";
 import type { ForecastView } from "../types";
+import { InsertHandle, InsertRowEditor, type InsertDraft } from "./InsertRow";
+import {
+	categoryChipStyle,
+	rowActionBtnStyle,
+	tdStyle,
+	thStyle,
+} from "./sheetShared";
 import { SheetScenarioBar } from "./SheetScenarioBar";
+
+// Re-exported so the CSV unit test keeps importing them from this module.
+export {
+	csvAmountCell,
+	sheetAmountLabel,
+	sheetRowsCsv,
+	sheetSignedTotal,
+} from "./sheetShared";
+import {
+	downloadCsv,
+	sheetAmountLabel,
+	sheetRowsCsv,
+} from "./sheetShared";
 
 const txAll$ = queryDb(tables.transactions.orderBy("postedAt", "desc"));
 const overlay$ = queryDb(tables.reviewOverlay);
 const categories$ = queryDb(tables.categories.orderBy("id", "asc"));
 const accounts$ = queryDb(tables.accounts.orderBy("label", "asc"));
 const forecasts$ = queryDb(tables.forecasts);
+const scenarioChanges$ = queryDb(tables.scenarioChanges);
 
-const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string }> = [
-	{ key: "date", label: "date", width: "64px" },
-	{ key: "description", label: "description" },
-	{ key: "account", label: "account", width: "120px" },
-	{ key: "category", label: "category", width: "220px" },
-	{ key: "amount", label: "amount", width: "136px" },
+/** Sortable columns of the unified sheet (origin lives in the icon header). */
+const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string; align?: "right" }> =
+	[
+		{ key: "description", label: "descrição" },
+		{ key: "category", label: "categoria", width: "200px" },
+		{ key: "date", label: "data", width: "64px" },
+		{ key: "amount", label: "valor", width: "150px", align: "right" },
+	];
+
+const ORIGIN_FILTER_OPTIONS: Array<{ value: SheetLocalFilters["origin"]; label: string }> = [
+	{ value: "all", label: "origem: todas" },
+	{ value: "real", label: "realizado" },
+	{ value: "installment", label: "parcela" },
+	{ value: "recurring", label: "recorrente" },
+	{ value: "fixed", label: "fixa" },
+	{ value: "manual", label: "previsto manual" },
+	{ value: "scenario", label: "cenário" },
 ];
 
-const CSV_COLUMNS = [
-	"transaction_id",
-	"posted_at",
-	"description",
-	"merchant_name",
-	"purpose",
-	"account",
-	"category_id",
-	"amount",
-	"installment",
-] as const;
+const FLOW_FILTER_OPTIONS: Array<{ value: SheetLocalFilters["flow"]; label: string }> = [
+	{ value: "all", label: "tipo: todos" },
+	{ value: "in", label: "entradas" },
+	{ value: "out", label: "saídas" },
+];
 
-const STATUS_LABEL: Record<string, string> = {
-	ativo: "Previsto",
-	active: "Previsto",
-	realizado: "Efetivado",
-	descartado: "Excluido",
+const ORIGIN_TITLE: Record<SheetOrigin, string> = {
+	real: "realizado",
+	installment: "parcela",
+	recurring: "recorrente",
+	fixed: "conta fixa",
+	manual: "previsto manual",
+	scenario: "item do cenário",
 };
 
-const metaString = (meta: Record<string, unknown>, key: string): string | null => {
-	const value = meta[key];
-	return typeof value === "string" && value.trim() ? value : null;
+/** "YYYY-MM" of the current calendar month. */
+const currentMonthKey = (): string => {
+	const d = new Date();
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+/** Normalize a typed magnitude (BR or dot decimal) to a plain dot-decimal string. */
+const normalizeMagnitude = (raw: string): string => {
+	let s = raw.trim().replace(/\s/g, "").replace(/^-/, "");
+	if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+	return s;
+};
+
+/** The magnitude (no sign) of a signed decimal amount, as an editable string. */
+const magnitudeOf = (amount: string): string => {
+	const cents = Math.abs(toCents(amount));
+	return (cents / 100).toFixed(2);
 };
 
 const monthOf = (date: string | null): string | null =>
 	date && date.length >= 7 ? date.slice(0, 7) : null;
 
-/** All active forecasts for the sheet — includes envelopes, installments,
- *  templates, and manual planned transactions. */
-const isSheetForecast = (forecast: ForecastView): boolean =>
-	!["descartado", "inativo"].includes(forecast.status);
+/** Build a full scenario-change table row from the parts a gesture supplies. */
+const scenarioChangeRow = (
+	scenarioId: string,
+	kind: string,
+	parts: Partial<{
+		changeId: string;
+		targetForecastId: string | null;
+		targetTemplateId: string | null;
+		month: string | null;
+		effectiveFrom: string | null;
+		amount: string | null;
+		monthsCount: number | null;
+		description: string | null;
+		categoryId: string | null;
+		accountId: string | null;
+	}>,
+) => ({
+	changeId: parts.changeId ?? `chg-${crypto.randomUUID()}`,
+	scenarioId,
+	kind,
+	targetForecastId: parts.targetForecastId ?? null,
+	targetTemplateId: parts.targetTemplateId ?? null,
+	month: parts.month ?? null,
+	effectiveFrom: parts.effectiveFrom ?? null,
+	amount: parts.amount ?? null,
+	monthsCount: parts.monthsCount ?? null,
+	description: parts.description ?? null,
+	categoryId: parts.categoryId ?? null,
+	accountId: parts.accountId ?? null,
+	status: "ativo",
+	orphaned: 0,
+});
 
-const FORECAST_KIND_LABEL: Record<string, string> = {
-	manual: "manual",
-	installment: "installment",
-	template: "template",
-};
+interface BaseUnifiedRow {
+	id: string;
+	date: string;
+	description: string;
+	account: string;
+	category: string | null;
+	amount: string;
+	origin: SheetOrigin;
+}
 
-const forecastKindLabel = (forecast: ForecastView): string => {
-	if (
-		forecast.kind === "manual" &&
-		forecast.metadataJson.ui_role !== "planned_transaction"
-	) {
-		return "envelope";
-	}
-	return FORECAST_KIND_LABEL[forecast.kind] ?? forecast.kind;
-};
+type UnifiedRow =
+	| (BaseUnifiedRow & { kind: "tx"; origin: "real"; tx: TxView; tier: CommitmentTier })
+	| (BaseUnifiedRow & { kind: "planned"; planned: PlannedSheetRow });
 
-const predictedAmount = (forecast: ForecastView): string =>
-	metaString(forecast.metadataJson, "predicted_amount") ?? forecast.amount;
-
-const realizedAmount = (forecast: ForecastView): string | null =>
-	metaString(forecast.metadataJson, "realized_amount") ??
-	(forecast.status === "realizado" ? forecast.amount : null);
-
-const scoreCandidate = (forecast: ForecastView, tx: TxView): number => {
-	const amountGap = Math.abs(
-		Math.abs(toCents(tx.amount)) - Math.abs(toCents(predictedAmount(forecast))),
-	);
-	const due = Date.parse(forecast.dueDate ?? `${forecast.month ?? tx.month}-01`);
-	const posted = Date.parse(tx.postedAt);
-	const dateGap =
-		Number.isFinite(due) && Number.isFinite(posted) ? Math.abs(due - posted) : 0;
-	return amountGap + dateGap / 86400000;
-};
-
-type SheetDataRow =
-	| {
-			kind: "transaction";
-			id: string;
-			date: string;
-			description: string;
-			account: string;
-			category: string | null;
-			amount: string;
-			tx: TxView;
-			tier: CommitmentTier;
-	  }
-	| {
-			kind: "forecast";
-			id: string;
-			date: string;
-			description: string;
-			account: string;
-			category: string | null;
-			amount: string;
-			forecast: ForecastView;
-			candidates: ReadonlyArray<TxView>;
-	  };
-
-const csvCell = (value: string | null | undefined): string => {
-	const text = value ?? "";
-	if (/[",\n\r]/.test(text)) {
-		return `"${text.replaceAll('"', '""')}"`;
-	}
-	return text;
-};
-
-export const csvAmountCell = (amount: string): string => {
-	const cents = toCents(amount);
-	const sign = cents < 0 ? "-" : "";
-	const absolute = Math.abs(cents);
-	const whole = Math.trunc(absolute / 100);
-	const fraction = String(absolute % 100).padStart(2, "0");
-	return `${sign}${whole},${fraction}`;
-};
-
-export const sheetRowsCsv = (
-	rows: ReadonlyArray<TxView>,
-	accountMap: Map<string, { label: string }>,
-): string => {
-	const lines = [CSV_COLUMNS.join(",")];
-	for (const tx of rows) {
-		const account = accountMap.get(tx.accountId)?.label ?? tx.accountId;
-		lines.push(
-			[
-				tx.id,
-				tx.postedAt,
-				sheetLabel(tx),
-				tx.merchantName,
-				tx.purpose,
-				account,
-				tx.categoryId,
-				csvAmountCell(tx.amount),
-				tx.installmentMarker,
-			]
-				.map(csvCell)
-				.join(","),
-		);
-	}
-	return `${lines.join("\n")}\n`;
-};
-
-export const sheetAmountLabel = (amount: string): string => {
-	const cents = toCents(amount);
-	const value = Math.abs(cents) / 100;
-	const formatted = formatMoneyNumber(value);
-	return cents < 0 ? `(${formatted})` : formatted;
-};
-
-export const sheetSignedTotal = (rows: ReadonlyArray<TxView>): number =>
-	rows.reduce((total, tx) => total + toCents(tx.amount), 0) / 100;
-
-const downloadCsv = (filename: string, csv: string) => {
-	const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-	const url = URL.createObjectURL(blob);
-	const link = document.createElement("a");
-	link.href = url;
-	link.download = filename;
-	document.body.append(link);
-	link.click();
-	link.remove();
-	URL.revokeObjectURL(url);
-};
+const rowRef = (planned: PlannedSheetRow): SheetRowRef => ({
+	origin: planned.origin,
+	forecastId: planned.forecastId,
+	templateId: planned.templateId,
+	changeId: planned.changeId,
+});
 
 /**
- * Planilha — the spreadsheet view of a month. Every transaction is one flat
- * row: sortable columns, inline category editing (click the chip or press
- * Enter), shift/cmd multi-select with a bulk-apply bar, and live totals for
- * the current filter. Edits go through the same `reviewSubmitted` event the
- * grouped view uses (optimistic overlay + background flush to the bridge).
+ * Planilha — the unified sheet of a month (ADR-0038). Real transactions and
+ * planned items (forecasts + the active scenario's deltas) share one table:
+ * each row carries an origin glyph, an inline-editable amount, and per-row
+ * delete/insert affordances on hover. Baseline edits write real forecasts;
+ * with a scenario active the same gestures become plan deltas (routing in
+ * `routeSheet*`). Sort and origin/flow filters persist in localStorage so a
+ * view tweak never bumps STORE_VERSION.
  */
 export const PlanilhaView = ({
 	month,
@@ -237,7 +225,10 @@ export const PlanilhaView = ({
 	const overlay = useQuery(overlay$);
 	const categories = useQuery(categories$);
 	const accounts = useQuery(accounts$);
-	const forecasts = useQuery(forecasts$);
+	const forecasts = useQuery(forecasts$) as ReadonlyArray<ForecastView>;
+	const scenarioChangeRows = useQuery(scenarioChanges$) as ReadonlyArray<
+		ScenarioChangeLike & { scenarioId: string; status: string }
+	>;
 
 	const overlayMap = useMemo(() => buildOverlayMap(overlay), [overlay]);
 	const accountMap = useMemo(() => buildAccountMap(accounts), [accounts]);
@@ -247,7 +238,22 @@ export const PlanilhaView = ({
 		[forecasts],
 	);
 
-	const [sort, setSort] = useState<SheetSort>({ key: "date", dir: -1 });
+	const monthEditable = month >= currentMonthKey();
+
+	// ── View preferences (localStorage, not LiveStore) ──────────────────────
+	const [sort, setSort] = useState<SheetSort>(
+		() => readSheetSort(window.localStorage) ?? { key: "date", dir: -1 },
+	);
+	const [localFilters, setLocalFilters] = useState<SheetLocalFilters>(
+		() => readSheetLocalFilters(window.localStorage),
+	);
+	useEffect(() => writeSheetSort(window.localStorage, sort), [sort]);
+	useEffect(
+		() => writeSheetLocalFilters(window.localStorage, localFilters),
+		[localFilters],
+	);
+
+	// ── Interaction state ───────────────────────────────────────────────────
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [focusedIdx, setFocusedIdx] = useState(-1);
 	const lastClickedIdx = useRef(-1);
@@ -257,17 +263,13 @@ export const PlanilhaView = ({
 	} | null>(null);
 	const [recentCats, setRecentCats] = useState<string[]>([]);
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
-	const [composerOpen, setComposerOpen] = useState<"expense" | "income" | null>(
-		null,
-	);
-	const [forecastDescription, setForecastDescription] = useState("");
-	const [forecastAmount, setForecastAmount] = useState("");
-	const [forecastAccountId, setForecastAccountId] = useState("");
-	const [forecastCategoryId, setForecastCategoryId] = useState("");
-	const [settlingId, setSettlingId] = useState<string | null>(null);
+	const [editingId, setEditingId] = useState<string | null>(null);
+	const [editingValue, setEditingValue] = useState("");
+	const [insertAfter, setInsertAfter] = useState<string | "end" | null>(null);
+	const [deleteRowId, setDeleteRowId] = useState<string | null>(null);
 	const tableRef = useRef<HTMLDivElement>(null);
 
-	const filters = useMemo(
+	const uiFilters = useMemo(
 		() => ({
 			accountFilter: ui.accountFilter,
 			ownerFilter: ui.ownerFilter,
@@ -292,25 +294,49 @@ export const PlanilhaView = ({
 		],
 	);
 
-	const rows = useMemo(() => {
-		// Bake the optimistic overlay in first so edited description/merchant/
-		// category reflect everywhere (sheet, sums, sort), not just the modal.
+	// Active scenario's changes, as the derivation and the re-emit paths need.
+	const activeChanges = useMemo<ScenarioChangeLike[]>(
+		() =>
+			activeScenarioId
+				? scenarioChangeRows.filter(
+						(c) => c.scenarioId === activeScenarioId && c.status !== "aplicado",
+					)
+				: [],
+		[scenarioChangeRows, activeScenarioId],
+	);
+
+	const forecastsLike = useMemo<SheetForecastLike[]>(
+		() =>
+			forecasts.map((f) => ({
+				forecastId: f.forecastId,
+				dueDate: f.dueDate,
+				description: f.description,
+				amount: f.amount,
+				categoryId: f.categoryId,
+				accountId: f.accountId,
+				status: f.status,
+				kind: f.kind,
+				templateId: f.templateId,
+			})),
+		[forecasts],
+	);
+
+	// Real transactions of the month, with the optimistic overlay baked in and
+	// the ui-doc filters applied (account/text/tier/uncategorized/…).
+	const txUnified = useMemo<UnifiedRow[]>(() => {
 		const monthTxs = transactionsForMonth(txRows, month).map((tx) =>
 			effectiveTx(tx, overlayMap),
 		);
 		const filtered = filterTransactions(
 			monthTxs,
-			filters,
+			uiFilters,
 			overlayMap,
 			accountMap,
 			fixedCategories,
 		);
-		return sortForSheet(filtered, sort, overlayMap, accountMap);
-	}, [txRows, month, filters, overlayMap, accountMap, fixedCategories, sort]);
-
-	const sheetRows = useMemo(() => {
-		const txSheetRows: SheetDataRow[] = rows.map((tx) => ({
-			kind: "transaction",
+		return filtered.map((tx) => ({
+			kind: "tx" as const,
+			origin: "real" as const,
 			id: tx.id,
 			date: tx.postedAt,
 			description: sheetLabel(tx),
@@ -320,167 +346,303 @@ export const PlanilhaView = ({
 			tx,
 			tier: commitmentTier(tx, fixedCategories, overlayMap),
 		}));
-		const forecastRows = (forecasts as ReadonlyArray<Omit<ForecastView, "month">>)
-			.map((forecast) => ({
-				...forecast,
-				month: monthOf(forecast.dueDate),
-				metadataJson:
-					forecast.metadataJson && typeof forecast.metadataJson === "object"
-						? (forecast.metadataJson as Record<string, unknown>)
-						: {},
-			}))
-			.filter((forecast) => forecast.month === month && isSheetForecast(forecast))
-			.filter((forecast) => {
-				if (
-					filters.accountFilter &&
-					forecast.accountId !== filters.accountFilter
-				) {
+	}, [txRows, month, uiFilters, overlayMap, accountMap, fixedCategories]);
+
+	// Planned rows: baseline forecasts + the active scenario applied on top.
+	const plannedUnified = useMemo<UnifiedRow[]>(() => {
+		const text = uiFilters.textFilter?.toLowerCase() ?? null;
+		return applyScenarioToMonthRows(forecastsLike, activeChanges, month)
+			.filter((p) => {
+				if (uiFilters.accountFilter && p.accountId !== uiFilters.accountFilter) {
 					return false;
 				}
 				if (
-					filters.categoryFilter &&
-					forecast.categoryId !== filters.categoryFilter
+					uiFilters.categoryFilter &&
+					p.categoryId !== uiFilters.categoryFilter
 				) {
 					return false;
 				}
-				if (ui.textFilter) {
-					const haystack = [
-						forecast.description,
-						forecast.categoryId ?? "",
-						accountMap.get(forecast.accountId ?? "") ?? "",
-					]
+				if (text) {
+					const haystack = [p.description, p.categoryId ?? ""]
 						.join(" ")
 						.toLowerCase();
-					if (!haystack.includes(ui.textFilter.toLowerCase())) return false;
+					if (!haystack.includes(text)) return false;
 				}
 				return true;
 			})
-			.map((forecast): SheetDataRow => ({
-				kind: "forecast",
-				id: forecast.forecastId,
-					date: forecast.dueDate ?? `${month}-01`,
-					description: forecast.description,
-					account: forecast.accountId
-						? (accountMap.get(forecast.accountId)?.label ?? forecast.accountId)
-						: "sem conta",
-				category: forecast.categoryId,
-				amount: forecast.amount,
-				forecast,
-				candidates: rows
-					.filter(
-						(tx) =>
-							isNegative(tx.amount) === isNegative(forecast.amount) &&
-							(!forecast.accountId || tx.accountId === forecast.accountId),
-					)
-					.sort(
-						(left, right) =>
-							scoreCandidate(forecast, left) - scoreCandidate(forecast, right),
-					)
-					.slice(0, 6),
+			.map((p) => ({
+				kind: "planned" as const,
+				id: `p:${p.id}`,
+				date: p.dueDate,
+				description: p.description,
+				account: p.accountId
+					? (accountMap.get(p.accountId)?.label ?? p.accountId)
+					: "sem conta",
+				category: p.categoryId,
+				amount: p.amount,
+				origin: p.origin,
+				planned: p,
 			}));
-		const allRows = [...txSheetRows, ...forecastRows];
-		return allRows.sort((left, right) => {
-			const dir = sort.dir;
-			switch (sort.key) {
-				case "amount":
-					return (toCents(left.amount) - toCents(right.amount)) * dir;
-				case "account":
-					return left.account.localeCompare(right.account) * dir;
-				case "category":
-					return (left.category ?? "").localeCompare(right.category ?? "") * dir;
-				case "description":
-					return left.description.localeCompare(right.description) * dir;
-				case "date":
-				default:
-					return left.date.localeCompare(right.date) * dir;
-			}
-		});
-	}, [
-		rows,
-		forecasts,
-		month,
-		filters.accountFilter,
-		filters.categoryFilter,
-		ui.textFilter,
-		accountMap,
-		overlayMap,
-		fixedCategories,
-		sort,
-	]);
+	}, [forecastsLike, activeChanges, month, uiFilters, accountMap]);
+
+	const rows = useMemo<UnifiedRow[]>(() => {
+		const all = [...txUnified, ...plannedUnified].filter((r) =>
+			matchesSheetLocalFilters(r, localFilters),
+		);
+		return sortUnifiedRows(all, sort);
+	}, [txUnified, plannedUnified, localFilters, sort]);
 
 	const hasSheetFilters = useMemo(
-		() => hasActiveFilters(filters),
-		[filters],
+		() => hasActiveFilters(uiFilters) || localFilters.origin !== "all" || localFilters.flow !== "all",
+		[uiFilters, localFilters],
 	);
 
-	// Reset selection when the month or the visible set changes size.
-	const rowCount = sheetRows.length;
+	const rowCount = rows.length;
 	useEffect(() => {
 		setSelectedIds(new Set());
 		setFocusedIdx(-1);
 		lastClickedIdx.current = -1;
-	}, [month, rowCount]);
+		setEditingId(null);
+		setInsertAfter(null);
+		setDeleteRowId(null);
+	}, [month, activeScenarioId]);
 
+	// ── Totals footer (the sheet's status bar) ──────────────────────────────
 	const totals = useMemo(() => {
-		let inCents = 0;
-		let outCents = 0;
-		for (const row of sheetRows) {
-			const c = toCents(row.amount);
-			if (c < 0) outCents += -c;
-			else inCents += c;
+		let realizedCents = 0;
+		let plannedCents = 0;
+		for (const row of rows) {
+			if (row.kind === "tx") realizedCents += toCents(row.amount);
+			else if (!row.planned.skipped) plannedCents += toCents(row.amount);
 		}
 		return {
-			entradas: inCents / 100,
-			saidas: outCents / 100,
-			net: sheetRows.reduce((total, row) => total + toCents(row.amount), 0) / 100,
+			realizado: realizedCents / 100,
+			previsto: plannedCents / 100,
+			net: (realizedCents + plannedCents) / 100,
 		};
-	}, [sheetRows]);
+	}, [rows]);
 
 	const selectionTotal = useMemo(() => {
 		let cents = 0;
-		for (const row of sheetRows) {
-			if (row.kind === "transaction" && selectedIds.has(row.id)) {
+		for (const row of rows) {
+			if (row.kind === "tx" && selectedIds.has(row.id)) {
 				cents += toCents(row.amount);
 			}
 		}
 		return cents / 100;
-	}, [sheetRows, selectedIds]);
+	}, [rows, selectedIds]);
 
+	const rawTxForCsv = useMemo(
+		() => txUnified.map((r) => (r as Extract<UnifiedRow, { kind: "tx" }>).tx),
+		[txUnified],
+	);
 	const handleExportCsv = useCallback(() => {
-		downloadCsv(`phai-planilha-${month}.csv`, sheetRowsCsv(rows, accountMap));
-	}, [month, rows, accountMap]);
+		downloadCsv(`phai-planilha-${month}.csv`, sheetRowsCsv(rawTxForCsv, accountMap));
+	}, [month, rawTxForCsv, accountMap]);
 
-	const submitForecast = useCallback(() => {
-		const desc = forecastDescription.trim();
-		const mag = forecastAmount.replace(/^-/, "").trim();
-		if (!desc || !mag || !composerOpen) return;
-		store.commit(
-			events.forecastCreated({
-				writeId: crypto.randomUUID(),
-				description: desc,
-				amount: composerOpen === "expense" ? `-${mag}` : mag,
-				dueDate: `${month}-01`,
-				categoryId: forecastCategoryId || null,
-				accountId: forecastAccountId || null,
-				uiRole: "planned_transaction",
-				createdAt: Date.now(),
-			}),
-		);
-		setForecastDescription("");
-		setForecastAmount("");
-		setForecastAccountId("");
-		setForecastCategoryId("");
-		setComposerOpen(null);
-	}, [
-		store,
-		forecastDescription,
-		forecastAmount,
-		composerOpen,
-		month,
-		forecastCategoryId,
-		forecastAccountId,
-	]);
+	const notifyScenario = useCallback(() => {
+		onScenarioMutated?.();
+	}, [onScenarioMutated]);
 
+	// ── Inline amount edit ──────────────────────────────────────────────────
+	const beginEdit = useCallback(
+		(row: Extract<UnifiedRow, { kind: "planned" }>) => {
+			if (!monthEditable) return;
+			setEditingId(row.id);
+			setEditingValue(magnitudeOf(row.amount));
+		},
+		[monthEditable],
+	);
+
+	const commitEdit = useCallback(
+		(row: Extract<UnifiedRow, { kind: "planned" }>) => {
+			const magnitude = normalizeMagnitude(editingValue);
+			setEditingId(null);
+			if (!magnitude || Number(magnitude) === 0) return;
+			const signed = isNegative(row.amount) ? `-${magnitude}` : magnitude;
+			const action = routeSheetAmountEdit(rowRef(row.planned), activeScenarioId);
+			const writeId = crypto.randomUUID();
+			const now = Date.now();
+			if (action.kind === "baselinePatch") {
+				store.commit(
+					events.forecastEnvelopeUpserted({
+						writeId,
+						forecastId: action.forecastId,
+						description: "",
+						amount: signed,
+						dueDate: row.planned.dueDate,
+						categoryId: null,
+						upsertedAt: now,
+					}),
+				);
+			} else if (action.kind === "scenarioAdjust" && activeScenarioId) {
+				store.commit(
+					events.scenarioChangeAdded({
+						writeId,
+						row: scenarioChangeRow(activeScenarioId, "adjust_amount", {
+							changeId:
+								row.planned.adjustChangeId ??
+								`adj-${activeScenarioId}-${action.forecastId}`,
+							targetForecastId: action.forecastId,
+							amount: signed,
+						}),
+						addedAt: now,
+					}),
+				);
+				notifyScenario();
+			} else if (action.kind === "scenarioReplaceOneShot" && activeScenarioId) {
+				const existing = activeChanges.find((c) => c.changeId === action.changeId);
+				store.commit(
+					events.scenarioChangeAdded({
+						writeId,
+						row: scenarioChangeRow(activeScenarioId, "add_one_shot", {
+							changeId: action.changeId,
+							month: existing?.month ?? month,
+							amount: signed,
+							description: existing?.description ?? row.description,
+							categoryId: existing?.categoryId ?? null,
+							accountId: existing?.accountId ?? null,
+						}),
+						addedAt: now,
+					}),
+				);
+				notifyScenario();
+			}
+		},
+		[editingValue, activeScenarioId, activeChanges, month, store, notifyScenario],
+	);
+
+	// ── Delete a planned row (with the recurring "só/em diante" popover) ─────
+	const deletePlanned = useCallback(
+		(planned: PlannedSheetRow, scope: SheetDeleteScope) => {
+			const action = routeSheetDelete(rowRef(planned), scope, month, activeScenarioId);
+			const writeId = crypto.randomUUID();
+			const now = Date.now();
+			setDeleteRowId(null);
+			switch (action.kind) {
+				case "baselineDelete":
+					store.commit(
+						events.forecastDeleted({ writeId, forecastId: action.forecastId, deletedAt: now }),
+					);
+					break;
+				case "baselineDiscard":
+					store.commit(
+						events.forecastDiscarded({ writeId, forecastId: action.forecastId, discardedAt: now }),
+					);
+					break;
+				case "baselineEndTemplate": {
+					const forecastIds = forecasts
+						.filter(
+							(f) =>
+								f.templateId === action.templateId &&
+								f.status !== "descartado" &&
+								(monthOf(f.dueDate) ?? "") >= action.effectiveFrom,
+						)
+						.map((f) => f.forecastId);
+					store.commit(
+						events.forecastTemplateEnded({
+							writeId,
+							templateId: action.templateId,
+							effectiveFrom: action.effectiveFrom,
+							forecastIds,
+							endedAt: now,
+						}),
+					);
+					break;
+				}
+				case "scenarioSkip":
+					if (!activeScenarioId) break;
+					store.commit(
+						events.scenarioChangeAdded({
+							writeId,
+							row: scenarioChangeRow(activeScenarioId, "skip_forecast", {
+								changeId:
+									planned.skipChangeId ??
+									`skip-${activeScenarioId}-${action.forecastId}`,
+								targetForecastId: action.forecastId,
+							}),
+							addedAt: now,
+						}),
+					);
+					notifyScenario();
+					break;
+				case "scenarioEndTemplate":
+					if (!activeScenarioId) break;
+					store.commit(
+						events.scenarioChangeAdded({
+							writeId,
+							row: scenarioChangeRow(activeScenarioId, "end_template", {
+								changeId: `end-${activeScenarioId}-${action.templateId}`,
+								targetTemplateId: action.templateId,
+								effectiveFrom: action.effectiveFrom,
+							}),
+							addedAt: now,
+						}),
+					);
+					notifyScenario();
+					break;
+				case "scenarioRemoveChange":
+					if (!activeScenarioId) break;
+					store.commit(
+						events.scenarioChangeRemoved({
+							writeId,
+							changeId: action.changeId,
+							scenarioId: activeScenarioId,
+							removedAt: now,
+						}),
+					);
+					notifyScenario();
+					break;
+				case "none":
+					break;
+			}
+		},
+		[month, activeScenarioId, forecasts, store, notifyScenario],
+	);
+
+	// ── Positional insert (design E) ────────────────────────────────────────
+	const commitInsert = useCallback(
+		(draft: InsertDraft) => {
+			const magnitude = normalizeMagnitude(draft.magnitude);
+			setInsertAfter(null);
+			if (!magnitude || Number(magnitude) === 0) return;
+			const signed = draft.isExpense ? `-${magnitude}` : magnitude;
+			const day = Math.min(Math.max(draft.day, 1), 28);
+			const dueDate = `${month}-${String(day).padStart(2, "0")}`;
+			const writeId = crypto.randomUUID();
+			const now = Date.now();
+			if (routeSheetAdd(activeScenarioId) === "forecastCreate") {
+				store.commit(
+					events.forecastCreated({
+						writeId,
+						description: draft.description,
+						amount: signed,
+						dueDate,
+						categoryId: null,
+						accountId: null,
+						uiRole: "planned_transaction",
+						createdAt: now,
+					}),
+				);
+			} else if (activeScenarioId) {
+				store.commit(
+					events.scenarioChangeAdded({
+						writeId,
+						row: scenarioChangeRow(activeScenarioId, "add_one_shot", {
+							month,
+							amount: signed,
+							description: draft.description,
+						}),
+						addedAt: now,
+					}),
+				);
+				notifyScenario();
+			}
+		},
+		[month, activeScenarioId, store, notifyScenario],
+	);
+
+	// ── Category picker + bulk actions (real transactions) ──────────────────
 	const applyCategory = useCallback(
 		(categoryId: string, targetIds: string[]) => {
 			for (const transactionId of targetIds) {
@@ -488,12 +650,7 @@ export const PlanilhaView = ({
 					events.reviewSubmitted({
 						writeId: crypto.randomUUID(),
 						transactionId,
-						patch: {
-							description: null,
-							merchantName: null,
-							purpose: null,
-							categoryId,
-						},
+						patch: { description: null, merchantName: null, purpose: null, categoryId },
 						submittedAt: Date.now(),
 					}),
 				);
@@ -507,8 +664,6 @@ export const PlanilhaView = ({
 		[store],
 	);
 
-	// Bulk-set the commitment-tier override on the selection (ADR-0032);
-	// `tier === ""` clears the override back to the derived tier.
 	const applyTier = useCallback(
 		(tier: CommitmentTier | "") => {
 			for (const transactionId of selectedIds) {
@@ -543,12 +698,18 @@ export const PlanilhaView = ({
 		[selectedIds],
 	);
 
-	const handleRowClick = useCallback(
-		(tx: TxView, idx: number, e: React.MouseEvent) => {
+	const txIndex = useMemo(
+		() => rows.filter((r) => r.kind === "tx").map((r) => r.id),
+		[rows],
+	);
+
+	const handleTxClick = useCallback(
+		(tx: TxView, e: React.MouseEvent) => {
+			const idx = txIndex.indexOf(tx.id);
 			if (e.shiftKey && lastClickedIdx.current >= 0) {
 				const start = Math.min(lastClickedIdx.current, idx);
 				const end = Math.max(lastClickedIdx.current, idx);
-				setSelectedIds(new Set(rows.slice(start, end + 1).map((t) => t.id)));
+				setSelectedIds(new Set(txIndex.slice(start, end + 1)));
 			} else if (e.ctrlKey || e.metaKey) {
 				setSelectedIds((prev) => {
 					const next = new Set(prev);
@@ -558,14 +719,11 @@ export const PlanilhaView = ({
 				});
 				lastClickedIdx.current = idx;
 			} else {
-				// Plain click opens the same edit modal the categorias view uses;
-				// selection stays on the checkbox / modifier clicks.
 				lastClickedIdx.current = idx;
 				setModalTx(tx);
 			}
-			setFocusedIdx(idx);
 		},
-		[rows],
+		[txIndex],
 	);
 
 	const submitModal = useCallback(
@@ -583,8 +741,6 @@ export const PlanilhaView = ({
 		[store],
 	);
 
-	// Same "similar" notion as the categorias view: shares the effective
-	// category or the merchant. Restricted to the seeded window (all months).
 	const similarTxs = useMemo(() => {
 		if (!modalTx) return [] as TxView[];
 		const cat = effectiveCategory(modalTx, overlayMap);
@@ -598,17 +754,14 @@ export const PlanilhaView = ({
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
-			if (picker || modalTx) return; // the popover/modal owns the keyboard
+			if (picker || modalTx || editingId) return;
 			switch (e.key) {
 				case "ArrowDown":
 				case "ArrowUp": {
 					e.preventDefault();
 					const delta = e.key === "ArrowDown" ? 1 : -1;
 					setFocusedIdx((i) => {
-						const next = Math.min(
-							Math.max(i + delta, 0),
-							sheetRows.length - 1,
-						);
+						const next = Math.min(Math.max(i + delta, 0), rows.length - 1);
 						tableRef.current
 							?.querySelector(`[data-row-idx="${next}"]`)
 							?.scrollIntoView({ block: "nearest" });
@@ -616,34 +769,12 @@ export const PlanilhaView = ({
 					});
 					break;
 				}
-				case " ": {
-					e.preventDefault();
-					const row = sheetRows[focusedIdx];
-					if (!row || row.kind !== "transaction") break;
-					setSelectedIds((prev) => {
-						const next = new Set(prev);
-						if (next.has(row.id)) next.delete(row.id);
-						else next.add(row.id);
-						return next;
-					});
-					break;
-				}
 				case "Enter": {
-					// Mirrors the plain click: open the full edit modal.
-					const row = sheetRows[focusedIdx];
-					if (!row || row.kind !== "transaction") break;
+					const row = rows[focusedIdx];
+					if (!row) break;
 					e.preventDefault();
-					setModalTx(row.tx);
-					break;
-				}
-				case "k": {
-					const row = sheetRows[focusedIdx];
-					if (!row || row.kind !== "transaction") break;
-					e.preventDefault();
-					const el = tableRef.current?.querySelector(
-						`[data-row-idx="${focusedIdx}"] [data-cat-chip]`,
-					);
-					if (el) openPickerFor(row.tx, el as HTMLElement);
+					if (row.kind === "tx") setModalTx(row.tx);
+					else beginEdit(row);
 					break;
 				}
 				case "Escape":
@@ -651,32 +782,29 @@ export const PlanilhaView = ({
 					break;
 			}
 		},
-		[picker, modalTx, sheetRows, focusedIdx, openPickerFor],
+		[picker, modalTx, editingId, rows, focusedIdx, beginEdit],
 	);
 
 	const toggleSort = (key: SheetSortKey) =>
 		setSort((s) =>
-			s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: key === "date" || key === "amount" ? -1 : 1 },
+			s.key === key
+				? { key, dir: s.dir === 1 ? -1 : 1 }
+				: { key, dir: key === "date" || key === "amount" ? -1 : 1 },
 		);
 
-	const selectableRowIds = useMemo(
-		() =>
-			sheetRows
-				.filter((row) => row.kind === "transaction")
-				.map((row) => row.id),
-		[sheetRows],
-	);
-	const allVisibleSelected =
-		selectableRowIds.length > 0 &&
-		selectableRowIds.every((id) => selectedIds.has(id));
+	const columnCount = COLUMNS.length + 2; // origin icon + actions
+
+	const sortArrow = (key: SheetSortKey) =>
+		sort.key === key ? (sort.dir === 1 ? " ↑" : " ↓") : "";
 
 	return (
 		<section aria-label={`Sheet for ${month}`}>
-			{/* ── Scenario pills (ADR-0037) — the sheet header owns them ── */}
+			{/* ── Scenario pills (ADR-0037) — creation gated to current+future ── */}
 			{onActivateScenario && onScenarioMutated && (
 				<SheetScenarioBar
 					activeScenarioId={activeScenarioId}
 					scenarioDelta={scenarioDelta}
+					canCreate={monthEditable}
 					onActivate={onActivateScenario}
 					onMutated={onScenarioMutated}
 				/>
@@ -686,6 +814,8 @@ export const PlanilhaView = ({
 				ui={ui}
 				setUi={setUi}
 				accounts={accounts}
+				localFilters={localFilters}
+				setLocalFilters={setLocalFilters}
 				count={rowCount}
 				hasActiveFilters={hasSheetFilters}
 				filteredTotal={totals.net}
@@ -707,95 +837,6 @@ export const PlanilhaView = ({
 					background: "var(--card)",
 				}}
 			>
-				<div
-					style={{
-						display: "flex",
-						flexWrap: "wrap",
-						gap: 8,
-						padding: 12,
-						borderBottom: "1px solid var(--border)",
-						background: "rgba(148,163,184,0.04)",
-					}}
-				>
-					<button
-						onClick={() =>
-							setComposerOpen((value) =>
-								value === "expense" ? null : "expense",
-							)
-						}
-						className="mono pressable"
-						style={inlineActionBtn("var(--rose)")}
-					>
-						+ despesa no mes
-					</button>
-					<button
-						onClick={() =>
-							setComposerOpen((value) =>
-								value === "income" ? null : "income",
-							)
-						}
-						className="mono pressable"
-						style={inlineActionBtn("var(--green)")}
-					>
-						+ receita no mes
-					</button>
-					<span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
-						previsoes manuais aparecem na mesma grade e podem ser efetivadas ou excluidas
-					</span>
-				</div>
-				{composerOpen ? (
-					<div
-						style={{
-							display: "grid",
-							gridTemplateColumns: "minmax(220px,2fr) repeat(4,minmax(140px,1fr)) auto",
-							gap: 8,
-							padding: 12,
-							borderBottom: "1px solid var(--border)",
-							background:
-								composerOpen === "expense"
-									? "rgba(244,63,94,0.05)"
-									: "rgba(22,163,74,0.05)",
-						}}
-					>
-						<input
-							value={forecastDescription}
-							onChange={(e) => setForecastDescription(e.target.value)}
-							placeholder="descricao"
-							style={sheetInputStyle}
-						/>
-						<input
-							value={forecastAmount}
-							onChange={(e) => setForecastAmount(e.target.value)}
-							placeholder={composerOpen === "expense" ? "120.00" : "2500.00"}
-							style={sheetInputStyle}
-						/>
-						<select
-							value={forecastAccountId}
-							onChange={(e) => setForecastAccountId(e.target.value)}
-							style={sheetInputStyle}
-						>
-							<option value="">conta opcional</option>
-							{accounts.map((account) => (
-								<option key={account.id} value={account.id}>
-									{account.label}
-								</option>
-							))}
-						</select>
-						<input
-							value={forecastCategoryId}
-							onChange={(e) => setForecastCategoryId(e.target.value)}
-							list="sheet-forecast-categories"
-							placeholder="categoria opcional"
-							style={sheetInputStyle}
-						/>
-						<div className="mono" style={{ ...sheetInputStyle, opacity: 0.7 }}>
-							{month}
-						</div>
-						<button onClick={submitForecast} className="mono" style={saveBtnStyle}>
-							salvar previsao
-						</button>
-					</div>
-				) : null}
 				<datalist id="sheet-forecast-categories">
 					{categories.map((category) => (
 						<option key={category.id} value={category.id} />
@@ -804,8 +845,6 @@ export const PlanilhaView = ({
 				<table
 					style={{
 						width: "100%",
-						// "separate": with collapsed borders, body cells z-fight the
-						// sticky header and paint through it while scrolling.
 						borderCollapse: "separate",
 						borderSpacing: 0,
 						fontSize: 14,
@@ -814,18 +853,14 @@ export const PlanilhaView = ({
 					<thead>
 						<tr className="mono">
 							<th style={{ ...thStyle, width: 34 }}>
-								<input
-									type="checkbox"
-									aria-label="select all"
-									checked={allVisibleSelected}
-									onChange={() =>
-										setSelectedIds(
-											allVisibleSelected
-												? new Set()
-												: new Set(selectableRowIds),
-										)
-									}
-								/>
+								<button
+									onClick={() => toggleSort("origin")}
+									className="mono"
+									title="ordenar por origem"
+									style={sortBtnStyle(sort.key === "origin", "left")}
+								>
+									·{sortArrow("origin")}
+								</button>
 							</th>
 							{COLUMNS.map((col) => (
 								<th
@@ -842,75 +877,74 @@ export const PlanilhaView = ({
 									<button
 										onClick={() => toggleSort(col.key)}
 										className="mono"
-										style={{
-											background: "transparent",
-											border: "none",
-											cursor: "pointer",
-											color:
-												sort.key === col.key ? "var(--purple)" : "var(--muted)",
-											fontSize: 12,
-											textTransform: "uppercase",
-											letterSpacing: "0.06em",
-											padding: 0,
-											textAlign: col.key === "amount" ? "right" : "left",
-											width: "100%",
-										}}
+										style={sortBtnStyle(sort.key === col.key, col.align ?? "left")}
 									>
 										{col.label}
-										{sort.key === col.key ? (sort.dir === 1 ? " ↑" : " ↓") : ""}
+										{sortArrow(col.key)}
 									</button>
 								</th>
 							))}
-							<th style={{ ...thStyle, width: 70 }}>installment</th>
+							<th style={{ ...thStyle, width: 72 }} />
 						</tr>
 					</thead>
 					<tbody className="sheet-tbody">
-						{sheetRows.map((row, idx) => (
-							<SheetRow
-								key={`${row.kind}:${row.id}`}
-								row={row}
-								idx={idx}
-								selected={
-									row.kind === "transaction" && selectedIds.has(row.id)
-								}
-								focused={focusedIdx === idx}
-								onClick={handleRowClick}
-								onCategoryClick={openPickerFor}
-								onSettle={(forecast, transactionId) =>
-									store.commit(
-										events.forecastSettled({
-											writeId: crypto.randomUUID(),
-											forecastId: forecast.forecastId,
-											transactionId,
-											predictedAmount: predictedAmount(forecast),
-											actualAmount:
-												rows.find((tx) => tx.id === transactionId)?.amount ??
-												forecast.amount,
-											actualDate:
-												rows.find((tx) => tx.id === transactionId)?.postedAt ??
-												forecast.dueDate ??
-												`${month}-01`,
-											actualDescription:
-												rows.find((tx) => tx.id === transactionId)?.rawDescription ??
-												forecast.description,
-											settledAt: new Date().toISOString(),
-											settledAtMs: Date.now(),
-										}),
-									)
-								}
-								onDelete={(forecast) =>
-									store.commit(
-										events.forecastDeleted({
-											writeId: crypto.randomUUID(),
-											forecastId: forecast.forecastId,
-											deletedAt: Date.now(),
-										}),
-									)
-								}
-								settlingId={settlingId}
-								onToggleSettling={setSettlingId}
-							/>
+						{rows.map((row, idx) => (
+							<React.Fragment key={`${row.kind}:${row.id}`}>
+								<SheetRow
+									row={row}
+									idx={idx}
+									focused={focusedIdx === idx}
+									selected={row.kind === "tx" && selectedIds.has(row.id)}
+									editable={monthEditable}
+									editing={editingId === row.id}
+									editingValue={editingValue}
+									onEditingValueChange={setEditingValue}
+									onBeginEdit={beginEdit}
+									onCommitEdit={commitEdit}
+									onCancelEdit={() => setEditingId(null)}
+									onTxClick={handleTxClick}
+									onCategoryClick={openPickerFor}
+									onAskDelete={setDeleteRowId}
+									onInsertAfter={setInsertAfter}
+									deleteOpen={deleteRowId === row.id}
+									onDelete={deletePlanned}
+									onCloseDelete={() => setDeleteRowId(null)}
+									month={month}
+								/>
+								{insertAfter === row.id && (
+									<InsertRowEditor
+										columnCount={columnCount}
+										defaultDay={Number(month.slice(5)) === new Date().getMonth() + 1 ? new Date().getDate() : 1}
+										contextLabel={activeScenarioId ? "cenário ativo" : "baseline"}
+										onSubmit={commitInsert}
+										onCancel={() => setInsertAfter(null)}
+									/>
+								)}
+							</React.Fragment>
 						))}
+						{monthEditable && insertAfter !== "end" && (
+							<tr>
+								<td style={tdStyle} />
+								<td
+									colSpan={columnCount - 1}
+									style={{ ...tdStyle, color: "var(--muted)", cursor: "pointer" }}
+									onClick={() => setInsertAfter("end")}
+								>
+									<span className="mono" style={{ fontSize: 12.5 }}>
+										+ adicionar linha…
+									</span>
+								</td>
+							</tr>
+						)}
+						{insertAfter === "end" && (
+							<InsertRowEditor
+								columnCount={columnCount}
+								defaultDay={1}
+								contextLabel={activeScenarioId ? "cenário ativo" : "baseline"}
+								onSubmit={commitInsert}
+								onCancel={() => setInsertAfter(null)}
+							/>
+						)}
 					</tbody>
 				</table>
 				{rowCount === 0 && (
@@ -923,12 +957,12 @@ export const PlanilhaView = ({
 							fontSize: 13,
 						}}
 					>
-						No transactions for the current filters.
+						Nada para os filtros atuais.
 					</div>
 				)}
 			</div>
 
-			{/* Totals footer — the "sheet status bar". */}
+			{/* Totals footer — the sheet status bar (design: previsto · Δ · net). */}
 			<div
 				className="mono"
 				style={{
@@ -940,23 +974,35 @@ export const PlanilhaView = ({
 					flexWrap: "wrap",
 				}}
 			>
-				<span>{rowCount} transactions</span>
-				<span style={{ color: "var(--green)" }}>
-					income {formatMoneyNumber(totals.entradas)}
+				<span>{rowCount} linhas</span>
+				{totals.realizado !== 0 && (
+					<span>
+						realizado{" "}
+						<span style={{ color: totals.realizado >= 0 ? "var(--green)" : "var(--rose)" }}>
+							{formatMoneyNumber(totals.realizado)}
+						</span>
+					</span>
+				)}
+				<span>
+					previsto{" "}
+					<span style={{ color: "var(--purple)" }}>
+						{formatMoneyNumber(totals.previsto)}
+					</span>
 				</span>
-				<span style={{ color: "var(--rose)" }}>
-					expenses {formatMoneyNumber(totals.saidas)}
-				</span>
+				{activeScenarioId && scenarioDelta != null && (
+					<span style={{ color: "var(--cyan)" }}>
+						Δ cenário {formatMoneyNumber(scenarioDelta)}
+					</span>
+				)}
 				<span style={{ color: totals.net >= 0 ? "var(--green)" : "var(--rose)" }}>
 					net {formatMoneyNumber(totals.net)}
 				</span>
 				<span style={{ marginLeft: "auto", opacity: 0.7 }}>
-					↑↓ navigate · space select · Enter/click edit · k categorize ·
-					shift+click range
+					↑↓ navega · Enter edita · clique valor edita · hover: + insere · 🗑 remove
 				</span>
 			</div>
 
-			{/* Bulk-apply bar */}
+			{/* Bulk-apply bar (real transactions only) */}
 			{selectedIds.size > 0 && (
 				<div
 					role="toolbar"
@@ -978,8 +1024,7 @@ export const PlanilhaView = ({
 					}}
 				>
 					<span className="mono" style={{ fontSize: 12 }}>
-						{selectedIds.size} selected ·{" "}
-						{formatMoneyNumber(selectionTotal)}
+						{selectedIds.size} selected · {formatMoneyNumber(selectionTotal)}
 					</span>
 					<button
 						onClick={(e) =>
@@ -1003,11 +1048,7 @@ export const PlanilhaView = ({
 					</button>
 					<span
 						aria-hidden
-						style={{
-							width: 1,
-							alignSelf: "stretch",
-							background: "rgba(255,255,255,0.25)",
-						}}
+						style={{ width: 1, alignSelf: "stretch", background: "rgba(255,255,255,0.25)" }}
 					/>
 					<span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>
 						tier:
@@ -1092,350 +1133,353 @@ export const PlanilhaView = ({
 	);
 };
 
-const thStyle: React.CSSProperties = {
-	padding: "8px 10px",
-	textAlign: "left",
-	fontWeight: 500,
-	// Sticky lives on each th, not the tr: with collapsed table borders some
-	// engines skip painting a sticky row's background, so body rows scrolled
-	// through it. The th needs its own opaque background.
-	position: "sticky",
-	top: 0,
-	zIndex: 2,
-	background: "var(--card)",
-	boxShadow: "0 1px 0 var(--border)",
-};
+// ── Row ─────────────────────────────────────────────────────────────────────
 
-const SheetRow = React.memo(({
-	row,
-	idx,
-	selected,
-	focused,
-	onClick,
-	onCategoryClick,
-	onSettle,
-	onDelete,
-	settlingId,
-	onToggleSettling,
-}: {
-	row: SheetDataRow;
-	idx: number;
-	selected: boolean;
-	focused: boolean;
-	onClick: (tx: TxView, idx: number, e: React.MouseEvent) => void;
-	onCategoryClick: (tx: TxView, anchor: HTMLElement) => void;
-	onSettle: (forecast: ForecastView, transactionId: string) => void;
-	onDelete: (forecast: ForecastView) => void;
-	settlingId: string | null;
-	onToggleSettling: (id: string | null) => void;
-}) => {
-	if (row.kind === "forecast") {
-		const forecast = row.forecast;
-		const negative = isNegative(forecast.amount);
-		const linkedAmount = realizedAmount(forecast);
-		const kindLbl = forecastKindLabel(forecast);
+const SheetRow = React.memo(
+	({
+		row,
+		idx,
+		focused,
+		selected,
+		editable,
+		editing,
+		editingValue,
+		onEditingValueChange,
+		onBeginEdit,
+		onCommitEdit,
+		onCancelEdit,
+		onTxClick,
+		onCategoryClick,
+		onAskDelete,
+		onInsertAfter,
+		deleteOpen,
+		onDelete,
+		onCloseDelete,
+		month,
+	}: {
+		row: UnifiedRow;
+		idx: number;
+		focused: boolean;
+		selected: boolean;
+		editable: boolean;
+		editing: boolean;
+		editingValue: string;
+		onEditingValueChange: (value: string) => void;
+		onBeginEdit: (row: Extract<UnifiedRow, { kind: "planned" }>) => void;
+		onCommitEdit: (row: Extract<UnifiedRow, { kind: "planned" }>) => void;
+		onCancelEdit: () => void;
+		onTxClick: (tx: TxView, e: React.MouseEvent) => void;
+		onCategoryClick: (tx: TxView, anchor: HTMLElement) => void;
+		onAskDelete: (rowId: string) => void;
+		onInsertAfter: (rowId: string) => void;
+		deleteOpen: boolean;
+		onDelete: (planned: PlannedSheetRow, scope: SheetDeleteScope) => void;
+		onCloseDelete: () => void;
+		month: string;
+	}) => {
+		const negative = isNegative(row.amount);
+		const skipped = row.kind === "planned" && row.planned.skipped;
+		// Teal marks anything the active scenario touched: its own added rows,
+		// plus baseline forecasts it adjusted or skipped.
+		const scenario =
+			row.kind === "planned" &&
+			(row.origin === "scenario" ||
+				!!row.planned.adjustChangeId ||
+				row.planned.skipped);
+		const teal = "var(--cyan)";
+
+		const rowStyle: React.CSSProperties = {
+			background: scenario
+				? "rgba(8,145,178,0.06)"
+				: row.kind === "planned"
+					? "rgba(109,74,255,0.03)"
+					: selected
+						? "var(--purple-50, rgba(124,93,250,0.08))"
+						: undefined,
+			boxShadow: focused ? "inset 2px 0 0 var(--purple)" : undefined,
+			opacity: skipped ? 0.6 : 1,
+			userSelect: "none",
+			position: "relative",
+		};
+
+		const originGlyph = SHEET_ORIGIN_ICONS[row.origin];
+		const originTitle = ORIGIN_TITLE[row.origin];
+
+		const amountColor = scenario
+			? teal
+			: row.kind === "planned"
+				? "var(--purple)"
+				: negative
+					? "var(--rose)"
+					: "var(--green)";
+
 		return (
 			<tr
 				data-row-idx={idx}
-				style={{
-					background:
-						forecast.status === "realizado"
-							? "rgba(22,163,74,0.05)"
-							: "rgba(109,74,255,0.04)",
-					boxShadow: focused ? "inset 2px 0 0 var(--purple)" : undefined,
-				}}
+				className={row.kind === "tx" && !selected ? "sheet-row-hover" : undefined}
+				aria-selected={selected}
+				style={rowStyle}
+				onClick={row.kind === "tx" ? (e) => onTxClick(row.tx, e) : undefined}
 			>
-				<td style={tdStyle} />
-				<td className="mono" style={{ ...tdStyle, color: "var(--purple)" }}>
+				{/* Origin glyph + hover insert affordance */}
+				<td style={{ ...tdStyle, textAlign: "center", position: "relative", color: scenario ? teal : "var(--muted)" }}>
+					<span title={originTitle} aria-label={originTitle} style={{ fontSize: 13 }}>
+						{originGlyph}
+					</span>
+					{editable && (
+						<InsertHandle
+							label="inserir linha aqui"
+							onClick={() => onInsertAfter(row.id)}
+						/>
+					)}
+				</td>
+
+				{/* Description */}
+				<td
+					style={{ ...tdStyle, maxWidth: 380, color: scenario ? "#0b7285" : undefined }}
+					title={row.kind === "tx" ? row.tx.rawDescription : undefined}
+				>
+					<div style={{ display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
+						{row.kind === "tx" && negative && <TierBadge tier={row.tier} compact />}
+						<span
+							style={{
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap",
+								textDecoration: skipped ? "line-through" : undefined,
+							}}
+						>
+							{row.description}
+						</span>
+						{row.kind === "planned" && row.planned.installmentLabel && (
+							<span className="mono" style={{ fontSize: 11, color: scenario ? teal : "var(--muted)" }}>
+								{row.planned.installmentLabel}
+							</span>
+						)}
+						{skipped && (
+							<span className="mono" style={{ fontSize: 11, color: teal }}>
+								pulado
+							</span>
+						)}
+					</div>
+					{row.kind === "tx" && row.tx.purpose && (
+						<div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+							{row.tx.purpose}
+						</div>
+					)}
+				</td>
+
+				{/* Category */}
+				<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
+					{row.kind === "tx" ? (
+						<button
+							data-cat-chip
+							onClick={(e) => onCategoryClick(row.tx, e.currentTarget)}
+							className="mono"
+							title="mudar categoria (Enter)"
+							style={{ ...categoryChipStyle(!!row.category), cursor: "pointer" }}
+						>
+							{row.category
+								? `${categoryEmoji(row.category, !negative)} ${row.category}`
+								: "❓ sem categoria"}
+						</button>
+					) : (
+						<span className="mono" style={categoryChipStyle(!!row.category)}>
+							{row.category
+								? `${categoryEmoji(row.category, !negative)} ${row.category}`
+								: "❓ sem categoria"}
+						</span>
+					)}
+				</td>
+
+				{/* Date */}
+				<td className="mono" style={{ ...tdStyle, color: "var(--muted)" }}>
 					{row.date.slice(8, 10)}/{row.date.slice(5, 7)}
 				</td>
-				<td style={{ ...tdStyle, maxWidth: 380, color: "var(--purple)" }}>
-					<div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-						<span>{forecast.description}</span>
-						<span style={forecastPillStyle(forecast.status === "realizado" ? "done" : "pending")}>
-							{STATUS_LABEL[forecast.status] ?? forecast.status}
-						</span>
-						<span style={forecastPillStyle("pending")}>{kindLbl}</span>
-					</div>
-					<div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-						{forecast.status === "realizado"
-							? `forecast ${kindLbl} efetivado`
-							: `forecast ${kindLbl} pendente`}
-					</div>
-						{linkedAmount && linkedAmount !== predictedAmount(forecast) ? (
-							<div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-								prev. {formatMoneyNumber(Math.abs(toCents(predictedAmount(forecast))) / 100)} {"->"} real{" "}
-								{formatMoneyNumber(Math.abs(toCents(linkedAmount)) / 100)}
-							</div>
-						) : null}
-					<div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-						{forecast.status !== "realizado" ? (
-							<button
-								onClick={() =>
-									onToggleSettling(
-										settlingId === forecast.forecastId ? null : forecast.forecastId,
-									)
-								}
-								className="mono"
-								style={forecastRowBtnStyle}
-							>
-								marcar como pago
-							</button>
-						) : null}
-						<button
-							onClick={() => onDelete(forecast)}
-							className="mono"
-							style={forecastRowBtnStyle}
-						>
-							excluir
-						</button>
-					</div>
-					{settlingId === forecast.forecastId && row.candidates.length > 0 ? (
-						<div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-							{row.candidates.map((candidate) => (
-								<button
-									key={candidate.id}
-									onClick={() => onSettle(forecast, candidate.id)}
-									className="mono"
-									style={forecastCandidateBtnStyle}
-								>
-									{candidate.postedAt.slice(8, 10)}/{candidate.postedAt.slice(5, 7)} · {sheetLabel(candidate)} · {sheetAmountLabel(candidate.amount)}
-								</button>
-							))}
-						</div>
-					) : null}
-				</td>
-				<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
-					{row.account}
-				</td>
-				<td style={tdStyle}>
-					<span
-						className="mono"
-						style={{
-							background: row.category ? "var(--chip, #f1eefc)" : "transparent",
-							color: row.category ? "var(--purple)" : "var(--amber)",
-							border: row.category
-								? "1px solid transparent"
-								: "1px dashed var(--amber)",
-							borderRadius: "var(--radius-full)",
-							padding: "3px 10px",
-							fontSize: 12,
-						}}
-					>
-						{row.category
-							? `${categoryEmoji(row.category, !negative)} ${row.category}`
-							: "❓ uncategorized"}
-					</span>
-				</td>
+
+				{/* Amount (inline-editable for planned rows) */}
 				<td
 					className="mono"
 					style={{
 						...tdStyle,
 						textAlign: "right",
-						color: forecast.status === "realizado"
-							? (negative ? "var(--rose)" : "var(--green)")
-							: "var(--purple)",
+						color: amountColor,
 						fontVariantNumeric: "tabular-nums",
 						whiteSpace: "nowrap",
 					}}
+					onClick={(e) => {
+						if (row.kind === "planned" && editable && !editing) {
+							e.stopPropagation();
+							onBeginEdit(row);
+						}
+					}}
 				>
-					{sheetAmountLabel(forecast.amount)}
+					{editing && row.kind === "planned" ? (
+						<input
+							autoFocus
+							value={editingValue}
+							inputMode="decimal"
+							onChange={(e) => onEditingValueChange(e.target.value)}
+							onBlur={() => onCommitEdit(row)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") onCommitEdit(row);
+								if (e.key === "Escape") onCancelEdit();
+							}}
+							onClick={(e) => e.stopPropagation()}
+							className="mono"
+							style={{
+								width: 110,
+								textAlign: "right",
+								fontSize: 13,
+								padding: "4px 6px",
+								border: `1px solid ${teal}`,
+								borderRadius: "var(--radius-sm)",
+								background: "var(--card)",
+							}}
+						/>
+					) : (
+						<span
+							style={{
+								cursor: row.kind === "planned" && editable ? "text" : "default",
+								textDecoration:
+									row.kind === "planned" && row.planned.originalAmount
+										? undefined
+										: skipped
+											? "line-through"
+											: undefined,
+							}}
+						>
+							{row.kind === "planned" && row.planned.originalAmount && (
+								<s style={{ color: "var(--muted)", marginRight: 6 }}>
+									{sheetAmountLabel(row.planned.originalAmount)}
+								</s>
+							)}
+							{sheetAmountLabel(row.amount)}
+						</span>
+					)}
 				</td>
-				<td className="mono" style={{ ...tdStyle, fontSize: 11, color: "var(--purple)", opacity: 0.7 }}>
-					{forecast.status === "realizado" ? "efetivado" : kindLbl}
+
+				{/* Hover actions */}
+				<td
+					style={{ ...tdStyle, textAlign: "right", position: "relative" }}
+					onClick={(e) => e.stopPropagation()}
+				>
+					{row.kind === "planned" && editable && (
+						<span className="sheet-row-actions">
+							<button
+								className="mono"
+								title={
+									row.planned.templateId
+										? "remover — só neste mês ou em diante"
+										: "remover"
+								}
+								onClick={() =>
+									row.planned.templateId
+										? onAskDelete(row.id)
+										: onDelete(row.planned, "month")
+								}
+								style={rowActionBtnStyle}
+							>
+								🗑
+							</button>
+						</span>
+					)}
+					{deleteOpen && row.kind === "planned" && (
+						<DeleteScopePopover
+							month={month}
+							onScope={(scope) => onDelete(row.planned, scope)}
+							onClose={onCloseDelete}
+						/>
+					)}
 				</td>
 			</tr>
 		);
-	}
-	const tx = row.tx;
-	const negative = isNegative(tx.amount);
+	},
+);
+
+// ── Delete-scope popover (recurring rows) ────────────────────────────────────
+
+const DeleteScopePopover = ({
+	month,
+	onScope,
+	onClose,
+}: {
+	month: string;
+	onScope: (scope: SheetDeleteScope) => void;
+	onClose: () => void;
+}) => {
+	const monthName = new Date(`${month}-15`).toLocaleString("pt-BR", { month: "long" });
 	return (
-		<tr
-			data-row-idx={idx}
-			aria-selected={selected}
-			className={!selected ? "sheet-row-hover" : undefined}
-			onClick={(e) => onClick(tx, idx, e)}
-			style={{
-				cursor: "default",
-				background: selected
-					? "var(--purple-50, rgba(124,93,250,0.08))"
-					: undefined,
-				boxShadow: focused ? "inset 2px 0 0 var(--purple)" : undefined,
-				userSelect: "none",
-			}}
-		>
-			<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
-				<input
-					type="checkbox"
-					aria-label={`select ${sheetLabel(tx)}`}
-					checked={selected}
-					onChange={(e) =>
-						onClick(tx, idx, {
-							...e,
-							ctrlKey: true,
-							metaKey: true,
-							shiftKey: false,
-						} as unknown as React.MouseEvent)
-					}
-				/>
-			</td>
-			<td className="mono" style={{ ...tdStyle, color: "var(--muted)" }}>
-				{tx.postedAt.slice(8, 10)}/{tx.postedAt.slice(5, 7)}
-			</td>
-			<td style={{ ...tdStyle, maxWidth: 380 }} title={tx.rawDescription}>
-				<div
-					style={{
-						display: "flex",
-						alignItems: "center",
-						gap: 6,
-						overflow: "hidden",
-					}}
-				>
-					{/* Tiers describe controllability of spending — income has none. */}
-					{negative && <TierBadge tier={row.tier} compact />}
-					<span
-						style={{
-							overflow: "hidden",
-							textOverflow: "ellipsis",
-							whiteSpace: "nowrap",
-						}}
-					>
-						{sheetLabel(tx)}
-					</span>
-				</div>
-				{tx.purpose && (
-					<div
-						className="mono"
-						style={{ fontSize: 11, color: "var(--muted)" }}
-					>
-						{tx.purpose}
-					</div>
-				)}
-			</td>
-			<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
-				{row.account}
-			</td>
-			<td style={tdStyle} onClick={(e) => e.stopPropagation()}>
-				<button
-					data-cat-chip
-					onClick={(e) => onCategoryClick(tx, e.currentTarget)}
-					className="mono"
-					title="change category (Enter)"
-					style={{
-						background: row.category ? "var(--chip, #f1eefc)" : "transparent",
-						color: row.category ? "var(--purple)" : "var(--amber)",
-						border: row.category
-							? "1px solid transparent"
-							: "1px dashed var(--amber)",
-						borderRadius: "var(--radius-full)",
-						padding: "3px 10px",
-						cursor: "pointer",
-						fontSize: 12,
-						maxWidth: 220,
-						overflow: "hidden",
-						textOverflow: "ellipsis",
-						whiteSpace: "nowrap",
-					}}
-				>
-					{row.category
-						? `${categoryEmoji(row.category, !negative)} ${row.category}`
-						: "❓ uncategorized"}
-				</button>
-			</td>
-			<td
-				className="mono"
+		<>
+			<div
+				onClick={onClose}
+				style={{ position: "fixed", inset: 0, zIndex: 40 }}
+				aria-hidden
+			/>
+			<div
+				role="menu"
 				style={{
-					...tdStyle,
-					textAlign: "right",
-					color: negative ? "var(--rose)" : "var(--green)",
-					fontVariantNumeric: "tabular-nums",
-					whiteSpace: "nowrap",
+					position: "absolute",
+					right: 8,
+					top: "100%",
+					zIndex: 41,
+					width: 230,
+					background: "var(--card)",
+					border: "1px solid var(--border)",
+					borderRadius: "var(--radius-md)",
+					boxShadow: "0 8px 24px rgba(21,19,31,0.18)",
+					padding: 8,
 				}}
 			>
-				{sheetAmountLabel(tx.amount)}
-			</td>
-			<td className="mono" style={{ ...tdStyle, fontSize: 12, color: "var(--muted)" }}>
-				{tx.installmentMarker ?? ""}
-			</td>
-		</tr>
+				<button
+					className="mono"
+					onClick={() => onScope("month")}
+					style={popoverBtnStyle}
+				>
+					📅 só em {monthName}
+				</button>
+				<button
+					className="mono"
+					onClick={() => onScope("onward")}
+					style={popoverBtnStyle}
+				>
+					✂ de {monthName} em diante
+				</button>
+				<p style={{ fontSize: 11, color: "var(--muted)", margin: "6px 2px 0" }}>
+					no cenário vira mudança; no baseline grava direto
+				</p>
+			</div>
+		</>
 	);
-});
-
-const tdStyle: React.CSSProperties = {
-	padding: "6px 10px",
-	verticalAlign: "top",
-	// Row separator lives on the td: tr borders don't render with
-	// border-collapse: separate (which the sticky header requires).
-	borderBottom: "1px solid var(--border)",
 };
 
-const inlineActionBtn = (color: string): React.CSSProperties => ({
-	// color is a CSS var (e.g. var(--rose)) — concatenating a hex alpha
-	// (`${color}12`) yields invalid CSS, so use color-mix to tint it.
-	background: `color-mix(in srgb, ${color} 10%, transparent)`,
-	color,
-	border: `1px solid color-mix(in srgb, ${color} 38%, transparent)`,
-	borderRadius: "var(--radius-full)",
-	padding: "6px 12px",
-	cursor: "pointer",
-	fontSize: 12,
-	fontWeight: 600,
-	whiteSpace: "nowrap",
-});
-
-const sheetInputStyle: React.CSSProperties = {
-	border: "1px solid var(--border)",
-	borderRadius: "var(--radius-sm)",
-	padding: "8px 10px",
-	fontSize: 12,
-	background: "var(--card)",
-	minHeight: 36,
-};
-
-const saveBtnStyle: React.CSSProperties = {
-	background: "var(--purple)",
-	color: "#fff",
+const popoverBtnStyle: React.CSSProperties = {
+	display: "block",
+	width: "100%",
+	textAlign: "left",
+	background: "transparent",
 	border: "none",
 	borderRadius: "var(--radius-sm)",
-	padding: "8px 12px",
+	padding: "7px 8px",
 	cursor: "pointer",
-	fontSize: 12,
+	fontSize: 12.5,
+	color: "var(--text)",
 };
 
-const forecastPillStyle = (
-	tone: "pending" | "done",
-): React.CSSProperties => ({
-	borderRadius: "var(--radius-full)",
-	padding: "2px 8px",
-	fontSize: 10,
-	fontFamily: "var(--font-mono, monospace)",
+const sortBtnStyle = (active: boolean, align: "left" | "right"): React.CSSProperties => ({
+	background: "transparent",
+	border: "none",
+	cursor: "pointer",
+	color: active ? "var(--purple)" : "var(--muted)",
+	fontSize: 12,
 	textTransform: "uppercase",
 	letterSpacing: "0.06em",
-	background:
-		tone === "done" ? "rgba(22,163,74,0.12)" : "rgba(124,93,250,0.1)",
-	color: tone === "done" ? "var(--green)" : "var(--purple)",
+	padding: 0,
+	textAlign: align,
+	width: "100%",
 });
 
-const forecastRowBtnStyle: React.CSSProperties = {
-	background: "transparent",
-	color: "var(--muted)",
-	border: "1px solid var(--border)",
-	borderRadius: "var(--radius-full)",
-	padding: "4px 10px",
-	cursor: "pointer",
-	fontSize: 11,
-};
-
-const forecastCandidateBtnStyle: React.CSSProperties = {
-	background: "rgba(148,163,184,0.08)",
-	color: "var(--text)",
-	border: "1px solid var(--border)",
-	borderRadius: "var(--radius-full)",
-	padding: "4px 10px",
-	cursor: "pointer",
-	fontSize: 11,
-	maxWidth: "100%",
-};
+// ── Filter bar ───────────────────────────────────────────────────────────────
 
 interface SheetFilterState {
 	textFilter: string | null;
@@ -1449,11 +1493,12 @@ interface SheetFilterState {
 	tierFilter: string | null;
 }
 
-/** Compact filter strip shared with the grouped view via the ui document. */
 const SheetFilterBar = ({
 	ui,
 	setUi,
 	accounts,
+	localFilters,
+	setLocalFilters,
 	count,
 	hasActiveFilters,
 	filteredTotal,
@@ -1462,11 +1507,20 @@ const SheetFilterBar = ({
 	ui: SheetFilterState;
 	setUi: (patch: Partial<SheetFilterState>) => void;
 	accounts: ReadonlyArray<{ id: string; label: string }>;
+	localFilters: SheetLocalFilters;
+	setLocalFilters: React.Dispatch<React.SetStateAction<SheetLocalFilters>>;
 	count: number;
 	hasActiveFilters: boolean;
 	filteredTotal: number;
 	onExportCsv: () => void;
 }) => {
+	const selectStyle: React.CSSProperties = {
+		border: "1px solid var(--border)",
+		borderRadius: "var(--radius-full)",
+		padding: "6px 10px",
+		fontSize: 12,
+		background: "var(--card)",
+	};
 	const chip = (active: boolean): React.CSSProperties => ({
 		background: active ? "var(--purple)" : "transparent",
 		color: active ? "#fff" : "var(--muted)",
@@ -1478,7 +1532,6 @@ const SheetFilterBar = ({
 		whiteSpace: "nowrap",
 		flexShrink: 0,
 	});
-	// Controllability tiers (ADR-0030): single-select, distinct colours.
 	const tierColor: Record<CommitmentTier, string> = {
 		locked: "#9a9aae",
 		cancellable: "var(--amber)",
@@ -1497,6 +1550,7 @@ const SheetFilterBar = ({
 			fontSize: 12,
 		};
 	};
+	const resetLocal = () => setLocalFilters(DEFAULT_SHEET_LOCAL_FILTERS);
 	return (
 		<div
 			style={{
@@ -1509,7 +1563,7 @@ const SheetFilterBar = ({
 		>
 			<input
 				type="search"
-				placeholder={`search ${count} transactions…`}
+				placeholder={`buscar ${count} linhas…`}
 				value={ui.textFilter ?? ""}
 				onChange={(e) => setUi({ textFilter: e.target.value || null })}
 				className="mono"
@@ -1518,24 +1572,48 @@ const SheetFilterBar = ({
 					borderRadius: "var(--radius-full)",
 					padding: "6px 14px",
 					fontSize: 12,
-					minWidth: 220,
+					minWidth: 200,
 					background: "var(--card)",
 				}}
 			/>
 			<select
-				aria-label="filter by account"
+				aria-label="filtrar por origem"
+				value={localFilters.origin}
+				onChange={(e) =>
+					setLocalFilters((f) => ({ ...f, origin: e.target.value as SheetLocalFilters["origin"] }))
+				}
+				className="mono"
+				style={selectStyle}
+			>
+				{ORIGIN_FILTER_OPTIONS.map((o) => (
+					<option key={o.value} value={o.value}>
+						{o.label}
+					</option>
+				))}
+			</select>
+			<select
+				aria-label="filtrar por tipo"
+				value={localFilters.flow}
+				onChange={(e) =>
+					setLocalFilters((f) => ({ ...f, flow: e.target.value as SheetLocalFilters["flow"] }))
+				}
+				className="mono"
+				style={selectStyle}
+			>
+				{FLOW_FILTER_OPTIONS.map((o) => (
+					<option key={o.value} value={o.value}>
+						{o.label}
+					</option>
+				))}
+			</select>
+			<select
+				aria-label="filtrar por conta"
 				value={ui.accountFilter ?? ""}
 				onChange={(e) => setUi({ accountFilter: e.target.value || null })}
 				className="mono"
-				style={{
-					border: "1px solid var(--border)",
-					borderRadius: "var(--radius-full)",
-					padding: "6px 10px",
-					fontSize: 12,
-					background: "var(--card)",
-				}}
+				style={selectStyle}
 			>
-				<option value="">all accounts</option>
+				<option value="">todas as contas</option>
 				{accounts.map((a) => (
 					<option key={a.id} value={a.id}>
 						{a.label}
@@ -1547,21 +1625,7 @@ const SheetFilterBar = ({
 				style={chip(ui.uncategorizedOnly)}
 				onClick={() => setUi({ uncategorizedOnly: !ui.uncategorizedOnly })}
 			>
-				uncategorized
-			</button>
-			<button
-				className="mono pressable"
-				style={chip(ui.unreviewedOnly)}
-				onClick={() => setUi({ unreviewedOnly: !ui.unreviewedOnly })}
-			>
-				unreviewed
-			</button>
-			<button
-				className="mono pressable"
-				style={chip(ui.installmentsOnly)}
-				onClick={() => setUi({ installmentsOnly: !ui.installmentsOnly })}
-			>
-				installments
+				sem categoria
 			</button>
 			<span
 				aria-hidden
@@ -1579,13 +1643,16 @@ const SheetFilterBar = ({
 					className="mono pressable"
 					style={tierChip(tier)}
 					aria-pressed={ui.tierFilter === tier}
-					onClick={() =>
-						setUi({ tierFilter: ui.tierFilter === tier ? null : tier })
-					}
+					onClick={() => setUi({ tierFilter: ui.tierFilter === tier ? null : tier })}
 				>
 					{COMMITMENT_TIER_LABELS[tier]}
 				</button>
 			))}
+			{(localFilters.origin !== "all" || localFilters.flow !== "all") && (
+				<button className="mono" style={chip(false)} onClick={resetLocal}>
+					limpar origem/tipo
+				</button>
+			)}
 			{hasActiveFilters && (
 				<div
 					className="mono"
@@ -1603,7 +1670,7 @@ const SheetFilterBar = ({
 						marginLeft: "auto",
 					}}
 				>
-					<span>filtered sum</span>
+					<span>soma filtrada</span>
 					<strong
 						style={{
 							color: filteredTotal >= 0 ? "var(--green)" : "var(--rose)",

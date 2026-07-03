@@ -23,12 +23,15 @@ interface ScenarioView {
 export const SheetScenarioBar = ({
 	activeScenarioId,
 	scenarioDelta,
+	canCreate,
 	onActivate,
 	onMutated,
 }: {
 	activeScenarioId: string | null;
 	/** Selected-month projected-saldo delta vs. baseline (null = not seeded). */
 	scenarioDelta: number | null;
+	/** Whether a new scenario can be started from the viewed month (current+future only). */
+	canCreate: boolean;
 	onActivate: (scenarioId: string | null) => void;
 	/** Fired after any scenario write so the caller re-seeds the projection. */
 	onMutated: () => void;
@@ -130,32 +133,42 @@ export const SheetScenarioBar = ({
 						{s.name}
 					</button>
 				))}
-				{creating ? (
-					<span style={{ display: "inline-flex", gap: 4 }}>
-						<input
-							autoFocus
-							placeholder="nome do cenário"
-							value={newName}
-							onChange={(e) => setNewName(e.target.value)}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") createScenario();
-								if (e.key === "Escape") setCreating(false);
-							}}
+				{canCreate ? (
+					creating ? (
+						<span style={{ display: "inline-flex", gap: 4 }}>
+							<input
+								autoFocus
+								placeholder="nome do cenário"
+								value={newName}
+								onChange={(e) => setNewName(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") createScenario();
+									if (e.key === "Escape") setCreating(false);
+								}}
+								className="mono"
+								style={inputStyle}
+							/>
+							<button onClick={createScenario} className="mono" style={pillStyle(false)}>
+								criar
+							</button>
+						</span>
+					) : (
+						<button
+							onClick={() => setCreating(true)}
 							className="mono"
-							style={inputStyle}
-						/>
-						<button onClick={createScenario} className="mono" style={pillStyle(false)}>
-							criar
+							style={{ ...pillStyle(false), borderStyle: "dashed" }}
+						>
+							+ novo
 						</button>
-					</span>
+					)
 				) : (
-					<button
-						onClick={() => setCreating(true)}
+					<span
 						className="mono"
-						style={{ ...pillStyle(false), borderStyle: "dashed" }}
+						style={{ fontSize: 11, color: "var(--muted)", opacity: 0.8 }}
+						title="cenários simulam o futuro — só a partir do mês atual"
 					>
-						+ novo
-					</button>
+						cenários a partir do mês atual
+					</span>
 				)}
 			</div>
 
