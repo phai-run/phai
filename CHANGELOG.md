@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.33.0](https://github.com/phai-run/phai/compare/v5.32.0...v5.33.0) (2026-07-03)
+
+
+### Features
+
+* named planning scenarios + unified sheet (ADR-0037, ADR-0038) ([c6eee7f](https://github.com/phai-run/phai/commit/c6eee7f0e1f65df89956d40a33b03fb6aead5680))
+* **web:** rich chart tooltip with scenario breakdown and per-month scenario slices ([8dbaec4](https://github.com/phai-run/phai/commit/8dbaec4b2be16392fdf3f8ee13e7302ca888fa13))
+
 ## [5.32.0](https://github.com/phai-run/phai/compare/v5.31.0...v5.32.0) (2026-07-02)
 
 
