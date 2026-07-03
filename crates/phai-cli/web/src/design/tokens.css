@@ -450,6 +450,66 @@ tr:hover .sheet-insert-btn {
   }
 }
 
+/* ── Skeuomorphic credit card — 3D flip on select ───────────────────────── */
+.cc-scene {
+  perspective: 1400px;
+}
+.cc-flip {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1.586 / 1; /* ISO/IEC 7810 ID-1 card ratio */
+  transform-style: preserve-3d;
+  transition: transform 620ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  cursor: pointer;
+}
+.cc-flip.is-flipped {
+  transform: rotateY(180deg);
+}
+.cc-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(21, 19, 31, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.cc-face-back {
+  transform: rotateY(180deg);
+}
+/* Subtle lift on hover, kept off the flipped state so it doesn't fight the 3D. */
+.cc-flip:not(.is-flipped):hover {
+  transform: translateY(-2px) scale(1.008);
+}
+/* Brushed-metal chip sheen. */
+.cc-chip {
+  background: linear-gradient(135deg, #d4af37 0%, #f5e7a0 40%, #c9a227 60%, #f5e7a0 100%);
+  border-radius: 5px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cc-flip {
+    transition: none;
+  }
+  .cc-flip:not(.is-flipped):hover {
+    transform: none;
+  }
+}
+
+/* ── Inline insert editor inputs — soft focus ring in the brand accent ─── */
+.sheet-insert-input {
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.sheet-insert-input:focus {
+  border-color: var(--purple);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--purple) 18%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-insert-input {
+    transition: none;
+  }
+}
+
 /* ── Select pill — native <select> styled as a rounded pill with a custom
    chevron that keeps a consistent gap from the right edge (the native arrow
    sat glued to the border). appearance:none removes the OS arrow; the SVG
