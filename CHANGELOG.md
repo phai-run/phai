@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.33.1](https://github.com/phai-run/phai/compare/v5.33.0...v5.33.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **web:** rebuild unified sheet to match the validated mockup ([3532440](https://github.com/phai-run/phai/commit/3532440be8470c5afeb3c68f1647413208365472))
+* **web:** rebuild unified sheet to match the validated mockup ([479497c](https://github.com/phai-run/phai/commit/479497c1cca30f3b4b22cb5d5237cef7d260c770))
+
 ## [5.33.0](https://github.com/phai-run/phai/compare/v5.32.0...v5.33.0) (2026-07-03)
 
 
