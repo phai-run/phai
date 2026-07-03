@@ -295,8 +295,10 @@ export const api = {
 			json<{ templates: ForecastTemplateRecord[] }>(r),
 		),
 
-	createForecast: (forecast: NewForecast): Promise<{ forecast_id: string }> =>
-		postJson<{ forecast_id: string }>("/api/forecast", forecast),
+	// POST /api/forecast returns { forecastId } (camelCase) for both create and
+	// envelope upsert — keep this in sync with `upsertForecast` below.
+	createForecast: (forecast: NewForecast): Promise<{ forecastId: string }> =>
+		postJson<{ forecastId: string }>("/api/forecast", forecast),
 
 	/** Upsert a budget envelope (inline amount edit or creation). */
 	upsertForecast: (envelope: EnvelopeUpsert): Promise<{ forecastId: string }> =>

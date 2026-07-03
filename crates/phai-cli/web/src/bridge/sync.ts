@@ -457,7 +457,7 @@ const flushForecastCreate = async (
 			events.forecastCreateAcked({
 				writeId: row.writeId,
 				localForecastId: row.writeId,
-				serverForecastId: response.forecast_id,
+				serverForecastId: response.forecastId,
 				description: forecast.description,
 				amount: forecast.amount,
 				dueDate: forecast.dueDate,
