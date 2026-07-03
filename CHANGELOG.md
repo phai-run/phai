@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.34.0](https://github.com/phai-run/phai/compare/v5.33.1...v5.34.0) (2026-07-03)
+
+
+### Features
+
+* **web:** sheet inline-edit alignment, multi-account filter, cards redesign ([e775d3b](https://github.com/phai-run/phai/commit/e775d3b25b3e1f7522b320b7bc243e7dd280ae7a))
+* **web:** sheet inline-edit alignment, multi-account filter, cards redesign ([c867bd6](https://github.com/phai-run/phai/commit/c867bd6b9526e8939d38866fec69fffaeb63921e))
+
 ## [5.33.1](https://github.com/phai-run/phai/compare/v5.33.0...v5.33.1) (2026-07-03)
 
 
