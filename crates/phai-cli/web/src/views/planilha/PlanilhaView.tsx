@@ -18,6 +18,7 @@ import { TierBadge } from "../../components/TierBadge";
 import { categoryEmoji } from "../../lib/categoryEmoji";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
 import {
+	accountFilterIds,
 	applyScenarioToMonthRows,
 	buildAccountMap,
 	buildOverlayMap,
@@ -30,6 +31,7 @@ import {
 	filterTransactions,
 	fixedCategoriesFromForecasts,
 	hasActiveFilters,
+	matchesAccountFilter,
 	matchesSheetLocalFilters,
 	readSheetLocalFilters,
 	readSheetSort,
@@ -89,7 +91,7 @@ const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string; align?:
 	[
 		{ key: "description", label: "descrição" },
 		{ key: "category", label: "categoria", width: "200px" },
-		{ key: "date", label: "data", width: "64px" },
+		{ key: "date", label: "dia", width: "56px" },
 		{ key: "amount", label: "valor", width: "150px", align: "right" },
 	];
 
@@ -124,9 +126,29 @@ const currentMonthKey = (): string => {
 	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
 
+const MONTH_LABEL_FMT = new Intl.DateTimeFormat("pt-BR", {
+	month: "long",
+	year: "numeric",
+});
+
+/** "2026-07" → "Julho 2026" (capitalised) for the sheet's month heading. */
+const monthLabel = (month: string): string => {
+	const [y, m] = month.split("-").map(Number);
+	if (!y || !m) return month;
+	const s = MONTH_LABEL_FMT.format(new Date(y, m - 1, 1));
+	return s.charAt(0).toUpperCase() + s.slice(1);
+};
+
+/** Number of days in a "YYYY-MM" month — used to validate the day column. */
+const daysInMonth = (month: string): number => {
+	const [y, m] = month.split("-").map(Number);
+	if (!y || !m) return 31;
+	return new Date(y, m, 0).getDate();
+};
+
 /** Normalize a typed magnitude (BR or dot decimal) to a plain dot-decimal string. */
 const normalizeMagnitude = (raw: string): string => {
-	let s = raw.trim().replace(/\s/g, "").replace(/^-/, "");
+	let s = raw.trim().replace(/\s/g, "").replace(/^[+-]/, "");
 	if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
 	return s;
 };
@@ -353,7 +375,7 @@ export const PlanilhaView = ({
 		const text = uiFilters.textFilter?.toLowerCase() ?? null;
 		return applyScenarioToMonthRows(forecastsLike, activeChanges, month)
 			.filter((p) => {
-				if (uiFilters.accountFilter && p.accountId !== uiFilters.accountFilter) {
+				if (!matchesAccountFilter(uiFilters.accountFilter, p.accountId ?? "")) {
 					return false;
 				}
 				if (
@@ -449,7 +471,10 @@ export const PlanilhaView = ({
 		(row: Extract<UnifiedRow, { kind: "planned" }>) => {
 			if (!monthEditable) return;
 			setEditingId(row.id);
-			setEditingValue(magnitudeOf(row.amount));
+			// Seed with the sign so the despesa/receita meaning is visible and
+			// editable inline ("-" = despesa, positivo = receita).
+			const mag = magnitudeOf(row.amount);
+			setEditingValue(isNegative(row.amount) ? `-${mag}` : mag);
 		},
 		[monthEditable],
 	);
@@ -459,7 +484,15 @@ export const PlanilhaView = ({
 			const magnitude = normalizeMagnitude(editingValue);
 			setEditingId(null);
 			if (!magnitude || Number(magnitude) === 0) return;
-			const signed = isNegative(row.amount) ? `-${magnitude}` : magnitude;
+			// The typed sign wins: a leading "-" makes it a despesa, a leading "+"
+			// (or a bare positive) an entrada; with no sign we keep the row's sign.
+			const trimmed = editingValue.trim();
+			const negative = trimmed.startsWith("-")
+				? true
+				: trimmed.startsWith("+")
+					? false
+					: isNegative(row.amount);
+			const signed = negative ? `-${magnitude}` : magnitude;
 			const action = routeSheetAmountEdit(rowRef(row.planned), activeScenarioId);
 			const writeId = crypto.randomUUID();
 			const now = Date.now();
@@ -607,8 +640,9 @@ export const PlanilhaView = ({
 			setInsertAfter(null);
 			if (!magnitude || Number(magnitude) === 0) return;
 			const signed = draft.isExpense ? `-${magnitude}` : magnitude;
-			const day = Math.min(Math.max(draft.day, 1), 28);
+			const day = Math.min(Math.max(draft.day, 1), daysInMonth(month));
 			const dueDate = `${month}-${String(day).padStart(2, "0")}`;
+			const categoryId = draft.categoryId?.trim() || null;
 			const writeId = crypto.randomUUID();
 			const now = Date.now();
 			if (routeSheetAdd(activeScenarioId) === "forecastCreate") {
@@ -618,7 +652,7 @@ export const PlanilhaView = ({
 						description: draft.description,
 						amount: signed,
 						dueDate,
-						categoryId: null,
+						categoryId,
 						accountId: null,
 						uiRole: "planned_transaction",
 						createdAt: now,
@@ -632,6 +666,7 @@ export const PlanilhaView = ({
 							month,
 							amount: signed,
 							description: draft.description,
+							categoryId,
 						}),
 						addedAt: now,
 					}),
@@ -799,6 +834,44 @@ export const PlanilhaView = ({
 
 	return (
 		<section aria-label={`Sheet for ${month}`}>
+			{/* ── Month heading — keeps the working month obvious once the hero
+			       has scrolled away (the sheet can be long). ── */}
+			<div
+				style={{
+					display: "flex",
+					alignItems: "baseline",
+					gap: 10,
+					padding: "4px 0 2px",
+				}}
+			>
+				<h2
+					style={{
+						fontFamily: "var(--font-display)",
+						fontSize: "1.35rem",
+						fontWeight: 700,
+						letterSpacing: "-0.02em",
+						margin: 0,
+					}}
+				>
+					{monthLabel(month)}
+				</h2>
+				<span
+					className="mono"
+					style={{ fontSize: 12, color: "var(--muted)" }}
+				>
+					planilha
+				</span>
+				{!monthEditable && (
+					<span
+						className="mono"
+						title="meses passados não são editáveis"
+						style={{ fontSize: 11, color: "var(--muted2)" }}
+					>
+						· somente leitura
+					</span>
+				)}
+			</div>
+
 			{/* ── Scenario pills (ADR-0037) — creation gated to current+future ── */}
 			{onActivateScenario && onScenarioMutated && (
 				<SheetScenarioBar
@@ -913,8 +986,8 @@ export const PlanilhaView = ({
 								/>
 								{insertAfter === row.id && (
 									<InsertRowEditor
-										columnCount={columnCount}
 										defaultDay={Number(month.slice(5)) === new Date().getMonth() + 1 ? new Date().getDate() : 1}
+										maxDay={daysInMonth(month)}
 										contextLabel={activeScenarioId ? "cenário ativo" : "baseline"}
 										onSubmit={commitInsert}
 										onCancel={() => setInsertAfter(null)}
@@ -938,8 +1011,8 @@ export const PlanilhaView = ({
 						)}
 						{insertAfter === "end" && (
 							<InsertRowEditor
-								columnCount={columnCount}
-								defaultDay={1}
+								defaultDay={Number(month.slice(5)) === new Date().getMonth() + 1 ? new Date().getDate() : 1}
+								maxDay={daysInMonth(month)}
 								contextLabel={activeScenarioId ? "cenário ativo" : "baseline"}
 								onSubmit={commitInsert}
 								onCancel={() => setInsertAfter(null)}
@@ -1292,9 +1365,12 @@ const SheetRow = React.memo(
 					)}
 				</td>
 
-				{/* Date */}
-				<td className="mono" style={{ ...tdStyle, color: "var(--muted)" }}>
-					{row.date.slice(8, 10)}/{row.date.slice(5, 7)}
+				{/* Date — day only; the sheet is always a single month. */}
+				<td
+					className="mono"
+					style={{ ...tdStyle, color: "var(--muted)", textAlign: "center" }}
+				>
+					{Number(row.date.slice(8, 10))}
 				</td>
 
 				{/* Amount (inline-editable for planned rows) */}
@@ -1519,7 +1595,9 @@ const SheetFilterBar = ({
 		borderRadius: "var(--radius-full)",
 		padding: "6px 10px",
 		fontSize: 12,
-		background: "var(--card)",
+		// backgroundColor (not the `background` shorthand) so the .select-pill
+		// chevron background-image isn't wiped by this inline style.
+		backgroundColor: "var(--card)",
 	};
 	const chip = (active: boolean): React.CSSProperties => ({
 		background: active ? "var(--purple)" : "transparent",
@@ -1582,7 +1660,7 @@ const SheetFilterBar = ({
 				onChange={(e) =>
 					setLocalFilters((f) => ({ ...f, origin: e.target.value as SheetLocalFilters["origin"] }))
 				}
-				className="mono"
+				className="mono select-pill"
 				style={selectStyle}
 			>
 				{ORIGIN_FILTER_OPTIONS.map((o) => (
@@ -1597,7 +1675,7 @@ const SheetFilterBar = ({
 				onChange={(e) =>
 					setLocalFilters((f) => ({ ...f, flow: e.target.value as SheetLocalFilters["flow"] }))
 				}
-				className="mono"
+				className="mono select-pill"
 				style={selectStyle}
 			>
 				{FLOW_FILTER_OPTIONS.map((o) => (
@@ -1606,20 +1684,11 @@ const SheetFilterBar = ({
 					</option>
 				))}
 			</select>
-			<select
-				aria-label="filtrar por conta"
-				value={ui.accountFilter ?? ""}
-				onChange={(e) => setUi({ accountFilter: e.target.value || null })}
-				className="mono"
-				style={selectStyle}
-			>
-				<option value="">todas as contas</option>
-				{accounts.map((a) => (
-					<option key={a.id} value={a.id}>
-						{a.label}
-					</option>
-				))}
-			</select>
+			<AccountMultiSelect
+				accounts={accounts}
+				value={ui.accountFilter}
+				onChange={(next) => setUi({ accountFilter: next })}
+			/>
 			<button
 				className="mono pressable"
 				style={chip(ui.uncategorizedOnly)}
@@ -1693,3 +1762,145 @@ const SheetFilterBar = ({
 		</div>
 	);
 };
+
+// ── Account multi-select ─────────────────────────────────────────────────────
+// The account filter accepts many accounts at once. The selection persists as a
+// comma-joined id list in `ui.accountFilter` (single id = one-element list), so
+// the ui-doc schema — and STORE_VERSION — stays untouched.
+
+const AccountMultiSelect = ({
+	accounts,
+	value,
+	onChange,
+}: {
+	accounts: ReadonlyArray<{ id: string; label: string }>;
+	value: string | null;
+	onChange: (next: string | null) => void;
+}) => {
+	const [open, setOpen] = useState(false);
+	const ref = useRef<HTMLDivElement>(null);
+	const selected = useMemo(() => new Set(accountFilterIds(value)), [value]);
+
+	useEffect(() => {
+		if (!open) return;
+		const onDoc = (e: MouseEvent) => {
+			if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+		};
+		document.addEventListener("mousedown", onDoc);
+		return () => document.removeEventListener("mousedown", onDoc);
+	}, [open]);
+
+	const toggle = (id: string) => {
+		const next = new Set(selected);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		onChange(next.size ? Array.from(next).join(",") : null);
+	};
+
+	const label =
+		selected.size === 0
+			? "todas as contas"
+			: selected.size === 1
+				? (accounts.find((a) => selected.has(a.id))?.label ?? "1 conta")
+				: `${selected.size} contas`;
+
+	return (
+		<div ref={ref} style={{ position: "relative" }}>
+			<button
+				type="button"
+				aria-haspopup="listbox"
+				aria-expanded={open}
+				onClick={() => setOpen((v) => !v)}
+				className="mono select-pill"
+				style={{
+					border: "1px solid var(--border)",
+					borderRadius: "var(--radius-full)",
+					padding: "6px 32px 6px 12px",
+					fontSize: 12,
+					backgroundColor: selected.size ? "var(--chip, #f1eefc)" : "var(--card)",
+					color: selected.size ? "var(--purple)" : "var(--text)",
+					cursor: "pointer",
+					maxWidth: 220,
+					whiteSpace: "nowrap",
+					overflow: "hidden",
+					textOverflow: "ellipsis",
+					textAlign: "left",
+				}}
+			>
+				{label}
+			</button>
+			{open && (
+				<div
+					role="listbox"
+					aria-multiselectable
+					style={{
+						position: "absolute",
+						top: "calc(100% + 6px)",
+						left: 0,
+						zIndex: 50,
+						minWidth: 220,
+						maxHeight: 300,
+						overflow: "auto",
+						background: "var(--card)",
+						border: "1px solid var(--border)",
+						borderRadius: "var(--radius-md)",
+						boxShadow: "0 8px 24px rgba(21,19,31,0.18)",
+						padding: 6,
+					}}
+				>
+					{selected.size > 0 && (
+						<button
+							type="button"
+							className="mono"
+							onClick={() => onChange(null)}
+							style={accountOptionStyle(false)}
+						>
+							<span style={{ width: 16 }}>×</span>
+							<span>limpar seleção</span>
+						</button>
+					)}
+					{accounts.map((a) => {
+						const on = selected.has(a.id);
+						return (
+							<button
+								key={a.id}
+								type="button"
+								role="option"
+								aria-selected={on}
+								className="mono"
+								onClick={() => toggle(a.id)}
+								style={accountOptionStyle(on)}
+							>
+								<span style={{ width: 16 }}>{on ? "✓" : ""}</span>
+								<span
+									style={{
+										overflow: "hidden",
+										textOverflow: "ellipsis",
+										whiteSpace: "nowrap",
+									}}
+								>
+									{a.label}
+								</span>
+							</button>
+						);
+					})}
+				</div>
+			)}
+		</div>
+	);
+};
+
+const accountOptionStyle = (active: boolean): React.CSSProperties => ({
+	display: "flex",
+	alignItems: "center",
+	gap: 8,
+	width: "100%",
+	textAlign: "left",
+	background: active ? "var(--chip, #f1eefc)" : "transparent",
+	color: active ? "var(--purple)" : "var(--text)",
+	border: "none",
+	borderRadius: "var(--radius-sm)",
+	padding: "7px 8px",
+	cursor: "pointer",
+	fontSize: 12.5,
+});

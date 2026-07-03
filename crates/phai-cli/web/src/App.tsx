@@ -43,12 +43,14 @@ export const App = () => {
 
 	return (
 		<>
-			{/* Floating sync + version badge — always visible, scroll-independent */}
+			{/* Floating sync + version badge — always visible, scroll-independent.
+			    Anchored bottom-right so it never sits on top of the header's
+			    search trigger (both used to fight for the top-right corner). */}
 			<div
 				style={{
 					position: "fixed",
-					top: 8,
-					right: 12,
+					bottom: 16,
+					right: 16,
 					zIndex: 90,
 					display: "flex",
 					alignItems: "center",
