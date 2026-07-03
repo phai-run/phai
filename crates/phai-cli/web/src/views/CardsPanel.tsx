@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type CardRow } from "../bridge/api";
-import { Card, CardGridSkeleton } from "../components/ui";
-import { formatMoneyCompact, formatMoneyNumber, numeric } from "../lib/format";
+import { CardGridSkeleton } from "../components/ui";
+import { formatMoneyNumber, numeric } from "../lib/format";
 import { CardDetailPanel } from "./cards/CardDetailPanel";
+import { SkeuomorphicCard } from "./cards/SkeuomorphicCard";
 
 /**
  * Per-credit-card cycle panel: shows whether each card's bill is open (aberta)
@@ -157,18 +158,18 @@ export const CardsPanel = ({
 			<div
 				style={{
 					display: "grid",
-					gridTemplateColumns: "repeat(auto-fit, minmax(320px, 440px))",
+					gridTemplateColumns: "repeat(auto-fit, minmax(300px, 360px))",
 					justifyContent: "center",
-					gap: 18,
+					gap: 22,
 					opacity: loading ? 0.55 : 1,
 					transition: "opacity 160ms ease",
 				}}
 			>
 				{cards.map((c) => (
-					<CardTile
+					<SkeuomorphicCard
 						key={c.accountId}
 						card={c}
-						expanded={c.accountId === expandedId}
+						flipped={c.accountId === expandedId}
 						onToggle={() =>
 							setExpandedId((id) => (id === c.accountId ? null : c.accountId))
 						}
@@ -179,6 +180,7 @@ export const CardsPanel = ({
 			{expanded && (
 				<CardDetailPanel
 					card={expanded}
+					month={month}
 					onClose={() => setExpandedId(null)}
 					onViewTransactions={onViewCardTx}
 				/>
@@ -270,201 +272,6 @@ const SummaryKpi = ({
 			}}
 		>
 			{formatMoneyNumber(value)}
-		</div>
-	</div>
-);
-
-const cardAccent = (state: CardRow["state"]): string =>
-	state === "aberta"
-		? "var(--amber)"
-		: state === "fechada"
-			? "var(--purple)"
-			: "var(--green)";
-
-const CardTile = ({
-	card,
-	expanded,
-	onToggle,
-}: {
-	card: CardRow;
-	expanded: boolean;
-	onToggle: () => void;
-}) => {
-	const open = card.state === "aberta";
-	const closed = card.state === "fechada";
-	const total = numeric(card.total);
-	const openAmount = numeric(card.openAmount);
-	const installmentDebt = numeric(card.installmentDebt);
-	const installmentMonthAmount = numeric(card.installmentMonthAmount);
-	const installmentEndingAmount = numeric(card.installmentEndingAmount);
-	const limit = card.creditLimit != null ? numeric(card.creditLimit) : null;
-	const used = card.usedAmount != null ? numeric(card.usedAmount) : null;
-	const usedPct =
-		limit && limit > 0 && used != null
-			? Math.min(100, Math.round((used / limit) * 100))
-			: null;
-	const accent = cardAccent(card.state);
-	const canExpand = card.installmentCount > 0;
-
-	return (
-		<Card accent={accent} selected={expanded} style={{ minWidth: 0 }}>
-			<div
-				className="lift"
-				role="button"
-				tabIndex={0}
-				aria-expanded={expanded}
-				onClick={onToggle}
-				onKeyDown={(e) => {
-					if (e.key === "Enter" || e.key === " ") {
-						e.preventDefault();
-						onToggle();
-					}
-				}}
-				style={{ cursor: "pointer", outline: "none" }}
-			>
-				<div
-					style={{
-						display: "flex",
-						justifyContent: "space-between",
-						alignItems: "baseline",
-						gap: 8,
-					}}
-				>
-					<span style={{ fontWeight: 600, fontSize: 13 }}>{card.label}</span>
-					<span
-						className="mono"
-						style={{
-							fontSize: 10,
-							fontWeight: 600,
-							color: accent,
-							border: `1px solid ${accent}`,
-							borderRadius: "var(--radius-full)",
-							padding: "1px 8px",
-						}}
-						title={
-							open
-								? "Open bill — still leaving your cash"
-								: closed
-									? "Bill closed for the selected month"
-									: "No bill in the selected month"
-						}
-					>
-						{open ? "ABERTA" : closed ? "FECHADA" : "EM DIA"}
-					</span>
-				</div>
-				<div style={{ fontSize: 24, fontWeight: 700, marginTop: 8 }}>
-					{formatMoneyNumber(total)}
-				</div>
-				<div
-					className="mono"
-					style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}
-				>
-					{card.cycleMonth
-						? `ciclo ${card.cycleMonth.slice(5, 7)}/${card.cycleMonth.slice(2, 4)}`
-						: "—"}
-					{card.dueDate
-						? ` · vence ${card.dueDate.slice(8, 10)}/${card.dueDate.slice(5, 7)}`
-						: ""}
-					{open && openAmount > 0
-						? ` · em aberto ${formatMoneyCompact(openAmount)}`
-						: ""}
-				</div>
-				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-						gap: 8,
-						marginTop: 12,
-					}}
-				>
-					<CardMetric label="parcelado" value={installmentDebt} />
-					<CardMetric label="este mês" value={installmentMonthAmount} />
-					<CardMetric label="encerrando" value={installmentEndingAmount} />
-				</div>
-				{usedPct != null && limit != null && (
-					<div style={{ marginTop: 12 }}>
-						<div
-							style={{
-								height: 6,
-								background: "var(--border)",
-								borderRadius: "var(--radius-full)",
-								overflow: "hidden",
-							}}
-						>
-							<div
-								style={{
-									width: `${usedPct}%`,
-									height: "100%",
-									background: usedPct >= 90 ? "var(--rose)" : accent,
-									transition: "width 200ms ease",
-								}}
-							/>
-						</div>
-						<div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>
-							{usedPct}% do limite ({formatMoneyNumber(limit)})
-						</div>
-					</div>
-				)}
-				{canExpand && (
-					<div
-						className="mono"
-						style={{
-							marginTop: 12,
-							fontSize: 11,
-							color: "var(--muted)",
-							display: "flex",
-							justifyContent: "space-between",
-						}}
-					>
-						<span>
-							{card.installmentCount} parcela
-							{card.installmentCount !== 1 ? "s" : ""}
-						</span>
-						<span style={{ color: accent }}>
-							{expanded ? "▾ fechar" : "▸ detalhes"}
-						</span>
-					</div>
-				)}
-			</div>
-		</Card>
-	);
-};
-
-const CardMetric = ({ label, value }: { label: string; value: number }) => (
-	<div
-		title={formatMoneyNumber(value)}
-		style={{
-			border: "1px solid var(--border)",
-			borderRadius: "var(--radius-sm)",
-			padding: "6px 7px",
-			minWidth: 0,
-		}}
-	>
-		<div
-			className="mono"
-			style={{
-				fontSize: 9,
-				color: "var(--muted)",
-				whiteSpace: "nowrap",
-				overflow: "hidden",
-				textOverflow: "ellipsis",
-			}}
-		>
-			{label}
-		</div>
-		<div
-			className="mono"
-			style={{
-				fontSize: 11,
-				fontWeight: 600,
-				color: value > 0 ? "var(--rose)" : "var(--muted)",
-				marginTop: 2,
-				whiteSpace: "nowrap",
-				overflow: "hidden",
-				textOverflow: "ellipsis",
-			}}
-		>
-			{formatMoneyCompact(value)}
 		</div>
 	</div>
 );

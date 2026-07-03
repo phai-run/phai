@@ -8,6 +8,7 @@ import { formatMoneyNumber, numeric } from "../../lib/format";
 import {
 	buildOverlayMap,
 	effectiveCategory,
+	sheetLabel,
 	type TxView,
 } from "../../lib/derivations";
 import {
@@ -40,10 +41,13 @@ const ddmm = (d: string | null): string =>
 
 export const CardDetailPanel = ({
 	card,
+	month,
 	onClose,
 	onViewTransactions,
 }: {
 	card: CardRow;
+	/** Selected sheet month ("YYYY-MM"); scopes the "transações do mês" list. */
+	month: string | null;
 	onClose: () => void;
 	onViewTransactions?: (accountId: string) => void;
 }) => {
@@ -68,6 +72,15 @@ export const CardDetailPanel = ({
 		[txRows],
 	);
 	const [modalTx, setModalTx] = useState<TxView | null>(null);
+
+	// Every real transaction on this card in the selected month — the "compras do
+	// mês" list the expanded card promises (installments are a subset shown above).
+	const monthTxs = useMemo(() => {
+		if (!month) return [] as TxView[];
+		return txRows
+			.filter((t) => t.accountId === card.accountId && t.postedAt.slice(0, 7) === month)
+			.sort((a, b) => b.postedAt.localeCompare(a.postedAt));
+	}, [txRows, card.accountId, month]);
 
 	const similarTxs = useMemo(() => {
 		if (!modalTx) return [] as TxView[];
@@ -301,6 +314,77 @@ export const CardDetailPanel = ({
 									}}
 								>
 									{formatMoneyNumber(numeric(row.amount))}
+								</span>
+							</div>
+						))}
+					</div>
+				</>
+			)}
+
+			{/* Transactions on this card in the selected month */}
+			{monthTxs.length > 0 && (
+				<>
+					<div
+						className="mono"
+						style={{ fontSize: 11, color: "var(--muted)", margin: "18px 0 8px" }}
+					>
+						transações do mês ({monthTxs.length})
+					</div>
+					<div
+						style={{
+							display: "grid",
+							gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+							gap: 8,
+						}}
+					>
+						{monthTxs.map((tx) => (
+							<div
+								key={tx.id}
+								role="button"
+								tabIndex={0}
+								title="editar transação"
+								onClick={() => setModalTx(tx)}
+								onKeyDown={(e) => e.key === "Enter" && setModalTx(tx)}
+								style={{
+									display: "flex",
+									justifyContent: "space-between",
+									alignItems: "baseline",
+									gap: 10,
+									padding: "8px 12px",
+									borderRadius: "var(--radius-sm)",
+									border: "1px solid var(--border)",
+									cursor: "pointer",
+									background: "var(--bg)",
+								}}
+							>
+								<div style={{ minWidth: 0 }}>
+									<div
+										style={{
+											fontSize: 12,
+											whiteSpace: "nowrap",
+											overflow: "hidden",
+											textOverflow: "ellipsis",
+										}}
+									>
+										{sheetLabel(tx)}
+									</div>
+									<div className="mono" style={{ fontSize: 10, color: "var(--muted)", marginTop: 1 }}>
+										{ddmm(tx.postedAt)}
+										{effectiveCategory(tx, overlayMap)
+											? ` · ${effectiveCategory(tx, overlayMap)}`
+											: ""}
+									</div>
+								</div>
+								<span
+									className="mono"
+									style={{
+										fontSize: 12,
+										fontWeight: 600,
+										color: numeric(tx.amount) < 0 ? "var(--rose)" : "var(--green)",
+										whiteSpace: "nowrap",
+									}}
+								>
+									{formatMoneyNumber(numeric(tx.amount))}
 								</span>
 							</div>
 						))}
