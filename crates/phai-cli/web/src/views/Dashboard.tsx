@@ -16,7 +16,9 @@ import { ScenarioPanel } from "./scenario/ScenarioPanel";
 import {
 	buildOverlayMap,
 	expensesByMonthCategory,
+	scenarioChangesByMonth,
 	subExpensesByMonthCategory,
+	type ScenarioChangeLike,
 	type TxView as TxViewD,
 } from "../lib/derivations";
 import {
@@ -60,6 +62,7 @@ const reviewOverlay$ = queryDb(tables.reviewOverlay);
 const scenarioChart$ = queryDb(
 	tables.scenarioChartMonths.orderBy("ordinal", "asc"),
 );
+const scenarioChanges$ = queryDb(tables.scenarioChanges);
 const pendingWrites$ = queryDb(tables.pendingWrites);
 
 const monthOf = (date: string | null): string | null =>
@@ -155,6 +158,9 @@ export const Dashboard = () => {
 	);
 	const scenarioChartRows = useQuery(scenarioChart$) as ReadonlyArray<
 		ChartMonthView & { scenarioId: string }
+	>;
+	const scenarioChangeRows = useQuery(scenarioChanges$) as ReadonlyArray<
+		ScenarioChangeLike & { scenarioId: string; orphaned: number }
 	>;
 
 	// Apply forecast re-dating overlay
@@ -259,20 +265,38 @@ export const Dashboard = () => {
 		if (activeScenarioId) setWarSim(null);
 	}, [activeScenarioId]);
 
+	// The active scenario's chart projection rows (null = baseline).
+	const scenarioMonths = useMemo(
+		() =>
+			activeScenarioId
+				? scenarioChartRows.filter((r) => r.scenarioId === activeScenarioId)
+				: null,
+		[activeScenarioId, scenarioChartRows],
+	);
+
 	// Scenario saldo per chart month (aligned with `months`; null = no data).
 	const scenarioBalances = useMemo(() => {
-		if (!activeScenarioId) return null;
+		if (!scenarioMonths || scenarioMonths.length === 0) return null;
 		const byMonth = new Map(
-			scenarioChartRows
-				.filter((r) => r.scenarioId === activeScenarioId)
-				.map((r) => [r.month, Number(r.projectedClosingBalance)]),
+			scenarioMonths.map((r) => [r.month, Number(r.projectedClosingBalance)]),
 		);
-		if (byMonth.size === 0) return null;
 		return months.map((m) => {
 			const v = byMonth.get(m.month);
 			return v != null && Number.isFinite(v) ? v : null;
 		});
-	}, [activeScenarioId, scenarioChartRows, months]);
+	}, [scenarioMonths, months]);
+
+	// The active scenario's changes bucketed per month, for the chart's rich
+	// hover card (label + signed delta per item). Orphaned deltas (target
+	// realized/removed) are excluded — they no longer move the projection.
+	const scenarioItemsByMonth = useMemo(() => {
+		if (!activeScenarioId) return null;
+		const changes = scenarioChangeRows.filter(
+			(c) => c.scenarioId === activeScenarioId && c.orphaned !== 1,
+		);
+		if (changes.length === 0) return null;
+		return scenarioChangesByMonth(changes, forecasts);
+	}, [activeScenarioId, scenarioChangeRows, forecasts]);
 
 	// Months a confirmed goal writes envelopes for: the selected month through
 	// December, never a past month.
@@ -388,6 +412,8 @@ export const Dashboard = () => {
 						compact={false}
 						simulation={warSim}
 						scenarioBalances={scenarioBalances}
+						scenarioMonths={scenarioMonths}
+						scenarioItemsByMonth={scenarioItemsByMonth}
 					/>
 					</div>
 				)}

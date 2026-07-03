@@ -1124,6 +1124,16 @@ export const forecastSheetOrigin = (forecast: {
 	return "recurring";
 };
 
+/** A "YYYY-MM" month key shifted forward by `n` whole months. */
+export const addMonths = (month: string, n: number): string => {
+	const [y, m] = month.split("-").map(Number);
+	if (!y || !m) return month;
+	const total = y * 12 + (m - 1) + n;
+	const year = Math.floor(total / 12);
+	const mon = (total % 12) + 1;
+	return `${year}-${String(mon).padStart(2, "0")}`;
+};
+
 /** Whole calendar months from `from` to `to` (both "YYYY-MM"; can be negative). */
 export const monthDiff = (from: string, to: string): number => {
 	const [fy, fm] = from.split("-").map(Number);
@@ -1319,6 +1329,123 @@ export const applyScenarioToMonthRows = (
 		)
 		.map((f) => applyChangesToRow(plannedRowFromForecast(f, month), changes, month));
 	return [...base, ...scenarioAddedRows(changes, month)];
+};
+
+// ── Scenario items per month (chart hover card, ADR-0037) ───────────────────
+
+/** One scenario change as the chart tooltip lists it for a month. */
+export interface ScenarioMonthItem {
+	changeId: string;
+	label: string;
+	/** Signed saldo impact of the change in that month (positive = frees cash). */
+	delta: number;
+}
+
+const amountOf = (amount: string | null): number =>
+	amount == null ? 0 : toCents(amount) / 100;
+
+const pushItem = (
+	map: Map<string, ScenarioMonthItem[]>,
+	month: string,
+	item: ScenarioMonthItem,
+): void => {
+	const list = map.get(month) ?? [];
+	list.push(item);
+	map.set(month, list);
+};
+
+/** The per-month items a single scenario change contributes. */
+const changeMonthItems = (
+	change: ScenarioChangeLike,
+	byForecast: Map<string, SheetForecastLike>,
+	activeForecasts: ReadonlyArray<SheetForecastLike>,
+): Array<{ month: string; item: ScenarioMonthItem }> => {
+	const { changeId } = change;
+	switch (change.kind) {
+		case "add_one_shot": {
+			if (!change.month) return [];
+			const item = {
+				changeId,
+				label: change.description ?? "",
+				delta: amountOf(change.amount),
+			};
+			return [{ month: change.month, item }];
+		}
+		case "hypothetical_installment": {
+			const from = change.effectiveFrom;
+			const count = change.monthsCount ?? 0;
+			if (!from || count <= 0) return [];
+			return Array.from({ length: count }, (_, i) => ({
+				month: addMonths(from, i),
+				item: {
+					changeId,
+					label: `${change.description ?? ""} ${i + 1}/${count}`.trim(),
+					delta: amountOf(change.amount),
+				},
+			}));
+		}
+		case "adjust_amount":
+		case "skip_forecast": {
+			const target = change.targetForecastId
+				? byForecast.get(change.targetForecastId)
+				: undefined;
+			if (!target?.dueDate) return [];
+			const delta =
+				change.kind === "adjust_amount"
+					? amountOf(change.amount) - amountOf(target.amount)
+					: -amountOf(target.amount);
+			return [
+				{
+					month: target.dueDate.slice(0, 7),
+					item: { changeId, label: target.description, delta },
+				},
+			];
+		}
+		case "end_template": {
+			const from = change.effectiveFrom;
+			if (!change.targetTemplateId || !from) return [];
+			return activeForecasts
+				.filter(
+					(f) =>
+						f.templateId === change.targetTemplateId &&
+						f.dueDate != null &&
+						f.dueDate.slice(0, 7) >= from,
+				)
+				.map((f) => ({
+					month: (f.dueDate as string).slice(0, 7),
+					item: { changeId, label: f.description, delta: -amountOf(f.amount) },
+				}));
+		}
+		default:
+			return [];
+	}
+};
+
+/**
+ * Derive month ("YYYY-MM") → the scenario's changes that hit that month, as
+ * tooltip items (label + signed saldo delta), sorted by |delta| desc so the
+ * chart hover card can truncate to the biggest movers. Target months come
+ * from the change itself (add_one_shot / hypothetical_installment) or from
+ * the targeted forecast's due month (adjust / skip / end_template).
+ */
+export const scenarioChangesByMonth = (
+	changes: ReadonlyArray<ScenarioChangeLike>,
+	forecasts: ReadonlyArray<SheetForecastLike>,
+): Map<string, ScenarioMonthItem[]> => {
+	const active = forecasts.filter((f) =>
+		ACTIVE_FORECAST_STATUSES.has(f.status),
+	);
+	const byForecast = new Map(active.map((f) => [f.forecastId, f]));
+	const out = new Map<string, ScenarioMonthItem[]>();
+	for (const change of changes) {
+		for (const { month, item } of changeMonthItems(change, byForecast, active)) {
+			pushItem(out, month, item);
+		}
+	}
+	for (const list of out.values()) {
+		list.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+	}
+	return out;
 };
 
 // ── Unified sheet sorting + localStorage persistence ────────────────────────
