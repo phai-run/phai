@@ -4343,10 +4343,98 @@ async fn log_ops(
     resp
 }
 
-/// Open the web app in the user's default browser. Best-effort — failures are
-/// logged (debug) and never block the server. When running under `sudo`, open
-/// as the invoking user so the browser attaches to their GUI session.
+/// Chromium-family browsers that support `--app=<url>`, tried in order. On
+/// macOS these are app-bundle names passed to `open -na`; on Linux they are
+/// executable names on `PATH`.
+#[cfg(target_os = "macos")]
+const APP_MODE_BROWSERS: [&str; 4] = [
+    "Google Chrome",
+    "Microsoft Edge",
+    "Brave Browser",
+    "Chromium",
+];
+#[cfg(target_os = "linux")]
+const APP_MODE_BROWSERS: [&str; 6] = [
+    "google-chrome",
+    "google-chrome-stable",
+    "microsoft-edge",
+    "brave-browser",
+    "chromium",
+    "chromium-browser",
+];
+
+/// The `--app=<url>` flag that turns a Chromium window into a chromeless,
+/// desktop-app-style shell (own dock/taskbar icon, no tabs or address bar).
+fn app_mode_flag(url: &str) -> String {
+    format!("--app={url}")
+}
+
+/// Open the web app as a desktop-style window. Tries a Chromium-family browser
+/// in `--app` mode first (chromeless, native-feeling); on failure falls back to
+/// the user's default browser. Best-effort — failures are logged and never
+/// block the server. When running under `sudo` (privileged port 80), launches
+/// as the invoking user so the window attaches to their GUI session.
 fn open_browser(url: &str) {
+    if open_in_app_mode(url) {
+        return;
+    }
+    open_in_default_browser(url);
+}
+
+/// A `Command` scoped to the invoking user when running under `sudo`, so the
+/// browser attaches to their desktop session instead of root's.
+fn user_scoped_command(program: &str) -> std::process::Command {
+    use std::process::Command;
+    match std::env::var("SUDO_USER") {
+        Ok(user) if !user.is_empty() => {
+            let mut cmd = Command::new("sudo");
+            cmd.args(["-u", &user, program]);
+            cmd
+        }
+        _ => Command::new(program),
+    }
+}
+
+/// Try to launch the first available Chromium-family browser in `--app` mode.
+/// Returns `true` once one launches successfully.
+#[cfg(target_os = "macos")]
+fn open_in_app_mode(url: &str) -> bool {
+    let flag = app_mode_flag(url);
+    for app in APP_MODE_BROWSERS {
+        // `open -na "App" --args --app=<url>`: `open` exits non-zero when the
+        // app bundle is missing, so a successful status means it launched.
+        let launched = user_scoped_command("open")
+            .args(["-na", app, "--args", &flag])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if launched {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn open_in_app_mode(url: &str) -> bool {
+    let flag = app_mode_flag(url);
+    for bin in APP_MODE_BROWSERS {
+        // A missing executable makes `spawn` fail with `NotFound`; try the next.
+        if user_scoped_command(bin).arg(&flag).spawn().is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn open_in_app_mode(_url: &str) -> bool {
+    false
+}
+
+/// Open the URL in the platform's default browser (fallback when no
+/// Chromium-family browser is available for app mode).
+fn open_in_default_browser(url: &str) {
     use std::process::Command;
     // Headless/automation escape hatch: E2E tests (and daemons that manage
     // their own browser) spawn `phai serve` with this set so no window pops.
@@ -4354,12 +4442,7 @@ fn open_browser(url: &str) {
         return;
     }
     let result = if cfg!(target_os = "macos") {
-        match std::env::var("SUDO_USER") {
-            Ok(user) if !user.is_empty() => Command::new("sudo")
-                .args(["-u", &user, "open", url])
-                .spawn(),
-            _ => Command::new("open").arg(url).spawn(),
-        }
+        user_scoped_command("open").arg(url).spawn()
     } else if cfg!(target_os = "linux") {
         // Try xdg-open first (X11/Wayland with xdg-utils)
         let xdg = Command::new("xdg-open").arg(url).spawn();
@@ -4598,6 +4681,49 @@ mod tests {
                 ("TRAILING".to_string(), "x".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn app_mode_flag_formats_chromeless_app_url() {
+        assert_eq!(
+            app_mode_flag("http://phai.localhost"),
+            "--app=http://phai.localhost"
+        );
+        assert_eq!(
+            app_mode_flag("http://phai.localhost:4317"),
+            "--app=http://phai.localhost:4317"
+        );
+    }
+
+    #[test]
+    fn app_mode_browsers_prefer_chrome_and_are_non_empty() {
+        assert!(!APP_MODE_BROWSERS.is_empty());
+        // Chrome is the most widely installed Chromium browser → try it first.
+        assert!(APP_MODE_BROWSERS[0].to_lowercase().contains("chrome"));
+    }
+
+    #[test]
+    fn user_scoped_command_wraps_in_sudo_when_sudo_user_set() {
+        // SAFETY: single-threaded test; env is restored before returning.
+        let prev = std::env::var("SUDO_USER").ok();
+        std::env::set_var("SUDO_USER", "alice");
+        let cmd = user_scoped_command("open");
+        assert_eq!(cmd.get_program(), "sudo");
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["-u", "alice", "open"]);
+
+        std::env::remove_var("SUDO_USER");
+        let plain = user_scoped_command("open");
+        assert_eq!(plain.get_program(), "open");
+        assert_eq!(plain.get_args().count(), 0);
+
+        match prev {
+            Some(v) => std::env::set_var("SUDO_USER", v),
+            None => std::env::remove_var("SUDO_USER"),
+        }
     }
 
     #[test]
