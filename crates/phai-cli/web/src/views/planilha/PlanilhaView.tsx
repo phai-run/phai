@@ -201,6 +201,28 @@ const rowRef = (planned: PlannedSheetRow): SheetRowRef => ({
 });
 
 /**
+ * Order the sheet rows. With no frozen order this is the plain column sort;
+ * while a manual order is frozen (after an inline insert) rows keep the snapshot
+ * order, and any row not in the snapshot — the freshly created one — is dropped
+ * in at `insertAt`, so a new line stays exactly where it was placed until the
+ * user re-sorts by clicking a column.
+ */
+const orderUnifiedRows = (
+	all: UnifiedRow[],
+	frozen: { ids: string[]; insertAt: number } | null,
+	sort: SheetSort,
+): UnifiedRow[] => {
+	if (!frozen) return sortUnifiedRows(all, sort);
+	const pos = new Map(frozen.ids.map((id, i) => [id, i]));
+	const known: UnifiedRow[] = [];
+	const fresh: UnifiedRow[] = [];
+	for (const r of all) (pos.has(r.id) ? known : fresh).push(r);
+	known.sort((a, b) => (pos.get(a.id) ?? 0) - (pos.get(b.id) ?? 0));
+	const at = Math.min(Math.max(frozen.insertAt, 0), known.length);
+	return [...known.slice(0, at), ...fresh, ...known.slice(at)];
+};
+
+/**
  * Planilha — the unified sheet of a month (ADR-0038). Real transactions and
  * planned items (forecasts + the active scenario's deltas) share one table:
  * each row carries an origin glyph, an inline-editable amount, and per-row
@@ -275,6 +297,13 @@ export const PlanilhaView = ({
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [editingValue, setEditingValue] = useState("");
 	const [insertAfter, setInsertAfter] = useState<string | "end" | null>(null);
+	// Frozen manual order: after an inline insert the sheet keeps the row where
+	// it was dropped (instead of re-sorting by day) until the user clicks a
+	// column header. `ids` is the displayed order snapshot; `insertAt` is where
+	// newly-created rows (unknown ids) land within it.
+	const [frozen, setFrozen] = useState<{ ids: string[]; insertAt: number } | null>(
+		null,
+	);
 	const [deleteRowId, setDeleteRowId] = useState<string | null>(null);
 	const tableRef = useRef<HTMLDivElement>(null);
 
@@ -302,47 +331,6 @@ export const PlanilhaView = ({
 		},
 		[],
 	);
-
-	// ── Adaptive sheet height ────────────────────────────────────────────────
-	// The sheet's scroll area grows to fill whatever vertical space is left once
-	// the hero + chart scroll away: as the container's top approaches the
-	// viewport top, `maxHeight` climbs toward the full window height. This is
-	// what lets a long month show far more than "half a screen" of rows.
-	const [sheetMaxH, setSheetMaxH] = useState<number | null>(null);
-	useEffect(() => {
-		let raf = 0;
-		const recompute = () => {
-			raf = 0;
-			const el = tableRef.current;
-			if (!el) return;
-			const top = el.getBoundingClientRect().top;
-			// Clamp the top under the fixed compact strip (~52px) once scrolled, and
-			// leave a small breathing gap at the bottom for the totals footer.
-			const usableTop = Math.max(top, 12);
-			const avail = window.innerHeight - usableTop - 24;
-			setSheetMaxH(Math.max(Math.round(avail), 320));
-		};
-		const onScroll = () => {
-			if (!raf) raf = requestAnimationFrame(recompute);
-		};
-		recompute();
-		window.addEventListener("scroll", onScroll, { passive: true });
-		window.addEventListener("resize", onScroll);
-		// The content above the sheet (hero + chart) grows when data seeds in and
-		// when the month changes; a body ResizeObserver re-measures then too, so the
-		// sheet doesn't stay stuck at its loading-time height until the first scroll.
-		const ro =
-			typeof ResizeObserver !== "undefined"
-				? new ResizeObserver(onScroll)
-				: null;
-		ro?.observe(document.body);
-		return () => {
-			window.removeEventListener("scroll", onScroll);
-			window.removeEventListener("resize", onScroll);
-			ro?.disconnect();
-			if (raf) cancelAnimationFrame(raf);
-		};
-	}, []);
 
 	const uiFilters = useMemo(
 		() => ({
@@ -464,8 +452,8 @@ export const PlanilhaView = ({
 		const all = [...txUnified, ...plannedUnified].filter((r) =>
 			matchesSheetLocalFilters(r, localFilters),
 		);
-		return sortUnifiedRows(all, sort);
-	}, [txUnified, plannedUnified, localFilters, sort]);
+		return orderUnifiedRows(all, frozen, sort);
+	}, [txUnified, plannedUnified, localFilters, sort, frozen]);
 
 	const hasSheetFilters = useMemo(
 		() => hasActiveFilters(uiFilters) || localFilters.origin !== "all" || localFilters.flow !== "all",
@@ -481,6 +469,7 @@ export const PlanilhaView = ({
 		setInsertAfter(null);
 		setDeleteRowId(null);
 		setUndo(null);
+		setFrozen(null);
 	}, [month, activeScenarioId]);
 
 	// ── Totals footer (the sheet's status bar) ──────────────────────────────
@@ -751,8 +740,18 @@ export const PlanilhaView = ({
 	const commitInsert = useCallback(
 		(draft: InsertDraft) => {
 			const magnitude = normalizeMagnitude(draft.magnitude);
+			// Freeze the current order and remember where the new row goes, so it
+			// stays put instead of jumping to its sorted-by-day position.
+			const anchor = insertAfter;
 			setInsertAfter(null);
 			if (!magnitude || Number(magnitude) === 0) return;
+			const insertAt =
+				anchor === "end"
+					? rows.length
+					: anchor
+						? rows.findIndex((r) => r.id === anchor) + 1
+						: rows.length;
+			setFrozen({ ids: rows.map((r) => r.id), insertAt });
 			const signed = draft.isExpense ? `-${magnitude}` : magnitude;
 			const day = Math.min(Math.max(draft.day, 1), daysInMonth(month));
 			const dueDate = `${month}-${String(day).padStart(2, "0")}`;
@@ -788,7 +787,7 @@ export const PlanilhaView = ({
 				notifyScenario();
 			}
 		},
-		[month, activeScenarioId, store, notifyScenario],
+		[month, activeScenarioId, store, notifyScenario, insertAfter, rows],
 	);
 
 	// ── Category picker + bulk actions (real transactions) ──────────────────
@@ -918,6 +917,22 @@ export const PlanilhaView = ({
 					});
 					break;
 				}
+				case " ": {
+					// Space toggles the focused real-transaction row in/out of the
+					// selection (the keyboard equivalent of ⌘-click) so the bulk bar's
+					// running sum + batch actions work without the mouse.
+					const row = rows[focusedIdx];
+					if (!row || row.kind !== "tx") break;
+					e.preventDefault();
+					setSelectedIds((prev) => {
+						const next = new Set(prev);
+						if (next.has(row.id)) next.delete(row.id);
+						else next.add(row.id);
+						return next;
+					});
+					lastClickedIdx.current = txIndex.indexOf(row.id);
+					break;
+				}
 				case "Enter": {
 					const row = rows[focusedIdx];
 					if (!row) break;
@@ -931,15 +946,18 @@ export const PlanilhaView = ({
 					break;
 			}
 		},
-		[picker, modalTx, editingId, rows, focusedIdx, beginEdit],
+		[picker, modalTx, editingId, rows, focusedIdx, beginEdit, txIndex],
 	);
 
-	const toggleSort = (key: SheetSortKey) =>
+	const toggleSort = (key: SheetSortKey) => {
+		// Any explicit sort abandons the frozen manual order.
+		setFrozen(null);
 		setSort((s) =>
 			s.key === key
 				? { key, dir: s.dir === 1 ? -1 : 1 }
 				: { key, dir: key === "date" || key === "amount" ? -1 : 1 },
 		);
+	};
 
 	const columnCount = COLUMNS.length + 2; // origin icon + actions
 
@@ -1036,8 +1054,9 @@ export const PlanilhaView = ({
 					border: "1px solid var(--border)",
 					borderTop: `2px solid ${theme.accent}`,
 					borderRadius: "var(--radius-md)",
-					overflow: "auto",
-					maxHeight: sheetMaxH ? `${sheetMaxH}px` : "70vh",
+					// The sheet renders in full — no inner scroll. The page grows to the
+					// table's height and the whole document scrolls as one; the sticky
+					// thead then pins column headers to the viewport while scrolling.
 					outline: "none",
 					background: "var(--card)",
 				}}
@@ -1184,6 +1203,24 @@ export const PlanilhaView = ({
 				}}
 			>
 				<span>{rowCount} linhas</span>
+				{frozen && (
+					<button
+						className="mono"
+						onClick={() => setFrozen(null)}
+						title="voltar à ordenação por coluna"
+						style={{
+							background: "transparent",
+							border: "1px solid var(--border)",
+							borderRadius: "var(--radius-full)",
+							padding: "1px 10px",
+							cursor: "pointer",
+							color: "var(--purple)",
+							fontSize: 11,
+						}}
+					>
+						ordem manual · reordenar
+					</button>
+				)}
 				{totals.realizado !== 0 && (
 					<span>
 						realizado{" "}
@@ -1204,10 +1241,10 @@ export const PlanilhaView = ({
 					</span>
 				)}
 				<span style={{ color: totals.net >= 0 ? "var(--green)" : "var(--rose)" }}>
-					net {formatMoneyNumber(totals.net)}
+					saldo {formatMoneyNumber(totals.net)}
 				</span>
 				<span style={{ marginLeft: "auto", opacity: 0.7 }}>
-					↑↓ navega · Enter edita · clique valor edita · hover: + insere · 🗑 remove
+					↑↓ navega · espaço seleciona · Enter abre/edita · hover: + insere · 🗑 remove
 				</span>
 			</div>
 
@@ -1215,7 +1252,7 @@ export const PlanilhaView = ({
 			{selectedIds.size > 0 && (
 				<div
 					role="toolbar"
-					aria-label="bulk actions"
+					aria-label="ações em lote"
 					style={{
 						position: "sticky",
 						bottom: 12,
@@ -1233,7 +1270,7 @@ export const PlanilhaView = ({
 					}}
 				>
 					<span className="mono" style={{ fontSize: 12 }}>
-						{selectedIds.size} selected · {formatMoneyNumber(selectionTotal)}
+						{selectedIds.size} selecionad{selectedIds.size === 1 ? "o" : "os"} · {formatMoneyNumber(selectionTotal)}
 					</span>
 					<button
 						onClick={(e) =>
@@ -1253,14 +1290,14 @@ export const PlanilhaView = ({
 							fontSize: 12,
 						}}
 					>
-						categorize
+						categorizar
 					</button>
 					<span
 						aria-hidden
 						style={{ width: 1, alignSelf: "stretch", background: "rgba(255,255,255,0.25)" }}
 					/>
 					<span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>
-						tier:
+						comprometimento:
 					</span>
 					{COMMITMENT_TIERS.map((tier) => (
 						<button
@@ -1283,7 +1320,7 @@ export const PlanilhaView = ({
 					<button
 						onClick={() => applyTier("")}
 						className="mono"
-						title="clear tier override"
+						title="limpar comprometimento"
 						style={{
 							background: "transparent",
 							color: "#fff",
@@ -1294,7 +1331,7 @@ export const PlanilhaView = ({
 							fontSize: 12,
 						}}
 					>
-						× tier
+						× limpar
 					</button>
 					<button
 						onClick={() => setSelectedIds(new Set())}
@@ -1309,7 +1346,7 @@ export const PlanilhaView = ({
 							fontSize: 12,
 						}}
 					>
-						clear
+						limpar seleção
 					</button>
 				</div>
 			)}
