@@ -62,10 +62,10 @@ export function cashSummary(row: ChartMonthView, when: CashWhen): CashSummary {
 
 const saldoLabel = (when: CashWhen): string =>
 	when === "future"
-		? "projected balance"
+		? "saldo projetado"
 		: when === "current"
-			? "cash balance"
-			: "closing balance";
+			? "saldo em caixa"
+			: "saldo final";
 
 const labelStyle: CSSProperties = {
 	fontFamily: "var(--font-body)",
@@ -153,7 +153,7 @@ export const CashDecisionPanel = ({
 							: "rgba(225,29,72,0.10)",
 					}}
 				>
-					{s.balancePositive ? "positive" : "negative"}
+					{s.balancePositive ? "positivo" : "negativo"}
 				</span>
 			</div>
 
@@ -162,10 +162,10 @@ export const CashDecisionPanel = ({
 				value={s.saldo}
 				style={{
 					fontFamily: "var(--font-display)",
-					fontSize: "clamp(2rem, 4.5vw, 2.75rem)",
+					fontSize: "clamp(1.7rem, 3.6vw, 2.3rem)",
 					fontWeight: 700,
 					letterSpacing: "-0.02em",
-					lineHeight: 1.1,
+					lineHeight: 1.05,
 					color: s.saldo < 0 ? "var(--rose)" : "var(--white)",
 				}}
 			/>
@@ -176,20 +176,20 @@ export const CashDecisionPanel = ({
 					display: "grid",
 					gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
 					gap: 10,
-					marginTop: 14,
+					marginTop: 10,
 					maxWidth: 640,
 				}}
 			>
-				<Kpi label="income" prefix="↑ " value={s.entradas} color="var(--cyan)" />
-				<Kpi label="expenses" prefix="↓ " value={s.saidas} color="var(--rose)" />
+				<Kpi label="entradas" prefix="↑ " value={s.entradas} color="var(--cyan)" />
+				<Kpi label="saídas" prefix="↓ " value={s.saidas} color="var(--rose)" />
 				<Kpi
-					label="net"
+					label="resultado"
 					prefix={sign}
 					value={s.resultado}
 					color={resultColor}
 				/>
 				{when !== "past" && (
-					<Kpi label="projected balance" value={s.projetado} color="var(--muted)" />
+					<Kpi label="saldo projetado" value={s.projetado} color="var(--muted)" />
 				)}
 			</div>
 		</div>

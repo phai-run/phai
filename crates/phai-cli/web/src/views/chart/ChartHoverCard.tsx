@@ -90,22 +90,50 @@ const cellStyle = (muted: boolean): React.CSSProperties => ({
 	fontVariantNumeric: "tabular-nums",
 });
 
-/** One flow row of the aligned table: label | realized | forecast-remaining. */
+/** A tiny colour chip matching the chart series — makes the card double as legend. */
+const Swatch = ({ color, dashed }: { color: string; dashed?: boolean }) => (
+	<span
+		aria-hidden
+		style={{
+			display: "inline-block",
+			width: dashed ? 12 : 9,
+			height: dashed ? 0 : 9,
+			borderRadius: dashed ? 0 : 2,
+			background: dashed ? "transparent" : color,
+			border: dashed ? `1.5px dashed ${color}` : "none",
+			marginRight: 6,
+			verticalAlign: "middle",
+		}}
+	/>
+);
+
+/**
+ * One flow row of the aligned table: swatch+label | realized | forecast. The
+ * "previsto" cell carries the lighter forecast hue so the card also reads as the
+ * chart's legend (real vs. forecast bars).
+ */
 const FlowCells = ({
 	label,
 	color,
+	fcColor,
 	real,
 	fc,
 }: {
 	label: string;
 	color: string;
+	fcColor: string;
 	real: number;
 	fc: number;
 }) => (
 	<>
-		<span style={{ color }}>{label}</span>
+		<span style={{ color: "var(--text)" }}>
+			<Swatch color={color} />
+			{label}
+		</span>
 		<span style={cellStyle(false)}>{money(real)}</span>
-		<span style={cellStyle(true)}>{fc > 0 ? `+${money(fc)}` : "—"}</span>
+		<span style={{ ...cellStyle(true), color: fc > 0 ? fcColor : "var(--muted)" }}>
+			{fc > 0 ? `+${money(fc)}` : "—"}
+		</span>
 	</>
 );
 
@@ -113,10 +141,15 @@ const SaldoRow = ({
 	label,
 	value,
 	color,
+	swatch,
+	dashed,
 }: {
 	label: string;
 	value: number;
 	color: string;
+	/** Swatch colour (defaults to the text colour); paints the legend chip. */
+	swatch?: string;
+	dashed?: boolean;
 }) => (
 	<div
 		className="mono"
@@ -130,7 +163,10 @@ const SaldoRow = ({
 			fontVariantNumeric: "tabular-nums",
 		}}
 	>
-		<span>{label}</span>
+		<span>
+			<Swatch color={swatch ?? color} dashed={dashed} />
+			{label}
+		</span>
 		<span>{money(value)}</span>
 	</div>
 );
@@ -223,19 +259,34 @@ export const CashHoverCard = ({ d }: { d: ChartHoverDatum }) => (
 			<span style={{ ...cellStyle(true), fontSize: 9, textTransform: "uppercase" }}>
 				previsto
 			</span>
-			<FlowCells label="entradas" color="var(--green)" real={d.realIn} fc={d.fcIn} />
-			<FlowCells label="saídas" color="var(--rose)" real={d.realOut} fc={d.fcOut} />
+			<FlowCells
+				label="entradas"
+				color="var(--cyan)"
+				fcColor="#99f6e4"
+				real={d.realIn}
+				fc={d.fcIn}
+			/>
+			<FlowCells
+				label="saídas"
+				color="var(--rose)"
+				fcColor="#fda4af"
+				real={d.realOut}
+				fc={d.fcOut}
+			/>
 		</div>
 		<SaldoRow
 			label={d.isFuture ? "saldo projetado" : "saldo"}
 			value={d.balance}
 			color="var(--text)"
+			swatch="var(--purple)"
+			dashed
 		/>
 		{d.scenarioBalance != null && (
 			<SaldoRow
 				label="saldo com cenário"
 				value={d.scenarioBalance}
 				color="var(--cyan)"
+				dashed
 			/>
 		)}
 		{d.scenarioItems.length > 0 && <ScenarioItemsSection items={d.scenarioItems} />}
