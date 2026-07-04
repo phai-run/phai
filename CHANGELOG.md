@@ -1,5 +1,20 @@
 # Changelog
 
+## [5.35.0](https://github.com/phai-run/phai/compare/v5.34.1...v5.35.0) (2026-07-04)
+
+
+### Features
+
+* **web:** full-height sheet, keyboard select, frozen insert order ([8b455a9](https://github.com/phai-run/phai/commit/8b455a9af832b19eebd54895344b0d79358031e1))
+* **web:** month theme, adaptive-height sheet, filter/insert wiring, undo ([d346606](https://github.com/phai-run/phai/commit/d346606976dd600b20880e5622e1aecbf5734452))
+* **web:** Nubank-ultravioleta cards + Portuguese sweep ([8d5b481](https://github.com/phai-run/phai/commit/8d5b481cd17b50e470d0eef7e903251846eef015))
+* **web:** per-month theme helper (accent + season glyph) ([fac2cda](https://github.com/phai-run/phai/commit/fac2cdae26303428753ede5dfb38e89abc050911))
+* **web:** planilha UX overhaul + skeuomorphic flip cards ([6b26a54](https://github.com/phai-run/phai/commit/6b26a5443d73d943479b51db230da4a10ca866cd))
+* **web:** polish inline forecast insert editor ([8b63fe6](https://github.com/phai-run/phai/commit/8b63fe6b541b1575ef9e5f7ad9cdd5d859280c65))
+* **web:** sheet filter bar as a single row + filtros popover ([5b93d59](https://github.com/phai-run/phai/commit/5b93d59536adcc9cbdbe40916de0d45cb4d0d374))
+* **web:** skeuomorphic flip credit cards with month transactions ([228de42](https://github.com/phai-run/phai/commit/228de424f16ed88fc57c2425b728c9ce0980be79))
+* **web:** sticky header with sync/version, mode shortcuts, PT tabs ([c657f1f](https://github.com/phai-run/phai/commit/c657f1ff818e58c35239cd98da5b0ab57fee9f96))
+
 ## [5.34.1](https://github.com/phai-run/phai/compare/v5.34.0...v5.34.1) (2026-07-03)
 
 
