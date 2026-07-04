@@ -26,9 +26,11 @@
 //!    `service_account_path` and config resolve, and runs with
 //!    `--no-auto-update`.
 //! 2. **Launcher app** `~/Applications/Phai.app` — a minimal bundle whose
-//!    executable opens the web app in the default browser. It shows up in
-//!    Launchpad/Spotlight with the φ icon and can be pinned to the Dock;
-//!    "installing phai" ends with something clickable.
+//!    executable opens the web app as a chromeless desktop-style window
+//!    (Chromium `--app` mode), falling back to the default browser. Since the
+//!    launchd service is already running, clicking the icon just opens the app
+//!    like a native one. It shows up in Launchpad/Spotlight with the φ icon and
+//!    can be pinned to the Dock; "installing phai" ends with something clickable.
 //!
 //! ## Security trade-off (system daemon)
 //!
@@ -283,8 +285,23 @@ fn app_info_plist() -> String {
 }
 
 /// The bundle "binary": a shell launcher that opens the app URL and exits.
+///
+/// Tries a Chromium-family browser in `--app` mode first, so clicking the Dock
+/// icon opens a chromeless, desktop-app-style window (own icon, no tabs or
+/// address bar) against the already-running launchd service. `open -na` exits
+/// non-zero when the app bundle is missing, so we fall through to the next
+/// candidate and finally to the default browser (`open <url>`).
 fn app_launcher_script(url: &str) -> String {
-    format!("#!/bin/sh\nexec /usr/bin/open \"{url}\"\n")
+    format!(
+        "#!/bin/sh\n\
+         url=\"{url}\"\n\
+         for app in \"Google Chrome\" \"Microsoft Edge\" \"Brave Browser\" \"Chromium\"; do\n\
+         \tif open -na \"$app\" --args --app=\"$url\" >/dev/null 2>&1; then\n\
+         \t\texit 0\n\
+         \tfi\n\
+         done\n\
+         exec /usr/bin/open \"$url\"\n"
+    )
 }
 
 fn launcher_url(port: u16, system_daemon_installed: bool) -> String {
@@ -677,7 +694,12 @@ mod tests {
         assert_eq!(app_url(4317), "http://localhost:4317/");
         let script = app_launcher_script(&app_url(4317));
         assert!(script.starts_with("#!/bin/sh\n"));
-        assert!(script.contains("exec /usr/bin/open \"http://localhost:4317/\""));
+        // App-mode first: chromeless Chromium window against the running service.
+        assert!(script.contains("--app=\"$url\""));
+        assert!(script.contains("\"Google Chrome\""));
+        // …then fall back to the default browser.
+        assert!(script.contains("exec /usr/bin/open \"$url\""));
+        assert!(script.contains("url=\"http://localhost:4317/\""));
     }
 
     #[test]
