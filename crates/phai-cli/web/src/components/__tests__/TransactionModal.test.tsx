@@ -63,12 +63,12 @@ describe("TransactionModal", () => {
 			/>,
 		);
 
-		fireEvent.change(screen.getByPlaceholderText("description"), {
+		fireEvent.change(screen.getByPlaceholderText("descrição"), {
 			target: { value: "Updated description" },
 		});
-		fireEvent.click(screen.getByRole("button", { name: "Similar (2)" }));
+		fireEvent.click(screen.getByRole("button", { name: "Semelhantes (2)" }));
 		fireEvent.click(
-			await screen.findByRole("button", { name: "select all (2)" }),
+			await screen.findByRole("button", { name: "selecionar todas (2)" }),
 		);
 		fireEvent.click(
 			screen.getByRole("button", {
@@ -108,12 +108,12 @@ describe("TransactionModal", () => {
 			/>,
 		);
 
-		fireEvent.change(screen.getByPlaceholderText("description"), {
+		fireEvent.change(screen.getByPlaceholderText("descrição"), {
 			target: { value: "Aluguel do apê" },
 		});
-		fireEvent.click(screen.getByRole("button", { name: "Similar (1)" }));
+		fireEvent.click(screen.getByRole("button", { name: "Semelhantes (1)" }));
 		fireEvent.click(
-			await screen.findByRole("button", { name: "select all (1)" }),
+			await screen.findByRole("button", { name: "selecionar todas (1)" }),
 		);
 		fireEvent.click(
 			screen.getByRole("button", { name: "Salvar (também em 1 selecionadas)" }),

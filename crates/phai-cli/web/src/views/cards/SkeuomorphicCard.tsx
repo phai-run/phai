@@ -2,13 +2,13 @@ import type { CardRow } from "../../bridge/api";
 import { formatMoneyNumber, numeric } from "../../lib/format";
 
 /**
- * A skeuomorphic credit-card face that flips (CSS 3D, .cc-flip) to its back when
- * selected. Front: chip, contactless glyph, a masked number, holder + valid-thru
- * and a network mark. Back: magnetic stripe, signature panel with a masked CVC,
- * and the cycle's key figures. Every visual detail that isn't in the data (last
- * four digits, the gradient, the network guess) is *deterministically* derived
- * from the accountId, so a given card always looks the same — but nothing real
- * or sensitive is ever shown (the digits are decorative, seeded from the id).
+ * A skeuomorphic Nubank Ultravioleta-style credit card that flips (CSS 3D,
+ * .cc-flip) to its back when selected. Front: chip, contactless glyph, a masked
+ * number, valid-thru and the Nubank wordmark on the dark iridescent-purple
+ * plastic. Back: magnetic stripe, signature panel with a masked CVC, and the
+ * cycle's key figures. Details not in the data (last four digits, the sheen
+ * angle) are *deterministically* derived from the accountId, so a card always
+ * looks the same — nothing real or sensitive is shown (digits are decorative).
  */
 
 /** Stable non-negative hash of a string (decorative seed only). */
@@ -18,28 +18,12 @@ const seed = (s: string): number => {
 	return h;
 };
 
-// A spread of tasteful card gradients; the accountId picks one deterministically
-// so different cards read as visually distinct plastic.
-const GRADIENTS: ReadonlyArray<string> = [
-	"linear-gradient(135deg, #1f2937 0%, #4b5563 100%)", // graphite
-	"linear-gradient(135deg, #4c1d95 0%, #7c3aed 100%)", // violet
-	"linear-gradient(135deg, #0f766e 0%, #14b8a6 100%)", // teal
-	"linear-gradient(135deg, #7c2d12 0%, #b45309 100%)", // copper
-	"linear-gradient(135deg, #831843 0%, #be185d 100%)", // magenta
-	"linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)", // sapphire
-	"linear-gradient(135deg, #052e16 0%, #15803d 100%)", // forest
-	"linear-gradient(135deg, #18181b 0%, #3f3f46 100%)", // onyx
-];
-
-type Network = "visa" | "mastercard" | "elo" | "amex" | "generic";
-
-const guessNetwork = (label: string): Network => {
-	const l = label.toLowerCase();
-	if (l.includes("visa")) return "visa";
-	if (l.includes("master") || l.includes("nubank") || l.includes("nu ")) return "mastercard";
-	if (l.includes("elo")) return "elo";
-	if (l.includes("amex") || l.includes("american")) return "amex";
-	return "generic";
+// The Nubank Ultravioleta plastic: near-black base with a deep violet rise. A
+// per-card hue nudge (from the id) keeps two cards subtly distinguishable
+// without leaving the ultravioleta family.
+const cardGradient = (h: number): string => {
+	const shift = h % 30; // 0..29° of hue variation
+	return `linear-gradient(150deg, #141019 0%, #201636 42%, hsl(${262 + shift}, 55%, 26%) 100%)`;
 };
 
 /** "YYYY-MM(-DD)" → "MM/YY" for the valid-thru line. */
@@ -51,48 +35,29 @@ const validThru = (card: CardRow): string => {
 	return `${mm}/${yy}`;
 };
 
-const NetworkMark = ({ network }: { network: Network }) => {
-	if (network === "mastercard") {
-		return (
-			<span aria-label="mastercard" style={{ display: "inline-flex", alignItems: "center" }}>
-				<span style={{ width: 22, height: 22, borderRadius: "50%", background: "#eb001b" }} />
-				<span
-					style={{
-						width: 22,
-						height: 22,
-						borderRadius: "50%",
-						background: "#f79e1b",
-						marginLeft: -10,
-						mixBlendMode: "multiply",
-					}}
-				/>
-			</span>
-		);
-	}
-	const text =
-		network === "visa"
-			? "VISA"
-			: network === "elo"
-				? "elo"
-				: network === "amex"
-					? "AMEX"
-					: "•• bank";
-	return (
+/** The Nubank wordmark, rendered as styled text (no shipped logo asset). */
+const NubankMark = () => (
+	<span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end", lineHeight: 1 }}>
 		<span
 			style={{
 				fontFamily: "var(--font-display)",
-				fontStyle: network === "visa" ? "italic" : "normal",
 				fontWeight: 800,
-				fontSize: 17,
-				letterSpacing: network === "visa" ? "0.06em" : "0.02em",
+				fontSize: 15,
+				letterSpacing: "-0.01em",
 				color: "#fff",
-				textShadow: "0 1px 2px rgba(0,0,0,0.3)",
+				textShadow: "0 1px 2px rgba(0,0,0,0.35)",
 			}}
 		>
-			{text}
+			nubank
 		</span>
-	);
-};
+		<span
+			className="mono"
+			style={{ fontSize: 7, letterSpacing: "0.32em", color: "#c4b5fd", marginTop: 1 }}
+		>
+			ULTRAVIOLETA
+		</span>
+	</span>
+);
 
 export const SkeuomorphicCard = ({
 	card,
@@ -104,8 +69,7 @@ export const SkeuomorphicCard = ({
 	onToggle: () => void;
 }) => {
 	const h = seed(card.accountId);
-	const gradient = GRADIENTS[h % GRADIENTS.length];
-	const network = guessNetwork(card.label);
+	const gradient = cardGradient(h);
 	const last4 = String(h % 10000).padStart(4, "0");
 	const total = numeric(card.total);
 	const limit = card.creditLimit != null ? numeric(card.creditLimit) : null;
@@ -222,7 +186,7 @@ export const SkeuomorphicCard = ({
 							<div style={{ fontSize: 8, opacity: 0.7, letterSpacing: "0.14em" }}>FATURA</div>
 							<div style={{ fontWeight: 700 }}>{formatMoneyNumber(total)}</div>
 						</div>
-						<NetworkMark network={network} />
+						<NubankMark />
 					</div>
 				</div>
 
