@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.36.0](https://github.com/phai-run/phai/compare/v5.35.0...v5.36.0) (2026-07-04)
+
+
+### Features
+
+* **serve:** open web UI as a chromeless desktop-style window ([#251](https://github.com/phai-run/phai/issues/251)) ([f427046](https://github.com/phai-run/phai/commit/f4270469f74a4c8e961ff8cfb252414e4bf24ed6))
+
 ## [5.35.0](https://github.com/phai-run/phai/compare/v5.34.1...v5.35.0) (2026-07-04)
 
 
