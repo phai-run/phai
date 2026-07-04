@@ -36,9 +36,9 @@ import { numeric } from "../lib/format";
 import type { ChartMonthView, ForecastView } from "./types";
 
 const DETAIL_MODES = [
-	{ id: "planilha", label: "sheet" },
-	{ id: "categorias", label: "categories" },
-	{ id: "cartoes", label: "cards" },
+	{ id: "planilha", label: "planilha" },
+	{ id: "categorias", label: "categorias" },
+	{ id: "cartoes", label: "cartões" },
 ] as const;
 
 // Seeding window: the 12 months of the current calendar year.
@@ -202,20 +202,39 @@ export const Dashboard = () => {
 	const currentMonth = currentMonthKey();
 	const selected = ui.selectedMonth ?? currentMonth;
 
-	// Global month navigation: Alt+Left / Alt+Right
+	// Global keyboard shortcuts:
+	//   Alt+←/→  → previous / next month
+	//   1 / 2 / 3 → planilha / categorias / cartões (when not typing in a field)
 	useEffect(() => {
+		const isTyping = (el: EventTarget | null) => {
+			const t = el as HTMLElement | null;
+			const tag = t?.tagName;
+			return (
+				tag === "INPUT" ||
+				tag === "TEXTAREA" ||
+				tag === "SELECT" ||
+				t?.isContentEditable === true
+			);
+		};
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (!e.altKey) return;
-			if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-			if (months.length === 0) return;
-			e.preventDefault();
-			const idx = months.findIndex((m) => m.month === selected);
-			if (idx === -1) return;
-			const next =
-				e.key === "ArrowLeft"
-					? months[idx - 1]
-					: months[idx + 1];
-			if (next) setUi({ selectedMonth: next.month });
+			if (isTyping(e.target)) return;
+			// Month navigation.
+			if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+				if (months.length === 0) return;
+				e.preventDefault();
+				const idx = months.findIndex((m) => m.month === selected);
+				if (idx === -1) return;
+				const next = e.key === "ArrowLeft" ? months[idx - 1] : months[idx + 1];
+				if (next) setUi({ selectedMonth: next.month });
+				return;
+			}
+			// Mode switch (no modifiers).
+			if (e.metaKey || e.ctrlKey || e.altKey) return;
+			const mode = { "1": "planilha", "2": "categorias", "3": "cartoes" }[e.key];
+			if (mode) {
+				e.preventDefault();
+				setUi({ detailMode: mode });
+			}
 		};
 		window.addEventListener("keydown", onKeyDown);
 		return () => window.removeEventListener("keydown", onKeyDown);
@@ -302,31 +321,6 @@ export const Dashboard = () => {
 		return scenario - baseline;
 	}, [scenarioBalances, months, selected]);
 
-	// Compact strip visibility. The strip is position:fixed, so toggling it
-	// never changes document flow — the old sticky variant swapped the tall
-	// hero for a thin one in place, and that height jump moved the page under
-	// the cursor, re-crossed the threshold and oscillated ("flicker on
-	// scroll"). With a fixed overlay the thresholds only drive a fade-in.
-	const [isCompact, setIsCompact] = useState(false);
-
-	useEffect(() => {
-		let raf = 0;
-		const onScroll = () => {
-			if (raf) return;
-			raf = requestAnimationFrame(() => {
-				raf = 0;
-				const y = window.scrollY;
-				setIsCompact((prev) => (prev ? y > 110 : y > 170));
-			});
-		};
-		window.addEventListener("scroll", onScroll, { passive: true });
-		onScroll();
-		return () => {
-			window.removeEventListener("scroll", onScroll);
-			if (raf) cancelAnimationFrame(raf);
-		};
-	}, []);
-
 	const error = chartSeed.error ?? forecastSeed.error ?? txSeed.error;
 	const loading = chartSeed.loading && months.length === 0;
 
@@ -350,38 +344,6 @@ export const Dashboard = () => {
 					</div>
 				) : null}
 			</div>
-
-			{/* ── Fixed compact strip: fades in once the hero scrolls out.
-			       position:fixed = zero layout shift, so no scroll feedback loop. ── */}
-			{heroRow && (
-				<div
-					aria-hidden={!isCompact}
-					style={{
-						position: "fixed",
-						top: 0,
-						left: 0,
-						right: 0,
-						zIndex: 30,
-						background: "var(--bg)",
-						borderBottom: "1px solid var(--border)",
-						boxShadow: "0 2px 12px rgba(21,19,31,0.08)",
-						transform: isCompact ? "translateY(0)" : "translateY(-110%)",
-						opacity: isCompact ? 1 : 0,
-						transition: "transform 180ms ease, opacity 180ms ease",
-						pointerEvents: isCompact ? "auto" : "none",
-					}}
-				>
-					<div
-						style={{
-							maxWidth: "var(--container)",
-							margin: "0 auto",
-							padding: "8px clamp(24px,3vw,32px)",
-						}}
-					>
-						<CashDecisionPanel row={heroRow} when={heroWhen} compact />
-					</div>
-				</div>
-			)}
 
 			{/* ── Cash chart (subordinate to the hero; scrolls normally) ── */}
 			<div
@@ -421,7 +383,7 @@ export const Dashboard = () => {
 			>
 				<div
 					role="tablist"
-					aria-label="month view mode"
+					aria-label="modo de visualização do mês"
 					style={{
 						display: "inline-flex",
 						gap: 2,
@@ -432,13 +394,14 @@ export const Dashboard = () => {
 						background: "var(--card)",
 					}}
 				>
-					{DETAIL_MODES.map((m) => {
+					{DETAIL_MODES.map((m, i) => {
 						const active = (ui.detailMode || "planilha") === m.id;
 						return (
 							<button
 								key={m.id}
 								role="tab"
 								aria-selected={active}
+								title={`${m.label} (${i + 1})`}
 								onClick={() => setUi({ detailMode: m.id })}
 								className="mono pressable"
 								style={{
@@ -487,7 +450,7 @@ export const Dashboard = () => {
 							textAlign: "center",
 						}}
 					>
-						No cash data.{" "}
+						Sem dados de caixa.{" "}
 						<button
 							onClick={() => {
 								chartSeed.reload();

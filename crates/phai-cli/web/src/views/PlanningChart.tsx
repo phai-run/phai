@@ -22,7 +22,6 @@ import {
 	type ChartModel,
 	type ScenarioBarDelta,
 } from "./chart/model";
-import { ChartLegend } from "./chart/ChartLegend";
 import {
 	CashHoverCard,
 	ExpensesHoverCard,
@@ -105,7 +104,9 @@ export const PlanningChart = ({
 		];
 		return extras.length > 0 ? extendScale(base, extras) : base;
 	}, [months, scenarioBalances, scenarioDeltas]);
-	const [mode, setMode] = useState<ChartMode>("caixa");
+	// The chart is a single year-overview (cash) view — the old Cash/Expenses
+	// toggle was removed; the per-category breakdown lives in the "categorias" tab.
+	const mode: ChartMode = "caixa";
 
 	const handleKeyDown = (e: React.KeyboardEvent) => {
 		const n = months.length;
@@ -140,12 +141,10 @@ export const PlanningChart = ({
 		<div
 			tabIndex={0}
 			role="application"
-			aria-label="cash chart — use ←→ to move between months"
+			aria-label="gráfico de caixa — use ←→ para mudar de mês"
 			onKeyDown={handleKeyDown}
 			style={{ outline: "none" }}
 		>
-			<ModeSelector mode={mode} onChange={setMode} />
-
 			<FullChart
 				months={months}
 				model={model}
@@ -163,73 +162,6 @@ export const PlanningChart = ({
 		</div>
 	);
 };
-
-// ── Mode selector ──────────────────────────────────────────────────────────
-
-const ModeSelector = ({
-	mode,
-	onChange,
-}: {
-	mode: ChartMode;
-	onChange: (m: ChartMode) => void;
-}) => (
-	<div
-		role="radiogroup"
-		aria-label="Chart mode"
-		style={{
-			display: "inline-flex",
-			background: "var(--surface)",
-			borderRadius: "var(--radius-full)",
-			padding: 3,
-			marginBottom: 14,
-			border: "1px solid var(--border)",
-		}}
-	>
-		<ModeChip
-			label="Cash"
-			active={mode === "caixa"}
-			onClick={() => onChange("caixa")}
-		/>
-		<ModeChip
-			label="Expenses"
-			active={mode === "despesas-barras"}
-			onClick={() => onChange("despesas-barras")}
-		/>
-	</div>
-);
-
-const ModeChip = ({
-	label,
-	active,
-	onClick,
-}: {
-	label: string;
-	active: boolean;
-	onClick: () => void;
-}) => (
-	<button
-		type="button"
-		role="radio"
-		aria-checked={active}
-		aria-label={label}
-		onClick={onClick}
-		className="mono pressable"
-		style={{
-			padding: "4px 14px",
-			fontSize: 11,
-			fontWeight: active ? 600 : 400,
-			background: active ? "var(--white)" : "transparent",
-			color: active ? "#ffffff" : "var(--muted)",
-			border: "none",
-			borderRadius: "var(--radius-full)",
-			cursor: "pointer",
-			transition: "all 140ms ease",
-			lineHeight: "1.5",
-		}}
-	>
-		{label}
-	</button>
-);
 
 // ── Full chart ─────────────────────────────────────────────────────────────
 
@@ -380,30 +312,30 @@ const FullChart = ({
 				</span>
 				{!isExpensesMode && (
 					<span style={{ color: "var(--cyan)" }}>
-						income <CountMoney value={yearIn} />
+						entradas <CountMoney value={yearIn} />
 					</span>
 				)}
 				<span style={{ color: "var(--rose)" }}>
-					expenses <CountMoney value={-yearOut} />
+					saídas <CountMoney value={-yearOut} />
 				</span>
 				<span
 					style={{
 						color: yearIn - yearOut >= 0 ? "var(--green)" : "var(--rose)",
 					}}
 				>
-					net {yearIn - yearOut >= 0 ? "+" : ""}
+					resultado {yearIn - yearOut >= 0 ? "+" : ""}
 					<CountMoney value={yearIn - yearOut} />
 				</span>
 				{!isExpensesMode && goal.shortfall && (
 					<span style={{ color: "var(--amber)" }}>
-						⚠ goes red in {goal.label} ·{" "}
+						⚠ fica no vermelho em {goal.label} ·{" "}
 						{goal.solution.achievable ? (
 							<>
-								cut <CountMoney value={goal.solution.monthlySaving} />
-								/mo to stay in the black
+								corte <CountMoney value={goal.solution.monthlySaving} />
+								/mês para não ficar no vermelho
 							</>
 						) : (
-							"out of reach by cutting alone"
+							"inalcançável só cortando"
 						)}
 					</span>
 				)}
@@ -448,8 +380,8 @@ const FullChart = ({
 					role="img"
 					aria-label={
 						mode === "caixa"
-							? "monthly cash chart — income and expense bars, balance line"
-							: "monthly expenses chart"
+							? "gráfico mensal de caixa — barras de entradas e saídas, linha de saldo"
+							: "gráfico mensal de despesas"
 					}
 					style={{ display: "block" }}
 				>
@@ -775,7 +707,7 @@ const FullChart = ({
 										fontSize={9}
 										fill="var(--amber)"
 									>
-										goal · balance ≥ 0
+										meta · saldo ≥ 0
 									</text>
 								</>
 							)}
@@ -863,13 +795,6 @@ const FullChart = ({
 					</HoverCardShell>
 				)}
 			</div>
-
-			{/* Legend */}
-			<ChartLegend
-				mode={mode}
-				months={months}
-				scenarioActive={scenarioBalances != null}
-			/>
 		</div>
 	);
 };

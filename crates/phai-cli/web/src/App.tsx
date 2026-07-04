@@ -43,47 +43,6 @@ export const App = () => {
 
 	return (
 		<>
-			{/* Floating sync + version badge — always visible, scroll-independent.
-			    Anchored bottom-right so it never sits on top of the header's
-			    search trigger (both used to fight for the top-right corner). */}
-			<div
-				style={{
-					position: "fixed",
-					bottom: 16,
-					right: 16,
-					zIndex: 90,
-					display: "flex",
-					alignItems: "center",
-					gap: 10,
-					background: "var(--bg)",
-					border: "1px solid var(--border)",
-					borderRadius: "var(--radius-full)",
-					padding: "4px 12px",
-					boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-				}}
-			>
-				<PluggySyncButton />
-				<SyncChip
-					pending={sync.pending}
-					error={sync.error}
-					onRetry={sync.retry}
-				/>
-				{update.currentVersion && (
-					<span
-						className="mono"
-						title="running version"
-						style={{
-							fontSize: 11,
-							color: update.updateAvailable
-								? "var(--purple)"
-								: "var(--muted2)",
-						}}
-					>
-						v{update.currentVersion}
-					</span>
-				)}
-			</div>
-
 			<UpdateBanner update={update} />
 
 			<a
@@ -112,63 +71,98 @@ export const App = () => {
 
 			<header
 				style={{
-					maxWidth: "var(--container)",
-					margin: "0 auto",
-					padding: "0 clamp(24px, 3vw, 32px)",
-					display: "flex",
-					alignItems: "center",
-					gap: 16,
-					height: 60,
+					position: "sticky",
+					top: 0,
+					zIndex: 40,
+					background: "color-mix(in srgb, var(--bg) 88%, transparent)",
+					backdropFilter: "blur(8px)",
 					borderBottom: "1px solid var(--border)",
 				}}
 			>
-				<span className="phi" style={{ fontSize: "1.75rem" }}>
-					φ
-				</span>
-				<strong
+				<div
 					style={{
-						fontFamily: "var(--font-display)",
-						fontSize: "1.25rem",
-						letterSpacing: "-0.02em",
-					}}
-				>
-					phai
-				</strong>
-				<button
-					type="button"
-					onClick={() => setSearchOpen(true)}
-					className="mono"
-					title="Search transactions (Cmd+K)"
-					style={{
-						marginLeft: "auto",
+						maxWidth: "var(--container)",
+						margin: "0 auto",
+						padding: "0 clamp(24px, 3vw, 32px)",
 						display: "flex",
 						alignItems: "center",
-						gap: 6,
-						background: "var(--surface)",
-						border: "1px solid var(--border)",
-						borderRadius: "var(--radius-full)",
-						padding: "5px 12px",
-						cursor: "pointer",
-						color: "var(--muted)",
-						fontSize: 12,
-						transition: "border-color 150ms",
+						gap: 16,
+						height: 56,
 					}}
 				>
-					<span style={{ fontSize: 13 }}>/</span>
-					Search...
-					<kbd
+					<span className="phi" style={{ fontSize: "1.6rem" }}>
+						φ
+					</span>
+					<strong
 						style={{
-							fontSize: 10,
-							background: "var(--bg)",
-							border: "1px solid var(--border)",
-							borderRadius: 4,
-							padding: "1px 5px",
-							marginLeft: 4,
+							fontFamily: "var(--font-display)",
+							fontSize: "1.2rem",
+							letterSpacing: "-0.02em",
 						}}
 					>
-						{"⌘"}K
-					</kbd>
-				</button>
+						phai
+					</strong>
+
+					{/* Right cluster: search · sync · version — the page's top controls. */}
+					<div
+						style={{
+							marginLeft: "auto",
+							display: "flex",
+							alignItems: "center",
+							gap: 12,
+						}}
+					>
+						<button
+							type="button"
+							onClick={() => setSearchOpen(true)}
+							className="mono"
+							title="Buscar transações (Cmd+K)"
+							style={{
+								display: "flex",
+								alignItems: "center",
+								gap: 6,
+								background: "var(--surface)",
+								border: "1px solid var(--border)",
+								borderRadius: "var(--radius-full)",
+								padding: "5px 12px",
+								cursor: "pointer",
+								color: "var(--muted)",
+								fontSize: 12,
+								transition: "border-color 150ms",
+							}}
+						>
+							<span style={{ fontSize: 13 }}>/</span>
+							Buscar…
+							<kbd
+								style={{
+									fontSize: 10,
+									background: "var(--bg)",
+									border: "1px solid var(--border)",
+									borderRadius: 4,
+									padding: "1px 5px",
+									marginLeft: 4,
+								}}
+							>
+								{"⌘"}K
+							</kbd>
+						</button>
+						<span aria-hidden style={{ width: 1, height: 20, background: "var(--border)" }} />
+						<PluggySyncButton />
+						<SyncChip pending={sync.pending} error={sync.error} onRetry={sync.retry} />
+						{update.currentVersion && (
+							<span
+								className="mono"
+								title="versão em execução"
+								style={{
+									fontSize: 11,
+									color: update.updateAvailable ? "var(--purple)" : "var(--muted2)",
+								}}
+							>
+								v{update.currentVersion}
+							</span>
+						)}
+					</div>
+				</div>
 			</header>
 
 			<DndProvider>

@@ -99,9 +99,10 @@ export const thStyle: React.CSSProperties = {
 	fontWeight: 500,
 	// Sticky lives on each th, not the tr: with collapsed table borders some
 	// engines skip painting a sticky row's background, so body rows scrolled
-	// through it. The th needs its own opaque background.
+	// through it. The th needs its own opaque background. Offset by the sticky
+	// app header (56px) so column headers pin just below it, not under it.
 	position: "sticky",
-	top: 0,
+	top: 56,
 	zIndex: 2,
 	background: "var(--card)",
 	boxShadow: "0 1px 0 var(--border)",

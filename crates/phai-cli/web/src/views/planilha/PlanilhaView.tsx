@@ -17,15 +17,14 @@ import {
 import { TierBadge } from "../../components/TierBadge";
 import { categoryEmoji } from "../../lib/categoryEmoji";
 import { formatMoneyNumber, isNegative, toCents } from "../../lib/format";
+import { monthTheme } from "../../lib/monthTheme";
 import {
-	accountFilterIds,
 	applyScenarioToMonthRows,
 	buildAccountMap,
 	buildOverlayMap,
 	commitmentTier,
 	COMMITMENT_TIER_LABELS,
 	COMMITMENT_TIERS,
-	DEFAULT_SHEET_LOCAL_FILTERS,
 	effectiveCategory,
 	effectiveTx,
 	filterTransactions,
@@ -65,6 +64,7 @@ import {
 	thStyle,
 } from "./sheetShared";
 import { SheetScenarioBar } from "./SheetScenarioBar";
+import { SheetFilterBar } from "./SheetFilterBar";
 
 // Re-exported so the CSV unit test keeps importing them from this module.
 export {
@@ -94,22 +94,6 @@ const COLUMNS: Array<{ key: SheetSortKey; label: string; width?: string; align?:
 		{ key: "date", label: "dia", width: "56px" },
 		{ key: "amount", label: "valor", width: "150px", align: "right" },
 	];
-
-const ORIGIN_FILTER_OPTIONS: Array<{ value: SheetLocalFilters["origin"]; label: string }> = [
-	{ value: "all", label: "origem: todas" },
-	{ value: "real", label: "realizado" },
-	{ value: "installment", label: "parcela" },
-	{ value: "recurring", label: "recorrente" },
-	{ value: "fixed", label: "fixa" },
-	{ value: "manual", label: "previsto manual" },
-	{ value: "scenario", label: "cenário" },
-];
-
-const FLOW_FILTER_OPTIONS: Array<{ value: SheetLocalFilters["flow"]; label: string }> = [
-	{ value: "all", label: "tipo: todos" },
-	{ value: "in", label: "entradas" },
-	{ value: "out", label: "saídas" },
-];
 
 const ORIGIN_TITLE: Record<SheetOrigin, string> = {
 	real: "realizado",
@@ -217,6 +201,28 @@ const rowRef = (planned: PlannedSheetRow): SheetRowRef => ({
 });
 
 /**
+ * Order the sheet rows. With no frozen order this is the plain column sort;
+ * while a manual order is frozen (after an inline insert) rows keep the snapshot
+ * order, and any row not in the snapshot — the freshly created one — is dropped
+ * in at `insertAt`, so a new line stays exactly where it was placed until the
+ * user re-sorts by clicking a column.
+ */
+const orderUnifiedRows = (
+	all: UnifiedRow[],
+	frozen: { ids: string[]; insertAt: number } | null,
+	sort: SheetSort,
+): UnifiedRow[] => {
+	if (!frozen) return sortUnifiedRows(all, sort);
+	const pos = new Map(frozen.ids.map((id, i) => [id, i]));
+	const known: UnifiedRow[] = [];
+	const fresh: UnifiedRow[] = [];
+	for (const r of all) (pos.has(r.id) ? known : fresh).push(r);
+	known.sort((a, b) => (pos.get(a.id) ?? 0) - (pos.get(b.id) ?? 0));
+	const at = Math.min(Math.max(frozen.insertAt, 0), known.length);
+	return [...known.slice(0, at), ...fresh, ...known.slice(at)];
+};
+
+/**
  * Planilha — the unified sheet of a month (ADR-0038). Real transactions and
  * planned items (forecasts + the active scenario's deltas) share one table:
  * each row carries an origin glyph, an inline-editable amount, and per-row
@@ -261,6 +267,9 @@ export const PlanilhaView = ({
 	);
 
 	const monthEditable = month >= currentMonthKey();
+	// Discreet per-month identity (ADR-free view sugar): a stable accent + season
+	// glyph so each month's sheet is distinguishable at a glance (never loud).
+	const theme = useMemo(() => monthTheme(month), [month]);
 
 	// ── View preferences (localStorage, not LiveStore) ──────────────────────
 	const [sort, setSort] = useState<SheetSort>(
@@ -288,8 +297,40 @@ export const PlanilhaView = ({
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [editingValue, setEditingValue] = useState("");
 	const [insertAfter, setInsertAfter] = useState<string | "end" | null>(null);
+	// Frozen manual order: after an inline insert the sheet keeps the row where
+	// it was dropped (instead of re-sorting by day) until the user clicks a
+	// column header. `ids` is the displayed order snapshot; `insertAt` is where
+	// newly-created rows (unknown ids) land within it.
+	const [frozen, setFrozen] = useState<{ ids: string[]; insertAt: number } | null>(
+		null,
+	);
 	const [deleteRowId, setDeleteRowId] = useState<string | null>(null);
 	const tableRef = useRef<HTMLDivElement>(null);
+
+	// ── Undo (skip / delete) ─────────────────────────────────────────────────
+	// Removing or skipping a planned row is a mistake away from lost work, so we
+	// stash a reversing action and surface a transient "desfazer" toast. `run` is
+	// null when the gesture has no clean client-side inverse (a template-ended
+	// recurrence, a discarded materialized forecast) — then the toast only
+	// confirms, without promising an undo we can't honour.
+	const [undo, setUndo] = useState<{ label: string; run: (() => void) | null } | null>(
+		null,
+	);
+	const undoTimer = useRef<number | null>(null);
+	const flashUndo = useCallback(
+		(label: string, run: (() => void) | null) => {
+			if (undoTimer.current) window.clearTimeout(undoTimer.current);
+			setUndo({ label, run });
+			undoTimer.current = window.setTimeout(() => setUndo(null), 7000);
+		},
+		[],
+	);
+	useEffect(
+		() => () => {
+			if (undoTimer.current) window.clearTimeout(undoTimer.current);
+		},
+		[],
+	);
 
 	const uiFilters = useMemo(
 		() => ({
@@ -411,8 +452,8 @@ export const PlanilhaView = ({
 		const all = [...txUnified, ...plannedUnified].filter((r) =>
 			matchesSheetLocalFilters(r, localFilters),
 		);
-		return sortUnifiedRows(all, sort);
-	}, [txUnified, plannedUnified, localFilters, sort]);
+		return orderUnifiedRows(all, frozen, sort);
+	}, [txUnified, plannedUnified, localFilters, sort, frozen]);
 
 	const hasSheetFilters = useMemo(
 		() => hasActiveFilters(uiFilters) || localFilters.origin !== "all" || localFilters.flow !== "all",
@@ -427,6 +468,8 @@ export const PlanilhaView = ({
 		setEditingId(null);
 		setInsertAfter(null);
 		setDeleteRowId(null);
+		setUndo(null);
+		setFrozen(null);
 	}, [month, activeScenarioId]);
 
 	// ── Totals footer (the sheet's status bar) ──────────────────────────────
@@ -545,6 +588,23 @@ export const PlanilhaView = ({
 		[editingValue, activeScenarioId, activeChanges, month, store, notifyScenario],
 	);
 
+	// Remove a scenario change by id (the inverse of every scenario-delta gesture).
+	const removeScenarioChange = useCallback(
+		(changeId: string) => {
+			if (!activeScenarioId) return;
+			store.commit(
+				events.scenarioChangeRemoved({
+					writeId: crypto.randomUUID(),
+					changeId,
+					scenarioId: activeScenarioId,
+					removedAt: Date.now(),
+				}),
+			);
+			notifyScenario();
+		},
+		[activeScenarioId, store, notifyScenario],
+	);
+
 	// ── Delete a planned row (with the recurring "só/em diante" popover) ─────
 	const deletePlanned = useCallback(
 		(planned: PlannedSheetRow, scope: SheetDeleteScope) => {
@@ -557,11 +617,28 @@ export const PlanilhaView = ({
 					store.commit(
 						events.forecastDeleted({ writeId, forecastId: action.forecastId, deletedAt: now }),
 					);
+					// A manual one-shot can be re-created verbatim (a fresh id, same fields).
+					flashUndo("linha removida", () =>
+						store.commit(
+							events.forecastCreated({
+								writeId: crypto.randomUUID(),
+								description: planned.description,
+								amount: planned.amount,
+								dueDate: planned.dueDate,
+								categoryId: planned.categoryId ?? null,
+								accountId: planned.accountId ?? null,
+								uiRole: "planned_transaction",
+								createdAt: Date.now(),
+							}),
+						),
+					);
 					break;
 				case "baselineDiscard":
 					store.commit(
 						events.forecastDiscarded({ writeId, forecastId: action.forecastId, discardedAt: now }),
 					);
+					// No un-discard endpoint on the bridge — confirm only.
+					flashUndo("linha removida deste mês", null);
 					break;
 				case "baselineEndTemplate": {
 					const forecastIds = forecasts
@@ -581,31 +658,35 @@ export const PlanilhaView = ({
 							endedAt: now,
 						}),
 					);
+					flashUndo("recorrência encerrada", null);
 					break;
 				}
-				case "scenarioSkip":
+				case "scenarioSkip": {
 					if (!activeScenarioId) break;
+					const changeId =
+						planned.skipChangeId ?? `skip-${activeScenarioId}-${action.forecastId}`;
 					store.commit(
 						events.scenarioChangeAdded({
 							writeId,
 							row: scenarioChangeRow(activeScenarioId, "skip_forecast", {
-								changeId:
-									planned.skipChangeId ??
-									`skip-${activeScenarioId}-${action.forecastId}`,
+								changeId,
 								targetForecastId: action.forecastId,
 							}),
 							addedAt: now,
 						}),
 					);
 					notifyScenario();
+					flashUndo("linha pulada", () => removeScenarioChange(changeId));
 					break;
-				case "scenarioEndTemplate":
+				}
+				case "scenarioEndTemplate": {
 					if (!activeScenarioId) break;
+					const changeId = `end-${activeScenarioId}-${action.templateId}`;
 					store.commit(
 						events.scenarioChangeAdded({
 							writeId,
 							row: scenarioChangeRow(activeScenarioId, "end_template", {
-								changeId: `end-${activeScenarioId}-${action.templateId}`,
+								changeId,
 								targetTemplateId: action.templateId,
 								effectiveFrom: action.effectiveFrom,
 							}),
@@ -613,8 +694,12 @@ export const PlanilhaView = ({
 						}),
 					);
 					notifyScenario();
+					flashUndo("recorrência encerrada no cenário", () =>
+						removeScenarioChange(changeId),
+					);
 					break;
-				case "scenarioRemoveChange":
+				}
+				case "scenarioRemoveChange": {
 					if (!activeScenarioId) break;
 					store.commit(
 						events.scenarioChangeRemoved({
@@ -625,20 +710,48 @@ export const PlanilhaView = ({
 						}),
 					);
 					notifyScenario();
+					// Re-add the removed scenario-added row (one-shot) with the same id.
+					flashUndo("item do cenário removido", () =>
+						store.commit(
+							events.scenarioChangeAdded({
+								writeId: crypto.randomUUID(),
+								row: scenarioChangeRow(activeScenarioId, "add_one_shot", {
+									changeId: action.changeId,
+									month: monthOf(planned.dueDate) ?? month,
+									amount: planned.amount,
+									description: planned.description,
+									categoryId: planned.categoryId ?? null,
+									accountId: planned.accountId ?? null,
+								}),
+								addedAt: Date.now(),
+							}),
+						),
+					);
 					break;
+				}
 				case "none":
 					break;
 			}
 		},
-		[month, activeScenarioId, forecasts, store, notifyScenario],
+		[month, activeScenarioId, forecasts, store, notifyScenario, flashUndo, removeScenarioChange],
 	);
 
 	// ── Positional insert (design E) ────────────────────────────────────────
 	const commitInsert = useCallback(
 		(draft: InsertDraft) => {
 			const magnitude = normalizeMagnitude(draft.magnitude);
+			// Freeze the current order and remember where the new row goes, so it
+			// stays put instead of jumping to its sorted-by-day position.
+			const anchor = insertAfter;
 			setInsertAfter(null);
 			if (!magnitude || Number(magnitude) === 0) return;
+			const insertAt =
+				anchor === "end"
+					? rows.length
+					: anchor
+						? rows.findIndex((r) => r.id === anchor) + 1
+						: rows.length;
+			setFrozen({ ids: rows.map((r) => r.id), insertAt });
 			const signed = draft.isExpense ? `-${magnitude}` : magnitude;
 			const day = Math.min(Math.max(draft.day, 1), daysInMonth(month));
 			const dueDate = `${month}-${String(day).padStart(2, "0")}`;
@@ -674,7 +787,7 @@ export const PlanilhaView = ({
 				notifyScenario();
 			}
 		},
-		[month, activeScenarioId, store, notifyScenario],
+		[month, activeScenarioId, store, notifyScenario, insertAfter, rows],
 	);
 
 	// ── Category picker + bulk actions (real transactions) ──────────────────
@@ -804,6 +917,22 @@ export const PlanilhaView = ({
 					});
 					break;
 				}
+				case " ": {
+					// Space toggles the focused real-transaction row in/out of the
+					// selection (the keyboard equivalent of ⌘-click) so the bulk bar's
+					// running sum + batch actions work without the mouse.
+					const row = rows[focusedIdx];
+					if (!row || row.kind !== "tx") break;
+					e.preventDefault();
+					setSelectedIds((prev) => {
+						const next = new Set(prev);
+						if (next.has(row.id)) next.delete(row.id);
+						else next.add(row.id);
+						return next;
+					});
+					lastClickedIdx.current = txIndex.indexOf(row.id);
+					break;
+				}
 				case "Enter": {
 					const row = rows[focusedIdx];
 					if (!row) break;
@@ -817,15 +946,18 @@ export const PlanilhaView = ({
 					break;
 			}
 		},
-		[picker, modalTx, editingId, rows, focusedIdx, beginEdit],
+		[picker, modalTx, editingId, rows, focusedIdx, beginEdit, txIndex],
 	);
 
-	const toggleSort = (key: SheetSortKey) =>
+	const toggleSort = (key: SheetSortKey) => {
+		// Any explicit sort abandons the frozen manual order.
+		setFrozen(null);
 		setSort((s) =>
 			s.key === key
 				? { key, dir: s.dir === 1 ? -1 : 1 }
 				: { key, dir: key === "date" || key === "amount" ? -1 : 1 },
 		);
+	};
 
 	const columnCount = COLUMNS.length + 2; // origin icon + actions
 
@@ -844,6 +976,18 @@ export const PlanilhaView = ({
 					padding: "4px 0 2px",
 				}}
 			>
+				<span
+					aria-hidden
+					title={theme.season}
+					style={{
+						fontSize: "1.2rem",
+						lineHeight: 1,
+						alignSelf: "center",
+						filter: "saturate(0.85)",
+					}}
+				>
+					{theme.glyph}
+				</span>
 				<h2
 					style={{
 						fontFamily: "var(--font-display)",
@@ -851,6 +995,10 @@ export const PlanilhaView = ({
 						fontWeight: 700,
 						letterSpacing: "-0.02em",
 						margin: 0,
+						// A hairline of the month's accent under the title — the one
+						// place the theme colour is allowed to read as "this month".
+						borderBottom: `2px solid ${theme.accent}`,
+						paddingBottom: 1,
 					}}
 				>
 					{monthLabel(month)}
@@ -893,6 +1041,7 @@ export const PlanilhaView = ({
 				hasActiveFilters={hasSheetFilters}
 				filteredTotal={totals.net}
 				onExportCsv={handleExportCsv}
+				accent={theme.accent}
 			/>
 
 			<div
@@ -903,9 +1052,11 @@ export const PlanilhaView = ({
 				onKeyDown={handleKeyDown}
 				style={{
 					border: "1px solid var(--border)",
+					borderTop: `2px solid ${theme.accent}`,
 					borderRadius: "var(--radius-md)",
-					overflow: "auto",
-					maxHeight: "70vh",
+					// The sheet renders in full — no inner scroll. The page grows to the
+					// table's height and the whole document scrolls as one; the sticky
+					// thead then pins column headers to the viewport while scrolling.
 					outline: "none",
 					background: "var(--card)",
 				}}
@@ -989,6 +1140,8 @@ export const PlanilhaView = ({
 										defaultDay={Number(month.slice(5)) === new Date().getMonth() + 1 ? new Date().getDate() : 1}
 										maxDay={daysInMonth(month)}
 										contextLabel={activeScenarioId ? "cenário ativo" : "baseline"}
+										colSpan={columnCount}
+										accent={theme.accent}
 										onSubmit={commitInsert}
 										onCancel={() => setInsertAfter(null)}
 									/>
@@ -1014,6 +1167,8 @@ export const PlanilhaView = ({
 								defaultDay={Number(month.slice(5)) === new Date().getMonth() + 1 ? new Date().getDate() : 1}
 								maxDay={daysInMonth(month)}
 								contextLabel={activeScenarioId ? "cenário ativo" : "baseline"}
+								colSpan={columnCount}
+								accent={theme.accent}
 								onSubmit={commitInsert}
 								onCancel={() => setInsertAfter(null)}
 							/>
@@ -1048,6 +1203,24 @@ export const PlanilhaView = ({
 				}}
 			>
 				<span>{rowCount} linhas</span>
+				{frozen && (
+					<button
+						className="mono"
+						onClick={() => setFrozen(null)}
+						title="voltar à ordenação por coluna"
+						style={{
+							background: "transparent",
+							border: "1px solid var(--border)",
+							borderRadius: "var(--radius-full)",
+							padding: "1px 10px",
+							cursor: "pointer",
+							color: "var(--purple)",
+							fontSize: 11,
+						}}
+					>
+						ordem manual · reordenar
+					</button>
+				)}
 				{totals.realizado !== 0 && (
 					<span>
 						realizado{" "}
@@ -1068,10 +1241,10 @@ export const PlanilhaView = ({
 					</span>
 				)}
 				<span style={{ color: totals.net >= 0 ? "var(--green)" : "var(--rose)" }}>
-					net {formatMoneyNumber(totals.net)}
+					saldo {formatMoneyNumber(totals.net)}
 				</span>
 				<span style={{ marginLeft: "auto", opacity: 0.7 }}>
-					↑↓ navega · Enter edita · clique valor edita · hover: + insere · 🗑 remove
+					↑↓ navega · espaço seleciona · Enter abre/edita · hover: + insere · 🗑 remove
 				</span>
 			</div>
 
@@ -1079,7 +1252,7 @@ export const PlanilhaView = ({
 			{selectedIds.size > 0 && (
 				<div
 					role="toolbar"
-					aria-label="bulk actions"
+					aria-label="ações em lote"
 					style={{
 						position: "sticky",
 						bottom: 12,
@@ -1097,7 +1270,7 @@ export const PlanilhaView = ({
 					}}
 				>
 					<span className="mono" style={{ fontSize: 12 }}>
-						{selectedIds.size} selected · {formatMoneyNumber(selectionTotal)}
+						{selectedIds.size} selecionad{selectedIds.size === 1 ? "o" : "os"} · {formatMoneyNumber(selectionTotal)}
 					</span>
 					<button
 						onClick={(e) =>
@@ -1117,14 +1290,14 @@ export const PlanilhaView = ({
 							fontSize: 12,
 						}}
 					>
-						categorize
+						categorizar
 					</button>
 					<span
 						aria-hidden
 						style={{ width: 1, alignSelf: "stretch", background: "rgba(255,255,255,0.25)" }}
 					/>
 					<span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>
-						tier:
+						comprometimento:
 					</span>
 					{COMMITMENT_TIERS.map((tier) => (
 						<button
@@ -1147,7 +1320,7 @@ export const PlanilhaView = ({
 					<button
 						onClick={() => applyTier("")}
 						className="mono"
-						title="clear tier override"
+						title="limpar comprometimento"
 						style={{
 							background: "transparent",
 							color: "#fff",
@@ -1158,7 +1331,7 @@ export const PlanilhaView = ({
 							fontSize: 12,
 						}}
 					>
-						× tier
+						× limpar
 					</button>
 					<button
 						onClick={() => setSelectedIds(new Set())}
@@ -1173,7 +1346,7 @@ export const PlanilhaView = ({
 							fontSize: 12,
 						}}
 					>
-						clear
+						limpar seleção
 					</button>
 				</div>
 			)}
@@ -1187,6 +1360,72 @@ export const PlanilhaView = ({
 					onSelect={(cat) => applyCategory(cat, picker.targetIds)}
 					onClose={() => setPicker(null)}
 				/>
+			)}
+
+			{undo && (
+				<div
+					role="status"
+					aria-live="polite"
+					style={{
+						position: "fixed",
+						left: "50%",
+						bottom: 24,
+						transform: "translateX(-50%)",
+						zIndex: 60,
+						display: "flex",
+						alignItems: "center",
+						gap: 14,
+						background: "var(--ink, #15131f)",
+						color: "#fff",
+						borderRadius: "var(--radius-full)",
+						padding: "10px 18px",
+						boxShadow: "0 8px 24px rgba(21,19,31,0.28)",
+						fontSize: 13,
+					}}
+				>
+					<span className="mono">{undo.label}</span>
+					{undo.run ? (
+						<button
+							type="button"
+							className="mono pressable"
+							onClick={() => {
+								undo.run?.();
+								setUndo(null);
+							}}
+							style={{
+								background: "var(--purple)",
+								color: "#fff",
+								border: "none",
+								borderRadius: "var(--radius-full)",
+								padding: "5px 14px",
+								cursor: "pointer",
+								fontSize: 12,
+								fontWeight: 600,
+							}}
+						>
+							↺ desfazer
+						</button>
+					) : (
+						<span className="mono" style={{ fontSize: 11, opacity: 0.6 }}>
+							não é possível desfazer
+						</span>
+					)}
+					<button
+						type="button"
+						aria-label="fechar aviso"
+						onClick={() => setUndo(null)}
+						style={{
+							background: "transparent",
+							color: "rgba(255,255,255,0.7)",
+							border: "none",
+							cursor: "pointer",
+							fontSize: 14,
+							padding: 0,
+						}}
+					>
+						×
+					</button>
+				</div>
 			)}
 
 			<AnimatePresence>
@@ -1553,354 +1792,4 @@ const sortBtnStyle = (active: boolean, align: "left" | "right"): React.CSSProper
 	padding: 0,
 	textAlign: align,
 	width: "100%",
-});
-
-// ── Filter bar ───────────────────────────────────────────────────────────────
-
-interface SheetFilterState {
-	textFilter: string | null;
-	accountFilter: string | null;
-	ownerFilter: string | null;
-	categoryFilter: string | null;
-	uncategorizedOnly: boolean;
-	unreviewedOnly: boolean;
-	installmentsOnly: boolean;
-	subscriptionsOnly: boolean;
-	tierFilter: string | null;
-}
-
-const SheetFilterBar = ({
-	ui,
-	setUi,
-	accounts,
-	localFilters,
-	setLocalFilters,
-	count,
-	hasActiveFilters,
-	filteredTotal,
-	onExportCsv,
-}: {
-	ui: SheetFilterState;
-	setUi: (patch: Partial<SheetFilterState>) => void;
-	accounts: ReadonlyArray<{ id: string; label: string }>;
-	localFilters: SheetLocalFilters;
-	setLocalFilters: React.Dispatch<React.SetStateAction<SheetLocalFilters>>;
-	count: number;
-	hasActiveFilters: boolean;
-	filteredTotal: number;
-	onExportCsv: () => void;
-}) => {
-	const selectStyle: React.CSSProperties = {
-		border: "1px solid var(--border)",
-		borderRadius: "var(--radius-full)",
-		padding: "6px 10px",
-		fontSize: 12,
-		// backgroundColor (not the `background` shorthand) so the .select-pill
-		// chevron background-image isn't wiped by this inline style.
-		backgroundColor: "var(--card)",
-	};
-	const chip = (active: boolean): React.CSSProperties => ({
-		background: active ? "var(--purple)" : "transparent",
-		color: active ? "#fff" : "var(--muted)",
-		border: `1px solid ${active ? "var(--purple)" : "var(--border)"}`,
-		borderRadius: "var(--radius-full)",
-		padding: "4px 12px",
-		cursor: "pointer",
-		fontSize: 12,
-		whiteSpace: "nowrap",
-		flexShrink: 0,
-	});
-	const tierColor: Record<CommitmentTier, string> = {
-		locked: "#9a9aae",
-		cancellable: "var(--amber)",
-		variable: "var(--green)",
-	};
-	const tierChip = (tier: CommitmentTier): React.CSSProperties => {
-		const active = ui.tierFilter === tier;
-		const c = tierColor[tier];
-		return {
-			background: active ? c : "transparent",
-			color: active ? "#1a1a1a" : "var(--muted)",
-			border: `1px solid ${active ? c : "var(--border)"}`,
-			borderRadius: "var(--radius-full)",
-			padding: "4px 12px",
-			cursor: "pointer",
-			fontSize: 12,
-		};
-	};
-	const resetLocal = () => setLocalFilters(DEFAULT_SHEET_LOCAL_FILTERS);
-	return (
-		<div
-			style={{
-				display: "flex",
-				gap: 8,
-				alignItems: "center",
-				flexWrap: "wrap",
-				padding: "12px 0",
-			}}
-		>
-			<input
-				type="search"
-				placeholder={`buscar ${count} linhas…`}
-				value={ui.textFilter ?? ""}
-				onChange={(e) => setUi({ textFilter: e.target.value || null })}
-				className="mono"
-				style={{
-					border: "1px solid var(--border)",
-					borderRadius: "var(--radius-full)",
-					padding: "6px 14px",
-					fontSize: 12,
-					minWidth: 200,
-					background: "var(--card)",
-				}}
-			/>
-			<select
-				aria-label="filtrar por origem"
-				value={localFilters.origin}
-				onChange={(e) =>
-					setLocalFilters((f) => ({ ...f, origin: e.target.value as SheetLocalFilters["origin"] }))
-				}
-				className="mono select-pill"
-				style={selectStyle}
-			>
-				{ORIGIN_FILTER_OPTIONS.map((o) => (
-					<option key={o.value} value={o.value}>
-						{o.label}
-					</option>
-				))}
-			</select>
-			<select
-				aria-label="filtrar por tipo"
-				value={localFilters.flow}
-				onChange={(e) =>
-					setLocalFilters((f) => ({ ...f, flow: e.target.value as SheetLocalFilters["flow"] }))
-				}
-				className="mono select-pill"
-				style={selectStyle}
-			>
-				{FLOW_FILTER_OPTIONS.map((o) => (
-					<option key={o.value} value={o.value}>
-						{o.label}
-					</option>
-				))}
-			</select>
-			<AccountMultiSelect
-				accounts={accounts}
-				value={ui.accountFilter}
-				onChange={(next) => setUi({ accountFilter: next })}
-			/>
-			<button
-				className="mono pressable"
-				style={chip(ui.uncategorizedOnly)}
-				onClick={() => setUi({ uncategorizedOnly: !ui.uncategorizedOnly })}
-			>
-				sem categoria
-			</button>
-			<span
-				aria-hidden
-				style={{
-					width: 1,
-					alignSelf: "stretch",
-					minHeight: 20,
-					background: "var(--border)",
-					margin: "0 2px",
-				}}
-			/>
-			{COMMITMENT_TIERS.map((tier) => (
-				<button
-					key={tier}
-					className="mono pressable"
-					style={tierChip(tier)}
-					aria-pressed={ui.tierFilter === tier}
-					onClick={() => setUi({ tierFilter: ui.tierFilter === tier ? null : tier })}
-				>
-					{COMMITMENT_TIER_LABELS[tier]}
-				</button>
-			))}
-			{(localFilters.origin !== "all" || localFilters.flow !== "all") && (
-				<button className="mono" style={chip(false)} onClick={resetLocal}>
-					limpar origem/tipo
-				</button>
-			)}
-			{hasActiveFilters && (
-				<div
-					className="mono"
-					aria-live="polite"
-					style={{
-						display: "flex",
-						alignItems: "center",
-						gap: 8,
-						border: "1px solid var(--border)",
-						borderRadius: "var(--radius-full)",
-						padding: "5px 12px",
-						background: "var(--card)",
-						fontSize: 12,
-						color: "var(--muted)",
-						marginLeft: "auto",
-					}}
-				>
-					<span>soma filtrada</span>
-					<strong
-						style={{
-							color: filteredTotal >= 0 ? "var(--green)" : "var(--rose)",
-							fontWeight: 700,
-							fontVariantNumeric: "tabular-nums",
-						}}
-					>
-						{formatMoneyNumber(filteredTotal)}
-					</strong>
-				</div>
-			)}
-			<button
-				className="mono"
-				style={{ ...chip(false), marginLeft: hasActiveFilters ? 0 : "auto" }}
-				onClick={onExportCsv}
-				disabled={count === 0}
-			>
-				export CSV
-			</button>
-		</div>
-	);
-};
-
-// ── Account multi-select ─────────────────────────────────────────────────────
-// The account filter accepts many accounts at once. The selection persists as a
-// comma-joined id list in `ui.accountFilter` (single id = one-element list), so
-// the ui-doc schema — and STORE_VERSION — stays untouched.
-
-const AccountMultiSelect = ({
-	accounts,
-	value,
-	onChange,
-}: {
-	accounts: ReadonlyArray<{ id: string; label: string }>;
-	value: string | null;
-	onChange: (next: string | null) => void;
-}) => {
-	const [open, setOpen] = useState(false);
-	const ref = useRef<HTMLDivElement>(null);
-	const selected = useMemo(() => new Set(accountFilterIds(value)), [value]);
-
-	useEffect(() => {
-		if (!open) return;
-		const onDoc = (e: MouseEvent) => {
-			if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-		};
-		document.addEventListener("mousedown", onDoc);
-		return () => document.removeEventListener("mousedown", onDoc);
-	}, [open]);
-
-	const toggle = (id: string) => {
-		const next = new Set(selected);
-		if (next.has(id)) next.delete(id);
-		else next.add(id);
-		onChange(next.size ? Array.from(next).join(",") : null);
-	};
-
-	const label =
-		selected.size === 0
-			? "todas as contas"
-			: selected.size === 1
-				? (accounts.find((a) => selected.has(a.id))?.label ?? "1 conta")
-				: `${selected.size} contas`;
-
-	return (
-		<div ref={ref} style={{ position: "relative" }}>
-			<button
-				type="button"
-				aria-haspopup="listbox"
-				aria-expanded={open}
-				onClick={() => setOpen((v) => !v)}
-				className="mono select-pill"
-				style={{
-					border: "1px solid var(--border)",
-					borderRadius: "var(--radius-full)",
-					padding: "6px 32px 6px 12px",
-					fontSize: 12,
-					backgroundColor: selected.size ? "var(--chip, #f1eefc)" : "var(--card)",
-					color: selected.size ? "var(--purple)" : "var(--text)",
-					cursor: "pointer",
-					maxWidth: 220,
-					whiteSpace: "nowrap",
-					overflow: "hidden",
-					textOverflow: "ellipsis",
-					textAlign: "left",
-				}}
-			>
-				{label}
-			</button>
-			{open && (
-				<div
-					role="listbox"
-					aria-multiselectable
-					style={{
-						position: "absolute",
-						top: "calc(100% + 6px)",
-						left: 0,
-						zIndex: 50,
-						minWidth: 220,
-						maxHeight: 300,
-						overflow: "auto",
-						background: "var(--card)",
-						border: "1px solid var(--border)",
-						borderRadius: "var(--radius-md)",
-						boxShadow: "0 8px 24px rgba(21,19,31,0.18)",
-						padding: 6,
-					}}
-				>
-					{selected.size > 0 && (
-						<button
-							type="button"
-							className="mono"
-							onClick={() => onChange(null)}
-							style={accountOptionStyle(false)}
-						>
-							<span style={{ width: 16 }}>×</span>
-							<span>limpar seleção</span>
-						</button>
-					)}
-					{accounts.map((a) => {
-						const on = selected.has(a.id);
-						return (
-							<button
-								key={a.id}
-								type="button"
-								role="option"
-								aria-selected={on}
-								className="mono"
-								onClick={() => toggle(a.id)}
-								style={accountOptionStyle(on)}
-							>
-								<span style={{ width: 16 }}>{on ? "✓" : ""}</span>
-								<span
-									style={{
-										overflow: "hidden",
-										textOverflow: "ellipsis",
-										whiteSpace: "nowrap",
-									}}
-								>
-									{a.label}
-								</span>
-							</button>
-						);
-					})}
-				</div>
-			)}
-		</div>
-	);
-};
-
-const accountOptionStyle = (active: boolean): React.CSSProperties => ({
-	display: "flex",
-	alignItems: "center",
-	gap: 8,
-	width: "100%",
-	textAlign: "left",
-	background: active ? "var(--chip, #f1eefc)" : "transparent",
-	color: active ? "var(--purple)" : "var(--text)",
-	border: "none",
-	borderRadius: "var(--radius-sm)",
-	padding: "7px 8px",
-	cursor: "pointer",
-	fontSize: 12.5,
 });

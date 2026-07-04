@@ -279,10 +279,10 @@ export const TransactionModal = ({
 								}}
 							>
 								{t === "edit"
-									? "Edit"
+									? "Editar"
 									: t === "raw"
 										? "JSON"
-										: `Similar (${similarTxs.length})`}
+										: `Semelhantes (${similarTxs.length})`}
 							</button>
 						))}
 					</div>
@@ -392,7 +392,7 @@ export const TransactionModal = ({
 							{saveLabel}
 						</button>
 						<button onClick={onClose} className="mono" style={pillStyle}>
-							cancel
+							cancelar
 						</button>
 					</div>
 				</motion.div>
@@ -432,39 +432,39 @@ const EditForm = ({
 			{postedAt} · {accountId}
 		</div>
 
-		<FieldRow label="category">
+		<FieldRow label="categoria">
 			<input
 				list="phai-modal-cats"
 				value={category}
 				onChange={(e) => setCategory(e.target.value)}
-				placeholder="category"
+				placeholder="categoria"
 				className="mono"
 				style={{ ...inputStyle, color: "var(--cyan)", flex: 1 }}
 			/>
 		</FieldRow>
-		<FieldRow label="description">
+		<FieldRow label="descrição">
 			<input
 				value={description}
 				onChange={(e) => setDescription(e.target.value)}
-				placeholder="description"
+				placeholder="descrição"
 				className="mono"
 				style={{ ...inputStyle, flex: 1 }}
 			/>
 		</FieldRow>
-		<FieldRow label="merchant">
+		<FieldRow label="estabelecimento">
 			<input
 				value={merchantName}
 				onChange={(e) => setMerchantName(e.target.value)}
-				placeholder="merchant"
+				placeholder="estabelecimento"
 				className="mono"
 				style={{ ...inputStyle, flex: 1 }}
 			/>
 		</FieldRow>
-		<FieldRow label="purpose">
+		<FieldRow label="propósito">
 			<input
 				value={purpose}
 				onChange={(e) => setPurpose(e.target.value)}
-				placeholder="purpose"
+				placeholder="propósito"
 				className="mono"
 				style={{ ...inputStyle, flex: 1 }}
 			/>
@@ -528,7 +528,7 @@ const SimilarPanel = ({
 	if (similarTxs.length === 0) {
 		return (
 			<p className="mono" style={{ color: "var(--muted)", fontSize: 13 }}>
-				No similar transactions in this window.
+				Nenhuma transação semelhante nesta janela.
 			</p>
 		);
 	}
@@ -545,11 +545,11 @@ const SimilarPanel = ({
 				}}
 			>
 				<button onClick={onSelectAll} className="mono" style={pillStyle}>
-					select all ({similarTxs.length})
+					selecionar todas ({similarTxs.length})
 				</button>
 				{selected.size > 0 && (
 					<button onClick={onClearAll} className="mono" style={pillStyle}>
-						clear ({selected.size})
+						limpar ({selected.size})
 					</button>
 				)}
 			</div>
