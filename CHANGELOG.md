@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.37.0](https://github.com/phai-run/phai/compare/v5.36.0...v5.37.0) (2026-07-06)
+
+
+### Features
+
+* **web:** self-host fonts + COEP require-corp for WebKit isolation ([#253](https://github.com/phai-run/phai/issues/253)) ([5434665](https://github.com/phai-run/phai/commit/5434665dea51b7b02e7796b57a0840d6be2cd743))
+
 ## [5.36.0](https://github.com/phai-run/phai/compare/v5.35.0...v5.36.0) (2026-07-04)
 
 
