@@ -6,11 +6,13 @@ import { defineConfig } from "vite";
 // Built bundle is embedded into the `phai` binary and served from `phai serve`
 // at the site root. Relative asset URLs keep it mount-point agnostic.
 // Cross-origin isolation headers — required for OPFS + SharedWorker (LiveStore)
-// during local `vite dev` / `vite preview`. Production is served by `phai serve`
-// with its own COEP-credentialless headers (this only affects the dev server).
+// during local `vite dev` / `vite preview`. Mirrors what `phai serve` sends in
+// production (serve_assets.rs): `require-corp`, not `credentialless`, because
+// WebKit/WKWebView (the native desktop shell engine) ignores `credentialless`.
+// Fonts are self-hosted, so there are no cross-origin subresources. ADR-0039.
 const crossOriginIsolation = {
 	"Cross-Origin-Opener-Policy": "same-origin",
-	"Cross-Origin-Embedder-Policy": "credentialless",
+	"Cross-Origin-Embedder-Policy": "require-corp",
 };
 
 export default defineConfig({

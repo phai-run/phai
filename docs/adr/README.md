@@ -90,6 +90,7 @@ proposed → active → superseded
 | [0036](0036-serve-bridge-no-per-request-auth.md) | `phai serve` bridge: loopback + Host/Origin guard as the security boundary, no per-request auth | active |
 | [0037](0037-named-planning-scenarios.md) | Named planning scenarios: persisted what-if deltas over the live forecast baseline | accepted |
 | [0038](0038-unified-sheet.md) | Unified sheet: forecasts and scenario items as inline rows | accepted |
+| [0039](0039-native-desktop-shell.md) | Native macOS desktop shell (Pake/Tauri WKWebView) over the local serve app; COEP require-corp + self-hosted fonts | accepted |
 
 ---
 
