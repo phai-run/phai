@@ -40,15 +40,19 @@ fn asset_response(path: &str, bytes: &'static [u8]) -> Response {
         HeaderValue::from_static(content_type(path)),
     );
     // Cross-origin isolation: LiveStore's OPFS worker + wa-sqlite need a
-    // crossOriginIsolated context. `credentialless` keeps isolation while
-    // still allowing cross-origin no-cors subresources (e.g. Google Fonts).
+    // crossOriginIsolated context (SharedArrayBuffer). We use `require-corp`
+    // (not `credentialless`) because WebKit/WKWebView — the engine the native
+    // desktop shell uses — does not honor `credentialless`, so it would leave
+    // the context non-isolated and break wa-sqlite. `require-corp` demands all
+    // subresources be same-origin or carry CORP; fonts are self-hosted via
+    // @fontsource, so there are no cross-origin subresources to allow. ADR-0039.
     headers.insert(
         "cross-origin-opener-policy",
         HeaderValue::from_static("same-origin"),
     );
     headers.insert(
         "cross-origin-embedder-policy",
-        HeaderValue::from_static("credentialless"),
+        HeaderValue::from_static("require-corp"),
     );
     // Vite emits content-hashed asset filenames → safe to cache immutably.
     // index.html must stay fresh so new bundles are picked up.
@@ -118,5 +122,19 @@ mod tests {
         assert!(has_extension("assets/index-abc.js"));
         assert!(!has_extension("review"));
         assert!(!has_extension("forecasts/2026"));
+    }
+
+    #[test]
+    fn cross_origin_isolation_uses_require_corp() {
+        // WebKit/WKWebView (native desktop shell) ignores `credentialless`, so
+        // the isolated context — and thus wa-sqlite's SharedArrayBuffer — only
+        // works with `require-corp`. Regression guard for ADR-0039.
+        let resp = asset_response(INDEX, b"<html></html>");
+        let h = resp.headers();
+        assert_eq!(h.get("cross-origin-opener-policy").unwrap(), "same-origin");
+        assert_eq!(
+            h.get("cross-origin-embedder-policy").unwrap(),
+            "require-corp"
+        );
     }
 }

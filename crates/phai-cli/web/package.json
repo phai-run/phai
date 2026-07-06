@@ -14,6 +14,9 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.10",
     "@livestore/adapter-web": "0.3.1",
     "@livestore/livestore": "0.3.1",
     "@livestore/peer-deps": "0.3.1",

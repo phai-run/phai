@@ -6,6 +6,15 @@ import { createRoot } from 'react-dom/client'
 import { unstable_batchedUpdates as batchUpdates } from 'react-dom'
 import { App } from './App'
 import { api } from './bridge/api'
+// Self-hosted fonts (bundled woff2, same-origin). Required so the strict
+// cross-origin-isolation policy (COEP: require-corp) the desktop shell needs
+// does not have to reach fonts.gstatic.com. See ADR-0039 + design/tokens.css.
+import '@fontsource/inter/400.css'
+import '@fontsource/inter/500.css'
+import '@fontsource/inter/600.css'
+import '@fontsource/jetbrains-mono/400.css'
+import '@fontsource/space-grotesk/500.css'
+import '@fontsource/space-grotesk/700.css'
 import './design/tokens.css'
 import LiveStoreWorker from './livestore/livestore.worker?worker'
 import { schema, STORE_ID } from './livestore/schema'
