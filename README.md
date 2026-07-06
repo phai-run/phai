@@ -125,7 +125,12 @@ See [BigQuery setup](#bigquery-setup) below for the multi-device backend.
 
 ## The web app
 
-`phai serve` opens a local-only web app (no cloud, no accounts — the client talks to your own binary). If a Chromium-family browser (Chrome, Edge, Brave, Chromium) is installed it opens as a chromeless **desktop-style window** with its own dock/taskbar icon; otherwise it falls back to a normal tab in your default browser. One screen, three ways to look at a month, all editable in place. *Screenshots below run on a synthetic demo dataset.*
+`phai serve` opens a local-only web app (no cloud, no accounts — the client talks to your own binary). One screen, three ways to look at a month, all editable in place. *Screenshots below run on a synthetic demo dataset.*
+
+Two ways to open it as a desktop app:
+
+- **`phai serve install`** (macOS) installs a native desktop app — a chromeless [Pake](https://github.com/tw93/Pake)/Tauri WKWebView window with its own icon, no browser ([ADR-0039](docs/adr/0039-native-desktop-shell.md)). It also runs the service at login (launchd, port 4317, no sudo), so clicking the φ Dock icon opens the app against an already-running service. The app is unsigned for now: first launch is right-click → Open → Open (once).
+- **`phai serve`** alone opens the app in a Chromium browser's `--app` mode (chromeless window) if one is installed, else a normal browser tab.
 
 The headline: cash balance, income vs expenses vs net for the selected month, and a 12-month chart mixing what happened with what's forecast — installment chains, recurring bills and budget envelopes included:
 
@@ -190,7 +195,7 @@ phai admin import-legacy     Import from legacy CSV files
 phai sync pluggy             Sync transactions from Pluggy
 phai report <subcommand>     See "Reports" above
 phai serve                   Start the web app — the interactive surface for review and forecasts
-phai serve install           Run the web app at login (launchd) + a clickable Phai.app launcher (--system: root daemon on port 80 via one admin-auth prompt)
+phai serve install           Run the web app at login (launchd, port 4317) + a native desktop app (Phai.app) in ~/Applications (--system: root daemon on port 80 via one admin-auth prompt)
 phai serve uninstall         Remove the launchd agent and the launcher app (--system: remove the root daemon)
 phai mcp                     Serve read-only reports as MCP tools over stdio (Claude, IDEs, agents)
 phai tx upsert-manual        Add a manual transaction
