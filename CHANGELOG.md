@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.38.0](https://github.com/phai-run/phai/compare/v5.37.0...v5.38.0) (2026-07-06)
+
+
+### Features
+
+* **serve:** install the native desktop app via phai serve install ([#256](https://github.com/phai-run/phai/issues/256)) ([bd5e1fe](https://github.com/phai-run/phai/commit/bd5e1fe9d993b6d31b487bee94a88f0c4bf97b18))
+
 ## [5.37.0](https://github.com/phai-run/phai/compare/v5.36.0...v5.37.0) (2026-07-06)
 
 
