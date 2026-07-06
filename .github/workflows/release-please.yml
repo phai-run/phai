@@ -89,3 +89,35 @@ jobs:
             --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # Native macOS desktop shell (Pake/Tauri WKWebView) — ADR-0039. Runs once and
+  # produces a universal (Intel + Apple Silicon) Phai.app, shipped as a zip (for
+  # `phai serve install`) and a dmg (for manual drag-install). Non-fatal: a Pake
+  # failure must never block the binary release above.
+  desktop-app:
+    needs: release-please
+    if: needs.release-please.outputs.phai-cli-released == 'true'
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.phai-cli-tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add both macOS targets (universal build)
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Phai.app (universal)
+        env:
+          PAKE_MULTI_ARCH: "1"
+        run: scripts/build-desktop-app.sh "${GITHUB_WORKSPACE}/dist-desktop"
+      - name: Upload to release
+        run: |
+          gh release upload "${{ needs.release-please.outputs.phai-cli-tag }}" \
+            dist-desktop/Phai.app.zip \
+            dist-desktop/Phai.dmg \
+            --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
