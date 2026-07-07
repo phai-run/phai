@@ -1,9 +1,7 @@
 import { queryDb } from "@livestore/livestore";
 import { useStore, useQuery, useClientDocument } from "@livestore/react";
 import { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
 import { events, tables } from "../livestore/schema";
-import { springSnap } from "../design/motion";
 import {
 	useChartSeed,
 	useForecastsSeed,
@@ -34,12 +32,6 @@ import { AccountBalances } from "./cash/AccountBalances";
 import { PlanilhaView } from "./planilha/PlanilhaView";
 import { numeric } from "../lib/format";
 import type { ChartMonthView, ForecastView } from "./types";
-
-const DETAIL_MODES = [
-	{ id: "planilha", label: "planilha" },
-	{ id: "categorias", label: "categorias" },
-	{ id: "cartoes", label: "cartões" },
-] as const;
 
 // Seeding window: the 12 months of the current calendar year.
 export const planningYearWindow = (date: Date) => {
@@ -339,7 +331,24 @@ export const Dashboard = () => {
 					<HeroSkeleton />
 				) : heroRow ? (
 					<div className="fade-in-soft">
-						<CashDecisionPanel row={heroRow} when={heroWhen} compact={false} />
+						<CashDecisionPanel
+							row={heroRow}
+							when={heroWhen}
+							compact={false}
+							onStepMonth={(dir) => {
+								const idx = months.findIndex((m) => m.month === selected);
+								if (idx === -1) return;
+								const next = months[idx + dir];
+								if (next) setUi({ selectedMonth: next.month });
+							}}
+							canStepPrev={
+								months.findIndex((m) => m.month === selected) > 0
+							}
+							canStepNext={(() => {
+								const idx = months.findIndex((m) => m.month === selected);
+								return idx >= 0 && idx < months.length - 1;
+							})()}
+						/>
 						<AccountBalances />
 					</div>
 				) : null}
@@ -381,63 +390,8 @@ export const Dashboard = () => {
 					padding: "0 clamp(24px,3vw,32px)",
 				}}
 			>
-				<div
-					role="tablist"
-					aria-label="modo de visualização do mês"
-					style={{
-						display: "inline-flex",
-						gap: 2,
-						border: "1px solid var(--border)",
-						borderRadius: "var(--radius-full)",
-						padding: 3,
-						margin: "16px 0 4px",
-						background: "var(--card)",
-					}}
-				>
-					{DETAIL_MODES.map((m, i) => {
-						const active = (ui.detailMode || "planilha") === m.id;
-						return (
-							<button
-								key={m.id}
-								role="tab"
-								aria-selected={active}
-								title={`${m.label} (${i + 1})`}
-								onClick={() => setUi({ detailMode: m.id })}
-								className="mono pressable"
-								style={{
-									border: "none",
-									borderRadius: "var(--radius-full)",
-									padding: "6px 14px",
-									fontSize: 12,
-									cursor: "pointer",
-									background: "transparent",
-									color: active ? "#fff" : "var(--muted)",
-									position: "relative",
-									zIndex: 1,
-									transition: "color 150ms",
-								}}
-							>
-								{active && (
-									<motion.span
-										layoutId="tab-indicator"
-										transition={springSnap}
-										style={{
-											position: "absolute",
-											inset: 0,
-											borderRadius: "var(--radius-full)",
-											background: "var(--purple)",
-											zIndex: -1,
-										}}
-									/>
-								)}
-								{m.label}
-							</button>
-						);
-					})}
-				</div>
-
 				{loading ? (
-					<div style={{ marginTop: 8 }}>
+					<div style={{ marginTop: 16 }}>
 						<ListSkeleton />
 					</div>
 				) : months.length === 0 ? (

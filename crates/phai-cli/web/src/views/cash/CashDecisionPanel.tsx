@@ -1,7 +1,21 @@
 import type { CSSProperties } from "react";
 import { CountMoney } from "../../components/ui";
 import { toCents } from "../../lib/format";
+import { monthTheme } from "../../lib/monthTheme";
 import type { ChartMonthView } from "../types";
+
+const MONTH_LABEL_FMT = new Intl.DateTimeFormat("pt-BR", {
+	month: "long",
+	year: "numeric",
+});
+
+/** "2026-07" → "Julho 2026" (capitalised) for the hero's themed month label. */
+const monthLabel = (month: string): string => {
+	const [y, m] = month.split("-").map(Number);
+	if (!y || !m) return month;
+	const s = MONTH_LABEL_FMT.format(new Date(y, m - 1, 1));
+	return s.charAt(0).toUpperCase() + s.slice(1);
+};
 
 /**
  * Painel de decisão do caixa — the headline band above the cash chart. It
@@ -76,16 +90,41 @@ const labelStyle: CSSProperties = {
 	color: "var(--muted)",
 };
 
+const monthNavBtn = (enabled: boolean): CSSProperties => ({
+	border: "1px solid var(--border)",
+	borderRadius: "var(--radius-full)",
+	background: "var(--card)",
+	color: enabled ? "var(--muted)" : "var(--muted2)",
+	width: 22,
+	height: 22,
+	display: "inline-flex",
+	alignItems: "center",
+	justifyContent: "center",
+	fontSize: 14,
+	lineHeight: 1,
+	cursor: enabled ? "pointer" : "default",
+	opacity: enabled ? 1 : 0.4,
+	padding: 0,
+});
+
 export const CashDecisionPanel = ({
 	row,
 	when,
 	compact,
+	onStepMonth,
+	canStepPrev = false,
+	canStepNext = false,
 }: {
 	row: ChartMonthView;
 	when: CashWhen;
 	compact: boolean;
+	/** Step the selected month by -1 / +1 (arrows next to the themed month). */
+	onStepMonth?: (dir: -1 | 1) => void;
+	canStepPrev?: boolean;
+	canStepNext?: boolean;
 }) => {
 	const s = cashSummary(row, when);
+	const theme = monthTheme(row.month);
 	const resultColor = s.positive ? "var(--green)" : "var(--rose)";
 	const sign = s.positive ? "+" : "";
 
@@ -136,8 +175,52 @@ export const CashDecisionPanel = ({
 				}}
 			>
 				<span style={labelStyle}>{saldoLabel(when)}</span>
-				<span className="mono" style={{ fontSize: 12, color: "var(--muted2)" }}>
-					{row.label}
+				{/* Themed month — always visible at the top, next to the balance,
+				    with inline prev/next navigation. */}
+				<span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+					{onStepMonth && (
+						<button
+							type="button"
+							aria-label="mês anterior"
+							title="mês anterior (Alt+←)"
+							disabled={!canStepPrev}
+							onClick={() => onStepMonth(-1)}
+							style={monthNavBtn(canStepPrev)}
+						>
+							‹
+						</button>
+					)}
+					<span
+						aria-hidden
+						title={theme.season}
+						style={{ fontSize: "1.05rem", lineHeight: 1 }}
+					>
+						{theme.glyph}
+					</span>
+					<span
+						style={{
+							fontFamily: "var(--font-display)",
+							fontSize: "1.02rem",
+							fontWeight: 600,
+							letterSpacing: "-0.01em",
+							borderBottom: `2px solid ${theme.accent}`,
+							paddingBottom: 1,
+						}}
+					>
+						{monthLabel(row.month)}
+					</span>
+					{onStepMonth && (
+						<button
+							type="button"
+							aria-label="próximo mês"
+							title="próximo mês (Alt+→)"
+							disabled={!canStepNext}
+							onClick={() => onStepMonth(1)}
+							style={monthNavBtn(canStepNext)}
+						>
+							›
+						</button>
+					)}
 				</span>
 				<span
 					className="mono"

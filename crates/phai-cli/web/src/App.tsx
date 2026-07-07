@@ -10,6 +10,8 @@ import { ViewErrorBoundary } from "./components/ErrorBoundary";
 import { PluggySyncButton } from "./components/PluggySyncButton";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { SearchPalette } from "./components/SearchPalette";
+import { ModeSwitcher } from "./components/ModeSwitcher";
+import { isDesktopShell } from "./lib/desktopShell";
 
 /**
  * App shell — unified full-width workspace. A single Dashboard view replaces
@@ -40,6 +42,7 @@ export const App = () => {
 	}, []);
 
 	const closeSearch = useCallback(() => setSearchOpen(false), []);
+	const desktop = isDesktopShell();
 
 	return (
 		<>
@@ -80,15 +83,24 @@ export const App = () => {
 				}}
 			>
 				<div
-					style={{
-						maxWidth: "var(--container)",
-						margin: "0 auto",
-						padding: "0 clamp(24px, 3vw, 32px)",
-						display: "flex",
-						alignItems: "center",
-						gap: 16,
-						height: 56,
-					}}
+					style={
+						{
+							position: "relative",
+							maxWidth: "var(--container)",
+							margin: "0 auto",
+							// In the desktop shell the macOS traffic lights float over the
+							// top-left (title bar hidden, ADR-0039) — inset the row so the
+							// logo clears them. The whole bar is a drag region there.
+							padding: desktop
+								? "0 clamp(24px, 3vw, 32px) 0 calc(clamp(24px, 3vw, 32px) + 70px)"
+								: "0 clamp(24px, 3vw, 32px)",
+							display: "flex",
+							alignItems: "center",
+							gap: 16,
+							height: 56,
+							WebkitAppRegion: desktop ? "drag" : undefined,
+						} as React.CSSProperties
+					}
 				>
 					<span className="phi" style={{ fontSize: "1.6rem" }}>
 						φ
@@ -103,14 +115,32 @@ export const App = () => {
 						phai
 					</strong>
 
+					{/* Global view switcher — centered, reads as primary navigation. */}
+					<div
+						style={
+							{
+								position: "absolute",
+								left: "50%",
+								top: "50%",
+								transform: "translate(-50%, -50%)",
+								WebkitAppRegion: "no-drag",
+							} as React.CSSProperties
+						}
+					>
+						<ModeSwitcher />
+					</div>
+
 					{/* Right cluster: search · sync · version — the page's top controls. */}
 					<div
-						style={{
-							marginLeft: "auto",
-							display: "flex",
-							alignItems: "center",
-							gap: 12,
-						}}
+						style={
+							{
+								marginLeft: "auto",
+								display: "flex",
+								alignItems: "center",
+								gap: 12,
+								WebkitAppRegion: "no-drag",
+							} as React.CSSProperties
+						}
 					>
 						<button
 							type="button"
