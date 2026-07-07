@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor, act } from "@testing-library/react";
 import { VersionChip } from "../App";
 
 afterEach(() => {
@@ -38,11 +38,20 @@ describe("VersionChip", () => {
 	});
 
 	it("shows error title and then returns to idle", async () => {
+		// Fake timers stop testing-library's `waitFor` polling from firing, so
+		// flush the rejected-promise microtasks and the timeout advance
+		// directly inside `act` instead of asserting through `waitFor`.
 		vi.useFakeTimers();
 		render(<VersionChip currentVersion="5.40.0" updateAvailable={false} applyUpdate={() => Promise.reject(new Error("boom"))} />);
-		fireEvent.click(screen.getByRole("button"));
-		await waitFor(() => expect(screen.getByRole("button")).toHaveAttribute("title", "boom"));
-		vi.advanceTimersByTime(4_000);
-		await waitFor(() => expect(screen.getByRole("button")).toHaveAttribute("title", "Verificar atualizações agora"));
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button"));
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(screen.getByRole("button").getAttribute("title")).toBe("boom");
+		await act(async () => {
+			vi.advanceTimersByTime(4_000);
+		});
+		expect(screen.getByRole("button").getAttribute("title")).toBe("Verificar atualizações agora");
 	});
 });

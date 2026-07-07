@@ -132,13 +132,34 @@ struct ExclusiveGuard {
     path: PathBuf,
 }
 
+/// How long to wait for a stale `.acquire` guard before assuming its owner
+/// crashed (SIGKILL, OOM, power loss) without running its `Drop` and removing
+/// it ourselves. Without this, a single unclean shutdown would permanently
+/// deadlock every future `phai serve` start on this port — exactly the
+/// failure mode the takeover lock exists to fix.
+const STALE_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl ExclusiveGuard {
     async fn acquire(data_dir: &Path, port: u16) -> Result<Self> {
+        Self::acquire_with_timeout(data_dir, port, STALE_GUARD_TIMEOUT).await
+    }
+
+    async fn acquire_with_timeout(data_dir: &Path, port: u16, timeout: Duration) -> Result<Self> {
         let path = guard_path(data_dir, port);
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(_) => return Ok(Self { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if tokio::time::Instant::now() >= deadline {
+                        eprintln!(
+                            "[phai serve] guard {} parado há {}s; assumindo dono anterior morreu sem limpar e removendo...",
+                            path.display(),
+                            timeout.as_secs()
+                        );
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(e) => {
@@ -259,6 +280,21 @@ mod tests {
         .unwrap();
         release(dir.path(), 80);
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn stale_guard_is_removed_after_timeout_instead_of_deadlocking() {
+        // Simulates a prior owner that created the `.acquire` guard and was
+        // SIGKILLed before its Drop could remove it — acquire must self-heal
+        // instead of waiting forever.
+        let dir = tempfile::tempdir().unwrap();
+        let guard = guard_path(dir.path(), 80);
+        std::fs::write(&guard, b"").unwrap();
+        let acquired =
+            ExclusiveGuard::acquire_with_timeout(dir.path(), 80, Duration::from_millis(50))
+                .await
+                .unwrap();
+        assert_eq!(acquired.path, guard);
     }
 
     #[tokio::test]

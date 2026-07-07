@@ -18,7 +18,9 @@ This is ADR-worthy because it changes the production topology, the desktop app's
 
 **Production has exactly one official `phai serve` per machine: the daemon on port 80.** The desktop app and LAN devices both talk to that daemon, while high ports such as 4317, 4318 and 8080 are reserved for development, preview and tests.
 
-Release builds on Unix acquire a production serve lock before binding port 80. The lock file lives at `data_dir/serve-80.lock`, records the owning PID/version/start time, and allows a new production daemon to take over by sending SIGTERM to the previous live PID, escalating to SIGKILL only if graceful shutdown does not complete quickly. Debug builds and non-port-80 serves do not participate in the singleton and rely only on normal TCP bind behavior.
+Release builds on Unix acquire a production serve lock before binding port 80. The lock file lives at `data_dir/serve-80.lock`, records the owning PID/version/start time, and allows a new production daemon to take over by sending SIGTERM to the previous live PID, escalating to SIGKILL only if graceful shutdown does not complete quickly. Debug builds and non-port-80 serves do not participate in the singleton and rely only on normal TCP bind behavior. Acquiring the lock itself is serialized by a short-lived `.lock.acquire` guard file; if that guard is older than 30s (its owner was SIGKILLed or the machine lost power before it could clean up), a new instance removes it and proceeds rather than deadlocking forever.
+
+Since binding port 80 always requires root, `phai serve install` now routes *any* install that resolves to port 80 through the root LaunchDaemon path, regardless of whether `--system` was passed — the flag becomes explicit-only for forcing a system install on a non-default port. Only an explicit high `--port` (dev/preview) still installs the no-sudo user agent.
 
 The app-triggered update path performs an on-demand GitHub check before deciding whether to update, so clicking the version in the desktop UI is not constrained by the passive background check interval.
 
