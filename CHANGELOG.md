@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.40.0](https://github.com/phai-run/phai/compare/v5.39.0...v5.40.0) (2026-07-07)
+
+
+### Features
+
+* **web:** header hierarchy pass — grouped month pill, KPI rail, ghost chips ([#260](https://github.com/phai-run/phai/issues/260)) ([76cfdd9](https://github.com/phai-run/phai/commit/76cfdd9e6b5a4c1e78e0970316682886f6365b4f))
+
 ## [5.39.0](https://github.com/phai-run/phai/compare/v5.38.0...v5.39.0) (2026-07-07)
 
 
