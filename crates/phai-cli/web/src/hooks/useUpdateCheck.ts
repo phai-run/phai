@@ -13,7 +13,7 @@ export interface UpdateCheck {
 	latestVersion: string | null;
 	state: UpdateState;
 	error: string | null;
-	applyUpdate: () => void;
+	applyUpdate: () => Promise<void>;
 }
 
 export const useUpdateCheck = (): UpdateCheck => {
@@ -41,7 +41,7 @@ export const useUpdateCheck = (): UpdateCheck => {
 	const applyUpdate = useCallback(() => {
 		setState("updating");
 		setError(null);
-		api
+		return api
 			.triggerUpdate()
 			.then((result) => {
 				if (result.status === "up_to_date") {
@@ -73,6 +73,7 @@ export const useUpdateCheck = (): UpdateCheck => {
 			.catch((e: Error) => {
 				setState("error");
 				setError(e.message);
+				throw e;
 			});
 	}, [status?.currentVersion]);
 

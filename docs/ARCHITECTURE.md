@@ -16,6 +16,8 @@ The CLI is one statically-linked binary distributed via `install.sh` and `cargo 
 
 This shapes everything else. New features that would require a long-running process, a sidecar, or a build step on the user's machine are rejected by default.
 
+The exception is the installed `phai serve` production daemon: one official process per machine runs on port 80 and serves both the desktop shell on localhost and other devices on the LAN. High ports are reserved for development, preview and tests, and release builds use a `serve-80.lock` file in the configured data directory to hand over port-80 ownership before binding.
+
 ### 3. Decimal precision, always
 
 All monetary amounts use `rust_decimal::Decimal` end-to-end: parsing, arithmetic, storage, serialization. No `f64`. No `f32`. No floating-point lies on amounts. SQLite stores decimals as strings; BigQuery uses `NUMERIC`.

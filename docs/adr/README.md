@@ -91,6 +91,7 @@ proposed → active → superseded
 | [0037](0037-named-planning-scenarios.md) | Named planning scenarios: persisted what-if deltas over the live forecast baseline | accepted |
 | [0038](0038-unified-sheet.md) | Unified sheet: forecasts and scenario items as inline rows | accepted |
 | [0039](0039-native-desktop-shell.md) | Native macOS desktop shell (Pake/Tauri WKWebView) over the local serve app; COEP require-corp + self-hosted fonts | accepted |
+| [0040](0040-single-production-daemon-port-80.md) | Single production daemon on port 80 | active |
 
 ---
 

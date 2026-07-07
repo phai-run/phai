@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, watch, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::LocalSet;
 use uuid::Uuid;
 
@@ -2402,6 +2402,8 @@ struct BridgeState {
     activation: Arc<RwLock<ActivationStatus>>,
     /// Live update availability, refreshed by a background task.
     update_status: Arc<RwLock<UpdateStatus>>,
+    /// Serializes explicit update applications so concurrent clicks do not download twice.
+    update_apply_lock: Arc<Mutex<()>>,
 }
 
 /// What `/api/status` reports to the web app so it can choose between the
@@ -2492,8 +2494,8 @@ fn build_api_router(state: BridgeState, bridge_identity: Arc<BridgeIdentityRespo
         // Explicit DoS-hardening cap on request body size — set intentionally
         // rather than relying on axum's implicit 2 MB `DefaultBodyLimit`, which
         // a future axum change or a route override could silently remove.
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_API_BODY_BYTES))
         .layer(axum::middleware::from_fn(guard_origin))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_API_BODY_BYTES))
         // Operation log (debug builds only): method, path, status, latency.
         .layer(axum::middleware::from_fn(log_ops))
         // Security headers on every response — outermost so they are never
@@ -4009,7 +4011,33 @@ async fn get_version(State(state): Store) -> impl IntoResponse {
     Json((*status).clone())
 }
 
+async fn refresh_update_status(status: &RwLock<UpdateStatus>) {
+    {
+        let mut s = status.write().await;
+        s.checking = true;
+        s.error = None;
+    }
+    match crate::update::check_for_update().await {
+        Some((latest, _release)) => {
+            let mut s = status.write().await;
+            s.latest_version = Some(latest);
+            s.update_available = true;
+            s.checking = false;
+            s.last_check = Some(Utc::now().to_rfc3339());
+        }
+        None => {
+            let mut s = status.write().await;
+            s.latest_version = None;
+            s.update_available = false;
+            s.checking = false;
+            s.last_check = Some(Utc::now().to_rfc3339());
+        }
+    }
+}
+
 async fn post_update(State(state): Store) -> impl IntoResponse {
+    let _update_guard = state.update_apply_lock.lock().await;
+    refresh_update_status(&state.update_status).await;
     {
         let status = state.update_status.read().await;
         if !status.update_available {
@@ -4070,6 +4098,11 @@ fn parse_opt_date(value: Option<&str>) -> Result<Option<NaiveDate>, String> {
 pub async fn run(port: u16) -> Result<()> {
     let (paths, config) = load_config().await?;
     let paths = Arc::new(paths);
+
+    if !cfg!(debug_assertions) && crate::serve_lock::is_production_port(port) {
+        crate::serve_lock::acquire(&paths.data_dir, port).await?;
+    }
+
     let config: AppConfig = config;
     let bridge_identity = Arc::new(bridge_identity_response(&config));
 
@@ -4148,26 +4181,7 @@ pub async fn run(port: u16) -> Result<()> {
         tokio::spawn(async move {
             const CHECK_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
             loop {
-                {
-                    let mut s = status.write().await;
-                    s.checking = true;
-                    s.error = None;
-                }
-                match crate::update::check_for_update().await {
-                    Some((latest, _release)) => {
-                        let mut s = status.write().await;
-                        s.latest_version = Some(latest);
-                        s.update_available = true;
-                        s.checking = false;
-                        s.last_check = Some(Utc::now().to_rfc3339());
-                    }
-                    None => {
-                        let mut s = status.write().await;
-                        s.update_available = false;
-                        s.checking = false;
-                        s.last_check = Some(Utc::now().to_rfc3339());
-                    }
-                }
+                refresh_update_status(&status).await;
                 tokio::time::sleep(CHECK_INTERVAL).await;
             }
         });
@@ -4177,9 +4191,10 @@ pub async fn run(port: u16) -> Result<()> {
         tx: store_tx,
         cache: ReadCache::default(),
         config_tx,
-        paths,
+        paths: paths.clone(),
         activation,
         update_status,
+        update_apply_lock: Arc::new(Mutex::new(())),
     };
 
     let api = build_api_router(app_state, bridge_identity.clone());
@@ -4221,6 +4236,10 @@ pub async fn run(port: u16) -> Result<()> {
                 .context("servidor web parou")
         })
         .await?;
+
+    if !cfg!(debug_assertions) && crate::serve_lock::is_production_port(port) {
+        crate::serve_lock::release(&paths.data_dir, port);
+    }
 
     Ok(())
 }
@@ -4696,8 +4715,7 @@ mod tests {
     }
 
     #[test]
-    fn app_mode_browsers_prefer_chrome_and_are_non_empty() {
-        assert!(!APP_MODE_BROWSERS.is_empty());
+    fn app_mode_browsers_prefer_chrome_first() {
         // Chrome is the most widely installed Chromium browser → try it first.
         assert!(APP_MODE_BROWSERS[0].to_lowercase().contains("chrome"));
     }
@@ -6347,6 +6365,7 @@ mod tests {
                 sync_available: false,
             })),
             update_status: Arc::new(RwLock::new(UpdateStatus::new())),
+            update_apply_lock: Arc::new(Mutex::new(())),
         };
         let identity = Arc::new(bridge_identity_response(&AppConfig::default()));
         build_api_router(state, identity)
@@ -6361,14 +6380,17 @@ mod tests {
             axum::serve(listener, router).await.unwrap();
         });
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("http://{addr}/api/events");
+        let origin = format!("http://{addr}");
 
         // Over the limit: must be rejected before reaching the handler.
         let oversized = vec![b'a'; MAX_API_BODY_BYTES + 1];
         let resp = client
             .post(&url)
             .header("content-type", "application/json")
+            .header("host", "127.0.0.1")
+            .header("origin", &origin)
             .body(oversized)
             .send()
             .await
@@ -6386,6 +6408,8 @@ mod tests {
         let resp = client
             .post(&url)
             .header("content-type", "application/json")
+            .header("host", "127.0.0.1")
+            .header("origin", &origin)
             .body(normal)
             .send()
             .await

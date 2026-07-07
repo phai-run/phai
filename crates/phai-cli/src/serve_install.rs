@@ -25,15 +25,11 @@
 //!    process inherits none of the user's environment) so the BigQuery
 //!    `service_account_path` and config resolve, and runs with
 //!    `--no-auto-update`.
-//! 2. **Launcher app** `~/Applications/Phai.app`. On the default user-agent
-//!    install (pairing port 4317) this is the **native desktop app** — a
-//!    chromeless Pake/Tauri WKWebView shell downloaded from the release
-//!    (ADR-0039), with its own window and Dock icon, no browser involved. On
-//!    other ports (or if the download fails) it falls back to a minimal bundle
-//!    whose executable opens the web app in a Chromium `--app` window / the
-//!    default browser. Either way the launchd service is already running, so
-//!    clicking the φ icon just opens the app; "installing phai" ends with
-//!    something clickable.
+//! 2. **Launcher app** `~/Applications/Phai.app`. The production launcher opens
+//!    the single daemon on port 80 (`http://phai.localhost/`); explicit high
+//!    ports remain available for development/preview launchers. Either way the
+//!    launchd service is already running, so clicking the φ icon just opens the
+//!    app; "installing phai" ends with something clickable.
 //!
 //! ## Security trade-off (system daemon)
 //!
@@ -56,15 +52,9 @@ const ICON_BYTES: &[u8] = include_bytes!("../assets/Phai.icns");
 /// Absolute path of the system LaunchDaemon plist (`--system`).
 const SYSTEM_DAEMON_PLIST: &str = "/Library/LaunchDaemons/run.phai.serve.plist";
 
-/// Fixed loopback port the native desktop app (ADR-0039) is baked to pair with.
-/// The default user-agent install serves here (no sudo, no privileged port), so
-/// clicking the Dock icon reaches an already-running service.
-const DESKTOP_PAIR_PORT: u16 = 4317;
-
 #[derive(Args, Debug)]
 pub struct InstallArgs {
-    /// Port the service serves on. Default: 4317 (user agent, pairs with the
-    /// native desktop app) or 80 with --system (→ http://phai.localhost).
+    /// Port the service serves on. Default: 80 (the production daemon at http://phai.localhost).
     #[arg(long)]
     pub port: Option<u16>,
 
@@ -379,102 +369,10 @@ fn write_app_bundle(port: u16) -> Result<PathBuf> {
     Ok(bundle)
 }
 
-/// Install the clickable launcher for `port`. On the desktop pairing port
-/// (4317, the default user agent) this fetches the native Pake/Tauri app
-/// (ADR-0039) from the matching release; on any other port — or if the download
-/// fails — it falls back to the browser launcher bundle, which adapts to the
-/// actual port.
+/// Install the clickable launcher for `port`. Production opens the daemon on
+/// port 80; explicit high ports are for development/preview only.
 fn install_launcher(port: u16) -> Result<PathBuf> {
-    if port == DESKTOP_PAIR_PORT {
-        match install_desktop_app() {
-            Ok(bundle) => return Ok(bundle),
-            Err(e) => eprintln!(
-                "   (não consegui instalar o app desktop nativo: {e};\n\
-                 \x20   usando o launcher de browser)"
-            ),
-        }
-    }
     write_app_bundle(port)
-}
-
-/// Download the native desktop app (`Phai.app.zip`) from the GitHub release and
-/// extract it into `~/Applications`, replacing any previous bundle. Tries the
-/// running binary's own version tag first, then `latest`. The app is a
-/// chromeless WKWebView shell baked to `http://localhost:4317`, independent of
-/// the CLI version, so `latest` is a safe fallback.
-fn install_desktop_app() -> Result<PathBuf> {
-    let bundle = app_bundle_path()?;
-    let apps_dir = bundle
-        .parent()
-        .context("app bundle path has no parent")?
-        .to_path_buf();
-    std::fs::create_dir_all(&apps_dir)?;
-
-    let version = env!("CARGO_PKG_VERSION");
-    let zip = std::env::temp_dir().join("phai-desktop-app.zip");
-    let urls = [
-        format!(
-            "{}/releases/download/v{version}/Phai.app.zip",
-            crate::update::REPO_URL
-        ),
-        format!(
-            "{}/releases/latest/download/Phai.app.zip",
-            crate::update::REPO_URL
-        ),
-    ];
-    if !urls.iter().any(|url| download_file(url, &zip).is_ok()) {
-        bail!("could not download Phai.app.zip from the release");
-    }
-
-    // Replace any previous bundle, then extract the fresh one.
-    let _ = std::fs::remove_dir_all(&bundle);
-    let out = Command::new("ditto")
-        .args([
-            "-x",
-            "-k",
-            &zip.display().to_string(),
-            &apps_dir.display().to_string(),
-        ])
-        .output()
-        .context("failed to run ditto")?;
-    let _ = std::fs::remove_file(&zip);
-    if !out.status.success() {
-        bail!(
-            "ditto extract failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    if !bundle.exists() {
-        bail!(
-            "Phai.app missing after extracting into {}",
-            apps_dir.display()
-        );
-    }
-    // Nudge LaunchServices to register the (possibly updated) bundle + icon.
-    let _ = Command::new("touch").arg(&bundle).output();
-    Ok(bundle)
-}
-
-/// Download `url` to `dest` with curl (follows redirects, fails on HTTP error).
-/// Verifies the result is non-empty. curl is always present on macOS.
-fn download_file(url: &str, dest: &Path) -> Result<()> {
-    let out = Command::new("curl")
-        .args(["-fsSL", "-o", &dest.display().to_string(), url])
-        .output()
-        .context("failed to run curl")?;
-    if !out.status.success() {
-        bail!(
-            "curl failed for {url}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let non_empty = std::fs::metadata(dest)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false);
-    if !non_empty {
-        bail!("downloaded file is empty: {}", dest.display());
-    }
-    Ok(())
 }
 
 fn dock_plist() -> Result<PathBuf> {
@@ -593,11 +491,10 @@ pub fn install(args: InstallArgs) -> Result<()> {
     }
 }
 
-/// Resolve the effective serve port: an explicit `--port` wins; otherwise a
-/// `--system` install defaults to 80 (`http://phai.localhost`) and a user-agent
-/// install to the desktop pairing port (4317), which needs no privileged bind.
-fn resolve_install_port(port: Option<u16>, system: bool) -> u16 {
-    port.unwrap_or(if system { 80 } else { DESKTOP_PAIR_PORT })
+/// Resolve the effective serve port: an explicit `--port` wins; otherwise all
+/// production installs target the single daemon on port 80.
+fn resolve_install_port(port: Option<u16>, _system: bool) -> u16 {
+    port.unwrap_or(80)
 }
 
 /// User-domain launchd agent (default). No sudo; cannot bind ports < 1024.
@@ -825,9 +722,8 @@ mod tests {
 
     #[test]
     fn resolve_install_port_defaults_by_mode_and_respects_explicit() {
-        // Default: user agent pairs with the native desktop app on 4317 (no sudo).
-        assert_eq!(resolve_install_port(None, false), DESKTOP_PAIR_PORT);
-        // Default: --system binds the friendly port 80.
+        // Default: both install modes target the production daemon on port 80.
+        assert_eq!(resolve_install_port(None, false), 80);
         assert_eq!(resolve_install_port(None, true), 80);
         // Explicit --port always wins, in either mode.
         assert_eq!(resolve_install_port(Some(9000), false), 9000);
