@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.39.0](https://github.com/phai-run/phai/compare/v5.38.0...v5.39.0) (2026-07-07)
+
+
+### Features
+
+* **web:** global mode switcher, themed month in hero, scenario dropdown ([#258](https://github.com/phai-run/phai/issues/258)) ([338f7ca](https://github.com/phai-run/phai/commit/338f7ca7637a8ac4b26d12e7ba485f3f3fb268b0))
+
 ## [5.38.0](https://github.com/phai-run/phai/compare/v5.37.0...v5.38.0) (2026-07-06)
 
 
