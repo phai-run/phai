@@ -43,6 +43,7 @@ mod serve;
 mod serve_assets;
 mod serve_cache;
 mod serve_install;
+mod serve_lock;
 mod sync_notify;
 mod update;
 mod update_state;

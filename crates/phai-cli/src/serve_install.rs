@@ -1,19 +1,23 @@
 //! `phai serve install` / `uninstall` — run the web app at login (macOS).
 //!
-//! Two flavors:
+//! Production has exactly one daemon, on port 80 (ADR-0040): the desktop app
+//! and a plain browser both point there. Two flavors, chosen by the
+//! *effective port*, not just the `--system` flag:
 //!
-//! - **User agent** (default, no `--system`) — a launchd *agent* in the
-//!   `gui/<uid>` domain. No sudo, no profiles, fully removed by `uninstall`.
-//!   A user agent cannot bind privileged ports (< 1024); on port 80 it
-//!   crash-loops with `Permission denied`.
-//! - **System daemon** (`--system`) — a launchd *daemon* at
+//! - **System daemon** (port 80, the default) — a launchd *daemon* at
 //!   `/Library/LaunchDaemons/run.phai.serve.plist`, owned `root:wheel`, loaded
-//!   into the `system` domain. This is the supported way to bind port 80
+//!   into the `system` domain. Required to bind port 80
 //!   (`http://phai.localhost/`). The privileged steps run through a *single*
 //!   native macOS admin-auth prompt (`osascript … with administrator
 //!   privileges`) rather than a hand-typed `sudo` sequence — see ADR-0029.
+//! - **User agent** (explicit `--port` above 1024, e.g. dev/preview/test) — a
+//!   launchd *agent* in the `gui/<uid>` domain. No sudo, no profiles, fully
+//!   removed by `uninstall`. A user agent cannot bind privileged ports
+//!   (< 1024); on port 80 it would crash-loop with `Permission denied`, so
+//!   `install()` always routes a privileged port through the system daemon
+//!   regardless of `--system`.
 //!
-//! Artifacts owned by these commands (ADR-0028, ADR-0029):
+//! Artifacts owned by these commands (ADR-0028, ADR-0029, ADR-0040):
 //!
 //! 1. **launchd agent/daemon** — launchd keeps `phai serve` alive (RunAtLoad +
 //!    KeepAlive) and restarts it across crashes and reboots. The plist points
@@ -25,15 +29,15 @@
 //!    process inherits none of the user's environment) so the BigQuery
 //!    `service_account_path` and config resolve, and runs with
 //!    `--no-auto-update`.
-//! 2. **Launcher app** `~/Applications/Phai.app`. On the default user-agent
-//!    install (pairing port 4317) this is the **native desktop app** — a
-//!    chromeless Pake/Tauri WKWebView shell downloaded from the release
-//!    (ADR-0039), with its own window and Dock icon, no browser involved. On
-//!    other ports (or if the download fails) it falls back to a minimal bundle
-//!    whose executable opens the web app in a Chromium `--app` window / the
-//!    default browser. Either way the launchd service is already running, so
-//!    clicking the φ icon just opens the app; "installing phai" ends with
-//!    something clickable.
+//! 2. **Launcher app** `~/Applications/Phai.app`. On the production port (80)
+//!    this is the **native desktop app** — a chromeless Pake/Tauri WKWebView
+//!    shell downloaded from the release (ADR-0039), baked to
+//!    `http://phai.localhost` (ADR-0040), with its own window and Dock icon,
+//!    no browser involved. On other ports (dev/preview) — or if the download
+//!    fails — it falls back to a minimal bundle whose executable opens the web
+//!    app in a Chromium `--app` window / the default browser. Either way the
+//!    launchd service is already running, so clicking the φ icon just opens
+//!    the app; "installing phai" ends with something clickable.
 //!
 //! ## Security trade-off (system daemon)
 //!
@@ -56,20 +60,23 @@ const ICON_BYTES: &[u8] = include_bytes!("../assets/Phai.icns");
 /// Absolute path of the system LaunchDaemon plist (`--system`).
 const SYSTEM_DAEMON_PLIST: &str = "/Library/LaunchDaemons/run.phai.serve.plist";
 
-/// Fixed loopback port the native desktop app (ADR-0039) is baked to pair with.
-/// The default user-agent install serves here (no sudo, no privileged port), so
-/// clicking the Dock icon reaches an already-running service.
-const DESKTOP_PAIR_PORT: u16 = 4317;
+/// Port the native desktop app (ADR-0039) is baked to pair with — the single
+/// production daemon (ADR-0040). Any other port is dev/preview/test and gets
+/// the plain browser-launcher bundle instead.
+const DESKTOP_PAIR_PORT: u16 = 80;
 
 #[derive(Args, Debug)]
 pub struct InstallArgs {
-    /// Port the service serves on. Default: 4317 (user agent, pairs with the
-    /// native desktop app) or 80 with --system (→ http://phai.localhost).
+    /// Port the service serves on. Default: 80, the single production daemon
+    /// (http://phai.localhost) that the desktop app and browser both use.
+    /// An explicit high port (e.g. --port 4317) installs a no-sudo user agent
+    /// for development/preview instead.
     #[arg(long)]
     pub port: Option<u16>,
 
-    /// Install a root LaunchDaemon (port 80 capable) via one macOS admin-auth
-    /// prompt, instead of a user agent. Required to bind privileged ports.
+    /// Force a root LaunchDaemon install via one macOS admin-auth prompt, even
+    /// for an explicit high port. Port 80 always goes through the root daemon
+    /// regardless of this flag — a user agent cannot bind it.
     #[arg(long)]
     pub system: bool,
 }
@@ -400,8 +407,8 @@ fn install_launcher(port: u16) -> Result<PathBuf> {
 /// Download the native desktop app (`Phai.app.zip`) from the GitHub release and
 /// extract it into `~/Applications`, replacing any previous bundle. Tries the
 /// running binary's own version tag first, then `latest`. The app is a
-/// chromeless WKWebView shell baked to `http://localhost:4317`, independent of
-/// the CLI version, so `latest` is a safe fallback.
+/// chromeless WKWebView shell baked to `http://phai.localhost` (ADR-0040),
+/// independent of the CLI version, so `latest` is a safe fallback.
 fn install_desktop_app() -> Result<PathBuf> {
     let bundle = app_bundle_path()?;
     let apps_dir = bundle
@@ -586,18 +593,22 @@ pub fn install(args: InstallArgs) -> Result<()> {
         bail!("phai serve install is macOS-only for now (launchd)");
     }
     let port = resolve_install_port(args.port, args.system);
-    if args.system {
+    // A privileged port can only ever be bound by the root daemon — route it
+    // there regardless of `--system`, so the default (no flags) install lands
+    // on the single production daemon instead of crash-looping as a user
+    // agent with `Permission denied`.
+    if args.system || port < 1024 {
         install_system(port)
     } else {
         install_user_agent(port)
     }
 }
 
-/// Resolve the effective serve port: an explicit `--port` wins; otherwise a
-/// `--system` install defaults to 80 (`http://phai.localhost`) and a user-agent
-/// install to the desktop pairing port (4317), which needs no privileged bind.
-fn resolve_install_port(port: Option<u16>, system: bool) -> u16 {
-    port.unwrap_or(if system { 80 } else { DESKTOP_PAIR_PORT })
+/// Resolve the effective serve port: an explicit `--port` wins; otherwise every
+/// install defaults to 80, the single production daemon (`http://phai.localhost`,
+/// ADR-0040). Pass an explicit high port for a no-sudo dev/preview user agent.
+fn resolve_install_port(port: Option<u16>, _system: bool) -> u16 {
+    port.unwrap_or(80)
 }
 
 /// User-domain launchd agent (default). No sudo; cannot bind ports < 1024.
@@ -825,13 +836,21 @@ mod tests {
 
     #[test]
     fn resolve_install_port_defaults_by_mode_and_respects_explicit() {
-        // Default: user agent pairs with the native desktop app on 4317 (no sudo).
+        // Default: every install targets the single production daemon on 80,
+        // regardless of --system.
         assert_eq!(resolve_install_port(None, false), DESKTOP_PAIR_PORT);
-        // Default: --system binds the friendly port 80.
         assert_eq!(resolve_install_port(None, true), 80);
         // Explicit --port always wins, in either mode.
         assert_eq!(resolve_install_port(Some(9000), false), 9000);
         assert_eq!(resolve_install_port(Some(8080), true), 8080);
+    }
+
+    #[test]
+    fn install_routes_privileged_port_through_system_daemon_regardless_of_flag() {
+        // A user agent cannot bind < 1024, so the default (no --system) install
+        // must still be routed to the root daemon once it resolves to port 80.
+        let port = resolve_install_port(None, false);
+        assert!(port < 1024, "default install must target a privileged port");
     }
 
     #[test]

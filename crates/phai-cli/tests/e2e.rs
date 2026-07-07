@@ -6743,7 +6743,7 @@ async fn spawn_serve(config_dir: &Path, data_dir: &Path) -> (KillOnDrop, String)
 
     // Readiness: /api/forecasts round-trips through the store actor, so a 200
     // means migrations ran and the SQLite store is answering.
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
     for _ in 0..150 {
         if let Ok(resp) = client.get(format!("{base}/api/forecasts")).send().await {
             if resp.status().is_success() {
@@ -6847,7 +6847,7 @@ async fn serve_baseline_discard_and_end_template_endpoints() {
     drop(conn);
 
     let (_serve, base) = spawn_serve(&config_dir, &data_dir).await;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
     // The old delete endpoint keeps refusing template-materialized rows...
     let resp = client

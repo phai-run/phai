@@ -186,16 +186,11 @@ export const App = () => {
 						<PluggySyncButton />
 						<SyncChip pending={sync.pending} error={sync.error} onRetry={sync.retry} />
 						{update.currentVersion && (
-							<span
-								className="mono hide-sm"
-								title="versão em execução"
-								style={{
-									fontSize: 11,
-									color: update.updateAvailable ? "var(--purple)" : "var(--muted2)",
-								}}
-							>
-								v{update.currentVersion}
-							</span>
+							<VersionChip
+								currentVersion={update.currentVersion}
+								updateAvailable={update.updateAvailable}
+								applyUpdate={update.applyUpdate}
+							/>
 						)}
 					</div>
 				</div>
@@ -211,6 +206,69 @@ export const App = () => {
 
 			<SearchPalette open={searchOpen} onClose={closeSearch} />
 		</>
+	);
+};
+
+export const VersionChip = ({
+	currentVersion,
+	updateAvailable,
+	applyUpdate,
+}: {
+	currentVersion: string;
+	updateAvailable: boolean;
+	applyUpdate: () => Promise<void>;
+}) => {
+	const [checking, setChecking] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	const onClick = () => {
+		if (checking) return;
+		setChecking(true);
+		setError(null);
+		void applyUpdate()
+			.catch((e: Error) => {
+				setError(e.message);
+				window.setTimeout(() => setError(null), 4_000);
+			})
+			.finally(() => setChecking(false));
+	};
+
+	const color = error
+		? "var(--rose)"
+		: updateAvailable
+			? "var(--purple)"
+			: "var(--muted2)";
+	const title = error ?? "Verificar atualizações agora";
+
+	return (
+		<button
+			type="button"
+			className="mono hide-sm"
+			onClick={onClick}
+			disabled={checking}
+			title={title}
+			aria-label={title}
+			style={{
+				fontSize: 11,
+				color,
+				display: "flex",
+				alignItems: "center",
+				gap: 6,
+				background: "transparent",
+				border: "none",
+				padding: 0,
+				cursor: checking ? "default" : "pointer",
+				opacity: checking ? 0.8 : 1,
+			}}
+		>
+			{checking ? (
+				<span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>
+					⟳
+				</span>
+			) : (
+				`v${currentVersion}`
+			)}
+		</button>
 	);
 };
 

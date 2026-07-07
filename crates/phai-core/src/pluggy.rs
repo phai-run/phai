@@ -641,10 +641,14 @@ fn build_pluggy_client(base_url: &str) -> Result<Client> {
             ));
         }
     };
-    Client::builder()
+    let mut builder = Client::builder()
         .https_only(https_only)
         .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10));
+    if is_loopback {
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .context("Falha ao construir cliente HTTP do Pluggy")
 }

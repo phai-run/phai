@@ -13,7 +13,7 @@
 #   OUT_DIR  where to leave Phai.app / .app.zip / .dmg (default: ./dist-desktop)
 #
 # Env overrides:
-#   PHAI_APP_URL     URL the shell loads       (default http://localhost:4317)
+#   PHAI_APP_URL     URL the shell loads       (default http://phai.localhost, ADR-0040)
 #   PHAI_APP_NAME    app + bundle name         (default Phai)
 #   PHAI_APP_ID      bundle identifier         (default run.phai.desktop)
 #   PAKE_VERSION     pinned pake-cli version   (default 3.13.1)
@@ -22,7 +22,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$REPO_ROOT/dist-desktop}"
-APP_URL="${PHAI_APP_URL:-http://localhost:4317}"
+APP_URL="${PHAI_APP_URL:-http://phai.localhost}"
 APP_NAME="${PHAI_APP_NAME:-Phai}"
 APP_ID="${PHAI_APP_ID:-run.phai.desktop}"
 PAKE_VERSION="${PAKE_VERSION:-3.13.1}"

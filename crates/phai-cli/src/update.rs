@@ -850,7 +850,6 @@ mod tests {
     fn embedded_signing_public_key_parses() {
         // Guards the embedded key format (ADR-0017): a wrong/empty value would
         // break every update once releases ship a .minisig sidecar.
-        assert!(!SIGNING_PUBLIC_KEY.is_empty());
         minisign_verify::PublicKey::from_base64(SIGNING_PUBLIC_KEY)
             .expect("embedded SIGNING_PUBLIC_KEY must be a valid minisign public key");
     }
