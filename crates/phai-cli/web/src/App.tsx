@@ -106,6 +106,7 @@ export const App = () => {
 						φ
 					</span>
 					<strong
+						className="hide-sm"
 						style={{
 							fontFamily: "var(--font-display)",
 							fontSize: "1.2rem",
@@ -162,8 +163,9 @@ export const App = () => {
 							}}
 						>
 							<span style={{ fontSize: 13 }}>/</span>
-							Buscar…
+							<span className="hide-sm">Buscar…</span>
 							<kbd
+								className="hide-sm"
 								style={{
 									fontSize: 10,
 									background: "var(--bg)",
@@ -176,12 +178,16 @@ export const App = () => {
 								{"⌘"}K
 							</kbd>
 						</button>
-						<span aria-hidden style={{ width: 1, height: 20, background: "var(--border)" }} />
+						<span
+							aria-hidden
+							className="hide-sm"
+							style={{ width: 1, height: 20, background: "var(--border)" }}
+						/>
 						<PluggySyncButton />
 						<SyncChip pending={sync.pending} error={sync.error} onRetry={sync.retry} />
 						{update.currentVersion && (
 							<span
-								className="mono"
+								className="mono hide-sm"
 								title="versão em execução"
 								style={{
 									fontSize: 11,
@@ -265,7 +271,7 @@ export const SyncChip = ({
 					⟳
 				</span>
 			)}
-			{label}
+			<span className="hide-sm">{label}</span>
 		</button>
 	);
 };

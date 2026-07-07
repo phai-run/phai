@@ -90,20 +90,22 @@ const labelStyle: CSSProperties = {
 	color: "var(--muted)",
 };
 
+// Ghost arrows inside the grouped month-selector pill — the pill carries the
+// border; the arrows stay quiet until hovered.
 const monthNavBtn = (enabled: boolean): CSSProperties => ({
-	border: "1px solid var(--border)",
+	border: "none",
 	borderRadius: "var(--radius-full)",
-	background: "var(--card)",
+	background: "transparent",
 	color: enabled ? "var(--muted)" : "var(--muted2)",
-	width: 22,
-	height: 22,
+	width: 24,
+	height: 24,
 	display: "inline-flex",
 	alignItems: "center",
 	justifyContent: "center",
-	fontSize: 14,
+	fontSize: 15,
 	lineHeight: 1,
 	cursor: enabled ? "pointer" : "default",
-	opacity: enabled ? 1 : 0.4,
+	opacity: enabled ? 1 : 0.35,
 	padding: 0,
 });
 
@@ -165,19 +167,20 @@ export const CashDecisionPanel = ({
 
 	return (
 		<div style={{ paddingBottom: 4 }}>
-			{/* Header: label + month + positive/negative badge */}
-			<div
-				style={{
-					display: "flex",
-					alignItems: "baseline",
-					gap: 10,
-					marginBottom: 2,
-				}}
-			>
-				<span style={labelStyle}>{saldoLabel(when)}</span>
-				{/* Themed month — always visible at the top, next to the balance,
-				    with inline prev/next navigation. */}
-				<span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+			{/* Context row — the month selector is the section's only control, so it
+			    stands alone: arrows + themed month grouped into a single pill. */}
+			<div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+				<span
+					style={{
+						display: "inline-flex",
+						alignItems: "center",
+						gap: 2,
+						border: "1px solid var(--border)",
+						borderRadius: "var(--radius-full)",
+						background: "var(--card)",
+						padding: "3px 6px",
+					}}
+				>
 					{onStepMonth && (
 						<button
 							type="button"
@@ -191,23 +194,33 @@ export const CashDecisionPanel = ({
 						</button>
 					)}
 					<span
-						aria-hidden
-						title={theme.season}
-						style={{ fontSize: "1.05rem", lineHeight: 1 }}
-					>
-						{theme.glyph}
-					</span>
-					<span
 						style={{
-							fontFamily: "var(--font-display)",
-							fontSize: "1.02rem",
-							fontWeight: 600,
-							letterSpacing: "-0.01em",
-							borderBottom: `2px solid ${theme.accent}`,
-							paddingBottom: 1,
+							display: "inline-flex",
+							alignItems: "center",
+							gap: 7,
+							padding: "0 8px",
 						}}
 					>
-						{monthLabel(row.month)}
+						<span
+							aria-hidden
+							title={theme.season}
+							style={{ fontSize: "0.95rem", lineHeight: 1 }}
+						>
+							{theme.glyph}
+						</span>
+						<span
+							style={{
+								fontFamily: "var(--font-display)",
+								fontSize: "0.98rem",
+								fontWeight: 600,
+								letterSpacing: "-0.01em",
+								borderBottom: `2px solid ${theme.accent}`,
+								paddingBottom: 1,
+								whiteSpace: "nowrap",
+							}}
+						>
+							{monthLabel(row.month)}
+						</span>
 					</span>
 					{onStepMonth && (
 						<button
@@ -222,58 +235,75 @@ export const CashDecisionPanel = ({
 						</button>
 					)}
 				</span>
-				<span
-					className="mono"
-					style={{
-						marginLeft: "auto",
-						fontSize: 11,
-						fontWeight: 600,
-						padding: "2px 10px",
-						borderRadius: "var(--radius-full)",
-						color: s.balancePositive ? "var(--green)" : "var(--rose)",
-						background: s.balancePositive
-							? "rgba(21,128,61,0.10)"
-							: "rgba(225,29,72,0.10)",
-					}}
-				>
-					{s.balancePositive ? "positivo" : "negativo"}
-				</span>
 			</div>
 
-			{/* Headline balance — the dominant figure on the screen */}
-			<CountMoney
-				value={s.saldo}
-				style={{
-					fontFamily: "var(--font-display)",
-					fontSize: "clamp(1.7rem, 3.6vw, 2.3rem)",
-					fontWeight: 700,
-					letterSpacing: "-0.02em",
-					lineHeight: 1.05,
-					color: s.saldo < 0 ? "var(--rose)" : "var(--white)",
-				}}
-			/>
-
-			{/* Supporting KPIs */}
+			{/* Headline zone — the balance owns the left, the KPI rail sits at its
+			    baseline on the right. Two levels, nothing in between. */}
 			<div
 				style={{
-					display: "grid",
-					gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-					gap: 10,
-					marginTop: 10,
-					maxWidth: 640,
+					display: "flex",
+					alignItems: "flex-end",
+					justifyContent: "space-between",
+					gap: "16px 48px",
+					flexWrap: "wrap",
 				}}
 			>
-				<Kpi label="entradas" prefix="↑ " value={s.entradas} color="var(--cyan)" />
-				<Kpi label="saídas" prefix="↓ " value={s.saidas} color="var(--rose)" />
-				<Kpi
-					label="resultado"
-					prefix={sign}
-					value={s.resultado}
-					color={resultColor}
-				/>
-				{when !== "past" && (
-					<Kpi label="saldo projetado" value={s.projetado} color="var(--muted)" />
-				)}
+				<div style={{ minWidth: 0 }}>
+					<div
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 10,
+							marginBottom: 2,
+						}}
+					>
+						<span style={labelStyle}>{saldoLabel(when)}</span>
+						{/* The badge qualifies the headline balance — it lives beside its
+						    label, not orphaned across the screen. */}
+						<span
+							className="mono"
+							style={{
+								fontSize: 10,
+								fontWeight: 600,
+								padding: "1px 8px",
+								borderRadius: "var(--radius-full)",
+								color: s.balancePositive ? "var(--green)" : "var(--rose)",
+								background: s.balancePositive
+									? "rgba(21,128,61,0.10)"
+									: "rgba(225,29,72,0.10)",
+							}}
+						>
+							{s.balancePositive ? "positivo" : "negativo"}
+						</span>
+					</div>
+					<CountMoney
+						value={s.saldo}
+						style={{
+							fontFamily: "var(--font-display)",
+							fontSize: "clamp(1.8rem, 3.8vw, 2.5rem)",
+							fontWeight: 700,
+							letterSpacing: "-0.02em",
+							lineHeight: 1.05,
+							color: s.saldo < 0 ? "var(--rose)" : "var(--white)",
+						}}
+					/>
+				</div>
+
+				{/* Supporting KPI rail — hairline-separated columns instead of boxed
+				    cards: quieter, reads as one unit subordinate to the balance. */}
+				<div style={{ display: "flex", flexWrap: "wrap", rowGap: 12 }}>
+					<Kpi label="entradas" prefix="↑ " value={s.entradas} color="var(--cyan)" />
+					<Kpi label="saídas" prefix="↓ " value={s.saidas} color="var(--rose)" />
+					<Kpi
+						label="resultado"
+						prefix={sign}
+						value={s.resultado}
+						color={resultColor}
+					/>
+					{when !== "past" && (
+						<Kpi label="projetado" value={s.projetado} color="var(--muted)" />
+					)}
+				</div>
 			</div>
 		</div>
 	);
@@ -292,21 +322,21 @@ const Kpi = ({
 }) => (
 	<div
 		style={{
-			border: "1px solid var(--border)",
-			borderRadius: "var(--radius-md)",
-			padding: "8px 12px",
+			borderLeft: "1px solid var(--border)",
+			padding: "2px 22px 2px 14px",
 			minWidth: 0,
 		}}
 	>
-		<div style={{ ...labelStyle, fontSize: 10, marginBottom: 3 }}>{label}</div>
+		<div style={{ ...labelStyle, fontSize: 10, marginBottom: 4 }}>{label}</div>
 		<div
 			className="mono"
 			style={{
 				display: "flex",
 				alignItems: "baseline",
-				fontSize: 16,
+				fontSize: 15,
 				fontWeight: 600,
 				color,
+				whiteSpace: "nowrap",
 			}}
 		>
 			{prefix}

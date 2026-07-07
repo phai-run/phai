@@ -30,13 +30,15 @@ export const AccountBalances = () => {
 	);
 	if (checking.length === 0) return null;
 
+	// Ghost chips — metadata under the hero balance, deliberately quieter than
+	// the KPI rail above (no border; the surface tint alone groups each pair).
 	return (
 		<div
 			style={{
 				display: "flex",
 				flexWrap: "wrap",
-				gap: 8,
-				marginTop: 10,
+				gap: 6,
+				marginTop: 12,
 			}}
 		>
 			{checking.map((a) => (
@@ -47,12 +49,11 @@ export const AccountBalances = () => {
 					style={{
 						display: "flex",
 						alignItems: "baseline",
-						gap: 8,
-						border: "1px solid var(--border)",
+						gap: 7,
 						borderRadius: "var(--radius-full)",
-						padding: "5px 12px",
-						background: "var(--card)",
-						fontSize: 12,
+						padding: "4px 11px",
+						background: "var(--surface)",
+						fontSize: 11,
 					}}
 				>
 					<span
