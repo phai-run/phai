@@ -296,38 +296,54 @@ const FullChart = ({
 
 	return (
 		<div>
-			{/* Year totals strip */}
+			{/* Year totals strip — the chart's caption: muted labels, colored values,
+			    and the solvency warning as its own amber pill (it's an alert, not
+			    another total in the row). */}
 			<div
 				className="mono"
 				style={{
 					display: "flex",
-					gap: 20,
+					alignItems: "center",
+					gap: 16,
 					fontSize: 11,
-					paddingBottom: 8,
+					paddingBottom: 10,
 					flexWrap: "wrap",
+					color: "var(--muted)",
 				}}
 			>
-				<span style={{ color: "var(--muted)" }}>
+				<span style={{ fontWeight: 700, color: "var(--text)" }}>
 					{new Date().getFullYear()}
 				</span>
 				{!isExpensesMode && (
-					<span style={{ color: "var(--cyan)" }}>
-						entradas <CountMoney value={yearIn} />
+					<span>
+						entradas{" "}
+						<CountMoney value={yearIn} style={{ color: "var(--cyan)" }} />
 					</span>
 				)}
-				<span style={{ color: "var(--rose)" }}>
-					saídas <CountMoney value={-yearOut} />
+				<span>
+					saídas{" "}
+					<CountMoney value={-yearOut} style={{ color: "var(--rose)" }} />
 				</span>
-				<span
-					style={{
-						color: yearIn - yearOut >= 0 ? "var(--green)" : "var(--rose)",
-					}}
-				>
-					resultado {yearIn - yearOut >= 0 ? "+" : ""}
-					<CountMoney value={yearIn - yearOut} />
+				<span>
+					resultado{" "}
+					<span
+						style={{
+							color: yearIn - yearOut >= 0 ? "var(--green)" : "var(--rose)",
+						}}
+					>
+						{yearIn - yearOut >= 0 ? "+" : ""}
+						<CountMoney value={yearIn - yearOut} />
+					</span>
 				</span>
 				{!isExpensesMode && goal.shortfall && (
-					<span style={{ color: "var(--amber)" }}>
+					<span
+						style={{
+							color: "var(--amber)",
+							background: "rgba(180,83,9,0.08)",
+							borderRadius: "var(--radius-full)",
+							padding: "2px 10px",
+						}}
+					>
 						⚠ fica no vermelho em {goal.label} ·{" "}
 						{goal.solution.achievable ? (
 							<>

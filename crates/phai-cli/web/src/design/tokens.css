@@ -102,6 +102,29 @@ code,
 	}
 }
 
+/* ── Responsive helpers ──────────────────────────────────────────────── */
+
+/* Header bar: the centered ModeSwitcher needs the flanks to slim down on
+   narrow viewports (brand wordmark, search label, version) or they collide. */
+@media (max-width: 760px) {
+	.hide-sm {
+		display: none !important;
+	}
+}
+
+/* Mode-switcher tabs compress on narrow viewports so the centered pill fits
+   between the brand and the sync cluster. */
+.mode-switch-btn {
+	padding: 5px 14px;
+	font-size: 12px;
+}
+@media (max-width: 760px) {
+	.mode-switch-btn {
+		padding: 4px 9px;
+		font-size: 11px;
+	}
+}
+
 /* ── Responsive view grids ───────────────────────────────────────────── */
 
 .review-grid {

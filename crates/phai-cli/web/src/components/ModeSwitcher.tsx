@@ -41,12 +41,10 @@ export const ModeSwitcher = () => {
 						aria-selected={active}
 						title={`${m.label} (${i + 1})`}
 						onClick={() => setUi({ detailMode: m.id })}
-						className="mono pressable"
+						className="mono pressable mode-switch-btn"
 						style={{
 							border: "none",
 							borderRadius: "var(--radius-full)",
-							padding: "5px 14px",
-							fontSize: 12,
 							cursor: "pointer",
 							background: "transparent",
 							color: active ? "#fff" : "var(--muted)",
