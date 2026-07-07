@@ -57,6 +57,7 @@ export const SheetFilterBar = ({
 	filteredTotal,
 	onExportCsv,
 	accent = "var(--purple)",
+	leading,
 }: {
 	ui: SheetFilterState;
 	setUi: (patch: Partial<SheetFilterState>) => void;
@@ -68,6 +69,8 @@ export const SheetFilterBar = ({
 	filteredTotal: number;
 	onExportCsv: () => void;
 	accent?: string;
+	/** Optional controls rendered at the row start (e.g. the scenario selector). */
+	leading?: React.ReactNode;
 }) => {
 	// How many refinements live *inside* the popover are active (search and
 	// accounts stay outside, so they don't count toward the popover badge).
@@ -92,6 +95,7 @@ export const SheetFilterBar = ({
 				padding: "12px 0",
 			}}
 		>
+			{leading}
 			<input
 				type="search"
 				placeholder={`buscar ${count} linhas…`}

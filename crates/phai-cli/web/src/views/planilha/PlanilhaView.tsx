@@ -110,19 +110,6 @@ const currentMonthKey = (): string => {
 	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
 
-const MONTH_LABEL_FMT = new Intl.DateTimeFormat("pt-BR", {
-	month: "long",
-	year: "numeric",
-});
-
-/** "2026-07" → "Julho 2026" (capitalised) for the sheet's month heading. */
-const monthLabel = (month: string): string => {
-	const [y, m] = month.split("-").map(Number);
-	if (!y || !m) return month;
-	const s = MONTH_LABEL_FMT.format(new Date(y, m - 1, 1));
-	return s.charAt(0).toUpperCase() + s.slice(1);
-};
-
 /** Number of days in a "YYYY-MM" month — used to validate the day column. */
 const daysInMonth = (month: string): number => {
 	const [y, m] = month.split("-").map(Number);
@@ -966,71 +953,9 @@ export const PlanilhaView = ({
 
 	return (
 		<section aria-label={`Sheet for ${month}`}>
-			{/* ── Month heading — keeps the working month obvious once the hero
-			       has scrolled away (the sheet can be long). ── */}
-			<div
-				style={{
-					display: "flex",
-					alignItems: "baseline",
-					gap: 10,
-					padding: "4px 0 2px",
-				}}
-			>
-				<span
-					aria-hidden
-					title={theme.season}
-					style={{
-						fontSize: "1.2rem",
-						lineHeight: 1,
-						alignSelf: "center",
-						filter: "saturate(0.85)",
-					}}
-				>
-					{theme.glyph}
-				</span>
-				<h2
-					style={{
-						fontFamily: "var(--font-display)",
-						fontSize: "1.35rem",
-						fontWeight: 700,
-						letterSpacing: "-0.02em",
-						margin: 0,
-						// A hairline of the month's accent under the title — the one
-						// place the theme colour is allowed to read as "this month".
-						borderBottom: `2px solid ${theme.accent}`,
-						paddingBottom: 1,
-					}}
-				>
-					{monthLabel(month)}
-				</h2>
-				<span
-					className="mono"
-					style={{ fontSize: 12, color: "var(--muted)" }}
-				>
-					planilha
-				</span>
-				{!monthEditable && (
-					<span
-						className="mono"
-						title="meses passados não são editáveis"
-						style={{ fontSize: 11, color: "var(--muted2)" }}
-					>
-						· somente leitura
-					</span>
-				)}
-			</div>
-
-			{/* ── Scenario pills (ADR-0037) — creation gated to current+future ── */}
-			{onActivateScenario && onScenarioMutated && (
-				<SheetScenarioBar
-					activeScenarioId={activeScenarioId}
-					scenarioDelta={scenarioDelta}
-					canCreate={monthEditable}
-					onActivate={onActivateScenario}
-					onMutated={onScenarioMutated}
-				/>
-			)}
-
+			{/* The working month now lives globally in the hero; the sheet leads
+			    with the scenario selector + a read-only cue, inline with filters
+			    (ADR-0038). ── */}
 			<SheetFilterBar
 				ui={ui}
 				setUi={setUi}
@@ -1042,6 +967,28 @@ export const PlanilhaView = ({
 				filteredTotal={totals.net}
 				onExportCsv={handleExportCsv}
 				accent={theme.accent}
+				leading={
+					<>
+						{onActivateScenario && onScenarioMutated && (
+							<SheetScenarioBar
+								activeScenarioId={activeScenarioId}
+								scenarioDelta={scenarioDelta}
+								canCreate={monthEditable}
+								onActivate={onActivateScenario}
+								onMutated={onScenarioMutated}
+							/>
+						)}
+						{!monthEditable && (
+							<span
+								className="mono"
+								title="meses passados não são editáveis"
+								style={{ fontSize: 11, color: "var(--muted2)" }}
+							>
+								somente leitura
+							</span>
+						)}
+					</>
+				}
 			/>
 
 			<div
