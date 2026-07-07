@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.41.0](https://github.com/phai-run/phai/compare/v5.40.0...v5.41.0) (2026-07-07)
+
+
+### Features
+
+* **serve:** single production daemon on port 80 with serve lock and on-demand updates ([#262](https://github.com/phai-run/phai/issues/262)) ([add2cc9](https://github.com/phai-run/phai/commit/add2cc9b7daa756728323ea2083536d19ed74a06))
+
 ## [5.40.0](https://github.com/phai-run/phai/compare/v5.39.0...v5.40.0) (2026-07-07)
 
 
